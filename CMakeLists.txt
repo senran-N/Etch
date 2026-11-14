@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.24)
-project(etch VERSION 0.6.0 LANGUAGES C CXX)
+project(etch VERSION 1.0.0 LANGUAGES C CXX)
 
-option(ETCH_BUILD_EXAMPLES "Build Etch sandbox example" ON)
+option(ETCH_BUILD_EXAMPLES "Build Etch sandbox and etch_studio examples" ON)
 
 # Enforce Orthodox C+ (C-style C++20 without exceptions or RTTI) on engine & example targets.
 function(etch_configure_orthodox_cpp target)
@@ -240,6 +240,26 @@ if (ETCH_BUILD_EXAMPLES)
                     $<$<BOOL:$<TARGET_RUNTIME_DLLS:sandbox>>:$<TARGET_FILE_DIR:sandbox>>
             COMMAND_EXPAND_LISTS
             COMMENT "Syncing runtime DLLs for sandbox"
+        )
+    endif ()
+
+    add_executable(etch_studio
+        examples/etch_studio.cpp
+    )
+    set_source_files_properties(examples/etch_studio.cpp PROPERTIES
+        OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/etch.h"
+    )
+    etch_configure_orthodox_cpp(etch_studio)
+    target_include_directories(etch_studio PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/third_party")
+    target_link_libraries(etch_studio PRIVATE etch)
+
+    if (WIN32)
+        add_custom_command(TARGET etch_studio POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E $<IF:$<BOOL:$<TARGET_RUNTIME_DLLS:etch_studio>>,copy_if_different,true>
+                    $<TARGET_RUNTIME_DLLS:etch_studio>
+                    $<$<BOOL:$<TARGET_RUNTIME_DLLS:etch_studio>>:$<TARGET_FILE_DIR:etch_studio>>
+            COMMAND_EXPAND_LISTS
+            COMMENT "Syncing runtime DLLs for etch_studio"
         )
     endif ()
 endif ()

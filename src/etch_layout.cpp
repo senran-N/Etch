@@ -3738,6 +3738,11 @@ SplitResult begin_split(const SplitDesc& desc) noexcept {
         .height = (desc.axis == Axis::Col) ? first_primary : Sizing::grow(),
         .clip_children = true,
     });
+    begin_box(BoxDesc{
+        .axis = Axis::Col,
+        .width = Sizing::percent(1.0f),
+        .height = Sizing::percent(1.0f),
+    });
 
     return SplitResult{ .ratio = ratio, .dragging = dragging_div };
 }
@@ -3751,6 +3756,7 @@ void split_second() noexcept {
     if (se.in_second) {
         return;
     }
+    end_box();
     end_box();
 
     const uint32_t div_id = id_index(se.id, kSplitDividerTag);
@@ -3786,6 +3792,11 @@ void split_second() noexcept {
         .height = Sizing::grow(),
         .clip_children = true,
     });
+    begin_box(BoxDesc{
+        .axis = Axis::Col,
+        .width = Sizing::percent(1.0f),
+        .height = Sizing::percent(1.0f),
+    });
     se.in_second = true;
 }
 
@@ -3795,6 +3806,7 @@ void end_split() noexcept {
         return;
     }
     --ctx->split_depth;
+    end_box();
     end_box();
     end_box();
 }

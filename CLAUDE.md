@@ -17,7 +17,7 @@
 - **Layout**: `third_party/clay.h` (pure C single-header Flexbox layout).
 - **Text Pipeline**:
   - Phase 1 (v0.1–v0.3, retired): `third_party/stb_truetype.h` bitmap glyph atlas.
-  - Phase 2 (v0.6, active): `HarfBuzz` OpenType shaping (`kern`/`liga`/`calt`) + Public Domain / MIT `Slug` quadratic Bezier GPU curve evaluation (`src/etch_slug.cpp`).
+  - Phase 2 (v0.6–v1.0, active): `HarfBuzz` OpenType shaping (`kern`/`liga`/`calt`) + Public Domain / MIT `Slug` quadratic Bezier GPU curve evaluation (`src/etch_slug.cpp`).
 - **Memory & State**:
   - Frame temporaries: `etch::Arena` linear allocator, $O(1)$ reset at frame end.
   - Cross-frame state: flat hash table keyed by `uint32_t` semantic ID (focus, hover, scroll inertia, spring animation).
@@ -43,7 +43,8 @@ etch/
 │   ├── etch_gpu.cpp
 │   └── etch_unity.cpp        # Unity build translation unit including all engine .cpp files
 └── examples/
-    └── sandbox.cpp           # 120fps interactive window + "--headless" PNG export
+    ├── sandbox.cpp           # Core interactive & "--headless" regression harness
+    └── etch_studio.cpp       # Etch Studio 1.0 flagship render-graph & 1M telemetry workbench + "--headless"
 ```
 
 ---

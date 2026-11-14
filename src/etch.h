@@ -8,8 +8,8 @@
 #include <span>
 #include <type_traits>
 
-#define ETCH_VERSION_MAJOR 0
-#define ETCH_VERSION_MINOR 6
+#define ETCH_VERSION_MAJOR 1
+#define ETCH_VERSION_MINOR 0
 #define ETCH_VERSION_PATCH 0
 
 #ifndef ETCH_ASSERT
