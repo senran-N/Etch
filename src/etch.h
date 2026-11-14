@@ -10,7 +10,7 @@
 #include <type_traits>
 
 #define ETCH_VERSION_MAJOR 1
-#define ETCH_VERSION_MINOR 4
+#define ETCH_VERSION_MINOR 5
 #define ETCH_VERSION_PATCH 0
 
 #ifndef ETCH_ASSERT
@@ -856,6 +856,16 @@ enum KeyMod : uint16_t {
 #endif
 };
 
+struct WindowFrameDesc {
+    float dt = 0.0f;
+    float min_scale = 0.0f;
+};
+
+enum class SystemTheme : uint8_t { Unknown = 0, Light = 1, Dark = 2 };
+SystemTheme system_theme() noexcept;
+bool system_dark_mode(bool default_when_unknown = true) noexcept;
+bool frame_in_progress(const Context* ctx) noexcept;
+
 struct FrameDesc {
     uint32_t viewport_w = 1280;
     uint32_t viewport_h = 720;
@@ -1493,6 +1503,11 @@ bool wait_events(Context* ctx, SDL_Event* first_event_out, int32_t timeout_ms = 
 // begin_frame binds ctx as the active thread context; end_frame finalizes ctx (or current_context()).
 void begin_frame(Context* ctx, const FrameDesc& desc) noexcept;
 void end_frame(Context* ctx = nullptr) noexcept;
+void begin_window_frame(Context* ctx, SDL_Window* window, float dt) noexcept;
+void begin_window_frame(Context* ctx, SDL_Window* window, const WindowFrameDesc& desc) noexcept;
+void end_window_frame(Context* ctx = nullptr) noexcept;
+bool needs_window_redraw(const Context* ctx, SDL_Window* window) noexcept;
+void request_window_redraw(Context* ctx, SDL_Window* window) noexcept;
 
 std::span<const Prim> frame_prims(const Context* ctx) noexcept;
 FrameStats frame_stats(const Context* ctx) noexcept;
@@ -1504,7 +1519,7 @@ bool render_window(
 void release_window(Context* ctx, SDL_Window* window) noexcept;
 uint32_t claimed_window_count(const Context* ctx) noexcept;
 
-void set_window_chrome(const WindowChromeDesc& desc) noexcept;
+void set_window_chrome(const WindowChromeDesc& desc, SDL_Window* window = nullptr) noexcept;
 void window_drag_region(Rect rect_logical) noexcept;
 void window_client_region(Rect rect_logical) noexcept;
 WindowHit evaluate_window_hit(const Context* ctx, Vec2 logical_pos, SDL_Window* window = nullptr) noexcept;
@@ -1589,7 +1604,20 @@ bool dragging(uint32_t element_id, float threshold_px = 3.0f) noexcept;
 bool should_close_popover(uint32_t popover_id, uint32_t trigger_id = 0) noexcept;
 
 std::span<const Str> dropped_files() noexcept;
-void inject_drop_file(Context* ctx, Str utf8_path) noexcept;
+bool is_os_dragging() noexcept;
+Vec2 os_drop_pos() noexcept;
+bool os_drag_hovering(uint32_t element_id) noexcept;
+std::span<const Str> dropped_files_on(uint32_t element_id) noexcept;
+std::span<const Str> dropped_texts() noexcept;
+std::span<const Str> dropped_texts_on(uint32_t element_id) noexcept;
+void inject_drop_file(Context* ctx, Str utf8_path, SDL_Window* window = nullptr) noexcept;
+void inject_drop_text(Context* ctx, Str utf8_text, SDL_Window* window = nullptr) noexcept;
+void inject_os_drop_begin(Context* ctx, Vec2 logical_pos, SDL_Window* window = nullptr) noexcept;
+void inject_os_drop_move(Context* ctx, Vec2 logical_pos, SDL_Window* window = nullptr) noexcept;
+void inject_os_drop_complete(Context* ctx, Vec2 logical_pos, SDL_Window* window = nullptr) noexcept;
+void begin_focus_scope(uint32_t scope_id, bool trap_tab = true) noexcept;
+void end_focus_scope() noexcept;
+bool keyboard_focus_visible(uint32_t element_id = 0) noexcept;
 
 bool begin_drag_payload(
     uint32_t source_id,

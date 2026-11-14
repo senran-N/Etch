@@ -149,8 +149,8 @@ constexpr Sizing scale_sizing(const Sizing& s, float scale) noexcept {
 }
 
 inline float current_world_scale(const Context* ctx) noexcept {
-    if (ctx && ctx->canvas_depth > 0u) {
-        const CanvasStackEntry& ce = ctx->canvas_stack[ctx->canvas_depth - 1u];
+    if (ctx && ctx->active_ui->canvas_depth > 0u) {
+        const CanvasStackEntry& ce = ctx->active_ui->canvas_stack[ctx->active_ui->canvas_depth - 1u];
         if (ce.in_node && ce.state.zoom > 1e-4f) {
             return ce.state.zoom;
         }
@@ -163,7 +163,7 @@ WidgetState* resolve_canvas_owner(Context* ctx, const Clay_ElementIdArray& over)
         return nullptr;
     }
     for (int32_t i = over.length - 1; i >= 0; --i) {
-        WidgetState* ws = state_map_find(&ctx->states, over.internalArray[i].id);
+        WidgetState* ws = state_map_find(&ctx->active_ui->states, over.internalArray[i].id);
         if (!ws || !ws->is_user_element) {
             continue;
         }
@@ -171,7 +171,7 @@ WidgetState* resolve_canvas_owner(Context* ctx, const Clay_ElementIdArray& over)
             return ws;
         }
         if (ws->owner_canvas_id != 0u) {
-            WidgetState* cws = state_map_find(&ctx->states, ws->owner_canvas_id);
+            WidgetState* cws = state_map_find(&ctx->active_ui->states, ws->owner_canvas_id);
             if (cws && cws->is_canvas && cws->canvas_interactive) {
                 return cws;
             }
@@ -1045,8 +1045,8 @@ void emit_rich_text_command(
             .has_right_edge = has_right,
         };
 
-        if (sp.id != 0u && seg_x1 > seg_x0 && ctx->span_hit_count < kMaxSpanHitsPerFrame) {
-            ctx->span_hits[ctx->span_hit_count++] = SpanHitRegion{
+        if (sp.id != 0u && seg_x1 > seg_x0 && ctx->active_ui->span_hit_count < kMaxSpanHitsPerFrame) {
+            ctx->active_ui->span_hits[ctx->active_ui->span_hit_count++] = SpanHitRegion{
                 .id = sp.id,
                 .clay_elem_id = rich->clay_elem_id,
                 .rect = Rect{ seg_x0, cmd->boundingBox.y, seg_x1 - seg_x0, cmd->boundingBox.height },
@@ -1230,11 +1230,11 @@ void emit_text_command(
 }
 
 WidgetState* find_scrollbar_owner(Context* ctx, uint32_t thumb_active_id) noexcept {
-    if (!ctx || !ctx->states.entries || thumb_active_id == 0u) {
+    if (!ctx || !ctx->active_ui->states.entries || thumb_active_id == 0u) {
         return nullptr;
     }
-    for (uint32_t i = 0u; i < ctx->states.capacity; ++i) {
-        WidgetState& ws = ctx->states.entries[i];
+    for (uint32_t i = 0u; i < ctx->active_ui->states.capacity; ++i) {
+        WidgetState& ws = ctx->active_ui->states.entries[i];
         if (ws.key != 0u && (ws.is_scroll_y || ws.is_virtual_list) && id_index(ws.key, kScrollbarYTag) == thumb_active_id) {
             return &ws;
         }
@@ -1320,7 +1320,7 @@ void emit_canvas_wire_command(
     if (!cw) {
         return;
     }
-    const WidgetState* cws = (cw->canvas_id != 0u) ? state_map_find(&ctx->states, cw->canvas_id) : nullptr;
+    const WidgetState* cws = (cw->canvas_id != 0u) ? state_map_find(&ctx->active_ui->states, cw->canvas_id) : nullptr;
     const Vec2 pan = cws ? cws->canvas_pan : Vec2{};
     const float zoom = (cws && cws->canvas_zoom > 1e-4f) ? cws->canvas_zoom : 1.0f;
 
@@ -1394,8 +1394,8 @@ uint32_t hit_test_span_regions(const Context* ctx, Vec2 pointer_pos) noexcept {
     if (!ctx || pointer_pos.x < 0.0f || pointer_pos.y < 0.0f) {
         return 0u;
     }
-    for (int32_t i = static_cast<int32_t>(ctx->span_hit_count) - 1; i >= 0; --i) {
-        const SpanHitRegion& r = ctx->span_hits[i];
+    for (int32_t i = static_cast<int32_t>(ctx->active_ui->span_hit_count) - 1; i >= 0; --i) {
+        const SpanHitRegion& r = ctx->active_ui->span_hits[i];
         if (!r.rect.contains(pointer_pos)) {
             continue;
         }
@@ -1411,34 +1411,32 @@ uint32_t hit_test_span_regions(const Context* ctx, Vec2 pointer_pos) noexcept {
 }
 
 Vec2 window_to_logical_pos_for(const Context* ctx, SDL_Window* win, float wx, float wy) noexcept {
-    if (!ctx || ctx->headless || ctx->dpi_scale <= 0.0f) {
-        return Vec2{wx, wy};
-    }
-    SDL_Window* target = win ? win : ctx->window;
-    if (!target) {
+    const WindowUiState* ui = ctx ? (win ? window_ui(ctx, win) : ctx->active_ui) : nullptr;
+    SDL_Window* target = win ? win : (ctx ? ctx->active_window : nullptr);
+    if (!ui || !target || ui->dpi_scale <= 0.0f) {
         return Vec2{wx, wy};
     }
     float density = SDL_GetWindowPixelDensity(target);
     if (density <= 0.0f) {
         density = 1.0f;
     }
-    const float scale = density / ctx->dpi_scale;
+    const float scale = density / ui->dpi_scale;
     return Vec2{wx * scale, wy * scale};
 }
 
 Vec2 window_to_logical_pos(const Context* ctx, float wx, float wy) noexcept {
-    return window_to_logical_pos_for(ctx, ctx ? ctx->window : nullptr, wx, wy);
+    return window_to_logical_pos_for(ctx, ctx ? ctx->active_window : nullptr, wx, wy);
 }
 
 float logical_to_window_scale(const Context* ctx) noexcept {
-    if (!ctx || ctx->headless || !ctx->window || ctx->dpi_scale <= 0.0f) {
+    if (!ctx || ctx->headless || !ctx->active_window || ctx->active_ui->dpi_scale <= 0.0f) {
         return 1.0f;
     }
-    float density = SDL_GetWindowPixelDensity(ctx->window);
+    float density = SDL_GetWindowPixelDensity(ctx->active_window);
     if (density <= 0.0f) {
         density = 1.0f;
     }
-    return ctx->dpi_scale / density;
+    return ctx->active_ui->dpi_scale / density;
 }
 
 uint32_t utf8_clamp_boundary(const char* s, uint32_t len, uint32_t pos) noexcept {
@@ -1727,32 +1725,32 @@ uint32_t insert_utf8_filtered(
 }
 
 void push_pending_text_op(Context* ctx, PendingTextOp op, Str utf8) noexcept {
-    if (!ctx || ctx->pending_text_op_count >= kMaxTextOpsPerFrame) {
+    if (!ctx || ctx->active_ui->pending_text_op_count >= kMaxTextOpsPerFrame) {
         return;
     }
     if (utf8.chars && utf8.length > 0u) {
-        const uint32_t avail = kMaxPendingTextBytes - ctx->pending_text_utf8_len;
+        const uint32_t avail = kMaxPendingTextBytes - ctx->active_ui->pending_text_utf8_len;
         const uint32_t max_copy = (utf8.length < avail) ? utf8.length : avail;
         const uint32_t copy_len = utf8_clamp_boundary(utf8.chars, utf8.length, max_copy);
         if (copy_len == 0u) {
             return;
         }
-        op.text_offset = static_cast<uint16_t>(ctx->pending_text_utf8_len);
+        op.text_offset = static_cast<uint16_t>(ctx->active_ui->pending_text_utf8_len);
         op.text_len = static_cast<uint16_t>(copy_len);
-        std::memcpy(ctx->pending_text_utf8 + ctx->pending_text_utf8_len, utf8.chars, copy_len);
-        ctx->pending_text_utf8_len += copy_len;
+        std::memcpy(ctx->active_ui->pending_text_utf8 + ctx->active_ui->pending_text_utf8_len, utf8.chars, copy_len);
+        ctx->active_ui->pending_text_utf8_len += copy_len;
     }
-    ctx->pending_text_ops[ctx->pending_text_op_count++] = op;
+    ctx->active_ui->pending_text_ops[ctx->active_ui->pending_text_op_count++] = op;
 }
 
 void clear_ime_composition(Context* ctx) noexcept {
     if (!ctx) {
         return;
     }
-    ctx->ime_comp_len = 0u;
-    ctx->ime_comp_utf8[0] = '\0';
-    ctx->ime_comp_cursor_byte = 0u;
-    ctx->ime_comp_sel_len_byte = 0u;
+    ctx->active_ui->ime_comp_len = 0u;
+    ctx->active_ui->ime_comp_utf8[0] = '\0';
+    ctx->active_ui->ime_comp_cursor_byte = 0u;
+    ctx->active_ui->ime_comp_sel_len_byte = 0u;
 }
 
 struct TextInnerGeom {
@@ -2030,7 +2028,7 @@ void measure_text_content_and_ime(
     float cw = 0.0f;
     float caret_dx = 0.0f;
 
-    if (composing && ctx && ctx->ime_comp_len > 0u) {
+    if (composing && ctx && ctx->active_ui->ime_comp_len > 0u) {
         const auto walk_slice = [&](const char* beg, uint32_t slice_len, bool mask) noexcept {
             uint32_t pos = 0u;
             while (pos <= slice_len) {
@@ -2061,7 +2059,7 @@ void measure_text_content_and_ime(
         cx = pen_x;
         cy = pen_y;
         measure_line_segment_x(
-            ctx, desc.font_id, ctx->ime_comp_utf8, ctx->ime_comp_len, ctx->ime_comp_cursor_byte, 0u,
+            ctx, desc.font_id, ctx->active_ui->ime_comp_utf8, ctx->active_ui->ime_comp_len, ctx->active_ui->ime_comp_cursor_byte, 0u,
             base_px, desc.letter_spacing, false, false, &caret_dx, nullptr, &cw);
         pen_x += cw;
         if (pen_x > max_w) {
@@ -2180,21 +2178,21 @@ void update_text_scroll_and_ime(
     if (ctx && is_focused && !desc.read_only && !desc.password) {
         const float win_scale = logical_to_window_scale(ctx);
         if (composing && comp_w > 0.0f) {
-            ctx->ime_cursor_logical = Rect{
+            ctx->active_ui->ime_cursor_logical = Rect{
                 .x = geom.origin_x + comp_x - sx,
                 .y = geom.origin_y + comp_y - sy,
                 .w = (comp_w > 2.0f) ? comp_w : 2.0f,
                 .h = geom.line_h,
             };
-            ctx->ime_cursor_offset_win = static_cast<int32_t>(std::floor((caret_x - comp_x) * win_scale + 0.5f));
+            ctx->active_ui->ime_cursor_offset_win = static_cast<int32_t>(std::floor((caret_x - comp_x) * win_scale + 0.5f));
         } else {
-            ctx->ime_cursor_logical = Rect{
+            ctx->active_ui->ime_cursor_logical = Rect{
                 .x = geom.origin_x + caret_x - sx,
                 .y = geom.origin_y + caret_y - sy,
                 .w = 2.0f,
                 .h = geom.line_h,
             };
-            ctx->ime_cursor_offset_win = 0;
+            ctx->active_ui->ime_cursor_offset_win = 0;
         }
     }
 }
@@ -2306,7 +2304,7 @@ void emit_text_input_command(
         return;
     }
     const TextInputDesc& desc = ti->desc;
-    WidgetState* ws = (desc.id != 0u) ? state_map_find(&ctx->states, desc.id) : nullptr;
+    WidgetState* ws = (desc.id != 0u) ? state_map_find(&ctx->active_ui->states, desc.id) : nullptr;
     const Rect box_logical = { bounds_logical.x, bounds_logical.y, bounds_logical.width, bounds_logical.height };
     if (ws) {
         ws->last_box_logical = box_logical;
@@ -2315,7 +2313,7 @@ void emit_text_input_command(
     const TextInnerGeom geom = compute_text_inner_geom(box_logical, desc);
     const Corners rad_px = scale_corners(desc.radius, dpi);
     const bool is_focused = ti->is_focused;
-    const bool composing = is_focused && !desc.read_only && !desc.password && ctx->ime_comp_len > 0u;
+    const bool composing = is_focused && !desc.read_only && !desc.password && ctx->active_ui->ime_comp_len > 0u;
 
     if (is_focused && desc.focus_border_color.a > 0u) {
         const Color glow_col = Color::rgba8(desc.focus_border_color.r, desc.focus_border_color.g, desc.focus_border_color.b, 80u);
@@ -2434,19 +2432,19 @@ void emit_text_input_command(
         float comp_w = 0.0f;
         float caret_dx = 0.0f;
         float clause_end_dx = 0.0f;
-        uint32_t cl_end = ctx->ime_comp_cursor_byte + ctx->ime_comp_sel_len_byte;
-        if (cl_end > ctx->ime_comp_len) {
-            cl_end = ctx->ime_comp_len;
+        uint32_t cl_end = ctx->active_ui->ime_comp_cursor_byte + ctx->active_ui->ime_comp_sel_len_byte;
+        if (cl_end > ctx->active_ui->ime_comp_len) {
+            cl_end = ctx->active_ui->ime_comp_len;
         }
         measure_line_segment_x(
-            ctx, desc.font_id, ctx->ime_comp_utf8, ctx->ime_comp_len,
-            ctx->ime_comp_cursor_byte, cl_end,
+            ctx, desc.font_id, ctx->active_ui->ime_comp_utf8, ctx->active_ui->ime_comp_len,
+            ctx->active_ui->ime_comp_cursor_byte, cl_end,
             base_px, desc.letter_spacing, false, false,
             &caret_dx, &clause_end_dx, &comp_w);
         caret_vx = comp_start_x + caret_dx;
         caret_vy = comp_start_y;
 
-        if (ctx->ime_comp_sel_len_byte > 0u) {
+        if (ctx->active_ui->ime_comp_sel_len_byte > 0u) {
             const float cl_left = (caret_dx < clause_end_dx) ? caret_dx : clause_end_dx;
             const float cl_w = (caret_dx < clause_end_dx) ? (clause_end_dx - caret_dx) : (caret_dx - clause_end_dx);
             if (cl_w > 0.0f) {
@@ -2463,7 +2461,7 @@ void emit_text_input_command(
         }
 
         emit_utf8_glyph_run(
-            ctx, desc.font_id, ctx->ime_comp_utf8, ctx->ime_comp_len, base_px, desc.letter_spacing, ascender_px, geom.line_adv,
+            ctx, desc.font_id, ctx->active_ui->ime_comp_utf8, ctx->active_ui->ime_comp_len, base_px, desc.letter_spacing, ascender_px, geom.line_adv,
             desc.composition_color, geom.origin_x, geom.origin_y, scroll_x, scroll_y,
             inner_clip, dpi, false, false, &pen_x, &pen_y);
 
@@ -2496,7 +2494,7 @@ void emit_text_input_command(
     }
 
     // 3. Emit SDF caret
-    if (is_focused && ctx->caret_blink_on && desc.caret_color.a > 0u) {
+    if (is_focused && ctx->active_ui->caret_blink_on && desc.caret_color.a > 0u) {
         const float cw_px = (2.0f * dpi > 1.5f) ? (2.0f * dpi) : 1.5f;
         const Rect caret_px = {
             std::floor((geom.origin_x + caret_vx - scroll_x) * dpi + 0.5f),
@@ -2532,14 +2530,14 @@ WidgetState* find_topmost_user_element(
     uint32_t hovered_span_id) noexcept
 {
     if (hovered_span_id != 0u) {
-        if (WidgetState* sws = state_map_find(&ctx->states, hovered_span_id)) {
+        if (WidgetState* sws = state_map_find(&ctx->active_ui->states, hovered_span_id)) {
             if (sws->is_user_element) {
                 return sws;
             }
         }
     }
     for (int32_t i = over.length - 1; i >= 0; --i) {
-        WidgetState* ws = state_map_find(&ctx->states, over.internalArray[i].id);
+        WidgetState* ws = state_map_find(&ctx->active_ui->states, over.internalArray[i].id);
         if (ws && ws->is_user_element) {
             return ws;
         }
@@ -2571,9 +2569,9 @@ void undo_reset_slot(TextUndoSlot* slot) noexcept {
 }
 
 TextUndoSlot* undo_acquire_slot(Context* ctx, uint32_t widget_id, uint32_t frame_index) noexcept {
-    TextUndoSlot* lru = &ctx->undo_pool[0];
+    TextUndoSlot* lru = &ctx->active_ui->undo_pool[0];
     for (uint32_t i = 0u; i < kTextUndoSlots; ++i) {
-        TextUndoSlot* s = &ctx->undo_pool[i];
+        TextUndoSlot* s = &ctx->active_ui->undo_pool[i];
         if (s->widget_id == widget_id) {
             s->last_used_frame = frame_index;
             return s;
@@ -2748,11 +2746,11 @@ void emit_vector_icon_quad(
 }
 
 DrawCmdNode* append_open_box_draw_cmd(Context* ctx, bool foreground) noexcept {
-    if (!ctx || !ctx->in_frame || !ctx->clay_ctx) {
+    if (!ctx || !ctx->in_frame || !ctx->active_ui->clay_ctx) {
         return nullptr;
     }
-    Clay_SetCurrentContext(ctx->clay_ctx);
-    if (ctx->clay_ctx->openLayoutElementStack.length < 2) {
+    Clay_SetCurrentContext(ctx->active_ui->clay_ctx);
+    if (ctx->active_ui->clay_ctx->openLayoutElementStack.length < 2) {
         return nullptr;
     }
     Clay_LayoutElement* open_elem = Clay__GetOpenLayoutElement();
@@ -3226,13 +3224,19 @@ void emit_draw_list_command(
 } // namespace
 
 bool needs_redraw(const Context* ctx) noexcept {
-    return ctx != nullptr && (ctx->redraw_budget > 0u || ctx->active_anim_count > 0u);
+    if (!ctx) return false;
+    if (ctx->headless_ui.redraw_budget || ctx->headless_ui.active_anim_count) return true;
+    for (uint32_t i = 0; i < kMaxClaimedWindows; ++i) {
+        const ClaimedWindowSlot& slot = ctx->claimed_windows[i];
+        if (slot.window && (slot.ui.redraw_budget || slot.ui.active_anim_count)) return true;
+    }
+    return false;
 }
 
 void request_redraw(Context* ctx_arg) noexcept {
     Context* ctx = ctx_arg ? ctx_arg : current_context();
     if (ctx) {
-        ctx->redraw_budget = 2u;
+        ctx->active_ui->redraw_budget = 2u;
     }
 }
 
@@ -3246,7 +3250,7 @@ void wake_up(Context* ctx_arg) noexcept {
         ev.type = ctx->wake_event_type;
         SDL_PushEvent(&ev);
     } else {
-        ctx->redraw_budget = 2u;
+        ctx->active_ui->redraw_budget = 2u;
     }
 }
 
@@ -3257,16 +3261,17 @@ bool wait_events(Context* ctx, SDL_Event* first_event_out, int32_t timeout_ms) n
     if (needs_redraw(ctx)) {
         return SDL_PollEvent(first_event_out);
     }
-    if (ctx && ctx->ime_focused_id != 0u && ctx->caret_blink_cycles < 20u && (timeout_ms < 0 || timeout_ms > 500)) {
+    WindowUiState* caret_ui = ctx ? window_ui(ctx, ctx->ime_active_window) : nullptr;
+    if (ctx && caret_ui->ime_focused_id != 0u && caret_ui->caret_blink_cycles < 20u && (timeout_ms < 0 || timeout_ms > 500)) {
         if (SDL_WaitEventTimeout(first_event_out, 500)) {
             return true;
         }
-        ctx->caret_blink_on = !ctx->caret_blink_on;
-        ++ctx->caret_blink_cycles;
-        if (ctx->caret_blink_cycles >= 20u) {
-            ctx->caret_blink_on = true;
+        caret_ui->caret_blink_on = !caret_ui->caret_blink_on;
+        ++caret_ui->caret_blink_cycles;
+        if (caret_ui->caret_blink_cycles >= 20u) {
+            caret_ui->caret_blink_on = true;
         }
-        request_redraw(ctx);
+        caret_ui->redraw_budget = 2;
         return false;
     }
     if (timeout_ms < 0) {
@@ -3275,10 +3280,7 @@ bool wait_events(Context* ctx, SDL_Event* first_event_out, int32_t timeout_ms) n
     return SDL_WaitEventTimeout(first_event_out, timeout_ms);
 }
 
-void process_event(Context* ctx, const SDL_Event& event) noexcept {
-    if (!ctx) {
-        return;
-    }
+static void process_window_event(Context* ctx, const SDL_Event& event) noexcept {
     if (ctx->wake_event_type != 0u && event.type == ctx->wake_event_type) {
         request_redraw(ctx);
         return;
@@ -3286,35 +3288,35 @@ void process_event(Context* ctx, const SDL_Event& event) noexcept {
 
     switch (event.type) {
         case SDL_EVENT_MOUSE_MOTION:
-            ctx->event_pointer_pos = window_to_logical_pos_for(
+            ctx->active_ui->event_pointer_pos = window_to_logical_pos_for(
                 ctx, SDL_GetWindowFromID(event.motion.windowID), event.motion.x, event.motion.y);
-            ctx->has_event_pointer = true;
+            ctx->active_ui->has_event_pointer = true;
             request_redraw(ctx);
             break;
         case SDL_EVENT_MOUSE_BUTTON_DOWN:
         case SDL_EVENT_MOUSE_BUTTON_UP:
             if (event.button.button == SDL_BUTTON_LEFT) {
-                ctx->event_pointer_pos = window_to_logical_pos_for(
+                ctx->active_ui->event_pointer_pos = window_to_logical_pos_for(
                     ctx, SDL_GetWindowFromID(event.button.windowID), event.button.x, event.button.y);
-                ctx->event_pointer_down = (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN);
-                ctx->has_event_pointer = true;
+                ctx->active_ui->event_pointer_down = (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN);
+                ctx->active_ui->has_event_pointer = true;
                 if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
-                    ctx->last_mouse_clicks = (event.button.clicks > 0u) ? event.button.clicks : 1u;
-                    ctx->caret_blink_on = true;
-                    ctx->caret_blink_cycles = 0u;
+                    ctx->active_ui->last_mouse_clicks = (event.button.clicks > 0u) ? event.button.clicks : 1u;
+                    ctx->active_ui->caret_blink_on = true;
+                    ctx->active_ui->caret_blink_cycles = 0u;
                 }
                 request_redraw(ctx);
             } else if (event.button.button == SDL_BUTTON_MIDDLE) {
-                ctx->event_pointer_pos = window_to_logical_pos_for(
+                ctx->active_ui->event_pointer_pos = window_to_logical_pos_for(
                     ctx, SDL_GetWindowFromID(event.button.windowID), event.button.x, event.button.y);
-                ctx->has_event_pointer = true;
-                ctx->event_middle_down = (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN);
+                ctx->active_ui->has_event_pointer = true;
+                ctx->active_ui->event_middle_down = (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN);
                 request_redraw(ctx);
             } else if (event.button.button == SDL_BUTTON_RIGHT) {
-                ctx->event_pointer_pos = window_to_logical_pos_for(
+                ctx->active_ui->event_pointer_pos = window_to_logical_pos_for(
                     ctx, SDL_GetWindowFromID(event.button.windowID), event.button.x, event.button.y);
-                ctx->has_event_pointer = true;
-                ctx->event_right_down = (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN);
+                ctx->active_ui->has_event_pointer = true;
+                ctx->active_ui->event_right_down = (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN);
                 request_redraw(ctx);
             }
             break;
@@ -3325,12 +3327,12 @@ void process_event(Context* ctx, const SDL_Event& event) noexcept {
                 wx = -wx;
                 wy = -wy;
             }
-            ctx->event_scroll_delta.x += wx;
-            ctx->event_scroll_delta.y += wy;
+            ctx->active_ui->event_scroll_delta.x += wx;
+            ctx->active_ui->event_scroll_delta.y += wy;
             if (event.wheel.mouse_x >= 0.0f && event.wheel.mouse_y >= 0.0f) {
-                ctx->event_pointer_pos = window_to_logical_pos_for(
+                ctx->active_ui->event_pointer_pos = window_to_logical_pos_for(
                     ctx, SDL_GetWindowFromID(event.wheel.windowID), event.wheel.mouse_x, event.wheel.mouse_y);
-                ctx->has_event_pointer = true;
+                ctx->active_ui->has_event_pointer = true;
             }
             request_redraw(ctx);
             break;
@@ -3341,21 +3343,21 @@ void process_event(Context* ctx, const SDL_Event& event) noexcept {
             const uint32_t max_copy = (raw_len < (kMaxImeCompBytes - 1u)) ? raw_len : (kMaxImeCompBytes - 1u);
             const uint32_t clamped = utf8_clamp_boundary(src, raw_len, max_copy);
             if (clamped > 0u) {
-                std::memcpy(ctx->ime_comp_utf8, src, clamped);
+                std::memcpy(ctx->active_ui->ime_comp_utf8, src, clamped);
             }
-            ctx->ime_comp_utf8[clamped] = '\0';
-            ctx->ime_comp_len = clamped;
-            ctx->ime_comp_cursor_byte = (event.edit.start < 0)
+            ctx->active_ui->ime_comp_utf8[clamped] = '\0';
+            ctx->active_ui->ime_comp_len = clamped;
+            ctx->active_ui->ime_comp_cursor_byte = (event.edit.start < 0)
                 ? clamped
-                : utf8_codepoint_to_byte_offset(ctx->ime_comp_utf8, clamped, event.edit.start);
-            ctx->ime_comp_sel_len_byte = (event.edit.length <= 0)
+                : utf8_codepoint_to_byte_offset(ctx->active_ui->ime_comp_utf8, clamped, event.edit.start);
+            ctx->active_ui->ime_comp_sel_len_byte = (event.edit.length <= 0)
                 ? 0u
                 : utf8_codepoint_to_byte_offset(
-                    ctx->ime_comp_utf8 + ctx->ime_comp_cursor_byte,
-                    clamped - ctx->ime_comp_cursor_byte,
+                    ctx->active_ui->ime_comp_utf8 + ctx->active_ui->ime_comp_cursor_byte,
+                    clamped - ctx->active_ui->ime_comp_cursor_byte,
                     event.edit.length);
-            ctx->caret_blink_on = true;
-            ctx->caret_blink_cycles = 0u;
+            ctx->active_ui->caret_blink_on = true;
+            ctx->active_ui->caret_blink_cycles = 0u;
             request_redraw(ctx);
             break;
         }
@@ -3367,59 +3369,59 @@ void process_event(Context* ctx, const SDL_Event& event) noexcept {
                     PendingTextOp{ .kind = TextEditOpKind::InsertText },
                     str_cstr(event.text.text));
             }
-            ctx->caret_blink_on = true;
-            ctx->caret_blink_cycles = 0u;
+            ctx->active_ui->caret_blink_on = true;
+            ctx->active_ui->caret_blink_cycles = 0u;
             request_redraw(ctx);
             break;
         }
         case SDL_EVENT_KEY_DOWN:
-            ctx->event_key_mods = sdl_mod_to_etch(event.key.mod);
+            ctx->active_ui->event_key_mods = sdl_mod_to_etch(event.key.mod);
             if (event.key.key == SDLK_F12 && !event.key.repeat) {
-                ctx->debug_hud_open = !ctx->debug_hud_open;
+                ctx->active_ui->debug_hud_open = !ctx->active_ui->debug_hud_open;
                 request_redraw(ctx);
                 break;
             }
-            if (event.key.key == SDLK_F11 && !event.key.repeat && ctx->debug_hud_open) {
-                ctx->debug_wireframe_open = !ctx->debug_wireframe_open;
+            if (event.key.key == SDLK_F11 && !event.key.repeat && ctx->active_ui->debug_hud_open) {
+                ctx->active_ui->debug_wireframe_open = !ctx->active_ui->debug_wireframe_open;
                 request_redraw(ctx);
                 break;
             }
             if (event.key.key == SDLK_SPACE) {
-                ctx->space_down = true;
+                ctx->active_ui->space_down = true;
             }
             if (event.key.key == SDLK_ESCAPE && !event.key.repeat) {
-                if (ctx->drag_active) {
-                    ctx->drag_active = false;
-                    ctx->drag_drop_pending = false;
-                    ctx->drag_accepted_this_frame = false;
+                if (ctx->active_ui->drag_active) {
+                    ctx->active_ui->drag_active = false;
+                    ctx->active_ui->drag_drop_pending = false;
+                    ctx->active_ui->drag_accepted_this_frame = false;
                 }
-                if (ctx->marquee_canvas_id != 0u) {
-                    if (WidgetState* mws = state_map_find(&ctx->states, ctx->marquee_canvas_id)) {
+                if (ctx->active_ui->marquee_canvas_id != 0u) {
+                    if (WidgetState* mws = state_map_find(&ctx->active_ui->states, ctx->active_ui->marquee_canvas_id)) {
                         mws->canvas_marquee_active = false;
                     }
-                    ctx->marquee_canvas_id = 0u;
+                    ctx->active_ui->marquee_canvas_id = 0u;
                 }
             }
-            if (ctx->pending_key_count < kMaxKeyEventsPerFrame) {
-                ctx->pending_keys[ctx->pending_key_count++] = KeyEventEntry{
+            if (ctx->active_ui->pending_key_count < kMaxKeyEventsPerFrame) {
+                ctx->active_ui->pending_keys[ctx->active_ui->pending_key_count++] = KeyEventEntry{
                     .key = static_cast<uint32_t>(event.key.key),
-                    .mods = ctx->event_key_mods,
+                    .mods = ctx->active_ui->event_key_mods,
                     .repeat = event.key.repeat,
                 };
             }
-            ctx->caret_blink_on = true;
-            ctx->caret_blink_cycles = 0u;
-            if (ctx->ime_comp_len > 0u) {
+            ctx->active_ui->caret_blink_on = true;
+            ctx->active_ui->caret_blink_cycles = 0u;
+            if (ctx->active_ui->ime_comp_len > 0u) {
                 if (event.key.key == SDLK_ESCAPE) {
                     clear_ime_composition(ctx);
-                    ctx->pending_escape_consumed_by_ime = true;
-                    if (!ctx->headless && ctx->window) {
-                        SDL_ClearComposition(ctx->window);
+                    ctx->active_ui->pending_escape_consumed_by_ime = true;
+                    if (!ctx->headless && ctx->active_window) {
+                        SDL_ClearComposition(ctx->active_window);
                     }
                 }
             } else {
                 if (event.key.key == SDLK_TAB) {
-                    ctx->pending_tab_delta += ((event.key.mod & SDL_KMOD_SHIFT) != 0u) ? -1 : 1;
+                    ctx->active_ui->pending_tab_delta += ((event.key.mod & SDL_KMOD_SHIFT) != 0u) ? -1 : 1;
                 } else {
                     push_pending_text_op(
                         ctx,
@@ -3434,47 +3436,68 @@ void process_event(Context* ctx, const SDL_Event& event) noexcept {
             request_redraw(ctx);
             break;
         case SDL_EVENT_KEY_UP:
-            ctx->event_key_mods = sdl_mod_to_etch(event.key.mod);
+            ctx->active_ui->event_key_mods = sdl_mod_to_etch(event.key.mod);
             if (event.key.key == SDLK_SPACE) {
-                ctx->space_down = false;
+                ctx->active_ui->space_down = false;
             }
             request_redraw(ctx);
             break;
-        case SDL_EVENT_DROP_FILE:
-            if (event.drop.data && event.drop.data[0] != '\0') {
-                inject_drop_file(ctx, str_cstr(event.drop.data));
+        case SDL_EVENT_DROP_BEGIN:
+        case SDL_EVENT_DROP_POSITION:
+        case SDL_EVENT_DROP_COMPLETE: {
+            const Vec2 pos = window_to_logical_pos_for(ctx, ctx->active_window, event.drop.x, event.drop.y);
+            if (event.type == SDL_EVENT_DROP_BEGIN) {
+                ctx->active_ui->pending_drop_count = 0;
+                ctx->active_ui->pending_text_drop_count = 0;
+                ctx->active_ui->pending_drop_bytes = 0;
+                ctx->active_ui->has_delivered_drop_pos = false;
             }
+            ctx->active_ui->os_drop_pos = pos;
+            ctx->active_ui->has_os_drop_pos = true;
+            ctx->active_ui->os_dragging = event.type != SDL_EVENT_DROP_COMPLETE;
+            if (event.type == SDL_EVENT_DROP_COMPLETE) {
+                ctx->active_ui->delivered_drop_pos = pos;
+                ctx->active_ui->has_delivered_drop_pos = true;
+            }
+            request_redraw(ctx);
+            break;
+        }
+        case SDL_EVENT_DROP_FILE:
+            if (event.drop.data) inject_drop_file(ctx, str_cstr(event.drop.data), ctx->active_window);
+            break;
+        case SDL_EVENT_DROP_TEXT:
+            if (event.drop.data) inject_drop_text(ctx, str_cstr(event.drop.data), ctx->active_window);
             break;
         case SDL_EVENT_WINDOW_MOUSE_LEAVE:
-            if (!ctx->mouse_captured) {
-                ctx->event_pointer_pos = Vec2{-1.0f, -1.0f};
-                ctx->has_event_pointer = false;
+            if (!ctx->active_ui->mouse_captured) {
+                ctx->active_ui->event_pointer_pos = Vec2{-1.0f, -1.0f};
+                ctx->active_ui->has_event_pointer = false;
             }
             request_redraw(ctx);
             break;
         case SDL_EVENT_WINDOW_FOCUS_LOST:
-            ctx->event_pointer_down = false;
-            ctx->event_middle_down = false;
-            ctx->event_right_down = false;
-            ctx->event_key_mods = 0u;
-            ctx->right_active_id = 0u;
-            ctx->right_drag_exceeded = false;
-            ctx->pan_canvas_id = 0u;
-            if (ctx->marquee_canvas_id != 0u) {
-                if (WidgetState* mws = state_map_find(&ctx->states, ctx->marquee_canvas_id)) {
+            ctx->active_ui->event_pointer_down = false;
+            ctx->active_ui->event_middle_down = false;
+            ctx->active_ui->event_right_down = false;
+            ctx->active_ui->event_key_mods = 0u;
+            ctx->active_ui->right_active_id = 0u;
+            ctx->active_ui->right_drag_exceeded = false;
+            ctx->active_ui->pan_canvas_id = 0u;
+            if (ctx->active_ui->marquee_canvas_id != 0u) {
+                if (WidgetState* mws = state_map_find(&ctx->active_ui->states, ctx->active_ui->marquee_canvas_id)) {
                     mws->canvas_marquee_active = false;
                 }
-                ctx->marquee_canvas_id = 0u;
+                ctx->active_ui->marquee_canvas_id = 0u;
             }
-            ctx->drag_active = false;
-            ctx->drag_drop_pending = false;
-            ctx->drag_accepted_this_frame = false;
-            ctx->space_down = false;
-            ctx->active_id = 0u;
+            ctx->active_ui->drag_active = false;
+            ctx->active_ui->drag_drop_pending = false;
+            ctx->active_ui->drag_accepted_this_frame = false;
+            ctx->active_ui->space_down = false;
+            ctx->active_ui->active_id = 0u;
             clear_ime_composition(ctx);
-            if (ctx->mouse_captured) {
-                SDL_CaptureMouse(false);
-                ctx->mouse_captured = false;
+            if (ctx->active_ui->mouse_captured) {
+                if (ctx->mouse_capture_window == ctx->active_window) { SDL_CaptureMouse(false); ctx->mouse_capture_window = nullptr; }
+                ctx->active_ui->mouse_captured = false;
             }
             request_redraw(ctx);
             break;
@@ -3490,115 +3513,138 @@ void process_event(Context* ctx, const SDL_Event& event) noexcept {
     }
 }
 
-void begin_frame(Context* ctx, const FrameDesc& desc) noexcept {
-    if (!ctx || !ctx->clay_ctx) {
+static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
+    if (!ctx || ctx->in_frame || !ctx->active_ui->clay_ctx) {
         return;
     }
+    Clay_SetCurrentContext(ctx->active_ui->clay_ctx);
     set_current_context(ctx);
     ctx->in_frame = true;
+    ctx->draw_list_window = ctx->active_window;
+    ctx->active_ui->focus_scope_depth = 0;
+    ctx->active_ui->focus_scope = 0;
     ctx->layout_start_ticks = SDL_GetPerformanceCounter();
-    ++ctx->frame_index;
-    ctx->elapsed_seconds += desc.dt_seconds;
+    ++ctx->active_ui->frame_index;
+    ctx->active_ui->elapsed_seconds += desc.dt_seconds;
 
-    if (ctx->redraw_budget > 0u) {
-        --ctx->redraw_budget;
+    if (ctx->active_ui->redraw_budget > 0u) {
+        --ctx->active_ui->redraw_budget;
     }
-    ctx->sim_dt = (desc.dt_seconds <= 0.0f)
+    ctx->active_ui->sim_dt = (desc.dt_seconds <= 0.0f)
         ? 0.0f
         : ((desc.dt_seconds > 0.1f) ? (1.0f / 60.0f) : desc.dt_seconds);
-    ctx->active_anim_count = 0u;
-    ctx->desired_cursor = Cursor::Arrow;
+    ctx->active_ui->active_anim_count = 0u;
+    ctx->active_ui->desired_cursor = Cursor::Arrow;
 
-    ctx->prev_ime_focused_id = ctx->ime_focused_id;
-    ctx->ime_focused_id = 0u;
-    ctx->ime_focused_password = false;
-    ctx->frame_text_op_count = ctx->pending_text_op_count;
-    if (ctx->frame_text_op_count > 0u) {
-        std::memcpy(ctx->frame_text_ops, ctx->pending_text_ops, size_t(ctx->frame_text_op_count) * sizeof(PendingTextOp));
+    ctx->active_ui->prev_ime_focused_id = ctx->active_ui->ime_focused_id;
+    ctx->active_ui->ime_focused_id = 0u;
+    ctx->active_ui->ime_focused_password = false;
+    ctx->active_ui->frame_text_op_count = ctx->active_ui->pending_text_op_count;
+    if (ctx->active_ui->frame_text_op_count > 0u) {
+        std::memcpy(ctx->active_ui->frame_text_ops, ctx->active_ui->pending_text_ops, size_t(ctx->active_ui->frame_text_op_count) * sizeof(PendingTextOp));
     }
-    if (ctx->pending_text_utf8_len > 0u) {
-        std::memcpy(ctx->frame_text_utf8, ctx->pending_text_utf8, ctx->pending_text_utf8_len);
+    if (ctx->active_ui->pending_text_utf8_len > 0u) {
+        std::memcpy(ctx->active_ui->frame_text_utf8, ctx->active_ui->pending_text_utf8, ctx->active_ui->pending_text_utf8_len);
     }
-    ctx->pending_text_op_count = 0u;
-    ctx->pending_text_utf8_len = 0u;
+    ctx->active_ui->pending_text_op_count = 0u;
+    ctx->active_ui->pending_text_utf8_len = 0u;
 
-    uint16_t kmods = static_cast<uint16_t>(desc.key_mods | ctx->event_key_mods);
-    if (!ctx->headless) {
-        kmods = static_cast<uint16_t>(kmods | sdl_mod_to_etch(SDL_GetModState()));
-    }
-    ctx->frame_key_mods = kmods;
-    ctx->frame_escape_consumed_by_ime = ctx->pending_escape_consumed_by_ime;
-    ctx->pending_escape_consumed_by_ime = false;
+    uint16_t kmods = static_cast<uint16_t>(desc.key_mods | ctx->active_ui->event_key_mods);
+    ctx->active_ui->frame_key_mods = kmods;
+    ctx->active_ui->frame_escape_consumed_by_ime = ctx->active_ui->pending_escape_consumed_by_ime;
+    ctx->active_ui->pending_escape_consumed_by_ime = false;
 
-    ctx->frame_key_count = ctx->pending_key_count;
-    if (ctx->frame_key_count > 0u) {
-        std::memcpy(ctx->frame_keys, ctx->pending_keys, size_t(ctx->frame_key_count) * sizeof(KeyEventEntry));
+    ctx->active_ui->frame_key_count = ctx->active_ui->pending_key_count;
+    if (ctx->active_ui->frame_key_count > 0u) {
+        std::memcpy(ctx->active_ui->frame_keys, ctx->active_ui->pending_keys, size_t(ctx->active_ui->frame_key_count) * sizeof(KeyEventEntry));
     }
-    ctx->pending_key_count = 0u;
+    ctx->active_ui->pending_key_count = 0u;
 
+    if (desc.key_pressed_code == SDLK_TAB || desc.key_pressed_code == SDLK_LEFT || desc.key_pressed_code == SDLK_RIGHT ||
+        desc.key_pressed_code == SDLK_UP || desc.key_pressed_code == SDLK_DOWN) ctx->active_ui->keyboard_focus_active = true;
     if (desc.key_pressed_code != 0u) {
-        if (ctx->frame_key_count < kMaxKeyEventsPerFrame) {
-            ctx->frame_keys[ctx->frame_key_count++] = KeyEventEntry{
+        if (ctx->active_ui->frame_key_count < kMaxKeyEventsPerFrame) {
+            ctx->active_ui->frame_keys[ctx->active_ui->frame_key_count++] = KeyEventEntry{
                 .key = desc.key_pressed_code,
-                .mods = ctx->frame_key_mods,
+                .mods = ctx->active_ui->frame_key_mods,
                 .repeat = false,
             };
         }
-        if (ctx->ime_comp_len == 0u) {
+        if (ctx->active_ui->ime_comp_len == 0u) {
             if (desc.key_pressed_code == SDLK_TAB) {
-                ctx->pending_tab_delta += ((ctx->frame_key_mods & Mod_Shift) != 0u) ? -1 : 1;
-            } else if (ctx->frame_text_op_count < kMaxTextOpsPerFrame) {
-                ctx->frame_text_ops[ctx->frame_text_op_count++] = PendingTextOp{
+                ctx->active_ui->pending_tab_delta += ((ctx->active_ui->frame_key_mods & Mod_Shift) != 0u) ? -1 : 1;
+            } else if (ctx->active_ui->frame_text_op_count < kMaxTextOpsPerFrame) {
+                ctx->active_ui->frame_text_ops[ctx->active_ui->frame_text_op_count++] = PendingTextOp{
                     .kind = TextEditOpKind::KeyPress,
-                    .mod = etch_mod_to_sdl(ctx->frame_key_mods),
+                    .mod = etch_mod_to_sdl(ctx->active_ui->frame_key_mods),
                     .key = static_cast<SDL_Keycode>(desc.key_pressed_code),
                 };
             }
         }
     }
 
-    ctx->frame_drop_count = ctx->pending_drop_count;
-    if (ctx->pending_drop_bytes > 0u) {
-        std::memcpy(ctx->frame_drop_buf, ctx->pending_drop_buf, ctx->pending_drop_bytes);
-        for (uint32_t i = 0u; i < ctx->frame_drop_count; ++i) {
-            ctx->frame_drops[i] = Str{
-                ctx->frame_drop_buf + ctx->pending_drop_offsets[i],
-                ctx->pending_drop_lengths[i],
-            };
+    ctx->active_ui->frame_drop_count = 0;
+    ctx->active_ui->frame_text_drop_count = 0;
+    if (!ctx->active_ui->os_dragging &&
+        (ctx->active_ui->pending_drop_count > 0 || ctx->active_ui->pending_text_drop_count > 0)) {
+        ctx->active_ui->frame_drop_count = ctx->active_ui->pending_drop_count;
+        if (ctx->active_ui->pending_drop_bytes > 0u) {
+            std::memcpy(ctx->active_ui->frame_drop_buf, ctx->active_ui->pending_drop_buf, ctx->active_ui->pending_drop_bytes);
+            for (uint32_t i = 0u; i < ctx->active_ui->frame_drop_count; ++i) {
+                ctx->active_ui->frame_drops[i] = Str{
+                    ctx->active_ui->frame_drop_buf + ctx->active_ui->pending_drop_offsets[i],
+                    ctx->active_ui->pending_drop_lengths[i],
+                };
+            }
         }
+        ctx->active_ui->frame_text_drop_count = ctx->active_ui->pending_text_drop_count;
+        for (uint32_t i = 0; i < ctx->active_ui->frame_text_drop_count; ++i)
+            ctx->active_ui->frame_text_drops[i] = Str{ctx->active_ui->frame_drop_buf + ctx->active_ui->pending_text_drop_offsets[i], ctx->active_ui->pending_text_drop_lengths[i]};
+        ctx->active_ui->pending_text_drop_count = 0;
+        ctx->active_ui->pending_drop_count = 0u;
+        ctx->active_ui->pending_drop_bytes = 0u;
     }
-    ctx->pending_drop_count = 0u;
-    ctx->pending_drop_bytes = 0u;
 
-    ctx->prev_focus_count = ctx->focus_count;
-    if (ctx->prev_focus_count > 0u) {
-        std::memcpy(ctx->prev_focus_order, ctx->focus_order, size_t(ctx->prev_focus_count) * sizeof(uint32_t));
+    ctx->active_ui->prev_focus_count = ctx->active_ui->focus_count;
+    if (ctx->active_ui->prev_focus_count > 0u) {
+        std::memcpy(ctx->active_ui->prev_focus_order, ctx->active_ui->focus_order, size_t(ctx->active_ui->prev_focus_count) * sizeof(uint32_t));
     }
-    ctx->focus_count = 0u;
+    ctx->active_ui->focus_count = 0u;
 
-    if (ctx->pending_tab_delta != 0 && ctx->prev_focus_count > 0u) {
+    if (ctx->active_ui->modal_scope) {
+        uint32_t count = 0;
+        for (uint32_t i = 0; i < ctx->active_ui->prev_focus_count; ++i) {
+            const WidgetState* ws = state_map_find(&ctx->active_ui->states, ctx->active_ui->prev_focus_order[i]);
+            if (ws && ws->focus_scope == ctx->active_ui->modal_scope)
+                ctx->active_ui->prev_focus_order[count++] = ws->key;
+        }
+        ctx->active_ui->prev_focus_count = count;
+        if (!count) ctx->active_ui->pending_tab_delta = 0;
+    }
+    if (ctx->active_ui->pending_tab_delta != 0 && ctx->active_ui->prev_focus_count > 0u) {
         int32_t cur_idx = -1;
-        for (uint32_t i = 0u; i < ctx->prev_focus_count; ++i) {
-            if (ctx->prev_focus_order[i] == ctx->focus_id) {
+        for (uint32_t i = 0u; i < ctx->active_ui->prev_focus_count; ++i) {
+            if (ctx->active_ui->prev_focus_order[i] == ctx->active_ui->focus_id) {
                 cur_idx = static_cast<int32_t>(i);
                 break;
             }
         }
-        const int32_t n = static_cast<int32_t>(ctx->prev_focus_count);
+        const int32_t n = static_cast<int32_t>(ctx->active_ui->prev_focus_count);
         int32_t next_idx = (cur_idx < 0)
-            ? ((ctx->pending_tab_delta > 0) ? 0 : (n - 1))
-            : ((cur_idx + ctx->pending_tab_delta) % n);
+            ? ((ctx->active_ui->pending_tab_delta > 0) ? 0 : (n - 1))
+            : ((cur_idx + ctx->active_ui->pending_tab_delta) % n);
         if (next_idx < 0) {
             next_idx += n;
         }
-        const uint32_t next_focus = ctx->prev_focus_order[next_idx];
-        if (next_focus != ctx->focus_id) {
+        const uint32_t next_focus = ctx->active_ui->prev_focus_order[next_idx];
+        if (next_focus != ctx->active_ui->focus_id) {
             clear_ime_composition(ctx);
         }
-        ctx->focus_id = next_focus;
-        ctx->pending_tab_delta = 0;
-        ctx->caret_blink_on = true;
-        ctx->caret_blink_cycles = 0u;
+        ctx->active_ui->focus_id = next_focus;
+        ctx->active_ui->pending_tab_delta = 0;
+        ctx->active_ui->keyboard_focus_active = true;
+        ctx->active_ui->caret_blink_on = true;
+        ctx->active_ui->caret_blink_cycles = 0u;
         request_redraw(ctx);
     }
 
@@ -3607,85 +3653,87 @@ void begin_frame(Context* ctx, const FrameDesc& desc) noexcept {
     ctx->batch_count = 0u;
     ctx->blur_split_count = 0u;
     ctx->layer_has_bg_prims = true;
-    ctx->split_depth = 0u;
-    ctx->canvas_depth = 0u;
-    ctx->last_canvas_clip_px = {};
-    ctx->last_canvas_clip_radius_px = 0.0f;
-    ctx->pending_chrome_drag_count = 0u;
-    ctx->pending_chrome_client_count = 0u;
-    ctx->drag_drop_pending = false;
-    ctx->drag_accepted_this_frame = false;
-    if (ctx->marquee_finished_canvas_id != 0u) {
-        if (WidgetState* mws = state_map_find(&ctx->states, ctx->marquee_finished_canvas_id)) {
+    ctx->active_ui->split_depth = 0u;
+    ctx->active_ui->canvas_depth = 0u;
+    ctx->active_ui->last_canvas_clip_px = {};
+    ctx->active_ui->last_canvas_clip_radius_px = 0.0f;
+    ctx->active_ui->pending_chrome_drag_count = 0u;
+    ctx->active_ui->pending_chrome_client_count = 0u;
+    ctx->active_ui->drag_drop_pending = false;
+    ctx->active_ui->drag_accepted_this_frame = false;
+    if (ctx->active_ui->marquee_finished_canvas_id != 0u) {
+        if (WidgetState* mws = state_map_find(&ctx->active_ui->states, ctx->active_ui->marquee_finished_canvas_id)) {
             mws->canvas_marquee_finished = false;
             mws->canvas_marquee_world = {};
         }
-        ctx->marquee_finished_canvas_id = 0u;
+        ctx->active_ui->marquee_finished_canvas_id = 0u;
     }
 
     const float dpi = (desc.dpi_scale > 0.0f) ? desc.dpi_scale : 1.0f;
-    ctx->viewport_w = (desc.viewport_w > 0u) ? desc.viewport_w : 1u;
-    ctx->viewport_h = (desc.viewport_h > 0u) ? desc.viewport_h : 1u;
-    ctx->dpi_scale = dpi;
+    ctx->active_ui->viewport_w = (desc.viewport_w > 0u) ? desc.viewport_w : 1u;
+    ctx->active_ui->viewport_h = (desc.viewport_h > 0u) ? desc.viewport_h : 1u;
+    ctx->active_ui->dpi_scale = dpi;
 
     const Clay_Dimensions logical_dims = {
-        .width = static_cast<float>(ctx->viewport_w) / dpi,
-        .height = static_cast<float>(ctx->viewport_h) / dpi,
+        .width = static_cast<float>(ctx->active_ui->viewport_w) / dpi,
+        .height = static_cast<float>(ctx->active_ui->viewport_h) / dpi,
     };
     Clay_SetLayoutDimensions(logical_dims);
 
-    ctx->prev_pointer_pos = ctx->pointer_pos;
+    ctx->active_ui->prev_pointer_pos = ctx->active_ui->pointer_pos;
     Vec2 pointer_pos = desc.pointer_pos;
-    if (pointer_pos.x < 0.0f && pointer_pos.y < 0.0f && ctx->has_event_pointer) {
-        pointer_pos = ctx->event_pointer_pos;
+    if (pointer_pos.x < 0.0f && pointer_pos.y < 0.0f && ctx->active_ui->has_event_pointer) {
+        pointer_pos = ctx->active_ui->event_pointer_pos;
     }
-    ctx->pointer_pos = pointer_pos;
-    if (ctx->prev_pointer_pos.x >= 0.0f && ctx->prev_pointer_pos.y >= 0.0f &&
+    ctx->active_ui->pointer_pos = pointer_pos;
+    if (ctx->active_ui->prev_pointer_pos.x >= 0.0f && ctx->active_ui->prev_pointer_pos.y >= 0.0f &&
         pointer_pos.x >= 0.0f && pointer_pos.y >= 0.0f)
     {
-        ctx->pointer_delta = Vec2{ pointer_pos.x - ctx->prev_pointer_pos.x, pointer_pos.y - ctx->prev_pointer_pos.y };
+        ctx->active_ui->pointer_delta = Vec2{ pointer_pos.x - ctx->active_ui->prev_pointer_pos.x, pointer_pos.y - ctx->active_ui->prev_pointer_pos.y };
     } else {
-        ctx->pointer_delta = Vec2{ 0.0f, 0.0f };
+        ctx->active_ui->pointer_delta = Vec2{ 0.0f, 0.0f };
     }
 
-    const bool pointer_down = desc.pointer_down || ctx->event_pointer_down;
-    const bool pressed_this_frame = pointer_down && !ctx->prev_pointer_down;
-    const bool released_this_frame = !pointer_down && ctx->prev_pointer_down;
-    ctx->prev_pointer_down = pointer_down;
-    ctx->left_pressed_this_frame = pressed_this_frame;
+    const bool pointer_down = desc.pointer_down || ctx->active_ui->event_pointer_down;
+    const bool pressed_this_frame = pointer_down && !ctx->active_ui->prev_pointer_down;
+    const bool released_this_frame = !pointer_down && ctx->active_ui->prev_pointer_down;
+    ctx->active_ui->prev_pointer_down = pointer_down;
+    ctx->active_ui->left_pressed_this_frame = pressed_this_frame;
+    if (pressed_this_frame) ctx->active_ui->keyboard_focus_active = false;
     if (pressed_this_frame) {
         if (desc.pointer_clicks > 0u) {
-            ctx->last_mouse_clicks = desc.pointer_clicks;
-        } else if (!ctx->event_pointer_down) {
-            ctx->last_mouse_clicks = 1u;
+            ctx->active_ui->last_mouse_clicks = desc.pointer_clicks;
+        } else if (!ctx->active_ui->event_pointer_down) {
+            ctx->active_ui->last_mouse_clicks = 1u;
         }
     }
 
-    const bool middle_down = ctx->event_middle_down;
-    const bool middle_pressed_this_frame = middle_down && !ctx->prev_pan_button_down;
-    ctx->prev_pan_button_down = middle_down;
+    const bool middle_down = ctx->active_ui->event_middle_down;
+    const bool middle_pressed_this_frame = middle_down && !ctx->active_ui->prev_pan_button_down;
+    ctx->active_ui->prev_pan_button_down = middle_down;
 
-    const bool right_down = desc.right_pointer_down || ctx->event_right_down;
-    const bool right_pressed_this_frame = right_down && !ctx->prev_right_down;
-    const bool right_released_this_frame = !right_down && ctx->prev_right_down;
-    ctx->prev_right_down = right_down;
-    ctx->right_pressed_this_frame = right_pressed_this_frame;
-    ctx->right_clicked_any_this_frame = false;
+    const bool right_down = desc.right_pointer_down || ctx->active_ui->event_right_down;
+    const bool right_pressed_this_frame = right_down && !ctx->active_ui->prev_right_down;
+    const bool right_released_this_frame = !right_down && ctx->active_ui->prev_right_down;
+    ctx->active_ui->prev_right_down = right_down;
+    ctx->active_ui->right_pressed_this_frame = right_pressed_this_frame;
+    if (right_pressed_this_frame || middle_pressed_this_frame) ctx->active_ui->keyboard_focus_active = false;
+    ctx->active_ui->right_clicked_any_this_frame = false;
 
     const Vec2 scroll = (desc.scroll_delta.x != 0.0f || desc.scroll_delta.y != 0.0f)
         ? desc.scroll_delta
-        : ctx->event_scroll_delta;
-    ctx->event_scroll_delta = {};
+        : ctx->active_ui->event_scroll_delta;
+    ctx->active_ui->event_scroll_delta = {};
 
     // Update Clay hit-test results against the previous frame's tree BEFORE Clay_BeginLayout() resets it.
     Clay_SetPointerState(Clay_Vector2{pointer_pos.x, pointer_pos.y}, pointer_down);
     Clay_UpdateScrollContainers(false, Clay_Vector2{0.0f, 0.0f}, 0.0f);
 
-    state_map_clear_flags(&ctx->states, true, false);
+    state_map_clear_flags(&ctx->active_ui->states, true, false);
     const Clay_ElementIdArray over = Clay_GetPointerOverIds();
     const uint32_t hovered_span_id = hit_test_span_regions(ctx, pointer_pos);
     if (hovered_span_id != 0u) {
-        if (WidgetState* sws = state_map_find(&ctx->states, hovered_span_id)) {
+        if (WidgetState* sws = state_map_find(&ctx->active_ui->states, hovered_span_id)) {
             sws->span_hovered = true;
         }
     }
@@ -3693,85 +3741,85 @@ void begin_frame(Context* ctx, const FrameDesc& desc) noexcept {
 
     if (middle_pressed_this_frame) {
         if (WidgetState* cws = resolve_canvas_owner(ctx, over)) {
-            ctx->pan_canvas_id = cws->key;
+            ctx->active_ui->pan_canvas_id = cws->key;
             pan_started_this_frame = true;
             request_redraw(ctx);
         }
     }
 
     if (right_pressed_this_frame) {
-        ctx->right_press_origin = pointer_pos;
-        ctx->right_drag_exceeded = false;
-        ctx->right_active_id = 0u;
+        ctx->active_ui->right_press_origin = pointer_pos;
+        ctx->active_ui->right_drag_exceeded = false;
+        ctx->active_ui->right_active_id = 0u;
         if (WidgetState* rws = find_topmost_user_element(ctx, over, hovered_span_id)) {
-            ctx->right_active_id = rws->key;
+            ctx->active_ui->right_active_id = rws->key;
         }
     }
-    if (right_down && !ctx->right_drag_exceeded &&
-        ctx->right_press_origin.x >= 0.0f && pointer_pos.x >= 0.0f)
+    if (right_down && !ctx->active_ui->right_drag_exceeded &&
+        ctx->active_ui->right_press_origin.x >= 0.0f && pointer_pos.x >= 0.0f)
     {
-        const float dx = pointer_pos.x - ctx->right_press_origin.x;
-        const float dy = pointer_pos.y - ctx->right_press_origin.y;
+        const float dx = pointer_pos.x - ctx->active_ui->right_press_origin.x;
+        const float dy = pointer_pos.y - ctx->active_ui->right_press_origin.y;
         if (dx * dx + dy * dy > 16.0f) {
-            ctx->right_drag_exceeded = true;
-            if (ctx->pan_canvas_id == 0u) {
+            ctx->active_ui->right_drag_exceeded = true;
+            if (ctx->active_ui->pan_canvas_id == 0u) {
                 if (WidgetState* cws = resolve_canvas_owner(ctx, over)) {
-                    ctx->pan_canvas_id = cws->key;
+                    ctx->active_ui->pan_canvas_id = cws->key;
                     pan_started_this_frame = true;
                     request_redraw(ctx);
                 }
             }
         }
     } else if (right_released_this_frame) {
-        bool drag_exceeded = ctx->right_drag_exceeded;
-        if (!drag_exceeded && ctx->right_press_origin.x >= 0.0f && pointer_pos.x >= 0.0f) {
-            const float dx = pointer_pos.x - ctx->right_press_origin.x;
-            const float dy = pointer_pos.y - ctx->right_press_origin.y;
+        bool drag_exceeded = ctx->active_ui->right_drag_exceeded;
+        if (!drag_exceeded && ctx->active_ui->right_press_origin.x >= 0.0f && pointer_pos.x >= 0.0f) {
+            const float dx = pointer_pos.x - ctx->active_ui->right_press_origin.x;
+            const float dy = pointer_pos.y - ctx->active_ui->right_press_origin.y;
             drag_exceeded = (dx * dx + dy * dy > 16.0f);
         }
         if (!drag_exceeded) {
-            ctx->right_clicked_any_this_frame = true;
-            if (ctx->right_active_id != 0u) {
-                if (WidgetState* ws = state_map_find(&ctx->states, ctx->right_active_id)) {
+            ctx->active_ui->right_clicked_any_this_frame = true;
+            if (ctx->active_ui->right_active_id != 0u) {
+                if (WidgetState* ws = state_map_find(&ctx->active_ui->states, ctx->active_ui->right_active_id)) {
                     const bool over_right = ws->is_text_span
                         ? ws->span_hovered
-                        : Clay_PointerOver(make_clay_id(ctx->right_active_id));
+                        : Clay_PointerOver(make_clay_id(ctx->active_ui->right_active_id));
                     if (ws->is_user_element && over_right) {
                         ws->right_clicked_this_frame = true;
                     }
                 }
             }
         }
-        ctx->right_active_id = 0u;
-        ctx->right_drag_exceeded = false;
+        ctx->active_ui->right_active_id = 0u;
+        ctx->active_ui->right_drag_exceeded = false;
     }
 
     if (pressed_this_frame) {
-        ctx->left_press_origin = pointer_pos;
-        ctx->left_max_drag_dist_sq = 0.0f;
-        state_map_clear_flags(&ctx->states, false, true);
-        WidgetState* space_pan_canvas = (ctx->space_down && ctx->focus_id == 0u) ? resolve_canvas_owner(ctx, over) : nullptr;
+        ctx->active_ui->left_press_origin = pointer_pos;
+        ctx->active_ui->left_max_drag_dist_sq = 0.0f;
+        state_map_clear_flags(&ctx->active_ui->states, false, true);
+        WidgetState* space_pan_canvas = (ctx->active_ui->space_down && ctx->active_ui->focus_id == 0u) ? resolve_canvas_owner(ctx, over) : nullptr;
         if (space_pan_canvas) {
-            ctx->pan_canvas_id = space_pan_canvas->key;
+            ctx->active_ui->pan_canvas_id = space_pan_canvas->key;
             pan_started_this_frame = true;
             request_redraw(ctx);
         } else {
             bool handled_scrollbar = false;
             for (int32_t i = over.length - 1; i >= 0; --i) {
-                WidgetState* ws = state_map_find(&ctx->states, over.internalArray[i].id);
+                WidgetState* ws = state_map_find(&ctx->active_ui->states, over.internalArray[i].id);
                 if (!ws || !ws->is_user_element || (!ws->is_scroll_y && !ws->is_virtual_list)) {
                     continue;
                 }
                 const ScrollbarGeom sb = compute_vscrollbar_geom(ws);
                 if (sb.visible && sb.hit_track.contains(pointer_pos)) {
-                    ctx->active_id = id_index(ws->key, kScrollbarYTag);
+                    ctx->active_ui->active_id = id_index(ws->key, kScrollbarYTag);
                     ws->scroll_vel.y = 0.0f;
                     ws->vscroll_vel_y = 0.0;
                     if (pointer_pos.y >= sb.thumb.y && pointer_pos.y <= (sb.thumb.y + sb.thumb.h)) {
-                        ctx->scrollbar_drag_grab_offset = pointer_pos.y - sb.thumb.y;
+                        ctx->active_ui->scrollbar_drag_grab_offset = pointer_pos.y - sb.thumb.y;
                     } else {
-                        ctx->scrollbar_drag_grab_offset = 0.5f * sb.thumb.h;
-                        apply_scrollbar_drag(ws, pointer_pos.y, ctx->scrollbar_drag_grab_offset);
+                        ctx->active_ui->scrollbar_drag_grab_offset = 0.5f * sb.thumb.h;
+                        apply_scrollbar_drag(ws, pointer_pos.y, ctx->active_ui->scrollbar_drag_grab_offset);
                     }
                     request_redraw(ctx);
                     handled_scrollbar = true;
@@ -3782,12 +3830,12 @@ void begin_frame(Context* ctx, const FrameDesc& desc) noexcept {
                 uint32_t top_hit = 0u;
                 uint32_t top_focus = 0u;
                 if (hovered_span_id != 0u) {
-                    if (WidgetState* sws = state_map_find(&ctx->states, hovered_span_id)) {
+                    if (WidgetState* sws = state_map_find(&ctx->active_ui->states, hovered_span_id)) {
                         if (sws->is_user_element) {
                             top_hit = hovered_span_id;
                             sws->pressed_down = true;
                             sws->pressed_this_frame = true;
-                            if (ctx->last_mouse_clicks >= 2u) {
+                            if (ctx->active_ui->last_mouse_clicks >= 2u) {
                                 sws->double_clicked_this_frame = true;
                             }
                         }
@@ -3795,19 +3843,19 @@ void begin_frame(Context* ctx, const FrameDesc& desc) noexcept {
                 }
                 for (int32_t i = over.length - 1; i >= 0; --i) {
                     const uint32_t oid = over.internalArray[i].id;
-                    WidgetState* ws = state_map_find(&ctx->states, oid);
+                    WidgetState* ws = state_map_find(&ctx->active_ui->states, oid);
                     if (ws && ws->is_user_element) {
                         if (top_hit == 0u) {
                             top_hit = oid;
                             ws->pressed_down = true;
                             ws->pressed_this_frame = true;
-                            if (ctx->last_mouse_clicks >= 2u) {
+                            if (ctx->active_ui->last_mouse_clicks >= 2u) {
                                 ws->double_clicked_this_frame = true;
                             }
                             if (ws->is_canvas && ws->canvas_interactive) {
                                 if (ws->canvas_marquee_enabled) {
-                                    if (ctx->marquee_canvas_id == 0u) {
-                                        ctx->marquee_canvas_id = oid;
+                                    if (ctx->active_ui->marquee_canvas_id == 0u) {
+                                        ctx->active_ui->marquee_canvas_id = oid;
                                         const Vec2 start_w = canvas_screen_to_world(ws, pointer_pos);
                                         ws->canvas_marquee_start_world = start_w;
                                         ws->canvas_marquee_world = Rect{ start_w.x, start_w.y, 0.0f, 0.0f };
@@ -3815,8 +3863,8 @@ void begin_frame(Context* ctx, const FrameDesc& desc) noexcept {
                                         ws->canvas_marquee_finished = false;
                                         request_redraw(ctx);
                                     }
-                                } else if (ctx->pan_canvas_id == 0u) {
-                                    ctx->pan_canvas_id = oid;
+                                } else if (ctx->active_ui->pan_canvas_id == 0u) {
+                                    ctx->active_ui->pan_canvas_id = oid;
                                     pan_started_this_frame = true;
                                 }
                             }
@@ -3826,26 +3874,31 @@ void begin_frame(Context* ctx, const FrameDesc& desc) noexcept {
                         }
                     }
                 }
-                if (top_focus != ctx->focus_id) {
+                const WidgetState* target_focus = state_map_find(&ctx->active_ui->states, top_focus);
+                const bool accept_focus = !ctx->active_ui->modal_scope ||
+                    (target_focus && target_focus->focus_scope == ctx->active_ui->modal_scope);
+                if (accept_focus && top_focus != ctx->active_ui->focus_id) {
                     clear_ime_composition(ctx);
                 }
-                ctx->active_id = top_hit;
-                ctx->focus_id = top_focus;
+                ctx->active_ui->active_id = top_hit;
+                if (accept_focus) {
+                    ctx->active_ui->focus_id = top_focus;
+                }
             }
         }
     }
 
-    if (pointer_down && ctx->active_id != 0u) {
-        if (ctx->left_press_origin.x >= 0.0f && pointer_pos.x >= 0.0f) {
-            const float dx = pointer_pos.x - ctx->left_press_origin.x;
-            const float dy = pointer_pos.y - ctx->left_press_origin.y;
+    if (pointer_down && ctx->active_ui->active_id != 0u) {
+        if (ctx->active_ui->left_press_origin.x >= 0.0f && pointer_pos.x >= 0.0f) {
+            const float dx = pointer_pos.x - ctx->active_ui->left_press_origin.x;
+            const float dy = pointer_pos.y - ctx->active_ui->left_press_origin.y;
             const float d2 = dx * dx + dy * dy;
-            if (d2 > ctx->left_max_drag_dist_sq) {
-                ctx->left_max_drag_dist_sq = d2;
+            if (d2 > ctx->active_ui->left_max_drag_dist_sq) {
+                ctx->active_ui->left_max_drag_dist_sq = d2;
             }
         }
-        if (ctx->marquee_canvas_id != 0u && pointer_pos.x >= 0.0f && pointer_pos.y >= 0.0f) {
-            if (WidgetState* mws = state_map_find(&ctx->states, ctx->marquee_canvas_id)) {
+        if (ctx->active_ui->marquee_canvas_id != 0u && pointer_pos.x >= 0.0f && pointer_pos.y >= 0.0f) {
+            if (WidgetState* mws = state_map_find(&ctx->active_ui->states, ctx->active_ui->marquee_canvas_id)) {
                 const Vec2 p0 = mws->canvas_marquee_start_world;
                 const Vec2 p1 = canvas_screen_to_world(mws, pointer_pos);
                 const float x0 = (p0.x < p1.x) ? p0.x : p1.x;
@@ -3853,28 +3906,29 @@ void begin_frame(Context* ctx, const FrameDesc& desc) noexcept {
                 const float x1 = (p0.x > p1.x) ? p0.x : p1.x;
                 const float y1 = (p0.y > p1.y) ? p0.y : p1.y;
                 mws->canvas_marquee_world = Rect{ x0, y0, x1 - x0, y1 - y0 };
-                ctx->desired_cursor = Cursor::Crosshair;
+                ctx->active_ui->desired_cursor = Cursor::Crosshair;
                 request_redraw(ctx);
             } else {
-                ctx->marquee_canvas_id = 0u;
+                ctx->active_ui->marquee_canvas_id = 0u;
             }
         }
-        if (!ctx->headless && ctx->window && !ctx->mouse_captured) {
-            if (SDL_CaptureMouse(true)) {
-                ctx->mouse_captured = true;
+        if (!ctx->headless && ctx->active_window && !ctx->active_ui->mouse_captured) {
+            if ((!ctx->mouse_capture_window || ctx->mouse_capture_window == ctx->active_window) && SDL_CaptureMouse(true)) {
+                ctx->mouse_capture_window = ctx->active_window;
+                ctx->active_ui->mouse_captured = true;
             }
         }
-        if (WidgetState* sb_ws = find_scrollbar_owner(ctx, ctx->active_id)) {
-            apply_scrollbar_drag(sb_ws, pointer_pos.y, ctx->scrollbar_drag_grab_offset);
-            ctx->desired_cursor = Cursor::Hand;
+        if (WidgetState* sb_ws = find_scrollbar_owner(ctx, ctx->active_ui->active_id)) {
+            apply_scrollbar_drag(sb_ws, pointer_pos.y, ctx->active_ui->scrollbar_drag_grab_offset);
+            ctx->active_ui->desired_cursor = Cursor::Hand;
         }
     } else if (released_this_frame) {
-        if (ctx->mouse_captured && ctx->pan_canvas_id == 0u) {
-            SDL_CaptureMouse(false);
-            ctx->mouse_captured = false;
+        if (ctx->active_ui->mouse_captured && ctx->active_ui->pan_canvas_id == 0u) {
+            if (ctx->mouse_capture_window == ctx->active_window) { SDL_CaptureMouse(false); ctx->mouse_capture_window = nullptr; }
+            ctx->active_ui->mouse_captured = false;
         }
-        if (ctx->marquee_canvas_id != 0u) {
-            if (WidgetState* mws = state_map_find(&ctx->states, ctx->marquee_canvas_id)) {
+        if (ctx->active_ui->marquee_canvas_id != 0u) {
+            if (WidgetState* mws = state_map_find(&ctx->active_ui->states, ctx->active_ui->marquee_canvas_id)) {
                 if (pointer_pos.x >= 0.0f && pointer_pos.y >= 0.0f) {
                     const Vec2 p0 = mws->canvas_marquee_start_world;
                     const Vec2 p1 = canvas_screen_to_world(mws, pointer_pos);
@@ -3887,61 +3941,62 @@ void begin_frame(Context* ctx, const FrameDesc& desc) noexcept {
                 mws->canvas_marquee_active = false;
                 if (mws->canvas_marquee_world.w >= 3.0f ||
                     mws->canvas_marquee_world.h >= 3.0f ||
-                    ctx->left_max_drag_dist_sq >= 9.0f)
+                    ctx->active_ui->left_max_drag_dist_sq >= 9.0f)
                 {
                     mws->canvas_marquee_finished = true;
-                    ctx->marquee_finished_canvas_id = ctx->marquee_canvas_id;
+                    ctx->active_ui->marquee_finished_canvas_id = ctx->active_ui->marquee_canvas_id;
                 }
             }
-            ctx->marquee_canvas_id = 0u;
+            ctx->active_ui->marquee_canvas_id = 0u;
         }
-        if (ctx->drag_active) {
-            ctx->drag_active = false;
-            ctx->drag_drop_pending = true;
-            ctx->drag_accepted_this_frame = false;
+        if (ctx->active_ui->drag_active) {
+            ctx->active_ui->drag_active = false;
+            ctx->active_ui->drag_drop_pending = true;
+            ctx->active_ui->drag_accepted_this_frame = false;
         }
-        if (ctx->active_id != 0u) {
+        if (ctx->active_ui->active_id != 0u) {
             const bool suppress_click =
-                (ctx->drag_drop_pending && ctx->active_id == ctx->drag_source_id) ||
-                (ctx->marquee_finished_canvas_id != 0u && ctx->active_id == ctx->marquee_finished_canvas_id);
+                (ctx->active_ui->drag_drop_pending && ctx->active_ui->active_id == ctx->active_ui->drag_source_id) ||
+                (ctx->active_ui->marquee_finished_canvas_id != 0u && ctx->active_ui->active_id == ctx->active_ui->marquee_finished_canvas_id);
             if (!suppress_click) {
-                if (WidgetState* ws = state_map_find(&ctx->states, ctx->active_id)) {
+                if (WidgetState* ws = state_map_find(&ctx->active_ui->states, ctx->active_ui->active_id)) {
                     const bool over_active = ws->is_text_span
                         ? ws->span_hovered
-                        : Clay_PointerOver(make_clay_id(ctx->active_id));
+                        : Clay_PointerOver(make_clay_id(ctx->active_ui->active_id));
                     if (ws->is_user_element && over_active) {
                         ws->clicked_this_frame = true;
                     }
                 }
             }
         }
-        state_map_clear_flags(&ctx->states, false, true);
-        ctx->active_id = 0u;
-        ctx->left_max_drag_dist_sq = 0.0f;
+        state_map_clear_flags(&ctx->active_ui->states, false, true);
+        ctx->active_ui->active_id = 0u;
+        ctx->active_ui->left_max_drag_dist_sq = 0.0f;
     }
 
-    const bool pan_held = pointer_down || middle_down || (right_down && ctx->right_drag_exceeded);
-    if (ctx->pan_canvas_id != 0u && pan_held) {
-        if (!ctx->headless && ctx->window && !ctx->mouse_captured) {
-            if (SDL_CaptureMouse(true)) {
-                ctx->mouse_captured = true;
+    const bool pan_held = pointer_down || middle_down || (right_down && ctx->active_ui->right_drag_exceeded);
+    if (ctx->active_ui->pan_canvas_id != 0u && pan_held) {
+        if (!ctx->headless && ctx->active_window && !ctx->active_ui->mouse_captured) {
+            if ((!ctx->mouse_capture_window || ctx->mouse_capture_window == ctx->active_window) && SDL_CaptureMouse(true)) {
+                ctx->mouse_capture_window = ctx->active_window;
+                ctx->active_ui->mouse_captured = true;
             }
         }
-        if (WidgetState* cws = state_map_find(&ctx->states, ctx->pan_canvas_id)) {
-            if (!pan_started_this_frame && ctx->prev_pointer_pos.x >= 0.0f && pointer_pos.x >= 0.0f) {
-                cws->canvas_pan.x += pointer_pos.x - ctx->prev_pointer_pos.x;
-                cws->canvas_pan.y += pointer_pos.y - ctx->prev_pointer_pos.y;
+        if (WidgetState* cws = state_map_find(&ctx->active_ui->states, ctx->active_ui->pan_canvas_id)) {
+            if (!pan_started_this_frame && ctx->active_ui->prev_pointer_pos.x >= 0.0f && pointer_pos.x >= 0.0f) {
+                cws->canvas_pan.x += pointer_pos.x - ctx->active_ui->prev_pointer_pos.x;
+                cws->canvas_pan.y += pointer_pos.y - ctx->active_ui->prev_pointer_pos.y;
             }
-            ctx->desired_cursor = Cursor::Move;
+            ctx->active_ui->desired_cursor = Cursor::Move;
             request_redraw(ctx);
         } else {
-            ctx->pan_canvas_id = 0u;
+            ctx->active_ui->pan_canvas_id = 0u;
         }
-    } else if (ctx->pan_canvas_id != 0u) {
-        ctx->pan_canvas_id = 0u;
-        if (ctx->mouse_captured && ctx->active_id == 0u) {
-            SDL_CaptureMouse(false);
-            ctx->mouse_captured = false;
+    } else if (ctx->active_ui->pan_canvas_id != 0u) {
+        ctx->active_ui->pan_canvas_id = 0u;
+        if (ctx->active_ui->mouse_captured && ctx->active_ui->active_id == 0u) {
+            if (ctx->mouse_capture_window == ctx->active_window) { SDL_CaptureMouse(false); ctx->mouse_capture_window = nullptr; }
+            ctx->active_ui->mouse_captured = false;
         }
     }
 
@@ -3951,7 +4006,7 @@ void begin_frame(Context* ctx, const FrameDesc& desc) noexcept {
         WidgetState* fallback_scroll = nullptr;
         WidgetState* target_canvas = nullptr;
         for (int32_t i = over.length - 1; i >= 0; --i) {
-            WidgetState* ws = state_map_find(&ctx->states, over.internalArray[i].id);
+            WidgetState* ws = state_map_find(&ctx->active_ui->states, over.internalArray[i].id);
             if (!ws || !ws->is_user_element) {
                 continue;
             }
@@ -3987,7 +4042,7 @@ void begin_frame(Context* ctx, const FrameDesc& desc) noexcept {
                     break;
                 }
             } else if (!target_canvas && ws->owner_canvas_id != 0u) {
-                WidgetState* cws = state_map_find(&ctx->states, ws->owner_canvas_id);
+                WidgetState* cws = state_map_find(&ctx->active_ui->states, ws->owner_canvas_id);
                 if (cws && cws->is_canvas && cws->canvas_interactive) {
                     target_canvas = cws;
                 }
@@ -3995,7 +4050,7 @@ void begin_frame(Context* ctx, const FrameDesc& desc) noexcept {
         }
         if (target_scroll) {
             if (target_scroll->is_virtual_list) {
-                if (ctx->sim_dt <= 0.0f) {
+                if (ctx->active_ui->sim_dt <= 0.0f) {
                     target_scroll->vscroll_pos_y = clamp_double(
                         target_scroll->vscroll_pos_y - static_cast<double>(scroll.y) * 48.0,
                         0.0,
@@ -4004,7 +4059,7 @@ void begin_frame(Context* ctx, const FrameDesc& desc) noexcept {
                     target_scroll->vscroll_vel_y += static_cast<double>(-scroll.y) * 560.0;
                 }
             } else {
-                if (ctx->sim_dt <= 0.0f) {
+                if (ctx->active_ui->sim_dt <= 0.0f) {
                     if (target_scroll->is_scroll_x) {
                         target_scroll->scroll_pos.x = clamp_range(target_scroll->scroll_pos.x - scroll.x * 48.0f, 0.0f, target_scroll->scroll_max.x);
                     }
@@ -4037,7 +4092,7 @@ void begin_frame(Context* ctx, const FrameDesc& desc) noexcept {
             request_redraw(ctx);
         } else if (fallback_scroll) {
             if (fallback_scroll->is_virtual_list) {
-                if (ctx->sim_dt <= 0.0f) {
+                if (ctx->active_ui->sim_dt <= 0.0f) {
                     fallback_scroll->vscroll_pos_y = clamp_double(
                         fallback_scroll->vscroll_pos_y - static_cast<double>(scroll.y) * 48.0,
                         0.0,
@@ -4046,7 +4101,7 @@ void begin_frame(Context* ctx, const FrameDesc& desc) noexcept {
                     fallback_scroll->vscroll_vel_y += static_cast<double>(-scroll.y) * 560.0;
                 }
             } else {
-                if (ctx->sim_dt <= 0.0f) {
+                if (ctx->active_ui->sim_dt <= 0.0f) {
                     if (fallback_scroll->is_scroll_x) {
                         fallback_scroll->scroll_pos.x = clamp_range(fallback_scroll->scroll_pos.x - scroll.x * 48.0f, 0.0f, fallback_scroll->scroll_max.x);
                     }
@@ -4067,12 +4122,12 @@ void begin_frame(Context* ctx, const FrameDesc& desc) noexcept {
     }
 
     // Integrate frame-rate-independent inertial scroll damping
-    if (ctx->sim_dt > 0.0f && ctx->states.entries) {
+    if (ctx->active_ui->sim_dt > 0.0f && ctx->active_ui->states.entries) {
         constexpr float kScrollFriction = 10.5f;
-        const float decay = std::exp(-kScrollFriction * ctx->sim_dt);
+        const float decay = std::exp(-kScrollFriction * ctx->active_ui->sim_dt);
         const float step_factor = (1.0f - decay) / kScrollFriction;
-        for (uint32_t i = 0u; i < ctx->states.capacity; ++i) {
-            WidgetState& ws = ctx->states.entries[i];
+        for (uint32_t i = 0u; i < ctx->active_ui->states.capacity; ++i) {
+            WidgetState& ws = ctx->active_ui->states.entries[i];
             if (ws.key == 0u || (!ws.is_scroll_x && !ws.is_scroll_y && !ws.is_virtual_list)) {
                 continue;
             }
@@ -4092,14 +4147,14 @@ void begin_frame(Context* ctx, const FrameDesc& desc) noexcept {
                     static_cast<double>(step_factor));
             }
             if (moving) {
-                ++ctx->active_anim_count;
+                ++ctx->active_ui->active_anim_count;
             }
         }
     }
 
-    if (ctx->applied_font_revision != ctx->atlas.font_revision) {
+    if (ctx->active_ui->applied_font_revision != ctx->atlas.font_revision) {
         Clay_ResetMeasureTextCache();
-        ctx->applied_font_revision = ctx->atlas.font_revision;
+        ctx->active_ui->applied_font_revision = ctx->atlas.font_revision;
     }
 
     Clay_BeginLayout();
@@ -4129,25 +4184,32 @@ void begin_box(const BoxDesc& desc_in) noexcept {
 
     WidgetState* box_ws = nullptr;
     if (desc.id != 0u) {
-        box_ws = state_map_get_or_insert(&ctx->states, desc.id, ctx->frame_index);
+        box_ws = state_map_get_or_insert(&ctx->active_ui->states, desc.id, ctx->active_ui->frame_index);
         if (box_ws) {
             box_ws->is_user_element = true;
             box_ws->is_focusable = desc.focusable;
+            box_ws->focus_scope = ctx->active_ui->modal_scope && focus_scope_contains(*ctx->active_ui, ctx->active_ui->modal_scope) ? ctx->active_ui->modal_scope : ctx->active_ui->focus_scope;
             box_ws->is_scroll_x = desc.scroll_x;
             box_ws->is_scroll_y = desc.scroll_y;
             box_ws->is_text_input_writable = false;
-            box_ws->owner_canvas_id = (ctx->canvas_depth > 0u)
-                ? ctx->canvas_stack[ctx->canvas_depth - 1u].id
+            box_ws->owner_canvas_id = (ctx->active_ui->canvas_depth > 0u)
+                ? ctx->active_ui->canvas_stack[ctx->active_ui->canvas_depth - 1u].id
                 : 0u;
         }
-        if (desc.focusable && ctx->focus_count < kMaxFocusablePerFrame) {
-            ctx->focus_order[ctx->focus_count++] = desc.id;
+        if (desc.focusable && ctx->active_ui->focus_count < kMaxFocusablePerFrame) {
+            ctx->active_ui->focus_order[ctx->active_ui->focus_count++] = desc.id;
+            if (ctx->active_ui->modal_needs_focus && focus_scope_contains(*ctx->active_ui, ctx->active_ui->modal_scope)) {
+                ctx->active_ui->focus_id = desc.id;
+                ctx->active_ui->modal_needs_focus = false;
+                clear_ime_composition(ctx);
+            }
         }
         Clay__OpenElementWithId(make_clay_id(desc.id));
     } else {
         Clay__OpenElement();
     }
 
+    const bool focus_ring = desc.focusable && keyboard_focus_visible(desc.id);
     const bool is_scroll = desc.scroll_x || desc.scroll_y;
     const bool any_clip = desc.clip_children || is_scroll;
     const bool is_floating_blocker = (desc.attach_to != AttachTo::None && !desc.pointer_passthrough);
@@ -4159,13 +4221,14 @@ void begin_box(const BoxDesc& desc_in) noexcept {
         desc.radial_gradient ||
         (desc.shadow_color.a > 0u && desc.shadow_blur > 0.0f) ||
         desc.backdrop_blur > 0.0f ||
-        has_border;
+        has_border || focus_ring;
 
     BoxExtra* extra = nullptr;
-    if (has_visual || any_clip || is_floating_blocker) {
+    if (has_visual || any_clip || is_floating_blocker || desc.id) {
         extra = ctx->frame_arena.alloc<BoxExtra>();
         if (extra) {
             extra->desc = desc;
+            extra->keyboard_focus_ring = focus_ring;
         }
     }
 
@@ -4187,7 +4250,7 @@ void begin_box(const BoxDesc& desc_in) noexcept {
     decl.cornerRadius = to_clay_corners(desc.radius);
     decl.userData = extra;
 
-    if ((has_visual || is_floating_blocker) && extra) {
+    if ((has_visual || is_floating_blocker || desc.id) && extra) {
         // Emit via CUSTOM command so shadows + gradients + borders + floating blockers render/occlude uniformly.
         decl.custom.customData = extra;
     }
@@ -4344,7 +4407,7 @@ void text_spans(std::span<const TextSpan> spans, const RichTextDesc& desc) noexc
         const float eff_rad = (sp.bg_radius > 0.0f) ? (sp.bg_radius * wscale) : 0.0f;
 
         if (sp.id != 0u) {
-            if (WidgetState* ws = state_map_get_or_insert(&ctx->states, sp.id, ctx->frame_index)) {
+            if (WidgetState* ws = state_map_get_or_insert(&ctx->active_ui->states, sp.id, ctx->active_ui->frame_index)) {
                 ws->is_user_element = true;
                 ws->is_text_span = true;
             }
@@ -4446,10 +4509,10 @@ void image(const ImageDesc& desc_in) noexcept {
         desc.border_width *= wscale;
     }
 
-    if (desc.id != 0u && ctx->canvas_depth > 0u) {
-        if (WidgetState* ws = state_map_get_or_insert(&ctx->states, desc.id, ctx->frame_index)) {
+    if (desc.id != 0u && ctx->active_ui->canvas_depth > 0u) {
+        if (WidgetState* ws = state_map_get_or_insert(&ctx->active_ui->states, desc.id, ctx->active_ui->frame_index)) {
             ws->is_user_element = true;
-            ws->owner_canvas_id = ctx->canvas_stack[ctx->canvas_depth - 1u].id;
+            ws->owner_canvas_id = ctx->active_ui->canvas_stack[ctx->active_ui->canvas_depth - 1u].id;
         }
     }
 
@@ -4486,11 +4549,11 @@ void icon(const IconDesc& desc_in) noexcept {
     const float layout_sz = ((desc.size_px > 0.0f) ? desc.size_px : 16.0f) * wscale;
 
     if (desc.id != 0u) {
-        if (WidgetState* ws = state_map_get_or_insert(&ctx->states, desc.id, ctx->frame_index)) {
+        if (WidgetState* ws = state_map_get_or_insert(&ctx->active_ui->states, desc.id, ctx->active_ui->frame_index)) {
             ws->is_user_element = true;
             ws->is_text_input_writable = false;
-            ws->owner_canvas_id = (ctx->canvas_depth > 0u)
-                ? ctx->canvas_stack[ctx->canvas_depth - 1u].id
+            ws->owner_canvas_id = (ctx->active_ui->canvas_depth > 0u)
+                ? ctx->active_ui->canvas_stack[ctx->active_ui->canvas_depth - 1u].id
                 : 0u;
         }
         Clay__OpenElementWithId(make_clay_id(desc.id));
@@ -4653,7 +4716,7 @@ SDL_HitTestResult SDLCALL etch_sdl_hit_test(SDL_Window* win, const SDL_Point* ar
     }
 }
 
-void set_window_chrome(const WindowChromeDesc& desc) noexcept {
+void set_window_chrome(const WindowChromeDesc& desc, SDL_Window* window) noexcept {
     Context* ctx = current_context();
     if (!ctx) {
         return;
@@ -4665,11 +4728,14 @@ void set_window_chrome(const WindowChromeDesc& desc) noexcept {
     if (clean.corner_size < clean.border_thickness) {
         clean.corner_size = clean.border_thickness;
     }
-    ctx->chrome_desc = clean;
+    WindowUiState* ui = window_ui(ctx, window ? window : ctx->active_window);
+    if (!ui) return;
+    ui->chrome_desc = clean;
+    ui->redraw_budget = 2;
     if (!ctx->headless) {
-        for (uint32_t i = 0u; i < ctx->claimed_window_count; ++i) {
+        for (uint32_t i = 0u; i < kMaxClaimedWindows; ++i) {
             ClaimedWindowSlot& slot = ctx->claimed_windows[i];
-            if (!slot.window) {
+            if (!slot.window || &slot.ui != ui) {
                 continue;
             }
             if (clean.enabled) {
@@ -4691,8 +4757,8 @@ void window_drag_region(Rect rect_logical) noexcept {
         return;
     }
     push_chrome_rect(
-        ctx->pending_chrome_drag_rects,
-        &ctx->pending_chrome_drag_count,
+        ctx->active_ui->pending_chrome_drag_rects,
+        &ctx->active_ui->pending_chrome_drag_count,
         kMaxChromeDragRects,
         rect_logical);
 }
@@ -4703,17 +4769,18 @@ void window_client_region(Rect rect_logical) noexcept {
         return;
     }
     push_chrome_rect(
-        ctx->pending_chrome_client_rects,
-        &ctx->pending_chrome_client_count,
+        ctx->active_ui->pending_chrome_client_rects,
+        &ctx->active_ui->pending_chrome_client_count,
         kMaxChromeClientRects,
         rect_logical);
 }
 
 WindowHit evaluate_window_hit(const Context* ctx, Vec2 logical_pos, SDL_Window* window) noexcept {
-    if (!ctx || !ctx->chrome_desc.enabled) {
+    const WindowUiState* ui = ctx ? window_ui(ctx, window ? window : ctx->active_window) : nullptr;
+    if (!ui || !ui->chrome_desc.enabled) {
         return WindowHit::Normal;
     }
-    SDL_Window* target = window ? window : ctx->window;
+    SDL_Window* target = window ? window : ctx->active_window;
     float w = 0.0f;
     float h = 0.0f;
     bool maximized = false;
@@ -4721,14 +4788,15 @@ WindowHit evaluate_window_hit(const Context* ctx, Vec2 logical_pos, SDL_Window* 
         int iw = 0;
         int ih = 0;
         SDL_GetWindowSize(target, &iw, &ih);
-        const Vec2 win_sz = window_to_logical_pos_for(ctx, target, static_cast<float>(iw), static_cast<float>(ih));
+        const float scale = SDL_GetWindowPixelDensity(target) / ui->dpi_scale;
+        const Vec2 win_sz = {static_cast<float>(iw) * scale, static_cast<float>(ih) * scale};
         w = win_sz.x;
         h = win_sz.y;
         maximized = (SDL_GetWindowFlags(target) & SDL_WINDOW_MAXIMIZED) != 0u;
     } else {
-        const float dpi = (ctx->dpi_scale > 0.0f) ? ctx->dpi_scale : 1.0f;
-        w = static_cast<float>(ctx->viewport_w) / dpi;
-        h = static_cast<float>(ctx->viewport_h) / dpi;
+        const float dpi = (ui->dpi_scale > 0.0f) ? ui->dpi_scale : 1.0f;
+        w = static_cast<float>(ui->viewport_w) / dpi;
+        h = static_cast<float>(ui->viewport_h) / dpi;
     }
     if (w <= 0.0f || h <= 0.0f ||
         logical_pos.x < 0.0f || logical_pos.y < 0.0f ||
@@ -4737,9 +4805,9 @@ WindowHit evaluate_window_hit(const Context* ctx, Vec2 logical_pos, SDL_Window* 
         return WindowHit::Normal;
     }
 
-    if (ctx->chrome_desc.resizable && !maximized) {
-        const float b = ctx->chrome_desc.border_thickness;
-        const float c = ctx->chrome_desc.corner_size;
+    if (ui->chrome_desc.resizable && !maximized) {
+        const float b = ui->chrome_desc.border_thickness;
+        const float c = ui->chrome_desc.corner_size;
         const bool left_edge = logical_pos.x < b;
         const bool right_edge = logical_pos.x >= (w - b);
         const bool top_edge = logical_pos.y < b;
@@ -4760,13 +4828,13 @@ WindowHit evaluate_window_hit(const Context* ctx, Vec2 logical_pos, SDL_Window* 
         }
     }
 
-    for (uint32_t i = 0u; i < ctx->chrome_client_count; ++i) {
-        if (ctx->chrome_client_rects[i].contains(logical_pos)) {
+    for (uint32_t i = 0u; i < ui->chrome_client_count; ++i) {
+        if (ui->chrome_client_rects[i].contains(logical_pos)) {
             return WindowHit::Client;
         }
     }
-    for (uint32_t i = 0u; i < ctx->chrome_drag_count; ++i) {
-        if (ctx->chrome_drag_rects[i].contains(logical_pos)) {
+    for (uint32_t i = 0u; i < ui->chrome_drag_count; ++i) {
+        if (ui->chrome_drag_rects[i].contains(logical_pos)) {
             return WindowHit::Caption;
         }
     }
@@ -4775,7 +4843,7 @@ WindowHit evaluate_window_hit(const Context* ctx, Vec2 logical_pos, SDL_Window* 
 
 void minimize_window(SDL_Window* window) noexcept {
     Context* ctx = current_context();
-    SDL_Window* target = window ? window : (ctx ? ctx->window : nullptr);
+    SDL_Window* target = window ? window : (ctx ? ctx->active_window : nullptr);
     if (target && (!ctx || !ctx->headless)) {
         SDL_MinimizeWindow(target);
         if (ctx) {
@@ -4786,7 +4854,7 @@ void minimize_window(SDL_Window* window) noexcept {
 
 void maximize_window(SDL_Window* window) noexcept {
     Context* ctx = current_context();
-    SDL_Window* target = window ? window : (ctx ? ctx->window : nullptr);
+    SDL_Window* target = window ? window : (ctx ? ctx->active_window : nullptr);
     if (target && (!ctx || !ctx->headless)) {
         SDL_MaximizeWindow(target);
         if (ctx) {
@@ -4797,7 +4865,7 @@ void maximize_window(SDL_Window* window) noexcept {
 
 void restore_window(SDL_Window* window) noexcept {
     Context* ctx = current_context();
-    SDL_Window* target = window ? window : (ctx ? ctx->window : nullptr);
+    SDL_Window* target = window ? window : (ctx ? ctx->active_window : nullptr);
     if (target && (!ctx || !ctx->headless)) {
         SDL_RestoreWindow(target);
         if (ctx) {
@@ -4808,7 +4876,7 @@ void restore_window(SDL_Window* window) noexcept {
 
 bool is_window_maximized(const Context* ctx_arg, SDL_Window* window) noexcept {
     const Context* ctx = ctx_arg ? ctx_arg : current_context();
-    SDL_Window* target = window ? window : (ctx ? ctx->window : nullptr);
+    SDL_Window* target = window ? window : (ctx ? ctx->active_window : nullptr);
     if (!target || (ctx && ctx->headless)) {
         return false;
     }
@@ -4825,19 +4893,19 @@ bool begin_drag_payload(
     uint32_t u32) noexcept
 {
     Context* ctx = current_context();
-    if (!ctx || !ctx->in_frame || !ctx->prev_pointer_down || kind_hash == 0u ||
+    if (!ctx || !ctx->in_frame || !ctx->active_ui->prev_pointer_down || kind_hash == 0u ||
         size > kMaxDragPayloadBytes || (size > 0u && !data))
     {
         return false;
     }
 
-    ctx->drag_source_id = source_id;
-    ctx->drag_kind_hash = kind_hash;
-    ctx->drag_u64 = u64;
-    ctx->drag_u32 = u32;
-    ctx->drag_size = size;
+    ctx->active_ui->drag_source_id = source_id;
+    ctx->active_ui->drag_kind_hash = kind_hash;
+    ctx->active_ui->drag_u64 = u64;
+    ctx->active_ui->drag_u32 = u32;
+    ctx->active_ui->drag_size = size;
     if (size > 0u) {
-        std::memcpy(ctx->drag_data, data, size);
+        std::memcpy(ctx->active_ui->drag_data, data, size);
     }
 
     uint32_t copy_len = 0u;
@@ -4847,40 +4915,40 @@ bool begin_drag_payload(
             : (kMaxDragLabelBytes - 1u);
         copy_len = utf8_clamp_boundary(label.chars, label.length, raw_cap);
         if (copy_len > 0u) {
-            std::memcpy(ctx->drag_label, label.chars, copy_len);
+            std::memcpy(ctx->active_ui->drag_label, label.chars, copy_len);
         }
     }
-    ctx->drag_label[copy_len] = '\0';
-    ctx->drag_label_len = copy_len;
+    ctx->active_ui->drag_label[copy_len] = '\0';
+    ctx->active_ui->drag_label_len = copy_len;
 
-    ctx->drag_active = true;
-    ctx->drag_drop_pending = false;
-    ctx->drag_accepted_this_frame = false;
+    ctx->active_ui->drag_active = true;
+    ctx->active_ui->drag_drop_pending = false;
+    ctx->active_ui->drag_accepted_this_frame = false;
     request_redraw(ctx);
     return true;
 }
 
 bool is_dragging_payload(uint32_t kind_hash) noexcept {
     const Context* ctx = current_context();
-    return ctx != nullptr && ctx->drag_active && (kind_hash == 0u || ctx->drag_kind_hash == kind_hash);
+    return ctx != nullptr && ctx->active_ui->drag_active && (kind_hash == 0u || ctx->active_ui->drag_kind_hash == kind_hash);
 }
 
 bool peek_drag_payload(DragPayloadView* out_view, uint32_t kind_hash) noexcept {
     const Context* ctx = current_context();
-    if (!ctx || (!ctx->drag_active && !(ctx->drag_drop_pending && !ctx->drag_accepted_this_frame))) {
+    if (!ctx || (!ctx->active_ui->drag_active && !(ctx->active_ui->drag_drop_pending && !ctx->active_ui->drag_accepted_this_frame))) {
         return false;
     }
-    if (kind_hash != 0u && ctx->drag_kind_hash != kind_hash) {
+    if (kind_hash != 0u && ctx->active_ui->drag_kind_hash != kind_hash) {
         return false;
     }
     if (out_view) {
         *out_view = DragPayloadView{
-            .kind_hash = ctx->drag_kind_hash,
-            .label = (ctx->drag_label_len > 0u) ? Str{ ctx->drag_label, ctx->drag_label_len, false } : Str{},
-            .u64 = ctx->drag_u64,
-            .u32 = ctx->drag_u32,
-            .data = (ctx->drag_size > 0u) ? ctx->drag_data : nullptr,
-            .size = ctx->drag_size,
+            .kind_hash = ctx->active_ui->drag_kind_hash,
+            .label = (ctx->active_ui->drag_label_len > 0u) ? Str{ ctx->active_ui->drag_label, ctx->active_ui->drag_label_len, false } : Str{},
+            .u64 = ctx->active_ui->drag_u64,
+            .u32 = ctx->active_ui->drag_u32,
+            .data = (ctx->active_ui->drag_size > 0u) ? ctx->active_ui->drag_data : nullptr,
+            .size = ctx->active_ui->drag_size,
         };
     }
     return true;
@@ -4888,29 +4956,29 @@ bool peek_drag_payload(DragPayloadView* out_view, uint32_t kind_hash) noexcept {
 
 bool accept_drag_payload(uint32_t target_id, uint32_t kind_hash, DragPayloadView* out_view) noexcept {
     Context* ctx = current_context();
-    if (!ctx || !ctx->drag_drop_pending || ctx->drag_accepted_this_frame || kind_hash == 0u) {
+    if (!ctx || !ctx->active_ui->drag_drop_pending || ctx->active_ui->drag_accepted_this_frame || kind_hash == 0u) {
         return false;
     }
-    if (ctx->drag_kind_hash != kind_hash) {
+    if (ctx->active_ui->drag_kind_hash != kind_hash) {
         return false;
     }
     if (target_id != 0u) {
-        const bool over_target = hovered(target_id) || element_bounds(target_id).contains(ctx->pointer_pos);
+        const bool over_target = hovered(target_id) || element_bounds(target_id).contains(ctx->active_ui->pointer_pos);
         if (!over_target) {
             return false;
         }
     }
     if (out_view) {
         *out_view = DragPayloadView{
-            .kind_hash = ctx->drag_kind_hash,
-            .label = (ctx->drag_label_len > 0u) ? Str{ ctx->drag_label, ctx->drag_label_len, false } : Str{},
-            .u64 = ctx->drag_u64,
-            .u32 = ctx->drag_u32,
-            .data = (ctx->drag_size > 0u) ? ctx->drag_data : nullptr,
-            .size = ctx->drag_size,
+            .kind_hash = ctx->active_ui->drag_kind_hash,
+            .label = (ctx->active_ui->drag_label_len > 0u) ? Str{ ctx->active_ui->drag_label, ctx->active_ui->drag_label_len, false } : Str{},
+            .u64 = ctx->active_ui->drag_u64,
+            .u32 = ctx->active_ui->drag_u32,
+            .data = (ctx->active_ui->drag_size > 0u) ? ctx->active_ui->drag_data : nullptr,
+            .size = ctx->active_ui->drag_size,
         };
     }
-    ctx->drag_accepted_this_frame = true;
+    ctx->active_ui->drag_accepted_this_frame = true;
     return true;
 }
 
@@ -4977,7 +5045,7 @@ void set_text_selection(uint32_t element_id, uint32_t anchor_byte, uint32_t curs
     if (!ctx || element_id == 0u) {
         return;
     }
-    WidgetState* ws = state_map_get_or_insert(&ctx->states, element_id, ctx->frame_index);
+    WidgetState* ws = state_map_get_or_insert(&ctx->active_ui->states, element_id, ctx->active_ui->frame_index);
     if (!ws) {
         return;
     }
@@ -4990,7 +5058,7 @@ void set_text_selection(uint32_t element_id, uint32_t anchor_byte, uint32_t curs
 
 Rect ime_cursor_rect(const Context* ctx_arg) noexcept {
     const Context* ctx = ctx_arg ? ctx_arg : current_context();
-    return ctx ? ctx->ime_cursor_logical : Rect{};
+    return ctx ? ctx->active_ui->ime_cursor_logical : Rect{};
 }
 
 TextInputResult text_input(const TextInputDesc& desc) noexcept {
@@ -5001,18 +5069,24 @@ TextInputResult text_input(const TextInputDesc& desc) noexcept {
 
     WidgetState* ws = nullptr;
     if (desc.id != 0u) {
-        ws = state_map_get_or_insert(&ctx->states, desc.id, ctx->frame_index);
+        ws = state_map_get_or_insert(&ctx->active_ui->states, desc.id, ctx->active_ui->frame_index);
         if (ws) {
             ws->is_user_element = true;
             ws->is_focusable = true;
+            ws->focus_scope = ctx->active_ui->modal_scope && focus_scope_contains(*ctx->active_ui, ctx->active_ui->modal_scope) ? ctx->active_ui->modal_scope : ctx->active_ui->focus_scope;
             ws->is_scroll_x = false;
             ws->is_scroll_y = false;
-            ws->owner_canvas_id = (ctx->canvas_depth > 0u)
-                ? ctx->canvas_stack[ctx->canvas_depth - 1u].id
+            ws->owner_canvas_id = (ctx->active_ui->canvas_depth > 0u)
+                ? ctx->active_ui->canvas_stack[ctx->active_ui->canvas_depth - 1u].id
                 : 0u;
         }
-        if (ctx->focus_count < kMaxFocusablePerFrame) {
-            ctx->focus_order[ctx->focus_count++] = desc.id;
+        if (ctx->active_ui->focus_count < kMaxFocusablePerFrame) {
+            ctx->active_ui->focus_order[ctx->active_ui->focus_count++] = desc.id;
+            if (ctx->active_ui->modal_needs_focus && focus_scope_contains(*ctx->active_ui, ctx->active_ui->modal_scope)) {
+                ctx->active_ui->focus_id = desc.id;
+                ctx->active_ui->modal_needs_focus = false;
+                clear_ime_composition(ctx);
+            }
         }
     }
 
@@ -5045,16 +5119,16 @@ TextInputResult text_input(const TextInputDesc& desc) noexcept {
 
     TextUndoSlot* undo_slot = nullptr;
     if (writable && desc.id != 0u) {
-        undo_slot = undo_acquire_slot(ctx, desc.id, ctx->frame_index);
+        undo_slot = undo_acquire_slot(ctx, desc.id, ctx->active_ui->frame_index);
         if (len <= kTextUndoByteCap) {
             const uint32_t cur_hash = (len > 0u) ? fnv1a_32_step(2166136261u, buf, len) : 2166136261u;
             if (undo_slot->count == 0u) {
-                undo_push_snapshot(undo_slot, buf, len, cursor, anchor, ctx->elapsed_seconds, 0u);
+                undo_push_snapshot(undo_slot, buf, len, cursor, anchor, ctx->active_ui->elapsed_seconds, 0u);
             } else {
                 const TextUndoRecord& cur_rec = undo_slot->entries[(undo_slot->head + undo_slot->cur) % kTextUndoMaxEntries];
                 if (cur_rec.length != len || cur_rec.hash != cur_hash) {
                     undo_reset_slot(undo_slot);
-                    undo_push_snapshot(undo_slot, buf, len, cursor, anchor, ctx->elapsed_seconds, 0u);
+                    undo_push_snapshot(undo_slot, buf, len, cursor, anchor, ctx->active_ui->elapsed_seconds, 0u);
                 }
             }
         } else {
@@ -5062,16 +5136,17 @@ TextInputResult text_input(const TextInputDesc& desc) noexcept {
         }
     }
 
-    const bool is_focused = (desc.id != 0u && ctx->focus_id == desc.id);
+    const bool is_focused = (desc.id != 0u && ctx->active_ui->focus_id == desc.id &&
+        (!ctx->active_ui->modal_scope || focus_scope_contains(*ctx->active_ui, ctx->active_ui->modal_scope)));
     const bool is_hovered = (desc.id != 0u && Clay_PointerOver(make_clay_id(desc.id)));
-    if (is_hovered || (desc.id != 0u && ctx->active_id == desc.id)) {
+    if (is_hovered || (desc.id != 0u && ctx->active_ui->active_id == desc.id)) {
         set_cursor(Cursor::IBeam);
     }
 
     if (is_focused && !desc.read_only) {
-        ctx->ime_focused_id = desc.id;
-        ctx->ime_focused_password = desc.password;
-        if (desc.password && ctx->ime_comp_len > 0u) {
+        ctx->active_ui->ime_focused_id = desc.id;
+        ctx->active_ui->ime_focused_password = desc.password;
+        if (desc.password && ctx->active_ui->ime_comp_len > 0u) {
             clear_ime_composition(ctx);
         }
     }
@@ -5079,32 +5154,32 @@ TextInputResult text_input(const TextInputDesc& desc) noexcept {
     // Pointer click / double-word / triple-line / drag selection
     if (ws && ws->last_box_logical.w > 0.0f && desc.id != 0u) {
         const TextInnerGeom prev_geom = compute_text_inner_geom(ws->last_box_logical, desc);
-        const float local_x = ctx->pointer_pos.x - prev_geom.origin_x + ws->edit_scroll_x;
-        const float local_y = ctx->pointer_pos.y - prev_geom.origin_y + ws->edit_scroll_y;
+        const float local_x = ctx->active_ui->pointer_pos.x - prev_geom.origin_x + ws->edit_scroll_x;
+        const float local_y = ctx->active_ui->pointer_pos.y - prev_geom.origin_y + ws->edit_scroll_y;
         const Str cur_text = { buf ? buf : "", len };
 
         if (ws->pressed_this_frame) {
-            ctx->caret_blink_on = true;
-            ctx->caret_blink_cycles = 0u;
+            ctx->active_ui->caret_blink_on = true;
+            ctx->active_ui->caret_blink_cycles = 0u;
             const uint32_t hit_byte = visual_point_to_byte(ctx, desc, cur_text, local_x, local_y);
-            if (ctx->last_mouse_clicks >= 3u) {
+            if (ctx->active_ui->last_mouse_clicks >= 3u) {
                 if (desc.multiline) {
                     line_bounds_at(buf, len, hit_byte, &anchor, &cursor);
                 } else {
                     anchor = 0u;
                     cursor = len;
                 }
-            } else if (ctx->last_mouse_clicks == 2u) {
+            } else if (ctx->active_ui->last_mouse_clicks == 2u) {
                 utf8_word_bounds_at(buf, len, hit_byte, &anchor, &cursor);
             } else {
-                const bool shift_held = (ctx->frame_key_mods & Mod_Shift) != 0u;
+                const bool shift_held = (ctx->active_ui->frame_key_mods & Mod_Shift) != 0u;
                 if (!shift_held) {
                     anchor = hit_byte;
                 }
                 cursor = hit_byte;
             }
             ws->edit_preferred_x = -1.0f;
-        } else if (ctx->active_id == desc.id && ws->pressed_down) {
+        } else if (ctx->active_ui->active_id == desc.id && ws->pressed_down) {
             cursor = visual_point_to_byte(ctx, desc, cur_text, local_x, local_y);
             ws->edit_preferred_x = -1.0f;
             request_redraw(ctx);
@@ -5123,21 +5198,21 @@ TextInputResult text_input(const TextInputDesc& desc) noexcept {
             changed = true;
             if (undo_slot) {
                 if (len <= kTextUndoByteCap) {
-                    undo_push_snapshot(undo_slot, buf, len, cursor, anchor, ctx->elapsed_seconds, op_group);
+                    undo_push_snapshot(undo_slot, buf, len, cursor, anchor, ctx->active_ui->elapsed_seconds, op_group);
                 } else {
                     undo_reset_slot(undo_slot);
                 }
             }
         };
-        for (uint32_t oi = 0u; oi < ctx->frame_text_op_count; ++oi) {
-            const PendingTextOp& op = ctx->frame_text_ops[oi];
+        for (uint32_t oi = 0u; oi < ctx->active_ui->frame_text_op_count; ++oi) {
+            const PendingTextOp& op = ctx->active_ui->frame_text_ops[oi];
             const uint32_t sel_min = (cursor < anchor) ? cursor : anchor;
             const uint32_t sel_max = (cursor < anchor) ? anchor : cursor;
             const bool has_sel = (sel_max > sel_min);
 
             if (op.kind == TextEditOpKind::InsertText) {
                 if (writable && op.text_len > 0u) {
-                    const Str ins = { ctx->frame_text_utf8 + op.text_offset, op.text_len };
+                    const Str ins = { ctx->active_ui->frame_text_utf8 + op.text_offset, op.text_len };
                     const uint32_t prev_len = len;
                     const uint32_t new_pos = insert_utf8_filtered(buf, cap, &len, anchor, cursor, ins, desc.multiline);
                     cursor = new_pos;
@@ -5400,7 +5475,7 @@ TextInputResult text_input(const TextInputDesc& desc) noexcept {
     }
 
     const Str committed_slice = (buf && len > 0u) ? ctx->frame_arena.push_str(buf, len) : Str{};
-    const bool composing = is_focused && !desc.read_only && !desc.password && ctx->ime_comp_len > 0u;
+    const bool composing = is_focused && !desc.read_only && !desc.password && ctx->active_ui->ime_comp_len > 0u;
     if (is_focused && ws && ws->last_box_logical.w > 0.0f && !desc.read_only && !desc.password) {
         const TextInnerGeom pre_geom = compute_text_inner_geom(ws->last_box_logical, desc);
         update_text_scroll_and_ime(
@@ -5454,24 +5529,24 @@ TextInputResult text_input(const TextInputDesc& desc) noexcept {
         .byte_length = len,
         .cursor_byte = cursor,
         .selection_anchor_byte = anchor,
-        .ime_cursor_rect = (is_focused && !desc.read_only && !desc.password) ? ctx->ime_cursor_logical : Rect{},
+        .ime_cursor_rect = (is_focused && !desc.read_only && !desc.password) ? ctx->active_ui->ime_cursor_logical : Rect{},
     };
 }
 
 bool hovered(uint32_t element_id) noexcept {
     Context* ctx = current_context();
-    if (element_id == 0u || !ctx || !ctx->clay_ctx) {
+    if (element_id == 0u || !ctx || !ctx->active_ui->clay_ctx) {
         return false;
     }
-    if (ctx->active_id != 0u && ctx->active_id != element_id) {
+    if (ctx->active_ui->active_id != 0u && ctx->active_ui->active_id != element_id) {
         return false;
     }
-    if (const WidgetState* ws = state_map_find(&ctx->states, element_id)) {
+    if (const WidgetState* ws = state_map_find(&ctx->active_ui->states, element_id)) {
         if (ws->is_text_span) {
             return ws->span_hovered;
         }
     }
-    Clay_SetCurrentContext(ctx->clay_ctx);
+    Clay_SetCurrentContext(ctx->active_ui->clay_ctx);
     return Clay_PointerOver(make_clay_id(element_id));
 }
 
@@ -5480,7 +5555,7 @@ bool pressed(uint32_t element_id) noexcept {
     if (!ctx || element_id == 0u) {
         return false;
     }
-    const WidgetState* ws = state_map_find(&ctx->states, element_id);
+    const WidgetState* ws = state_map_find(&ctx->active_ui->states, element_id);
     return ws != nullptr && ws->pressed_down;
 }
 
@@ -5489,69 +5564,69 @@ bool clicked(uint32_t element_id) noexcept {
     if (!ctx || element_id == 0u) {
         return false;
     }
-    const WidgetState* ws = state_map_find(&ctx->states, element_id);
+    const WidgetState* ws = state_map_find(&ctx->active_ui->states, element_id);
     return ws != nullptr && ws->clicked_this_frame;
 }
 
 bool active(uint32_t element_id) noexcept {
     Context* ctx = current_context();
-    return ctx != nullptr && element_id != 0u && ctx->active_id == element_id;
+    return ctx != nullptr && element_id != 0u && ctx->active_ui->active_id == element_id;
 }
 
 uint32_t active_id() noexcept {
     Context* ctx = current_context();
-    return ctx ? ctx->active_id : 0u;
+    return ctx ? ctx->active_ui->active_id : 0u;
 }
 
 void set_active(uint32_t element_id) noexcept {
     if (Context* ctx = current_context()) {
-        ctx->active_id = element_id;
+        ctx->active_ui->active_id = element_id;
         request_redraw(ctx);
     }
 }
 
 bool focused(uint32_t element_id) noexcept {
     Context* ctx = current_context();
-    return ctx != nullptr && element_id != 0u && ctx->focus_id == element_id;
+    return ctx != nullptr && element_id != 0u && ctx->active_ui->focus_id == element_id;
 }
 
 uint32_t focused_id() noexcept {
     Context* ctx = current_context();
-    return ctx ? ctx->focus_id : 0u;
+    return ctx ? ctx->active_ui->focus_id : 0u;
 }
 
 void request_focus(uint32_t element_id) noexcept {
     if (Context* ctx = current_context()) {
-        if (element_id != ctx->focus_id) {
+        if (element_id != ctx->active_ui->focus_id) {
             clear_ime_composition(ctx);
         }
-        ctx->focus_id = element_id;
-        ctx->caret_blink_on = true;
-        ctx->caret_blink_cycles = 0u;
+        ctx->active_ui->focus_id = element_id;
+        ctx->active_ui->caret_blink_on = true;
+        ctx->active_ui->caret_blink_cycles = 0u;
         request_redraw(ctx);
     }
 }
 
 void set_cursor(Cursor cursor) noexcept {
     if (Context* ctx = current_context()) {
-        ctx->desired_cursor = cursor;
+        ctx->active_ui->desired_cursor = cursor;
     }
 }
 
 Rect element_bounds(uint32_t element_id) noexcept {
     Context* ctx = current_context();
-    if (!ctx || !ctx->clay_ctx || element_id == 0u) {
+    if (!ctx || !ctx->active_ui->clay_ctx || element_id == 0u) {
         return {};
     }
-    if (const WidgetState* ws = state_map_find(&ctx->states, element_id)) {
+    if (const WidgetState* ws = state_map_find(&ctx->active_ui->states, element_id)) {
         if (ws->is_text_span) {
             bool found = false;
             float min_x = 0.0f;
             float min_y = 0.0f;
             float max_x = 0.0f;
             float max_y = 0.0f;
-            for (uint32_t i = 0u; i < ctx->span_hit_count; ++i) {
-                const SpanHitRegion& r = ctx->span_hits[i];
+            for (uint32_t i = 0u; i < ctx->active_ui->span_hit_count; ++i) {
+                const SpanHitRegion& r = ctx->active_ui->span_hits[i];
                 if (r.id != element_id) {
                     continue;
                 }
@@ -5571,7 +5646,7 @@ Rect element_bounds(uint32_t element_id) noexcept {
             return found ? Rect{ min_x, min_y, max_x - min_x, max_y - min_y } : Rect{};
         }
     }
-    Clay_SetCurrentContext(ctx->clay_ctx);
+    Clay_SetCurrentContext(ctx->active_ui->clay_ctx);
     const Clay_ElementData ed = Clay_GetElementData(make_clay_id(element_id));
     if (!ed.found) {
         return {};
@@ -5586,7 +5661,7 @@ Rect element_bounds(uint32_t element_id) noexcept {
 
 uint16_t key_mods() noexcept {
     const Context* ctx = current_context();
-    return ctx ? ctx->frame_key_mods : Mod_None;
+    return ctx ? ctx->active_ui->frame_key_mods : Mod_None;
 }
 
 bool key_pressed(uint32_t keycode, bool include_repeat) noexcept {
@@ -5594,8 +5669,8 @@ bool key_pressed(uint32_t keycode, bool include_repeat) noexcept {
     if (!ctx || keycode == 0u) {
         return false;
     }
-    for (uint32_t i = 0u; i < ctx->frame_key_count; ++i) {
-        const KeyEventEntry& ev = ctx->frame_keys[i];
+    for (uint32_t i = 0u; i < ctx->active_ui->frame_key_count; ++i) {
+        const KeyEventEntry& ev = ctx->active_ui->frame_keys[i];
         if (ev.key == keycode && (include_repeat || !ev.repeat)) {
             return true;
         }
@@ -5608,20 +5683,21 @@ bool shortcut(uint16_t required_mods, uint32_t keycode, bool allow_when_typing) 
     if (!ctx || keycode == 0u) {
         return false;
     }
+    if (ctx->active_ui->modal_scope && !focus_scope_contains(*ctx->active_ui, ctx->active_ui->modal_scope)) return false;
     if (!allow_when_typing) {
-        if (ctx->ime_comp_len > 0u) {
+        if (ctx->active_ui->ime_comp_len > 0u) {
             return false;
         }
-        if (ctx->focus_id != 0u) {
-            const WidgetState* fws = state_map_find(&ctx->states, ctx->focus_id);
-            if (fws && fws->is_text_input_writable && (fws->last_seen_frame + 1u >= ctx->frame_index)) {
+        if (ctx->active_ui->focus_id != 0u) {
+            const WidgetState* fws = state_map_find(&ctx->active_ui->states, ctx->active_ui->focus_id);
+            if (fws && fws->is_text_input_writable && (fws->last_seen_frame + 1u >= ctx->active_ui->frame_index)) {
                 return false;
             }
         }
     }
     constexpr uint16_t kModMask = static_cast<uint16_t>(Mod_Shift | Mod_Ctrl | Mod_Alt | Mod_Super);
-    for (uint32_t i = 0u; i < ctx->frame_key_count; ++i) {
-        const KeyEventEntry& ev = ctx->frame_keys[i];
+    for (uint32_t i = 0u; i < ctx->active_ui->frame_key_count; ++i) {
+        const KeyEventEntry& ev = ctx->active_ui->frame_keys[i];
         if (!ev.repeat && ev.key == keycode && (ev.mods & kModMask) == required_mods) {
             return true;
         }
@@ -5631,12 +5707,12 @@ bool shortcut(uint16_t required_mods, uint32_t keycode, bool allow_when_typing) 
 
 Vec2 pointer_pos() noexcept {
     const Context* ctx = current_context();
-    return ctx ? ctx->pointer_pos : Vec2{-1.0f, -1.0f};
+    return ctx ? ctx->active_ui->pointer_pos : Vec2{-1.0f, -1.0f};
 }
 
 Vec2 pointer_delta() noexcept {
     const Context* ctx = current_context();
-    return ctx ? ctx->pointer_delta : Vec2{0.0f, 0.0f};
+    return ctx ? ctx->active_ui->pointer_delta : Vec2{0.0f, 0.0f};
 }
 
 bool right_clicked(uint32_t element_id) noexcept {
@@ -5644,13 +5720,13 @@ bool right_clicked(uint32_t element_id) noexcept {
     if (!ctx || element_id == 0u) {
         return false;
     }
-    const WidgetState* ws = state_map_find(&ctx->states, element_id);
+    const WidgetState* ws = state_map_find(&ctx->active_ui->states, element_id);
     return ws != nullptr && ws->right_clicked_this_frame;
 }
 
 bool right_clicked_anywhere() noexcept {
     const Context* ctx = current_context();
-    return ctx != nullptr && ctx->right_clicked_any_this_frame;
+    return ctx != nullptr && ctx->active_ui->right_clicked_any_this_frame;
 }
 
 bool double_clicked(uint32_t element_id) noexcept {
@@ -5658,45 +5734,45 @@ bool double_clicked(uint32_t element_id) noexcept {
     if (!ctx || element_id == 0u) {
         return false;
     }
-    const WidgetState* ws = state_map_find(&ctx->states, element_id);
+    const WidgetState* ws = state_map_find(&ctx->active_ui->states, element_id);
     return ws != nullptr && ws->double_clicked_this_frame;
 }
 
 bool dragging(uint32_t element_id, float threshold_px) noexcept {
     Context* ctx = current_context();
-    if (!ctx || element_id == 0u || ctx->active_id != element_id) {
+    if (!ctx || element_id == 0u || ctx->active_ui->active_id != element_id) {
         return false;
     }
-    const WidgetState* ws = state_map_find(&ctx->states, element_id);
+    const WidgetState* ws = state_map_find(&ctx->active_ui->states, element_id);
     if (!ws || !ws->pressed_down) {
         return false;
     }
     const float th = (threshold_px > 0.0f) ? threshold_px : 0.0f;
-    return ctx->left_max_drag_dist_sq >= (th * th);
+    return ctx->active_ui->left_max_drag_dist_sq >= (th * th);
 }
 
 bool should_close_popover(uint32_t popover_id, uint32_t trigger_id) noexcept {
     Context* ctx = current_context();
-    if (!ctx || !ctx->clay_ctx || popover_id == 0u || ctx->frame_index <= 1u) {
+    if (!ctx || !ctx->active_ui->clay_ctx || popover_id == 0u || ctx->active_ui->frame_index <= 1u) {
         return false;
     }
-    const WidgetState* pop_ws = state_map_find(&ctx->states, popover_id);
+    const WidgetState* pop_ws = state_map_find(&ctx->active_ui->states, popover_id);
     if (!pop_ws) {
         return false;
     }
     const bool seen_prev_frame =
-        (pop_ws->last_seen_frame == (ctx->frame_index - 1u)) ||
-        (pop_ws->last_seen_frame == ctx->frame_index && pop_ws->prev_seen_frame == (ctx->frame_index - 1u));
+        (pop_ws->last_seen_frame == (ctx->active_ui->frame_index - 1u)) ||
+        (pop_ws->last_seen_frame == ctx->active_ui->frame_index && pop_ws->prev_seen_frame == (ctx->active_ui->frame_index - 1u));
     if (!seen_prev_frame) {
         return false;
     }
-    if (!ctx->frame_escape_consumed_by_ime && key_pressed(SDLK_ESCAPE, false)) {
+    if (!ctx->active_ui->frame_escape_consumed_by_ime && key_pressed(SDLK_ESCAPE, false)) {
         return true;
     }
-    if (!ctx->left_pressed_this_frame && !ctx->right_pressed_this_frame) {
+    if (!ctx->active_ui->left_pressed_this_frame && !ctx->active_ui->right_pressed_this_frame) {
         return false;
     }
-    Clay_SetCurrentContext(ctx->clay_ctx);
+    Clay_SetCurrentContext(ctx->active_ui->clay_ctx);
     const auto is_over_elem = [&](uint32_t id, const WidgetState* ws) noexcept -> bool {
         if (id == 0u) {
             return false;
@@ -5704,9 +5780,9 @@ bool should_close_popover(uint32_t popover_id, uint32_t trigger_id) noexcept {
         if (Clay_PointerOver(make_clay_id(id))) {
             return true;
         }
-        if (ws && (ws->last_seen_frame + 1u >= ctx->frame_index) &&
+        if (ws && (ws->last_seen_frame + 1u >= ctx->active_ui->frame_index) &&
             ws->last_box_logical.w > 0.0f && ws->last_box_logical.h > 0.0f &&
-            ws->last_box_logical.contains(ctx->pointer_pos))
+            ws->last_box_logical.contains(ctx->active_ui->pointer_pos))
         {
             return true;
         }
@@ -5716,7 +5792,7 @@ bool should_close_popover(uint32_t popover_id, uint32_t trigger_id) noexcept {
         return false;
     }
     if (trigger_id != 0u) {
-        const WidgetState* trig_ws = state_map_find(&ctx->states, trigger_id);
+        const WidgetState* trig_ws = state_map_find(&ctx->active_ui->states, trigger_id);
         if (is_over_elem(trigger_id, trig_ws)) {
             return false;
         }
@@ -5726,39 +5802,20 @@ bool should_close_popover(uint32_t popover_id, uint32_t trigger_id) noexcept {
 
 std::span<const Str> dropped_files() noexcept {
     const Context* ctx = current_context();
-    if (!ctx || ctx->frame_drop_count == 0u) {
+    if (!ctx || ctx->active_ui->frame_drop_count == 0u) {
         return {};
     }
-    return std::span<const Str>(ctx->frame_drops, ctx->frame_drop_count);
+    return std::span<const Str>(ctx->active_ui->frame_drops, ctx->active_ui->frame_drop_count);
 }
 
-void inject_drop_file(Context* ctx, Str utf8_path) noexcept {
-    if (!ctx || !utf8_path.chars || utf8_path.length == 0u) {
-        return;
-    }
-    if (ctx->pending_drop_count >= kMaxDroppedFiles) {
-        return;
-    }
-    if (utf8_path.length >= kMaxDroppedPathBytes - ctx->pending_drop_bytes) {
-        return;
-    }
-    const uint32_t off = ctx->pending_drop_bytes;
-    const uint32_t len = utf8_path.length;
-    std::memcpy(ctx->pending_drop_buf + off, utf8_path.chars, len);
-    ctx->pending_drop_buf[off + len] = '\0';
-    ctx->pending_drop_offsets[ctx->pending_drop_count] = static_cast<uint16_t>(off);
-    ctx->pending_drop_lengths[ctx->pending_drop_count] = static_cast<uint16_t>(len);
-    ++ctx->pending_drop_count;
-    ctx->pending_drop_bytes = off + len + 1u;
-    request_redraw(ctx);
-}
+
 
 float spring(uint32_t anim_id, float target, SpringSpec spec) noexcept {
     Context* ctx = current_context();
     if (!ctx || anim_id == 0u) {
         return target;
     }
-    WidgetState* ws = state_map_get_or_insert(&ctx->states, anim_id, ctx->frame_index);
+    WidgetState* ws = state_map_get_or_insert(&ctx->active_ui->states, anim_id, ctx->active_ui->frame_index);
     if (!ws) {
         return target;
     }
@@ -5777,9 +5834,9 @@ float spring(uint32_t anim_id, float target, SpringSpec spec) noexcept {
         return target;
     }
 
-    const float dt = ctx->sim_dt;
+    const float dt = ctx->active_ui->sim_dt;
     if (dt <= 0.0f) {
-        ++ctx->active_anim_count;
+        ++ctx->active_ui->active_anim_count;
         return ws->spring_pos;
     }
 
@@ -5825,7 +5882,7 @@ float spring(uint32_t anim_id, float target, SpringSpec spec) noexcept {
 
     ws->spring_pos = target + x1;
     ws->spring_vel = v1;
-    ++ctx->active_anim_count;
+    ++ctx->active_ui->active_anim_count;
     return ws->spring_pos;
 }
 
@@ -5844,7 +5901,7 @@ Vec2 scroll_offset(uint32_t element_id) noexcept {
     if (!ctx || element_id == 0u) {
         return {};
     }
-    const WidgetState* ws = state_map_find(&ctx->states, element_id);
+    const WidgetState* ws = state_map_find(&ctx->active_ui->states, element_id);
     return ws ? ws->scroll_pos : Vec2{};
 }
 
@@ -5853,7 +5910,7 @@ void set_scroll_offset(uint32_t element_id, Vec2 offset, bool stop_momentum) noe
     if (!ctx || element_id == 0u) {
         return;
     }
-    if (WidgetState* ws = state_map_get_or_insert(&ctx->states, element_id, ctx->frame_index)) {
+    if (WidgetState* ws = state_map_get_or_insert(&ctx->active_ui->states, element_id, ctx->active_ui->frame_index)) {
         ws->is_user_element = true;
         ws->scroll_pos = Vec2{
             (ws->scroll_max.x > 0.0f) ? clamp_range(offset.x, 0.0f, ws->scroll_max.x) : ((offset.x > 0.0f) ? offset.x : 0.0f),
@@ -5869,21 +5926,21 @@ void set_scroll_offset(uint32_t element_id, Vec2 offset, bool stop_momentum) noe
 SplitResult begin_split(const SplitDesc& desc) noexcept {
     Context* ctx = current_context();
     const float fallback_ratio = clamp_range(desc.default_ratio, 0.02f, 0.98f);
-    if (!ctx || !ctx->in_frame || desc.id == 0u || ctx->split_depth >= kMaxSplitDepth) {
+    if (!ctx || !ctx->in_frame || desc.id == 0u || ctx->active_ui->split_depth >= kMaxSplitDepth) {
         return SplitResult{ .ratio = fallback_ratio, .dragging = false };
     }
 
     const uint32_t div_id = id_index(desc.id, kSplitDividerTag);
-    state_map_get_or_insert(&ctx->states, desc.id, ctx->frame_index);
-    WidgetState* ws_div = state_map_get_or_insert(&ctx->states, div_id, ctx->frame_index);
-    WidgetState* ws_split = state_map_find(&ctx->states, desc.id);
+    state_map_get_or_insert(&ctx->active_ui->states, desc.id, ctx->active_ui->frame_index);
+    WidgetState* ws_div = state_map_get_or_insert(&ctx->active_ui->states, div_id, ctx->active_ui->frame_index);
+    WidgetState* ws_split = state_map_find(&ctx->active_ui->states, desc.id);
     if (!ws_split || !ws_div) {
         return SplitResult{ .ratio = fallback_ratio, .dragging = false };
     }
 
     ws_split->is_user_element = true;
-    ws_split->owner_canvas_id = (ctx->canvas_depth > 0u)
-        ? ctx->canvas_stack[ctx->canvas_depth - 1u].id
+    ws_split->owner_canvas_id = (ctx->active_ui->canvas_depth > 0u)
+        ? ctx->active_ui->canvas_stack[ctx->active_ui->canvas_depth - 1u].id
         : 0u;
     if (!ws_split->split_initialized) {
         ws_split->split_ratio = fallback_ratio;
@@ -5893,23 +5950,23 @@ SplitResult begin_split(const SplitDesc& desc) noexcept {
     const float div_sz = (desc.divider_size_px > 1.0f) ? desc.divider_size_px : 1.0f;
     const float total_span = (desc.axis == Axis::Row) ? ws_split->last_box_logical.w : ws_split->last_box_logical.h;
     const float avail = total_span - div_sz;
-    const bool dragging_div = (ctx->active_id == div_id);
-    const bool hovered_div = (ctx->active_id == 0u) && Clay_PointerOver(make_clay_id(div_id));
+    const bool dragging_div = (ctx->active_ui->active_id == div_id);
+    const bool hovered_div = (ctx->active_ui->active_id == 0u) && Clay_PointerOver(make_clay_id(div_id));
 
     if (ws_div->pressed_this_frame) {
-        if (ctx->last_mouse_clicks >= 2u) {
+        if (ctx->active_ui->last_mouse_clicks >= 2u) {
             ws_split->split_ratio = fallback_ratio;
             ws_split->split_grab_offset = 0.0f;
             request_redraw(ctx);
         } else if (avail > 1.0f) {
             const float origin = (desc.axis == Axis::Row) ? ws_split->last_box_logical.x : ws_split->last_box_logical.y;
-            const float ptr_axis = (desc.axis == Axis::Row) ? ctx->pointer_pos.x : ctx->pointer_pos.y;
+            const float ptr_axis = (desc.axis == Axis::Row) ? ctx->active_ui->pointer_pos.x : ctx->active_ui->pointer_pos.y;
             const float div_start = origin + avail * ws_split->split_ratio;
             ws_split->split_grab_offset = ptr_axis - div_start;
         }
-    } else if (dragging_div && ctx->prev_pointer_down && avail > 1.0f) {
+    } else if (dragging_div && ctx->active_ui->prev_pointer_down && avail > 1.0f) {
         const float origin = (desc.axis == Axis::Row) ? ws_split->last_box_logical.x : ws_split->last_box_logical.y;
-        const float ptr_axis = (desc.axis == Axis::Row) ? ctx->pointer_pos.x : ctx->pointer_pos.y;
+        const float ptr_axis = (desc.axis == Axis::Row) ? ctx->active_ui->pointer_pos.x : ctx->active_ui->pointer_pos.y;
         const float new_first = (ptr_axis - ws_split->split_grab_offset) - origin;
         ws_split->split_ratio = clamp_range(new_first / avail, 0.0f, 1.0f);
         request_redraw(ctx);
@@ -5932,11 +5989,11 @@ SplitResult begin_split(const SplitDesc& desc) noexcept {
     }
 
     if (dragging_div || hovered_div) {
-        ctx->desired_cursor = (desc.axis == Axis::Row) ? Cursor::ResizeEW : Cursor::ResizeNS;
+        ctx->active_ui->desired_cursor = (desc.axis == Axis::Row) ? Cursor::ResizeEW : Cursor::ResizeNS;
     }
 
     const float ratio = ws_split->split_ratio;
-    ctx->split_stack[ctx->split_depth++] = SplitStackEntry{
+    ctx->active_ui->split_stack[ctx->active_ui->split_depth++] = SplitStackEntry{
         .id = desc.id,
         .axis = desc.axis,
         .ratio = ratio,
@@ -5976,10 +6033,10 @@ SplitResult begin_split(const SplitDesc& desc) noexcept {
 
 void split_second() noexcept {
     Context* ctx = current_context();
-    if (!ctx || !ctx->in_frame || ctx->split_depth == 0u) {
+    if (!ctx || !ctx->in_frame || ctx->active_ui->split_depth == 0u) {
         return;
     }
-    SplitStackEntry& se = ctx->split_stack[ctx->split_depth - 1u];
+    SplitStackEntry& se = ctx->active_ui->split_stack[ctx->active_ui->split_depth - 1u];
     if (se.in_second) {
         return;
     }
@@ -5987,8 +6044,8 @@ void split_second() noexcept {
     end_box();
 
     const uint32_t div_id = id_index(se.id, kSplitDividerTag);
-    const bool dragging_div = (ctx->active_id == div_id);
-    const bool hovered_div = (ctx->active_id == 0u) && Clay_PointerOver(make_clay_id(div_id));
+    const bool dragging_div = (ctx->active_ui->active_id == div_id);
+    const bool hovered_div = (ctx->active_ui->active_id == 0u) && Clay_PointerOver(make_clay_id(div_id));
     const Color div_col = dragging_div
         ? se.divider_active_color
         : (hovered_div ? se.divider_hover_color : se.divider_color);
@@ -6029,10 +6086,10 @@ void split_second() noexcept {
 
 void end_split() noexcept {
     Context* ctx = current_context();
-    if (!ctx || !ctx->in_frame || ctx->split_depth == 0u) {
+    if (!ctx || !ctx->in_frame || ctx->active_ui->split_depth == 0u) {
         return;
     }
-    --ctx->split_depth;
+    --ctx->active_ui->split_depth;
     end_box();
     end_box();
     end_box();
@@ -6043,7 +6100,7 @@ float split_ratio(uint32_t split_id) noexcept {
     if (!ctx || split_id == 0u) {
         return 0.5f;
     }
-    const WidgetState* ws = state_map_find(&ctx->states, split_id);
+    const WidgetState* ws = state_map_find(&ctx->active_ui->states, split_id);
     return (ws && ws->split_initialized) ? ws->split_ratio : 0.5f;
 }
 
@@ -6052,7 +6109,7 @@ void set_split_ratio(uint32_t split_id, float ratio) noexcept {
     if (!ctx || split_id == 0u) {
         return;
     }
-    if (WidgetState* ws = state_map_get_or_insert(&ctx->states, split_id, ctx->frame_index)) {
+    if (WidgetState* ws = state_map_get_or_insert(&ctx->active_ui->states, split_id, ctx->active_ui->frame_index)) {
         ws->is_user_element = true;
         ws->split_initialized = true;
         ws->split_ratio = clamp_range(ratio, 0.02f, 0.98f);
@@ -6065,7 +6122,7 @@ VirtualListSlice begin_virtual_list(const VirtualListDesc& desc) noexcept {
     if (!ctx || !ctx->in_frame || desc.id == 0u) {
         return VirtualListSlice{};
     }
-    WidgetState* ws = state_map_get_or_insert(&ctx->states, desc.id, ctx->frame_index);
+    WidgetState* ws = state_map_get_or_insert(&ctx->active_ui->states, desc.id, ctx->active_ui->frame_index);
     if (!ws) {
         return VirtualListSlice{};
     }
@@ -6080,8 +6137,8 @@ VirtualListSlice begin_virtual_list(const VirtualListDesc& desc) noexcept {
     ws->is_scroll_y = false;
     ws->is_virtual_list = true;
     ws->vlist_stride = static_cast<float>(stride);
-    ws->owner_canvas_id = (ctx->canvas_depth > 0u)
-        ? ctx->canvas_stack[ctx->canvas_depth - 1u].id
+    ws->owner_canvas_id = (ctx->active_ui->canvas_depth > 0u)
+        ? ctx->active_ui->canvas_stack[ctx->active_ui->canvas_depth - 1u].id
         : 0u;
 
     const double pad_v = static_cast<double>(desc.padding.top) + static_cast<double>(desc.padding.bottom);
@@ -6096,7 +6153,7 @@ VirtualListSlice begin_virtual_list(const VirtualListDesc& desc) noexcept {
         if (desc.height.kind == SizingKind::Fixed && desc.height.value > 0.0f) {
             view_h = static_cast<double>(desc.height.value);
         } else {
-            view_h = static_cast<double>(ctx->viewport_h) / static_cast<double>(ctx->dpi_scale);
+            view_h = static_cast<double>(ctx->active_ui->viewport_h) / static_cast<double>(ctx->active_ui->dpi_scale);
         }
     }
     const double max_scroll = (total_h > view_h) ? (total_h - view_h) : 0.0;
@@ -6201,7 +6258,7 @@ double virtual_list_scroll_offset(uint32_t list_id) noexcept {
     if (!ctx || list_id == 0u) {
         return 0.0;
     }
-    const WidgetState* ws = state_map_find(&ctx->states, list_id);
+    const WidgetState* ws = state_map_find(&ctx->active_ui->states, list_id);
     return ws ? ws->vscroll_pos_y : 0.0;
 }
 
@@ -6210,7 +6267,7 @@ void set_virtual_list_scroll_offset(uint32_t list_id, double offset_y, bool stop
     if (!ctx || list_id == 0u) {
         return;
     }
-    if (WidgetState* ws = state_map_get_or_insert(&ctx->states, list_id, ctx->frame_index)) {
+    if (WidgetState* ws = state_map_get_or_insert(&ctx->active_ui->states, list_id, ctx->active_ui->frame_index)) {
         ws->is_user_element = true;
         ws->is_virtual_list = true;
         double clamped = (offset_y > 0.0) ? offset_y : 0.0;
@@ -6235,7 +6292,7 @@ void virtual_list_scroll_to_row(
     if (!ctx || list_id == 0u) {
         return;
     }
-    WidgetState* ws = state_map_get_or_insert(&ctx->states, list_id, ctx->frame_index);
+    WidgetState* ws = state_map_get_or_insert(&ctx->active_ui->states, list_id, ctx->active_ui->frame_index);
     if (!ws) {
         return;
     }
@@ -6245,7 +6302,7 @@ void virtual_list_scroll_to_row(
         : static_cast<double>(item_h);
     const double view_h = (ws->viewport_dim.y > 1.0f)
         ? static_cast<double>(ws->viewport_dim.y)
-        : (static_cast<double>(ctx->viewport_h) / static_cast<double>(ctx->dpi_scale));
+        : (static_cast<double>(ctx->active_ui->viewport_h) / static_cast<double>(ctx->active_ui->dpi_scale));
     double target_y = static_cast<double>(row_index) * stride;
     if (align == AlignY::Center) {
         target_y -= 0.5 * (view_h - static_cast<double>(item_h));
@@ -6267,10 +6324,10 @@ void virtual_list_scroll_to_row(
 
 CanvasState begin_canvas(const CanvasDesc& desc) noexcept {
     Context* ctx = current_context();
-    if (!ctx || !ctx->in_frame || desc.id == 0u || ctx->canvas_depth >= kMaxCanvasDepth) {
+    if (!ctx || !ctx->in_frame || desc.id == 0u || ctx->active_ui->canvas_depth >= kMaxCanvasDepth) {
         return CanvasState{};
     }
-    WidgetState* ws = state_map_get_or_insert(&ctx->states, desc.id, ctx->frame_index);
+    WidgetState* ws = state_map_get_or_insert(&ctx->active_ui->states, desc.id, ctx->active_ui->frame_index);
     if (!ws) {
         return CanvasState{};
     }
@@ -6294,13 +6351,13 @@ CanvasState begin_canvas(const CanvasDesc& desc) noexcept {
     ws->canvas_min_zoom = min_z;
     ws->canvas_max_zoom = max_z;
     ws->canvas_zoom = clamp_range(ws->canvas_zoom, min_z, max_z);
-    ws->owner_canvas_id = (ctx->canvas_depth > 0u)
-        ? ctx->canvas_stack[ctx->canvas_depth - 1u].id
+    ws->owner_canvas_id = (ctx->active_ui->canvas_depth > 0u)
+        ? ctx->active_ui->canvas_stack[ctx->active_ui->canvas_depth - 1u].id
         : 0u;
 
-    const bool panning = (ctx->pan_canvas_id == desc.id);
+    const bool panning = (ctx->active_ui->pan_canvas_id == desc.id);
     if (panning) {
-        ctx->desired_cursor = Cursor::Move;
+        ctx->active_ui->desired_cursor = Cursor::Move;
     }
 
     const CanvasState cs = {
@@ -6313,7 +6370,7 @@ CanvasState begin_canvas(const CanvasDesc& desc) noexcept {
         .marquee_world = ws->canvas_marquee_world,
     };
 
-    ctx->canvas_stack[ctx->canvas_depth++] = CanvasStackEntry{
+    ctx->active_ui->canvas_stack[ctx->active_ui->canvas_depth++] = CanvasStackEntry{
         .id = desc.id,
         .desc = desc,
         .state = cs,
@@ -6367,10 +6424,10 @@ CanvasState begin_canvas(const CanvasDesc& desc) noexcept {
 
 void end_canvas() noexcept {
     Context* ctx = current_context();
-    if (!ctx || !ctx->in_frame || ctx->canvas_depth == 0u) {
+    if (!ctx || !ctx->in_frame || ctx->active_ui->canvas_depth == 0u) {
         return;
     }
-    const CanvasStackEntry ce = ctx->canvas_stack[--ctx->canvas_depth];
+    const CanvasStackEntry ce = ctx->active_ui->canvas_stack[--ctx->active_ui->canvas_depth];
     if (ce.state.marquee_active && ce.state.marquee_world.w > 0.0f && ce.state.marquee_world.h > 0.0f) {
         const Vec2 tl_local = ce.state.world_to_local(Vec2{ ce.state.marquee_world.x, ce.state.marquee_world.y });
         box(BoxDesc{
@@ -6409,10 +6466,10 @@ void end_canvas() noexcept {
 
 void canvas_wire(const CanvasWireDesc& desc) noexcept {
     Context* ctx = current_context();
-    if (!ctx || !ctx->in_frame || ctx->canvas_depth == 0u) {
+    if (!ctx || !ctx->in_frame || ctx->active_ui->canvas_depth == 0u) {
         return;
     }
-    const CanvasStackEntry& ce = ctx->canvas_stack[ctx->canvas_depth - 1u];
+    const CanvasStackEntry& ce = ctx->active_ui->canvas_stack[ctx->active_ui->canvas_depth - 1u];
     BoxExtra* extra = ctx->frame_arena.alloc<BoxExtra>();
     CanvasWireExtra* cw = ctx->frame_arena.alloc<CanvasWireExtra>();
     if (!extra || !cw) {
@@ -6450,11 +6507,11 @@ void canvas_wire(const CanvasWireDesc& desc) noexcept {
 
 CanvasNodeResult begin_canvas_node(const CanvasNodeDesc& desc) noexcept {
     Context* ctx = current_context();
-    if (!ctx || !ctx->in_frame || ctx->canvas_depth == 0u || desc.id == 0u) {
+    if (!ctx || !ctx->in_frame || ctx->active_ui->canvas_depth == 0u || desc.id == 0u) {
         return CanvasNodeResult{};
     }
-    CanvasStackEntry& ce = ctx->canvas_stack[ctx->canvas_depth - 1u];
-    WidgetState* ws = state_map_get_or_insert(&ctx->states, desc.id, ctx->frame_index);
+    CanvasStackEntry& ce = ctx->active_ui->canvas_stack[ctx->active_ui->canvas_depth - 1u];
+    WidgetState* ws = state_map_get_or_insert(&ctx->active_ui->states, desc.id, ctx->active_ui->frame_index);
     if (!ws) {
         return CanvasNodeResult{};
     }
@@ -6466,22 +6523,22 @@ CanvasNodeResult begin_canvas_node(const CanvasNodeDesc& desc) noexcept {
     Vec2 node_pos = desc.world_pos ? *desc.world_pos : desc.pos_value;
     const bool hovered_node = Clay_PointerOver(make_clay_id(desc.id));
     const bool can_drag = desc.draggable && ce.desc.interactive;
-    const bool dragging = can_drag && (ctx->active_id == desc.id) && ctx->prev_pointer_down;
+    const bool dragging = can_drag && (ctx->active_ui->active_id == desc.id) && ctx->active_ui->prev_pointer_down;
 
     Vec2 drag_delta_world = {};
     if (can_drag && ws->pressed_this_frame) {
-        const Vec2 ptr_world = ce.state.screen_to_world(ctx->pointer_pos);
+        const Vec2 ptr_world = ce.state.screen_to_world(ctx->active_ui->pointer_pos);
         ws->drag_grab = node_pos - ptr_world;
-        ctx->desired_cursor = Cursor::Move;
+        ctx->active_ui->desired_cursor = Cursor::Move;
     } else if (dragging) {
         const float inv_z = (ce.state.zoom > 1e-4f) ? (1.0f / ce.state.zoom) : 1.0f;
-        drag_delta_world = ctx->pointer_delta * inv_z;
-        const Vec2 ptr_world = ce.state.screen_to_world(ctx->pointer_pos);
+        drag_delta_world = ctx->active_ui->pointer_delta * inv_z;
+        const Vec2 ptr_world = ce.state.screen_to_world(ctx->active_ui->pointer_pos);
         node_pos = ptr_world + ws->drag_grab;
         if (desc.world_pos) {
             *desc.world_pos = node_pos;
         }
-        ctx->desired_cursor = Cursor::Move;
+        ctx->active_ui->desired_cursor = Cursor::Move;
     }
 
     const float z = ce.state.zoom;
@@ -6527,10 +6584,10 @@ CanvasNodeResult begin_canvas_node(const CanvasNodeDesc& desc) noexcept {
 
 void end_canvas_node() noexcept {
     Context* ctx = current_context();
-    if (!ctx || !ctx->in_frame || ctx->canvas_depth == 0u) {
+    if (!ctx || !ctx->in_frame || ctx->active_ui->canvas_depth == 0u) {
         return;
     }
-    ctx->canvas_stack[ctx->canvas_depth - 1u].in_node = false;
+    ctx->active_ui->canvas_stack[ctx->active_ui->canvas_depth - 1u].in_node = false;
     end_box();
 }
 
@@ -6539,7 +6596,7 @@ CanvasState canvas_state(uint32_t canvas_id) noexcept {
     if (!ctx || canvas_id == 0u) {
         return CanvasState{};
     }
-    const WidgetState* ws = state_map_find(&ctx->states, canvas_id);
+    const WidgetState* ws = state_map_find(&ctx->active_ui->states, canvas_id);
     if (!ws || !ws->canvas_initialized) {
         return CanvasState{};
     }
@@ -6547,7 +6604,7 @@ CanvasState canvas_state(uint32_t canvas_id) noexcept {
         .pan = ws->canvas_pan,
         .zoom = ws->canvas_zoom,
         .viewport = ws->last_box_logical,
-        .panning = (ctx->pan_canvas_id == canvas_id),
+        .panning = (ctx->active_ui->pan_canvas_id == canvas_id),
         .marquee_active = ws->canvas_marquee_active,
         .marquee_finished = ws->canvas_marquee_finished,
         .marquee_world = ws->canvas_marquee_world,
@@ -6559,7 +6616,7 @@ void set_canvas_view(uint32_t canvas_id, Vec2 pan, float zoom) noexcept {
     if (!ctx || canvas_id == 0u) {
         return;
     }
-    if (WidgetState* ws = state_map_get_or_insert(&ctx->states, canvas_id, ctx->frame_index)) {
+    if (WidgetState* ws = state_map_get_or_insert(&ctx->active_ui->states, canvas_id, ctx->active_ui->frame_index)) {
         const float min_z = (ws->canvas_min_zoom > 0.02f) ? ws->canvas_min_zoom : 0.02f;
         const float max_z = (ws->canvas_max_zoom > min_z) ? ws->canvas_max_zoom : 16.0f;
         ws->canvas_pan = pan;
@@ -6571,28 +6628,28 @@ void set_canvas_view(uint32_t canvas_id, Vec2 pan, float zoom) noexcept {
 
 void set_debug_hud_open(Context* ctx_arg, bool open) noexcept {
     Context* ctx = ctx_arg ? ctx_arg : current_context();
-    if (ctx && ctx->debug_hud_open != open) {
-        ctx->debug_hud_open = open;
+    if (ctx && ctx->active_ui->debug_hud_open != open) {
+        ctx->active_ui->debug_hud_open = open;
         request_redraw(ctx);
     }
 }
 
 bool debug_hud_open(const Context* ctx_arg) noexcept {
     const Context* ctx = ctx_arg ? ctx_arg : current_context();
-    return ctx != nullptr && ctx->debug_hud_open;
+    return ctx != nullptr && ctx->active_ui->debug_hud_open;
 }
 
 void set_debug_wireframe(Context* ctx_arg, bool enabled) noexcept {
     Context* ctx = ctx_arg ? ctx_arg : current_context();
-    if (ctx && ctx->debug_wireframe_open != enabled) {
-        ctx->debug_wireframe_open = enabled;
+    if (ctx && ctx->active_ui->debug_wireframe_open != enabled) {
+        ctx->active_ui->debug_wireframe_open = enabled;
         request_redraw(ctx);
     }
 }
 
 bool debug_wireframe(const Context* ctx_arg) noexcept {
     const Context* ctx = ctx_arg ? ctx_arg : current_context();
-    return ctx != nullptr && ctx->debug_wireframe_open;
+    return ctx != nullptr && ctx->active_ui->debug_wireframe_open;
 }
 
 namespace {
@@ -6603,7 +6660,7 @@ constexpr uint32_t kTableHeaderTag = 0x7401u;
 constexpr uint32_t kTableColTagBase = 0x7500u;
 constexpr uint32_t kTreeChevronTag = 0x7EE0u;
 DockSpaceSlot* dock_slot(Context* ctx, uint32_t id) noexcept {
-    for (auto& s : ctx->dock_spaces) if (s.id == id) return &s;
+    for (auto& s : ctx->active_ui->dock_spaces) if (s.id == id) return &s;
     return nullptr;
 }
 DockTabSlot* dock_tab(DockSpaceSlot* s, uint32_t id) noexcept {
@@ -6641,16 +6698,16 @@ bool dock_space_initialized(uint32_t id) noexcept {
     Context* ctx = current_context(); return ctx && id && dock_slot(ctx, id);
 }
 uint32_t dock_reset_root(uint32_t id) noexcept {
-    Context* ctx = current_context(); if (!ctx || !id || ctx->dock_cursor.space) return 0;
+    Context* ctx = current_context(); if (!ctx || !id || ctx->active_ui->dock_cursor.space) return 0;
     DockSpaceSlot* s = dock_slot(ctx, id);
-    if (!s) for (auto& slot : ctx->dock_spaces) if (!slot.id) { s = &slot; break; }
+    if (!s) for (auto& slot : ctx->active_ui->dock_spaces) if (!slot.id) { s = &slot; break; }
     if (!s) return 0;
     *s = {}; s->id = id; s->root = 1; s->nodes[0].used = true; return 1;
 }
 bool dock_split_node(uint32_t id, uint32_t node, Axis axis, float ratio,
     uint32_t* out_a, uint32_t* out_b, uint32_t split_id, float min_a, float min_b) noexcept {
     Context* ctx = current_context();
-    if (!ctx || !id || !node || node > kMaxDockNodes || ctx->dock_cursor.space || !std::isfinite(ratio)) return false;
+    if (!ctx || !id || !node || node > kMaxDockNodes || ctx->active_ui->dock_cursor.space || !std::isfinite(ratio)) return false;
     auto* s = dock_slot(ctx, id); if (!s || !s->nodes[node - 1u].used || s->nodes[node - 1u].first) return false;
     uint32_t free_nodes[2] = {}; uint32_t count = 0;
     for (uint32_t i = 0; i < kMaxDockNodes && count < 2; ++i) if (!s->nodes[i].used) free_nodes[count++] = i + 1;
@@ -6667,7 +6724,7 @@ bool dock_split_node(uint32_t id, uint32_t node, Axis axis, float ratio,
 }
 bool dock_add_pane(uint32_t id, uint32_t leaf, const DockPaneDesc& pane) noexcept {
     Context* ctx = current_context();
-    if (!ctx || !id || !pane.id || !leaf || leaf > kMaxDockNodes || (pane.title.length && !pane.title.chars) || ctx->dock_cursor.space) return false;
+    if (!ctx || !id || !pane.id || !leaf || leaf > kMaxDockNodes || (pane.title.length && !pane.title.chars) || ctx->active_ui->dock_cursor.space) return false;
     auto* s = dock_slot(ctx, id); if (!s || !s->nodes[leaf - 1u].used || s->nodes[leaf - 1u].first || dock_tab(s, pane.id)) return false;
     for (auto& t : s->tabs) if (!t.id) {
         t.id = pane.id; t.leaf = leaf; t.icon_id = pane.icon_id; t.closable = pane.closable; t.open = pane.default_open;
@@ -6696,13 +6753,13 @@ void dock_activate_pane(uint32_t id, uint32_t pane) noexcept {
     if (t && t->open) { s->nodes[t->leaf - 1u].active = pane; request_redraw(ctx); }
 }
 void dock_set_pane_open(uint32_t id, uint32_t pane, bool open) noexcept {
-    Context* ctx = current_context(); if (!ctx || !id || !pane || ctx->dock_cursor.space) return;
+    Context* ctx = current_context(); if (!ctx || !id || !pane || ctx->active_ui->dock_cursor.space) return;
     auto* s = dock_slot(ctx, id); auto* t = s ? dock_tab(s, pane) : nullptr;
     if (t) { t->open = open; if (open) s->nodes[t->leaf - 1u].active = pane; else dock_collapse(s, t->leaf); request_redraw(ctx); }
 }
 bool dock_dock_pane(uint32_t id, uint32_t pane, uint32_t target, DockZone zone, float ratio) noexcept {
     Context* ctx = current_context();
-    if (!ctx || !id || !pane || !target || pane == target || zone < DockZone::Center || zone > DockZone::Bottom || !std::isfinite(ratio) || ctx->dock_cursor.space) return false;
+    if (!ctx || !id || !pane || !target || pane == target || zone < DockZone::Center || zone > DockZone::Bottom || !std::isfinite(ratio) || ctx->active_ui->dock_cursor.space) return false;
     auto* s = dock_slot(ctx, id); auto* t = s ? dock_tab(s, pane) : nullptr; auto* dst = s ? dock_tab(s, target) : nullptr;
     if (!t || !dst || !dst->open) return false;
     if (zone != DockZone::Center) {
@@ -6724,15 +6781,15 @@ bool dock_dock_pane(uint32_t id, uint32_t pane, uint32_t target, DockZone zone, 
     dock_collapse(s, source); request_redraw(ctx); return true;
 }
 void begin_dock_space(const DockSpaceDesc& desc) noexcept {
-    Context* ctx = current_context(); if (!ctx || !ctx->in_frame || !desc.id || ctx->dock_cursor.space) return;
+    Context* ctx = current_context(); if (!ctx || !ctx->in_frame || !desc.id || ctx->active_ui->dock_cursor.space) return;
     if (!dock_space_initialized(desc.id)) dock_reset_root(desc.id);
     auto* s = dock_slot(ctx, desc.id); if (!s) return;
-    auto& c = ctx->dock_cursor; c = {}; c.space = s; c.desc = desc; c.depth = 1; c.stack[0].node_idx = s->root;
+    auto& c = ctx->active_ui->dock_cursor; c = {}; c.space = s; c.desc = desc; c.depth = 1; c.stack[0].node_idx = s->root;
     begin_box({ .id = desc.id, .axis = Axis::Col, .width = desc.width, .height = desc.height, .background = desc.background });
 }
 uint32_t next_dock_pane() noexcept {
-    Context* ctx = current_context(); if (!ctx || !ctx->in_frame || !ctx->dock_cursor.space) return 0;
-    auto& c = ctx->dock_cursor; auto* s = c.space; const auto& d = c.desc;
+    Context* ctx = current_context(); if (!ctx || !ctx->in_frame || !ctx->active_ui->dock_cursor.space) return 0;
+    auto& c = ctx->active_ui->dock_cursor; auto* s = c.space; const auto& d = c.desc;
     if (c.pane_open) { end_box(); end_box(); c.pane_open = false; }
     while (c.depth) {
         auto& e = c.stack[c.depth - 1]; auto& n = s->nodes[e.node_idx - 1];
@@ -6777,7 +6834,7 @@ uint32_t next_dock_pane() noexcept {
         }
         end_box(); n.active = dock_visible(s, leaf);
         DragPayloadView payload = {};
-        const Rect r = element_bounds(leaf_id); const Vec2 p = ctx->pointer_pos;
+        const Rect r = element_bounds(leaf_id); const Vec2 p = ctx->active_ui->pointer_pos;
         if (peek_drag_payload(&payload, kInternalDockDragKind) && p.x >= r.x && p.y >= r.y && p.x < r.x + r.w && p.y < r.y + r.h) {
             const float x = (p.x - r.x) / r.w, y = (p.y - r.y) / r.h;
             DockZone z = DockZone::Center;
@@ -6799,8 +6856,8 @@ uint32_t next_dock_pane() noexcept {
     return 0;
 }
 void end_dock_space() noexcept {
-    Context* ctx = current_context(); if (!ctx || !ctx->in_frame || !ctx->dock_cursor.space) return;
-    auto& c = ctx->dock_cursor;
+    Context* ctx = current_context(); if (!ctx || !ctx->in_frame || !ctx->active_ui->dock_cursor.space) return;
+    auto& c = ctx->active_ui->dock_cursor;
     if (c.pane_open) { end_box(); end_box(); }
     while (c.depth) { auto& e = c.stack[--c.depth]; if (e.phase) end_split(); }
     end_box();
@@ -6811,7 +6868,7 @@ void end_dock_space() noexcept {
 }
 namespace {
 TableMetadata* table_metadata(Context* ctx, uint32_t id) noexcept {
-    for (auto& m : ctx->tables) if (m.id == id) return &m;
+    for (auto& m : ctx->active_ui->tables) if (m.id == id) return &m;
     return nullptr;
 }
 uint32_t table_col_id(const TableDesc& d, uint32_t c) noexcept {
@@ -6824,16 +6881,16 @@ void table_close_row(TableStackEntry& t) noexcept {
 }
 TableResult begin_table(const TableDesc& desc) noexcept {
     Context* ctx = current_context();
-    if (!ctx || !ctx->in_frame || !desc.id || desc.columns.empty() || desc.columns.size() > kMaxTableColumns || ctx->table_depth == 8 ||
+    if (!ctx || !ctx->in_frame || !desc.id || desc.columns.empty() || desc.columns.size() > kMaxTableColumns || ctx->active_ui->table_depth == 8 ||
         !std::isfinite(desc.row_height_px) || desc.row_height_px <= 0) return {};
     for (const auto& col : desc.columns) if (!std::isfinite(col.width) || !std::isfinite(col.min_width) || !std::isfinite(col.max_width) || col.min_width < 0 || col.max_width < col.min_width) return {};
     auto* metadata = table_metadata(ctx, desc.id);
-    if (!metadata) for (auto& slot : ctx->tables) if (!slot.id) { metadata = &slot; metadata->id = desc.id; break; }
+    if (!metadata) for (auto& slot : ctx->active_ui->tables) if (!slot.id) { metadata = &slot; metadata->id = desc.id; break; }
     if (!metadata) return {};
-    auto& t = ctx->table_stack[ctx->table_depth++]; t = {}; t.desc = desc; t.count = static_cast<uint32_t>(desc.columns.size());
+    auto& t = ctx->active_ui->table_stack[ctx->active_ui->table_depth++]; t = {}; t.desc = desc; t.count = static_cast<uint32_t>(desc.columns.size());
     for (uint32_t c = 0; c < t.count; ++c) t.columns[c] = desc.columns[c];
     t.desc.columns = {t.columns, t.count};
-    auto* ws = state_map_get_or_insert(&ctx->states, desc.id, ctx->frame_index);
+    auto* ws = state_map_get_or_insert(&ctx->active_ui->states, desc.id, ctx->active_ui->frame_index);
     if (!ws->table_initialized) {
         ws->table_initialized = true; ws->table_sort_column = desc.default_sort_column < t.count ? desc.default_sort_column : 0;
         ws->table_sort_descending = desc.default_sort_descending;
@@ -6843,24 +6900,24 @@ TableResult begin_table(const TableDesc& desc) noexcept {
     const uint32_t outer_id = id_index(desc.id, kTableOuterTag);
     const float gutter = desc.show_scrollbar ? 10.0f : 0;
     float viewport = element_bounds(id_index(desc.id,0x7402u)).w;
-    if (viewport <= 0) viewport = desc.width.kind == SizingKind::Fixed ? desc.width.value : static_cast<float>(ctx->viewport_w) / ctx->dpi_scale;
+    if (viewport <= 0) viewport = desc.width.kind == SizingKind::Fixed ? desc.width.value : static_cast<float>(ctx->active_ui->viewport_w) / ctx->active_ui->dpi_scale;
     float remaining = viewport - desc.padding.left - desc.padding.right - gutter;
     float weights = 0; bool resizing = false;
     for (uint32_t c = 0; c < t.count; ++c) {
         const auto& col = t.columns[c]; const uint32_t cid = table_col_id(desc, c), rid = id_index(cid, 0x7600u);
-        state_map_get_or_insert(&ctx->states, rid, ctx->frame_index);
-        auto* cw = state_map_get_or_insert(&ctx->states, cid, ctx->frame_index);
-        const bool active = ctx->active_id == rid;
+        state_map_get_or_insert(&ctx->active_ui->states, rid, ctx->active_ui->frame_index);
+        auto* cw = state_map_get_or_insert(&ctx->active_ui->states, cid, ctx->active_ui->frame_index);
+        const bool active = ctx->active_ui->active_id == rid;
         const bool ended = cw->column_resizing && !active;
         cw->column_resizing = active;
         if (col.resizable) {
             if (double_clicked(rid)) { cw->column_override = false; request_redraw(ctx); }
-            else if (state_map_find(&ctx->states, rid)->pressed_this_frame) { cw->column_grab = ctx->pointer_pos.x - (cw->column_width > 0 ? cw->column_width : col.width); }
-            else if (active && ctx->prev_pointer_down) {
-                cw->column_width = clamp_range(ctx->pointer_pos.x - cw->column_grab, col.min_width, col.max_width);
+            else if (state_map_find(&ctx->active_ui->states, rid)->pressed_this_frame) { cw->column_grab = ctx->active_ui->pointer_pos.x - (cw->column_width > 0 ? cw->column_width : col.width); }
+            else if (active && ctx->active_ui->prev_pointer_down) {
+                cw->column_width = clamp_range(ctx->active_ui->pointer_pos.x - cw->column_grab, col.min_width, col.max_width);
                 cw->column_override = true; request_redraw(ctx);
             }
-            if (active || hovered(rid)) ctx->desired_cursor = Cursor::ResizeEW;
+            if (active || hovered(rid)) ctx->active_ui->desired_cursor = Cursor::ResizeEW;
         }
         resizing = resizing || active || ended;
         if (cw->column_override || col.sizing == TableColumnSizing::Fixed) {
@@ -6873,7 +6930,7 @@ TableResult begin_table(const TableDesc& desc) noexcept {
     for (uint32_t pass = 0; pass <= t.count; ++pass) {
         bool clamped = false;
         for (uint32_t c = 0; c < t.count; ++c) {
-            const auto& col = t.columns[c]; auto* cw = state_map_find(&ctx->states, table_col_id(desc, c));
+            const auto& col = t.columns[c]; auto* cw = state_map_find(&ctx->active_ui->states, table_col_id(desc, c));
             if (resolved[c] || cw->column_override || col.sizing != TableColumnSizing::Stretch) continue;
             const float weight = col.width > 0 ? col.width : 1;
             const float width = weights > 0 ? remaining * weight / weights : col.min_width;
@@ -6891,7 +6948,7 @@ TableResult begin_table(const TableDesc& desc) noexcept {
         .padding = {desc.padding.left, desc.padding.right + gutter, 0, 0}, .background = desc.header_background });
     for (uint32_t c = 0; c < t.count; ++c) {
         const auto& col = t.columns[c]; const uint32_t cid = table_col_id(desc, c), hid = id_index(cid, 0x7601u), rid = id_index(cid, 0x7600u);
-        auto* cw = state_map_find(&ctx->states, cid); cw->column_width = t.col_widths[c];
+        auto* cw = state_map_find(&ctx->active_ui->states, cid); cw->column_width = t.col_widths[c];
         if (col.sortable && clicked(hid) && !resizing) {
             result.sort_descending = result.sort_column == c ? !result.sort_descending : true;
             result.sort_column = c; result.sort_changed = true;
@@ -6911,7 +6968,7 @@ TableResult begin_table(const TableDesc& desc) noexcept {
         end_box();
     }
     end_box();
-    ws = state_map_find(&ctx->states, desc.id);
+    ws = state_map_find(&ctx->active_ui->states, desc.id);
     ws->table_sort_column = result.sort_column; ws->table_sort_descending = result.sort_descending; metadata->count = t.count;
     for (uint32_t c = 0; c < t.count; ++c) { metadata->widths[c] = t.col_widths[c]; metadata->column_ids[c] = table_col_id(desc,c); metadata->min_widths[c] = t.columns[c].min_width; metadata->max_widths[c] = t.columns[c].max_width; }
     const float outer_h = element_bounds(outer_id).h;
@@ -6928,8 +6985,8 @@ TableResult begin_table(const TableDesc& desc) noexcept {
     return result;
 }
 bool table_next_row(uint32_t* out, Color bg, Color border) noexcept {
-    Context* ctx = current_context(); if (!ctx || !ctx->in_frame || !ctx->table_depth) return false;
-    auto& t = ctx->table_stack[ctx->table_depth - 1]; table_close_row(t);
+    Context* ctx = current_context(); if (!ctx || !ctx->in_frame || !ctx->active_ui->table_depth) return false;
+    auto& t = ctx->active_ui->table_stack[ctx->active_ui->table_depth - 1]; table_close_row(t);
     if (t.cursor_row >= t.end_row) return false;
     const auto& d = t.desc; const uint32_t row = t.cursor_row++, rid = id_index(d.id, 0x100000u + row);
     if (out) *out = row;
@@ -6940,8 +6997,8 @@ bool table_next_row(uint32_t* out, Color bg, Color border) noexcept {
     t.col_cursor = 0; t.row_open = true; return true;
 }
 bool table_next_column() noexcept {
-    Context* ctx = current_context(); if (!ctx || !ctx->in_frame || !ctx->table_depth) return false;
-    auto& t = ctx->table_stack[ctx->table_depth - 1]; if (!t.row_open) return false;
+    Context* ctx = current_context(); if (!ctx || !ctx->in_frame || !ctx->active_ui->table_depth) return false;
+    auto& t = ctx->active_ui->table_stack[ctx->active_ui->table_depth - 1]; if (!t.row_open) return false;
     if (t.cell_open) { end_box(); t.cell_open = false; }
     if (t.col_cursor == t.count) return false;
     const uint32_t c = t.col_cursor++;
@@ -6950,8 +7007,8 @@ bool table_next_column() noexcept {
     t.cell_open = true; return true;
 }
 void end_table() noexcept {
-    Context* ctx = current_context(); if (!ctx || !ctx->in_frame || !ctx->table_depth) return;
-    auto& t = ctx->table_stack[--ctx->table_depth]; table_close_row(t); end_virtual_list(); end_box(); end_box(); end_box();
+    Context* ctx = current_context(); if (!ctx || !ctx->in_frame || !ctx->active_ui->table_depth) return;
+    auto& t = ctx->active_ui->table_stack[--ctx->active_ui->table_depth]; table_close_row(t); end_virtual_list(); end_box(); end_box(); end_box();
 }
 float table_column_width(uint32_t id, uint32_t col) noexcept {
     Context* ctx = current_context(); if (!ctx || !id || col >= kMaxTableColumns) return 0;
@@ -6961,12 +7018,12 @@ void set_table_column_width(uint32_t id, uint32_t col, float width) noexcept {
     Context* ctx = current_context(); if (!ctx || !id || col >= kMaxTableColumns || !std::isfinite(width) || width <= 0) return;
     auto* metadata = table_metadata(ctx,id); if (!metadata || col >= metadata->count) return;
     width = clamp_range(width,metadata->min_widths[col],metadata->max_widths[col]); metadata->widths[col] = width;
-    const uint32_t cid = metadata->column_ids[col]; auto* cw = state_map_get_or_insert(&ctx->states,cid,ctx->frame_index);
+    const uint32_t cid = metadata->column_ids[col]; auto* cw = state_map_get_or_insert(&ctx->active_ui->states,cid,ctx->active_ui->frame_index);
     cw->column_width = width; cw->column_override = true; request_redraw(ctx);
 }
 void set_table_sort(uint32_t id, uint32_t col, bool descending) noexcept {
     Context* ctx = current_context(); if (!ctx || !id || col >= kMaxTableColumns) return;
-    auto* ws = state_map_get_or_insert(&ctx->states,id,ctx->frame_index);
+    auto* ws = state_map_get_or_insert(&ctx->active_ui->states,id,ctx->active_ui->frame_index);
     const auto* metadata = table_metadata(ctx,id);
     if (metadata && col >= metadata->count) return;
     ws->table_sort_changed = !ws->table_initialized || ws->table_sort_column != col || ws->table_sort_descending != descending;
@@ -6975,16 +7032,16 @@ void set_table_sort(uint32_t id, uint32_t col, bool descending) noexcept {
 void table_scroll_to_row(uint32_t id, uint32_t row, float height, AlignY align) noexcept { virtual_list_scroll_to_row(id,row,height,align); }
 bool is_tree_open(uint32_t id) noexcept {
     Context* ctx = current_context(); if (!ctx || !id) return false;
-    const auto* ws = state_map_find(&ctx->states,id); return ws && ws->tree_open;
+    const auto* ws = state_map_find(&ctx->active_ui->states,id); return ws && ws->tree_open;
 }
 void set_tree_open(uint32_t id, bool open) noexcept {
     Context* ctx = current_context(); if (!ctx || !id) return;
-    auto* ws = state_map_get_or_insert(&ctx->states,id,ctx->frame_index); ws->tree_initialized = true; ws->tree_open = open; request_redraw(ctx);
+    auto* ws = state_map_get_or_insert(&ctx->active_ui->states,id,ctx->active_ui->frame_index); ws->tree_initialized = true; ws->tree_open = open; request_redraw(ctx);
 }
 TreeNodeResult begin_tree_node(const TreeNodeDesc& d) noexcept {
-    Context* ctx = current_context(); if (!ctx || !ctx->in_frame || !d.id || ctx->tree_depth >= kMaxTreeDepth) return {};
+    Context* ctx = current_context(); if (!ctx || !ctx->in_frame || !d.id || ctx->active_ui->tree_depth >= kMaxTreeDepth) return {};
     const uint32_t chev = id_index(d.id,kTreeChevronTag);
-    auto* ws = state_map_get_or_insert(&ctx->states,d.id,ctx->frame_index);
+    auto* ws = state_map_get_or_insert(&ctx->active_ui->states,d.id,ctx->active_ui->frame_index);
     if (!ws->tree_initialized) { ws->tree_initialized = true; ws->tree_open = d.default_open; }
     TreeNodeResult r = { .clicked = clicked(d.id), .double_clicked = double_clicked(d.id), .hovered = hovered(d.id) };
     bool open = ws->tree_open;
@@ -6997,7 +7054,7 @@ TreeNodeResult begin_tree_node(const TreeNodeDesc& d) noexcept {
     }
     ws->tree_open = open;
     begin_box({ .id = d.id, .width = Sizing::grow(), .height = Sizing::fixed(d.row_height_px),
-        .padding = {static_cast<float>(ctx->tree_depth)*d.indent_px,0,0,0}, .gap = 4,
+        .padding = {static_cast<float>(ctx->active_ui->tree_depth)*d.indent_px,0,0,0}, .gap = 4,
         .align_y = AlignY::Center, .background = d.selected ? d.selected_bg : (r.hovered ? d.hover_bg : Color{}), .focusable = true });
     if (d.selected) draw_line({ .from = {1,2}, .to = {1,d.row_height_px-2}, .color = d.selected_accent, .thickness = 2 });
     begin_box({ .id = chev, .width = Sizing::fixed(16), .height = Sizing::fixed(d.row_height_px) });
@@ -7013,39 +7070,40 @@ TreeNodeResult begin_tree_node(const TreeNodeDesc& d) noexcept {
     if (r.open) {
         begin_box({ .id = id_index(d.id,0x7EE1u), .axis = Axis::Col, .width = Sizing::grow(), .height = Sizing::fit() });
         if (d.show_indent_guide) {
-            const float x = static_cast<float>(ctx->tree_depth)*d.indent_px+8;
+            const float x = static_cast<float>(ctx->active_ui->tree_depth)*d.indent_px+8;
             draw_line({ .from = {x,0}, .to = {x,element_bounds(id_index(d.id,0x7EE1u)).h}, .color = Color::rgba8(148,163,184,40) });
         }
-        ++ctx->tree_depth;
+        ++ctx->active_ui->tree_depth;
     }
     return r;
 }
 void end_tree_node() noexcept {
-    Context* ctx = current_context(); if (!ctx || !ctx->in_frame || !ctx->tree_depth) return;
-    --ctx->tree_depth; end_box();
+    Context* ctx = current_context(); if (!ctx || !ctx->in_frame || !ctx->active_ui->tree_depth) return;
+    --ctx->active_ui->tree_depth; end_box();
 }
 
 void end_frame(Context* ctx_arg) noexcept {
     Context* ctx = ctx_arg ? ctx_arg : current_context();
-    if (!ctx || !ctx->in_frame || !ctx->clay_ctx) {
+    if (!ctx || !ctx->in_frame || !ctx->active_ui->clay_ctx) {
         return;
     }
-    Clay_SetCurrentContext(ctx->clay_ctx);
+    Clay_SetCurrentContext(ctx->active_ui->clay_ctx);
 
-    while (ctx->tree_depth) end_tree_node();
-    const float dpi = ctx->dpi_scale;
+    while (ctx->active_ui->tree_depth) end_tree_node();
+    const float dpi = ctx->active_ui->dpi_scale;
     const Rect root_clip = {
         0.0f,
         0.0f,
-        static_cast<float>(ctx->viewport_w),
-        static_cast<float>(ctx->viewport_h),
+        static_cast<float>(ctx->active_ui->viewport_w),
+        static_cast<float>(ctx->active_ui->viewport_h),
     };
 
     ClipStack clip_stack = {};
     clip_stack.entries[0] = ClipEntry{ .rect = root_clip, .radius = 0.0f };
     clip_stack.depth = 1u;
 
-    ctx->span_hit_count = 0u;
+    ctx->active_ui->span_hit_count = 0u;
+    ctx->active_ui->drop_hit_count = 0;
     Clay_RenderCommandArray cmds = Clay_EndLayout(0.0f);
     for (int32_t i = 0; i < cmds.length; ++i) {
         const Clay_RenderCommand* cmd = Clay_RenderCommandArray_Get(&cmds, i);
@@ -7064,6 +7122,14 @@ void end_frame(Context* ctx_arg) noexcept {
             case CLAY_RENDER_COMMAND_TYPE_CUSTOM: {
                 const BoxExtra* extra = static_cast<const BoxExtra*>(cmd->renderData.custom.customData);
                 if (extra) {
+                    if (extra->desc.id && ctx->active_ui->drop_hit_count < ETCH_COUNTOF(ctx->active_ui->drop_hits)) {
+                        ctx->active_ui->drop_hits[ctx->active_ui->drop_hit_count++] = SpanHitRegion{
+                            .id = extra->desc.id, .clay_elem_id = extra->desc.id,
+                            .rect = {cmd->boundingBox.x, cmd->boundingBox.y, cmd->boundingBox.width, cmd->boundingBox.height},
+                            .paint_order = static_cast<uint32_t>(i),
+                            .z_index = cmd->zIndex,
+                            .clip_rect = {cur_clip.rect.x / dpi, cur_clip.rect.y / dpi, cur_clip.rect.w / dpi, cur_clip.rect.h / dpi}, .has_clip = true};
+                    }
                     if (extra->text_input) {
                         emit_text_input_command(ctx, extra->text_input, cmd->boundingBox, box_px, cur_clip, dpi);
                     } else if (extra->kind == CustomCmdKind::CanvasWire && extra->canvas_wire) {
@@ -7072,19 +7138,20 @@ void end_frame(Context* ctx_arg) noexcept {
                         emit_vector_icon_quad(ctx, extra->icon_desc.icon_id, box_px, extra->icon_desc.color, cur_clip);
                     } else {
                         if (extra->desc.attach_to != AttachTo::None && !extra->desc.pointer_passthrough) {
-                            const uint32_t slot = (ctx->span_hit_count < kMaxSpanHitsPerFrame)
-                                ? ctx->span_hit_count++
+                            const uint32_t slot = (ctx->active_ui->span_hit_count < kMaxSpanHitsPerFrame)
+                                ? ctx->active_ui->span_hit_count++
                                 : (kMaxSpanHitsPerFrame - 1u);
-                            ctx->span_hits[slot] = SpanHitRegion{
+                            ctx->active_ui->span_hits[slot] = SpanHitRegion{
                                 .id = 0u,
-                                .clay_elem_id = 0u,
+                                .clay_elem_id = extra->desc.id,
                                 .rect = Rect{
                                     cmd->boundingBox.x,
                                     cmd->boundingBox.y,
                                     cmd->boundingBox.width,
                                     cmd->boundingBox.height,
                                 },
-                                .z_index = cmd->zIndex,
+                                .paint_order = static_cast<uint32_t>(i),
+                            .z_index = cmd->zIndex,
                                 .clip_rect = Rect{
                                     cur_clip.rect.x / dpi,
                                     cur_clip.rect.y / dpi,
@@ -7095,6 +7162,9 @@ void end_frame(Context* ctx_arg) noexcept {
                             };
                         }
                         emit_box_background_and_shadow(ctx, extra, box_px, cur_clip, dpi);
+                        if (extra->keyboard_focus_ring)
+                            push_prim(ctx, Prim::make_rect(box_px, cur_clip.rect, {}, scale_corners_uniform(Corners::all(4), dpi),
+                                Color::rgb_hex(0x60A5FA), 2 * dpi, 1, cur_clip.radius));
                         if (extra->draw_head) {
                             ClipEntry draw_clip = cur_clip;
                             const bool box_clips =
@@ -7123,7 +7193,7 @@ void end_frame(Context* ctx_arg) noexcept {
                 const BoxExtra* extra = static_cast<const BoxExtra*>(cmd->userData);
                 if (extra && extra->desc.id != 0u) {
                     if (extra->is_virtual_list) {
-                        if (WidgetState* ws = state_map_find(&ctx->states, extra->desc.id)) {
+                        if (WidgetState* ws = state_map_find(&ctx->active_ui->states, extra->desc.id)) {
                             const double view_h = static_cast<double>(cmd->boundingBox.height);
                             ws->viewport_dim = Vec2{ cmd->boundingBox.width, cmd->boundingBox.height };
                             ws->last_box_logical = Rect{
@@ -7138,7 +7208,7 @@ void end_frame(Context* ctx_arg) noexcept {
                             ws->vscroll_pos_y = clamp_double(ws->vscroll_pos_y, 0.0, ws->vscroll_max_y);
                         }
                     } else if (extra->desc.scroll_x || extra->desc.scroll_y) {
-                        if (WidgetState* ws = state_map_find(&ctx->states, extra->desc.id)) {
+                        if (WidgetState* ws = state_map_find(&ctx->active_ui->states, extra->desc.id)) {
                             const Clay_ScrollContainerData sc = Clay_GetScrollContainerData(make_clay_id(extra->desc.id));
                             if (sc.found) {
                                 ws->viewport_dim = Vec2{ sc.scrollContainerDimensions.width, sc.scrollContainerDimensions.height };
@@ -7172,15 +7242,15 @@ void end_frame(Context* ctx_arg) noexcept {
                         const Corners& c = extra->desc.radius;
                         next_radius = min4f(c.tl, c.tr, c.br, c.bl) * dpi;
                         if (extra->is_canvas) {
-                            ctx->last_canvas_clip_px = clipped_rect;
-                            ctx->last_canvas_clip_radius_px = next_radius;
+                            ctx->active_ui->last_canvas_clip_px = clipped_rect;
+                            ctx->active_ui->last_canvas_clip_radius_px = next_radius;
                         }
-                    } else if (clipped_rect.x == ctx->last_canvas_clip_px.x &&
-                               clipped_rect.y == ctx->last_canvas_clip_px.y &&
-                               clipped_rect.w == ctx->last_canvas_clip_px.w &&
-                               clipped_rect.h == ctx->last_canvas_clip_px.h)
+                    } else if (clipped_rect.x == ctx->active_ui->last_canvas_clip_px.x &&
+                               clipped_rect.y == ctx->active_ui->last_canvas_clip_px.y &&
+                               clipped_rect.w == ctx->active_ui->last_canvas_clip_px.w &&
+                               clipped_rect.h == ctx->active_ui->last_canvas_clip_px.h)
                     {
-                        next_radius = ctx->last_canvas_clip_radius_px;
+                        next_radius = ctx->active_ui->last_canvas_clip_radius_px;
                     }
                     if (next_radius <= 0.0f &&
                         clipped_rect.x == cur_clip.rect.x &&
@@ -7216,12 +7286,12 @@ void end_frame(Context* ctx_arg) noexcept {
                 const bool any_clip = d.clip_children || is_scroll;
 
                 if ((d.scroll_y || extra->is_virtual_list) && d.show_scrollbar && d.id != 0u) {
-                    if (const WidgetState* ws = state_map_find(&ctx->states, d.id)) {
+                    if (const WidgetState* ws = state_map_find(&ctx->active_ui->states, d.id)) {
                         const ScrollbarGeom sb = compute_vscrollbar_geom(ws);
                         if (sb.visible) {
                             const uint32_t thumb_id = id_index(d.id, kScrollbarYTag);
-                            const bool sb_active = (ctx->active_id == thumb_id);
-                            const bool sb_hover = (ctx->active_id == 0u) && sb.hit_track.contains(ctx->pointer_pos) &&
+                            const bool sb_active = (ctx->active_ui->active_id == thumb_id);
+                            const bool sb_hover = (ctx->active_ui->active_id == 0u) && sb.hit_track.contains(ctx->active_ui->pointer_pos) &&
                                 Clay_PointerOver(make_clay_id(d.id));
                             const Rect track_px = { sb.track.x * dpi, sb.track.y * dpi, sb.track.w * dpi, sb.track.h * dpi };
                             const Rect thumb_px = { sb.thumb.x * dpi, sb.thumb.y * dpi, sb.thumb.w * dpi, sb.thumb.h * dpi };
@@ -7322,91 +7392,99 @@ void end_frame(Context* ctx_arg) noexcept {
         }
     }
 
-    ctx->frame_text_op_count = 0u;
-    ctx->frame_key_count = 0u;
-    ctx->last_mouse_clicks = 1u;
+    ctx->active_ui->frame_text_op_count = 0u;
+    ctx->active_ui->frame_key_count = 0u;
+    ctx->active_ui->last_mouse_clicks = 1u;
 
-    if (ctx->ime_focused_id == 0u && ctx->ime_comp_len > 0u) {
+    if (ctx->active_ui->ime_focused_id == 0u && ctx->active_ui->ime_comp_len > 0u) {
         clear_ime_composition(ctx);
     }
 
-    if (!ctx->headless && ctx->window) {
-        if (ctx->ime_focused_id != 0u) {
-            if (!ctx->ime_input_started || ctx->ime_focused_password != ctx->applied_ime_password) {
-                if (ctx->ime_input_started) {
-                    SDL_ClearComposition(ctx->window);
-                    SDL_StopTextInput(ctx->window);
-                    ctx->ime_input_started = false;
+    if (!ctx->headless && ctx->active_window && SDL_GetKeyboardFocus() == ctx->active_window) {
+        if (ctx->active_ui->ime_focused_id != 0u) {
+            if (ctx->ime_active_window != ctx->active_window) {
+                if (ctx->ime_active_window) SDL_StopTextInput(ctx->ime_active_window);
+                ctx->ime_active_window = ctx->active_window;
+                ctx->active_ui->ime_input_started = false;
+            }
+            if (!ctx->active_ui->ime_input_started || ctx->active_ui->ime_focused_password != ctx->active_ui->applied_ime_password) {
+                if (ctx->active_ui->ime_input_started) {
+                    SDL_ClearComposition(ctx->active_window);
+                    SDL_StopTextInput(ctx->active_window);
+                    ctx->active_ui->ime_input_started = false;
                 }
                 bool started = false;
-                if (ctx->ime_focused_password) {
+                if (ctx->active_ui->ime_focused_password) {
                     const SDL_PropertiesID props = SDL_CreateProperties();
                     if (props != 0u) {
                         SDL_SetNumberProperty(props, SDL_PROP_TEXTINPUT_TYPE_NUMBER, SDL_TEXTINPUT_TYPE_TEXT_PASSWORD_HIDDEN);
-                        started = SDL_StartTextInputWithProperties(ctx->window, props);
+                        started = SDL_StartTextInputWithProperties(ctx->active_window, props);
                         SDL_DestroyProperties(props);
                     }
                 } else {
-                    started = SDL_StartTextInput(ctx->window);
+                    started = SDL_StartTextInput(ctx->active_window);
                 }
                 if (started) {
-                    ctx->ime_input_started = true;
-                    ctx->applied_ime_password = ctx->ime_focused_password;
+                    ctx->active_ui->ime_input_started = true;
+                    ctx->active_ui->applied_ime_password = ctx->active_ui->ime_focused_password;
                 }
-            } else if (ctx->prev_ime_focused_id != 0u && ctx->prev_ime_focused_id != ctx->ime_focused_id) {
-                SDL_ClearComposition(ctx->window);
+            } else if (ctx->active_ui->prev_ime_focused_id != 0u && ctx->active_ui->prev_ime_focused_id != ctx->active_ui->ime_focused_id) {
+                SDL_ClearComposition(ctx->active_window);
             }
 
             const float wscale = logical_to_window_scale(ctx);
             const SDL_Rect ime_rect = {
-                static_cast<int>(std::floor(ctx->ime_cursor_logical.x * wscale + 0.5f)),
-                static_cast<int>(std::floor(ctx->ime_cursor_logical.y * wscale + 0.5f)),
-                static_cast<int>(std::floor(ctx->ime_cursor_logical.w * wscale + 0.5f)),
-                static_cast<int>(std::floor(ctx->ime_cursor_logical.h * wscale + 0.5f)),
+                static_cast<int>(std::floor(ctx->active_ui->ime_cursor_logical.x * wscale + 0.5f)),
+                static_cast<int>(std::floor(ctx->active_ui->ime_cursor_logical.y * wscale + 0.5f)),
+                static_cast<int>(std::floor(ctx->active_ui->ime_cursor_logical.w * wscale + 0.5f)),
+                static_cast<int>(std::floor(ctx->active_ui->ime_cursor_logical.h * wscale + 0.5f)),
             };
-            const int ime_cursor = static_cast<int>(ctx->ime_cursor_offset_win);
+            const int ime_cursor = static_cast<int>(ctx->active_ui->ime_cursor_offset_win);
             if (ime_rect.w > 0 && ime_rect.h > 0 &&
-                (ime_rect.x != ctx->applied_ime_rect.x ||
-                 ime_rect.y != ctx->applied_ime_rect.y ||
-                 ime_rect.w != ctx->applied_ime_rect.w ||
-                 ime_rect.h != ctx->applied_ime_rect.h ||
-                 ime_cursor != ctx->applied_ime_cursor))
+                (ime_rect.x != ctx->active_ui->applied_ime_rect.x ||
+                 ime_rect.y != ctx->active_ui->applied_ime_rect.y ||
+                 ime_rect.w != ctx->active_ui->applied_ime_rect.w ||
+                 ime_rect.h != ctx->active_ui->applied_ime_rect.h ||
+                 ime_cursor != ctx->active_ui->applied_ime_cursor))
             {
-                SDL_SetTextInputArea(ctx->window, &ime_rect, ime_cursor);
-                ctx->applied_ime_rect = ime_rect;
-                ctx->applied_ime_cursor = ime_cursor;
+                SDL_SetTextInputArea(ctx->active_window, &ime_rect, ime_cursor);
+                ctx->active_ui->applied_ime_rect = ime_rect;
+                ctx->active_ui->applied_ime_cursor = ime_cursor;
             }
-        } else if (ctx->ime_input_started) {
-            SDL_ClearComposition(ctx->window);
-            SDL_StopTextInput(ctx->window);
-            ctx->ime_input_started = false;
-            ctx->applied_ime_password = false;
-            ctx->applied_ime_rect = SDL_Rect{-1, -1, 0, 0};
-            ctx->applied_ime_cursor = -1;
+        } else if (ctx->active_ui->ime_input_started && ctx->ime_active_window == ctx->active_window) {
+            ctx->ime_active_window = nullptr;
+            SDL_ClearComposition(ctx->active_window);
+            SDL_StopTextInput(ctx->active_window);
+            ctx->active_ui->ime_input_started = false;
+            ctx->active_ui->applied_ime_password = false;
+            ctx->active_ui->applied_ime_rect = SDL_Rect{-1, -1, 0, 0};
+            ctx->active_ui->applied_ime_cursor = -1;
         }
     }
 
-    if (!ctx->headless && ctx->window && ctx->desired_cursor != ctx->applied_cursor) {
-        const uint32_t cidx = static_cast<uint32_t>(ctx->desired_cursor);
+    if (!ctx->headless && ctx->active_window &&
+        (SDL_GetMouseFocus() == ctx->active_window || ctx->mouse_capture_window == ctx->active_window) &&
+        ctx->active_ui->desired_cursor != ctx->applied_cursor) {
+        const uint32_t cidx = static_cast<uint32_t>(ctx->active_ui->desired_cursor);
         if (cidx < kCursorCount) {
             if (!ctx->system_cursors[cidx]) {
-                ctx->system_cursors[cidx] = SDL_CreateSystemCursor(to_sdl_system_cursor(ctx->desired_cursor));
+                ctx->system_cursors[cidx] = SDL_CreateSystemCursor(to_sdl_system_cursor(ctx->active_ui->desired_cursor));
             }
             if (ctx->system_cursors[cidx]) {
                 SDL_SetCursor(ctx->system_cursors[cidx]);
-                ctx->applied_cursor = ctx->desired_cursor;
+                ctx->applied_cursor = ctx->active_ui->desired_cursor;
             }
         }
     }
 
-    if (ctx->active_anim_count > 0u) {
-        ctx->redraw_budget = 2u;
+    if (ctx->active_ui->active_anim_count > 0u) {
+        ctx->active_ui->redraw_budget = 2u;
     }
 
-    if (ctx->states.entries) {
-        for (uint32_t i = 0u; i < ctx->states.capacity; ++i) {
-            WidgetState& ws = ctx->states.entries[i];
-            if (ws.key == 0u || ws.last_seen_frame != ctx->frame_index) {
+    if (ctx->active_ui->states.entries) {
+        for (uint32_t i = 0u; i < ctx->active_ui->states.capacity; ++i) {
+            WidgetState& ws = ctx->active_ui->states.entries[i];
+            if (ws.key == 0u || ws.last_seen_frame != ctx->active_ui->frame_index) {
                 continue;
             }
             if (ws.is_user_element || ws.split_initialized || ws.is_canvas || ws.is_canvas_node || ws.is_virtual_list) {
@@ -7423,29 +7501,29 @@ void end_frame(Context* ctx_arg) noexcept {
         }
     }
 
-    for (uint32_t i = 0u; i < ctx->pending_chrome_drag_count; ++i) {
-        ctx->chrome_drag_rects[i] = ctx->pending_chrome_drag_rects[i];
+    for (uint32_t i = 0u; i < ctx->active_ui->pending_chrome_drag_count; ++i) {
+        ctx->active_ui->chrome_drag_rects[i] = ctx->active_ui->pending_chrome_drag_rects[i];
     }
-    ctx->chrome_drag_count = ctx->pending_chrome_drag_count;
-    ctx->pending_chrome_drag_count = 0u;
+    ctx->active_ui->chrome_drag_count = ctx->active_ui->pending_chrome_drag_count;
+    ctx->active_ui->pending_chrome_drag_count = 0u;
 
     uint32_t chrome_client_n = 0u;
-    for (uint32_t i = 0u; i < ctx->pending_chrome_client_count && chrome_client_n < kMaxChromeClientRects; ++i) {
-        ctx->chrome_client_rects[chrome_client_n++] = ctx->pending_chrome_client_rects[i];
+    for (uint32_t i = 0u; i < ctx->active_ui->pending_chrome_client_count && chrome_client_n < kMaxChromeClientRects; ++i) {
+        ctx->active_ui->chrome_client_rects[chrome_client_n++] = ctx->active_ui->pending_chrome_client_rects[i];
     }
-    ctx->pending_chrome_client_count = 0u;
+    ctx->active_ui->pending_chrome_client_count = 0u;
 
-    if (ctx->chrome_desc.enabled && ctx->chrome_drag_count > 0u) {
-        for (uint32_t i = 0u; i < ctx->span_hit_count && chrome_client_n < kMaxChromeClientRects; ++i) {
-            const SpanHitRegion& r = ctx->span_hits[i];
+    if (ctx->active_ui->chrome_desc.enabled && ctx->active_ui->chrome_drag_count > 0u) {
+        for (uint32_t i = 0u; i < ctx->active_ui->span_hit_count && chrome_client_n < kMaxChromeClientRects; ++i) {
+            const SpanHitRegion& r = ctx->active_ui->span_hits[i];
             if (r.id == 0u && r.rect.w > 0.0f && r.rect.h > 0.0f) {
-                ctx->chrome_client_rects[chrome_client_n++] = r.rect;
+                ctx->active_ui->chrome_client_rects[chrome_client_n++] = r.rect;
             }
         }
-        if (ctx->states.entries) {
-            for (uint32_t i = 0u; i < ctx->states.capacity && chrome_client_n < kMaxChromeClientRects; ++i) {
-                const WidgetState& ws = ctx->states.entries[i];
-                if (ws.key == 0u || ws.last_seen_frame != ctx->frame_index || !ws.is_focusable) {
+        if (ctx->active_ui->states.entries) {
+            for (uint32_t i = 0u; i < ctx->active_ui->states.capacity && chrome_client_n < kMaxChromeClientRects; ++i) {
+                const WidgetState& ws = ctx->active_ui->states.entries[i];
+                if (ws.key == 0u || ws.last_seen_frame != ctx->active_ui->frame_index || !ws.is_focusable) {
                     continue;
                 }
                 const Rect r = ws.last_box_logical;
@@ -7453,19 +7531,19 @@ void end_frame(Context* ctx_arg) noexcept {
                     continue;
                 }
                 bool hits_drag = false;
-                for (uint32_t d = 0u; d < ctx->chrome_drag_count; ++d) {
-                    if (ctx->chrome_drag_rects[d].intersects(r)) {
+                for (uint32_t d = 0u; d < ctx->active_ui->chrome_drag_count; ++d) {
+                    if (ctx->active_ui->chrome_drag_rects[d].intersects(r)) {
                         hits_drag = true;
                         break;
                     }
                 }
                 if (hits_drag) {
-                    ctx->chrome_client_rects[chrome_client_n++] = r;
+                    ctx->active_ui->chrome_client_rects[chrome_client_n++] = r;
                 }
             }
         }
     }
-    ctx->chrome_client_count = chrome_client_n;
+    ctx->active_ui->chrome_client_count = chrome_client_n;
 
     const uint64_t end_ticks = SDL_GetPerformanceCounter();
     const uint64_t freq = SDL_GetPerformanceFrequency();
@@ -7473,18 +7551,18 @@ void end_frame(Context* ctx_arg) noexcept {
         ? (static_cast<double>(end_ticks - ctx->layout_start_ticks) * 1000.0 / static_cast<double>(freq))
         : 0.0;
 
-    ctx->layout_us_hist[ctx->hud_hist_cursor] = static_cast<float>(layout_ms * 1000.0);
-    ctx->gpu_us_hist[ctx->hud_hist_cursor] = static_cast<float>(ctx->stats.gpu_submit_ms * 1000.0);
-    ctx->hud_hist_cursor = (ctx->hud_hist_cursor + 1u) % kHudHistorySamples;
-    if (ctx->hud_hist_count < kHudHistorySamples) {
-        ++ctx->hud_hist_count;
+    ctx->active_ui->layout_us_hist[ctx->active_ui->hud_hist_cursor] = static_cast<float>(layout_ms * 1000.0);
+    ctx->active_ui->gpu_us_hist[ctx->active_ui->hud_hist_cursor] = static_cast<float>(ctx->stats.gpu_submit_ms * 1000.0);
+    ctx->active_ui->hud_hist_cursor = (ctx->active_ui->hud_hist_cursor + 1u) % kHudHistorySamples;
+    if (ctx->active_ui->hud_hist_count < kHudHistorySamples) {
+        ++ctx->active_ui->hud_hist_count;
     }
 
     const uint32_t app_prim_count = ctx->prim_count;
     const uint32_t app_batch_count = ctx->batch_count;
     const uint32_t app_blur_count = ctx->blur_split_count;
 
-    if (ctx->debug_wireframe_open && app_prim_count > 0u) {
+    if (ctx->active_ui->debug_wireframe_open && app_prim_count > 0u) {
         const uint32_t step = (app_prim_count > 320u) ? ((app_prim_count + 319u) / 320u) : 1u;
         for (uint32_t pi = 0u; pi < app_prim_count; pi += step) {
             const Prim src = ctx->prims[pi];
@@ -7522,19 +7600,19 @@ void end_frame(Context* ctx_arg) noexcept {
         }
     }
 
-    if (ctx->drag_active && ctx->pointer_pos.x >= 0.0f && ctx->pointer_pos.y >= 0.0f) {
-        const float vp_w = static_cast<float>(ctx->viewport_w) / dpi;
-        const float vp_h = static_cast<float>(ctx->viewport_h) / dpi;
-        const Str lbl = (ctx->drag_label_len > 0u)
-            ? Str{ ctx->drag_label, ctx->drag_label_len, false }
+    if (ctx->active_ui->drag_active && ctx->active_ui->pointer_pos.x >= 0.0f && ctx->active_ui->pointer_pos.y >= 0.0f) {
+        const float vp_w = static_cast<float>(ctx->active_ui->viewport_w) / dpi;
+        const float vp_h = static_cast<float>(ctx->active_ui->viewport_h) / dpi;
+        const Str lbl = (ctx->active_ui->drag_label_len > 0u)
+            ? Str{ ctx->active_ui->drag_label, ctx->active_ui->drag_label_len, false }
             : str_lit("Item");
         const Vec2 tsz = measure_multiline_text_metrics(ctx, lbl, kFontSans, 12.0f, 0.0f, nullptr, nullptr);
         const float pill_w = clamp_range(tsz.x + 26.0f, 76.0f, 240.0f);
         const float pill_h = 26.0f;
         const float max_x = (vp_w - pill_w - 4.0f > 4.0f) ? (vp_w - pill_w - 4.0f) : 4.0f;
         const float max_y = (vp_h - pill_h - 4.0f > 4.0f) ? (vp_h - pill_h - 4.0f) : 4.0f;
-        const float gx = clamp_range(ctx->pointer_pos.x + 14.0f, 4.0f, max_x);
-        const float gy = clamp_range(ctx->pointer_pos.y + 14.0f, 4.0f, max_y);
+        const float gx = clamp_range(ctx->active_ui->pointer_pos.x + 14.0f, 4.0f, max_x);
+        const float gy = clamp_range(ctx->active_ui->pointer_pos.y + 14.0f, 4.0f, max_y);
         const ClipEntry pill_clip = { .rect = root_clip, .radius = 0.0f };
 
         push_prim(
@@ -7576,8 +7654,8 @@ void end_frame(Context* ctx_arg) noexcept {
     }
 
     const bool idle_now = !needs_redraw(ctx);
-    if (ctx->debug_hud_open) {
-        const float vp_w = static_cast<float>(ctx->viewport_w) / dpi;
+    if (ctx->active_ui->debug_hud_open) {
+        const float vp_w = static_cast<float>(ctx->active_ui->viewport_w) / dpi;
         const float hud_w = (vp_w > 340.0f) ? 292.0f : ((vp_w > 180.0f) ? (vp_w - 20.0f) : 160.0f);
         const float hud_h = 154.0f;
         const float hud_x = (vp_w - hud_w - 14.0f > 4.0f) ? (vp_w - hud_w - 14.0f) : 4.0f;
@@ -7616,14 +7694,14 @@ void end_frame(Context* ctx_arg) noexcept {
 
         emit_direct_text_px(
             ctx,
-            "ETCH 1.4 INSPECTOR   [F12]",
+            "ETCH 1.5 INSPECTOR   [F12]",
             hud_x + 12.0f,
             hud_y + 10.0f,
             12.0f,
             Color::rgb_hex(0xF8FAFC),
             hud_clip,
             dpi);
-        if (ctx->debug_wireframe_open) {
+        if (ctx->active_ui->debug_wireframe_open) {
             emit_direct_text_px(
                 ctx,
                 "[F11 WIRE]",
@@ -7695,20 +7773,20 @@ void end_frame(Context* ctx_arg) noexcept {
                 1.0f * dpi));
 
         float peak_us = 250.0f;
-        for (uint32_t hi = 0u; hi < ctx->hud_hist_count; ++hi) {
-            if (ctx->layout_us_hist[hi] > peak_us) {
-                peak_us = ctx->layout_us_hist[hi];
+        for (uint32_t hi = 0u; hi < ctx->active_ui->hud_hist_count; ++hi) {
+            if (ctx->active_ui->layout_us_hist[hi] > peak_us) {
+                peak_us = ctx->active_ui->layout_us_hist[hi];
             }
         }
         const uint32_t bar_slots = kHudHistorySamples;
         const float inner_w = chart_w - 8.0f;
         const float pitch = inner_w / static_cast<float>(bar_slots);
         const float bar_w = (pitch > 1.5f) ? (pitch - 0.8f) : pitch;
-        const uint32_t n = ctx->hud_hist_count;
-        const uint32_t start = (n == kHudHistorySamples) ? ctx->hud_hist_cursor : 0u;
+        const uint32_t n = ctx->active_ui->hud_hist_count;
+        const uint32_t start = (n == kHudHistorySamples) ? ctx->active_ui->hud_hist_cursor : 0u;
         for (uint32_t bi = 0u; bi < n; ++bi) {
             const uint32_t idx = (start + bi) % kHudHistorySamples;
-            const float us = ctx->layout_us_hist[idx];
+            const float us = ctx->active_ui->layout_us_hist[idx];
             const float norm = clamp_range(us / peak_us, 0.06f, 1.0f);
             const float bh = norm * (chart_h - 8.0f);
             const float bx = chart_x + 4.0f + static_cast<float>(bar_slots - n + bi) * pitch;
@@ -7726,6 +7804,18 @@ void end_frame(Context* ctx_arg) noexcept {
         }
     }
 
+    while (ctx->active_ui->modal_count && ctx->active_ui->modal_scopes[ctx->active_ui->modal_count - 1].seen != ctx->active_ui->frame_index) {
+        const uint32_t restore = ctx->active_ui->modal_scopes[--ctx->active_ui->modal_count].restore;
+        const WidgetState* prior = state_map_find(&ctx->active_ui->states, restore);
+        ctx->active_ui->focus_id = prior && prior->is_focusable && prior->last_seen_frame == ctx->active_ui->frame_index ? prior->key : 0;
+        ctx->active_ui->modal_scope = ctx->active_ui->modal_count ? ctx->active_ui->modal_scopes[ctx->active_ui->modal_count - 1].id : 0;
+        ctx->active_ui->modal_needs_focus = false;
+    }
+    ctx->active_ui->frame_drop_count = 0;
+    ctx->active_ui->frame_text_drop_count = 0;
+    ctx->active_ui->has_delivered_drop_pos = false;
+    // A window-only context consumes global invalidations through its primary pass.
+    if (!ctx->headless && ctx->active_window == ctx->window) ctx->headless_ui.redraw_budget = 0;
     ctx->in_frame = false;
     ctx->stats.prim_count = ctx->prim_count;
     ctx->stats.draw_call_count = ctx->batch_count;
@@ -7735,8 +7825,197 @@ void end_frame(Context* ctx_arg) noexcept {
     ctx->stats.arena_used_bytes = ctx->frame_arena.used();
     ctx->stats.arena_peak_bytes = ctx->frame_arena.peak_offset;
     ctx->stats.layout_ms = layout_ms;
-    ctx->stats.active_animations = ctx->active_anim_count;
+    ctx->stats.active_animations = ctx->active_ui->active_anim_count;
     ctx->stats.idle_sleeping = idle_now;
+}
+
+
+bool frame_in_progress(const Context* ctx) noexcept { return ctx && ctx->in_frame; }
+SystemTheme system_theme() noexcept { return static_cast<SystemTheme>(SDL_GetSystemTheme()); }
+bool system_dark_mode(bool fallback) noexcept {
+    const SystemTheme theme = system_theme();
+    return theme == SystemTheme::Unknown ? fallback : theme == SystemTheme::Dark;
+}
+bool needs_window_redraw(const Context* ctx, SDL_Window* window) noexcept {
+    const WindowUiState* ui = ctx ? window_ui(ctx, window) : nullptr;
+    return ui && (ui->redraw_budget || ui->active_anim_count);
+}
+void request_window_redraw(Context* ctx, SDL_Window* window) noexcept {
+    WindowUiState* ui = ctx ? window_ui(ctx, window) : nullptr;
+    if (ui) ui->redraw_budget = 2;
+}
+void process_event(Context* ctx, const SDL_Event& event) noexcept {
+    if (!ctx) return;
+    if (event.type == SDL_EVENT_SYSTEM_THEME_CHANGED || event.type == ctx->wake_event_type) {
+        ctx->headless_ui.redraw_budget = 2;
+        for (uint32_t i = 0; i < kMaxClaimedWindows; ++i)
+            if (ctx->claimed_windows[i].window) ctx->claimed_windows[i].ui.redraw_budget = 2;
+        return;
+    }
+    SDL_WindowID id = 0;
+    switch (event.type) {
+        case SDL_EVENT_MOUSE_MOTION: id = event.motion.windowID; break;
+        case SDL_EVENT_MOUSE_BUTTON_DOWN: case SDL_EVENT_MOUSE_BUTTON_UP: id = event.button.windowID; break;
+        case SDL_EVENT_MOUSE_WHEEL: id = event.wheel.windowID; break;
+        case SDL_EVENT_KEY_DOWN: case SDL_EVENT_KEY_UP: id = event.key.windowID; break;
+        case SDL_EVENT_TEXT_EDITING: id = event.edit.windowID; break;
+        case SDL_EVENT_TEXT_INPUT: id = event.text.windowID; break;
+        case SDL_EVENT_DROP_BEGIN: case SDL_EVENT_DROP_POSITION: case SDL_EVENT_DROP_COMPLETE:
+        case SDL_EVENT_DROP_FILE: case SDL_EVENT_DROP_TEXT: id = event.drop.windowID; break;
+        default:
+            if (event.type >= SDL_EVENT_WINDOW_FIRST && event.type <= SDL_EVENT_WINDOW_LAST) id = event.window.windowID;
+            break;
+    }
+    SDL_Window* window = id ? SDL_GetWindowFromID(id) : ctx->window;
+    if (id && !window) return;
+    WindowUiState* ui = window_ui(ctx, window);
+    if (!ui) return;
+    WindowUiState* saved = ctx->active_ui;
+    SDL_Window* saved_window = ctx->active_window;
+    ctx->active_ui = ui; ctx->active_window = window;
+    if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN) ui->keyboard_focus_active = false;
+    if (event.type == SDL_EVENT_KEY_DOWN && (event.key.key == SDLK_TAB || event.key.key == SDLK_LEFT ||
+        event.key.key == SDLK_RIGHT || event.key.key == SDLK_UP || event.key.key == SDLK_DOWN)) ui->keyboard_focus_active = true;
+    process_window_event(ctx, event);
+    ctx->active_ui = saved; ctx->active_window = saved_window;
+}
+void begin_frame(Context* ctx, const FrameDesc& desc) noexcept {
+    if (!ctx || ctx->in_frame) return;
+    ctx->active_window = ctx->headless ? nullptr : ctx->window;
+    ctx->active_ui = ctx->headless ? &ctx->headless_ui : window_ui(ctx, nullptr);
+    begin_bound_frame(ctx, desc);
+}
+void begin_window_frame(Context* ctx, SDL_Window* window, float dt) noexcept {
+    begin_window_frame(ctx, window, WindowFrameDesc{.dt = dt});
+}
+void begin_window_frame(Context* ctx, SDL_Window* window, const WindowFrameDesc& desc) noexcept {
+    if (!ctx || !window || ctx->in_frame || !claim_window_swapchain(ctx, window)) return;
+    ctx->active_window = window; ctx->active_ui = window_ui(ctx, window);
+    int w = 0, h = 0;
+    SDL_GetWindowSizeInPixels(window, &w, &h);
+    float scale = SDL_GetWindowDisplayScale(window);
+    if (scale <= 0) scale = 1;
+    if (scale < desc.min_scale) scale = desc.min_scale;
+    begin_bound_frame(ctx, FrameDesc{.viewport_w = static_cast<uint32_t>(w > 0 ? w : 1),
+        .viewport_h = static_cast<uint32_t>(h > 0 ? h : 1), .dpi_scale = scale, .dt_seconds = desc.dt});
+}
+void end_window_frame(Context* ctx) noexcept { end_frame(ctx); }
+void begin_focus_scope(uint32_t scope_id, bool trap_tab) noexcept {
+    Context* ctx = current_context();
+    if (!ctx || !ctx->in_frame || !scope_id || ctx->active_ui->focus_scope_depth == 32) return;
+    WindowUiState& ui = *ctx->active_ui;
+    ui.focus_scopes[ui.focus_scope_depth++] = ui.focus_scope;
+    ui.focus_scope = scope_id;
+    if (trap_tab) {
+        uint32_t index = 0;
+        while (index < ui.modal_count && ui.modal_scopes[index].id != scope_id) ++index;
+        if (index == ui.modal_count) {
+            if (ui.modal_count == 32) return;
+            ui.modal_scopes[ui.modal_count++] = ModalFocusScope{scope_id, ui.focus_id, ui.frame_index};
+            ui.focus_id = 0;
+            ui.modal_needs_focus = true;
+        }
+        ui.modal_scopes[index].seen = ui.frame_index;
+        ui.modal_scope = ui.modal_scopes[ui.modal_count - 1].id;
+        ui.pending_tab_delta = 0;
+    }
+}
+void end_focus_scope() noexcept {
+    Context* ctx = current_context();
+    if (!ctx || !ctx->in_frame || !ctx->active_ui->focus_scope_depth) return;
+    WindowUiState& ui = *ctx->active_ui;
+    ui.focus_scope = ui.focus_scopes[--ui.focus_scope_depth];
+}
+bool keyboard_focus_visible(uint32_t id) noexcept {
+    Context* ctx = current_context();
+    return ctx && ctx->active_ui->keyboard_focus_active && ctx->active_ui->focus_id &&
+        (!id || ctx->active_ui->focus_id == id);
+}
+namespace {
+void store_os_drop(WindowUiState& ui, Str value, bool text) noexcept {
+    uint32_t& count = text ? ui.pending_text_drop_count : ui.pending_drop_count;
+    if (count == kMaxDroppedFiles || value.length >= kMaxDroppedPathBytes - ui.pending_drop_bytes) return;
+    const uint32_t offset = ui.pending_drop_bytes;
+    std::memcpy(ui.pending_drop_buf + offset, value.chars, value.length);
+    ui.pending_drop_buf[offset + value.length] = '\0';
+    (text ? ui.pending_text_drop_offsets : ui.pending_drop_offsets)[count] = static_cast<uint16_t>(offset);
+    (text ? ui.pending_text_drop_lengths : ui.pending_drop_lengths)[count++] = static_cast<uint16_t>(value.length);
+    ui.pending_drop_bytes += value.length + 1;
+    ui.redraw_budget = 2;
+}
+bool os_target(Context* ctx, uint32_t id, Vec2 pos) noexcept {
+    WindowUiState& ui = *ctx->active_ui;
+    int32_t target = -1;
+    bool has_drop_hit = false;
+    for (uint32_t i = 0; i < ui.drop_hit_count; ++i) {
+        const SpanHitRegion& hit = ui.drop_hits[i];
+        if (hit.id == id) has_drop_hit = true;
+        if (hit.id == id && hit.rect.contains(pos) && (!hit.has_clip || hit.clip_rect.contains(pos))) target = static_cast<int32_t>(i);
+    }
+    if (target < 0) {
+        if (has_drop_hit) return false;
+        const WidgetState* ws = state_map_find(&ui.states, id);
+        if (!ws || ws->last_seen_frame + 1u < ui.frame_index || !ws->last_box_logical.contains(pos)) return false;
+        for (uint32_t i = 0; i < ui.span_hit_count; ++i) {
+            const SpanHitRegion& hit = ui.span_hits[i];
+            if (hit.id == 0 && hit.z_index >= 0 && hit.rect.contains(pos) &&
+                (!hit.has_clip || hit.clip_rect.contains(pos))) return false;
+        }
+        return true;
+    }
+    const int16_t z = ui.drop_hits[target].z_index;
+    for (uint32_t i = 0; i < ui.span_hit_count; ++i) {
+        const SpanHitRegion& hit = ui.span_hits[i];
+        if (hit.id == 0 && (hit.z_index > z || (hit.z_index == z && hit.paint_order > ui.drop_hits[target].paint_order)) && hit.rect.contains(pos) && (!hit.has_clip || hit.clip_rect.contains(pos))) return false;
+    }
+    return true;
+}
+}
+void inject_drop_file(Context* ctx, Str value, SDL_Window* window) noexcept {
+    WindowUiState* ui = ctx ? window_ui(ctx, window) : nullptr;
+    if (ui && value.chars && value.length) store_os_drop(*ui, value, false);
+}
+void inject_drop_text(Context* ctx, Str value, SDL_Window* window) noexcept {
+    WindowUiState* ui = ctx ? window_ui(ctx, window) : nullptr;
+    if (ui && value.chars && value.length) store_os_drop(*ui, value, true);
+}
+void inject_os_drop_move(Context* ctx, Vec2 pos, SDL_Window* window) noexcept {
+    WindowUiState* ui = ctx ? window_ui(ctx, window) : nullptr;
+    if (!ui) return;
+    ui->os_drop_pos = pos; ui->has_os_drop_pos = true; ui->os_dragging = true; ui->redraw_budget = 2;
+}
+void inject_os_drop_begin(Context* ctx, Vec2 pos, SDL_Window* window) noexcept {
+    WindowUiState* ui = ctx ? window_ui(ctx, window) : nullptr;
+    if (!ui) return;
+    ui->pending_drop_count = 0;
+    ui->pending_text_drop_count = 0;
+    ui->pending_drop_bytes = 0;
+    ui->has_delivered_drop_pos = false;
+    inject_os_drop_move(ctx, pos, window);
+}
+void inject_os_drop_complete(Context* ctx, Vec2 pos, SDL_Window* window) noexcept {
+    WindowUiState* ui = ctx ? window_ui(ctx, window) : nullptr;
+    if (!ui) return;
+    ui->os_dragging = false; ui->os_drop_pos = pos; ui->has_os_drop_pos = true;
+    ui->delivered_drop_pos = pos; ui->has_delivered_drop_pos = true; ui->redraw_budget = 2;
+}
+bool is_os_dragging() noexcept { Context* ctx = current_context(); return ctx && ctx->active_ui->os_dragging; }
+Vec2 os_drop_pos() noexcept { Context* ctx = current_context(); return ctx ? ctx->active_ui->os_drop_pos : Vec2{}; }
+bool os_drag_hovering(uint32_t id) noexcept {
+    Context* ctx = current_context();
+    return ctx && id && ctx->active_ui->os_dragging && ctx->active_ui->has_os_drop_pos && os_target(ctx, id, ctx->active_ui->os_drop_pos);
+}
+std::span<const Str> dropped_files_on(uint32_t id) noexcept {
+    Context* ctx = current_context();
+    return ctx && id && ctx->active_ui->has_delivered_drop_pos && os_target(ctx, id, ctx->active_ui->delivered_drop_pos) ? dropped_files() : std::span<const Str>{};
+}
+std::span<const Str> dropped_texts() noexcept {
+    Context* ctx = current_context();
+    return ctx ? std::span<const Str>{ctx->active_ui->frame_text_drops, ctx->active_ui->frame_text_drop_count} : std::span<const Str>{};
+}
+std::span<const Str> dropped_texts_on(uint32_t id) noexcept {
+    Context* ctx = current_context();
+    return ctx && id && ctx->active_ui->has_delivered_drop_pos && os_target(ctx, id, ctx->active_ui->delivered_drop_pos) ? dropped_texts() : std::span<const Str>{};
 }
 
 } // namespace etch

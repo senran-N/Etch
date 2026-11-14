@@ -5,6 +5,7 @@
 
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_gpu.h>
+#include "clay.h"
 
 #include <cmath>
 #include <cstdio>
@@ -12,6 +13,251 @@
 #include <cstring>
 
 namespace {
+
+bool check_v15_window_ui() noexcept {
+    etch::Context* previous = etch::current_context();
+    etch::Context* ctx = etch::create_context({.headless = true});
+    if (!ctx) return false;
+    bool ok = true;
+    const uint32_t target = etch::id("v15_target");
+    const uint32_t plain = etch::id("v15_plain");
+    const uint32_t background = etch::id("v15_background");
+    const uint32_t first = etch::id("v15_modal_first");
+    const uint32_t second = etch::id("v15_modal_second");
+    bool blur = false;
+    const uint32_t scroll_id = etch::id("v15_scroll");
+    const uint32_t scope = etch::id("v15_modal");
+    const auto build = [&](bool overlay, bool modal) noexcept {
+        etch::begin_box({.axis = etch::Axis::Col, .width = etch::Sizing::grow(), .height = etch::Sizing::grow(), .background = etch::Color::rgb_hex(0x0E1014)});
+        etch::box({.id = background, .width = etch::Sizing::fixed(120), .height = etch::Sizing::fixed(30), .focusable = true});
+        etch::box({.id = target, .width = etch::Sizing::fixed(200), .height = etch::Sizing::fixed(100), .background = etch::Color::rgb_hex(0x1E293B), .backdrop_blur = blur ? 8.0f : 0.0f});
+        etch::begin_box({.id = scroll_id, .width = etch::Sizing::fixed(200), .height = etch::Sizing::fixed(70), .scroll_y = true});
+        etch::box({.width = etch::Sizing::fixed(180), .height = etch::Sizing::fixed(500)});
+        etch::end_box();
+        etch::box({.id = plain, .width = etch::Sizing::fixed(200), .height = etch::Sizing::fixed(30)});
+        if (overlay) etch::box({.width = etch::Sizing::fixed(200), .height = etch::Sizing::fixed(240),
+            .background = etch::Color::rgb_hex(0x334155), .attach_to = etch::AttachTo::Root, .anchor_parent = etch::Anchor::TopLeft, .z_index = 20});
+        if (modal) {
+            etch::begin_focus_scope(scope);
+            etch::box({.id = first, .width = etch::Sizing::fixed(100), .height = etch::Sizing::fixed(30), .focusable = true});
+            etch::box({.id = second, .width = etch::Sizing::fixed(100), .height = etch::Sizing::fixed(30), .focusable = true});
+            etch::end_focus_scope();
+        }
+        etch::end_box();
+    };
+    const auto step = [&](bool overlay, bool modal, uint32_t key = 0, uint16_t mods = 0) noexcept {
+        etch::begin_frame(ctx, {.viewport_w = 400, .viewport_h = 300, .key_mods = mods, .key_pressed_code = key});
+        build(overlay, modal); etch::end_frame(ctx);
+    };
+    step(false, false);
+    const etch::Vec2 plain_pos = {20, 210};
+    etch::inject_drop_file(ctx, etch::str_lit("stale.svg"));
+    etch::inject_drop_text(ctx, etch::str_lit("stale text"));
+    etch::inject_os_drop_begin(ctx, plain_pos);
+    etch::begin_frame(ctx, {.viewport_w = 400, .viewport_h = 300});
+    ok &= etch::os_drag_hovering(plain) && etch::dropped_files().empty() && etch::dropped_texts().empty();
+    build(false, false); etch::end_frame(ctx);
+    const etch::Vec2 pos = {20, 60};
+    etch::inject_os_drop_begin(ctx, pos);
+    etch::begin_frame(ctx, {.viewport_w = 400, .viewport_h = 300});
+    ok &= etch::is_os_dragging() && etch::os_drag_hovering(target);
+    build(false, false); etch::end_frame(ctx);
+    if (!ok) std::fprintf(stderr, "v15 live hover failed\n");
+    step(true, false);
+    etch::begin_frame(ctx, {.viewport_w = 400, .viewport_h = 300});
+    ok &= !etch::os_drag_hovering(target);
+    etch::inject_os_drop_move(ctx, plain_pos);
+    ok &= !etch::os_drag_hovering(plain);
+    etch::inject_os_drop_move(ctx, pos);
+    build(false, false); etch::end_frame(ctx);
+    if (!ok) std::fprintf(stderr, "v15 occlusion failed\n");
+    // Complete arrives before building, exactly as in an SDL polling drain.
+    char path[] = "C:/assets/input.svg";
+    etch::inject_drop_file(ctx, etch::str_cstr(path));
+    etch::inject_drop_text(ctx, etch::str_lit("External note"));
+    path[0] = 'X';
+    step(false, false);
+    etch::begin_frame(ctx, {.viewport_w = 400, .viewport_h = 300});
+    ok &= etch::os_drag_hovering(target) && etch::dropped_files().empty() && etch::dropped_texts().empty();
+    build(false, false); etch::end_frame(ctx);
+    etch::inject_os_drop_complete(ctx, pos);
+    etch::begin_frame(ctx, {.viewport_w = 400, .viewport_h = 300});
+    const auto files = etch::dropped_files_on(target);
+    ok &= !etch::is_os_dragging() && files.size() == 1 && files[0].chars[0] == 'C' && etch::dropped_texts_on(target).size() == 1;
+    build(false, false); etch::end_frame(ctx);
+    if (!ok) std::fprintf(stderr, "v15 delivery failed\n");
+    etch::begin_frame(ctx, {.viewport_w = 400, .viewport_h = 300});
+    ok &= etch::dropped_files().empty() && etch::dropped_texts().empty();
+    etch::request_focus(background);
+    etch::begin_focus_scope(scope);
+    etch::box({.id = first, .width = etch::Sizing::fixed(100), .height = etch::Sizing::fixed(30), .focusable = true});
+    ok &= etch::focused(first); // synchronous Frame-0 reconciliation
+    etch::end_focus_scope();
+    etch::end_frame(ctx);
+    if (!ok) std::fprintf(stderr, "v15 frame0 focus failed\n");
+    step(false, true);
+    step(false, true, SDLK_TAB);
+    ok &= etch::focused(second) && etch::keyboard_focus_visible(second);
+    step(false, true, SDLK_TAB);
+    ok &= etch::focused(first);
+    step(false, true, SDLK_TAB, etch::Mod_Shift);
+    ok &= etch::focused(second);
+    etch::begin_frame(ctx, {.viewport_w = 400, .viewport_h = 300, .key_mods = etch::Mod_Ctrl, .key_pressed_code = SDLK_K});
+    ok &= !etch::shortcut(etch::Mod_Ctrl, SDLK_K, true);
+    build(false, true); etch::end_frame(ctx);
+    step(false, false);
+    ok &= etch::focused(background);
+    etch::begin_frame(ctx, {.viewport_w = 400, .viewport_h = 300, .pointer_pos = {10,10}, .pointer_down = true});
+    ok &= !etch::keyboard_focus_visible();
+    build(false, false); etch::end_frame(ctx);
+    etch::inject_drop_file(ctx, etch::str_lit("direct.svg"));
+    etch::begin_frame(ctx, {.viewport_w = 400, .viewport_h = 300});
+    ok &= etch::dropped_files().size() == 1;
+    build(false, false); etch::end_frame(ctx);
+    const etch::SystemTheme theme = etch::system_theme();
+    ok &= theme == etch::SystemTheme::Unknown ? etch::system_dark_mode(true) && !etch::system_dark_mode(false) :
+        etch::system_dark_mode(true) == etch::system_dark_mode(false) && etch::system_dark_mode() == (theme == etch::SystemTheme::Dark);
+    if (!ok) std::fprintf(stderr, "v15 focus and theme failed\n");
+    // A modal text input must keep its IME preedit when pointer focus is rejected.
+    const uint32_t modal_input = etch::id("v15_modal_input");
+    char modal_text[32] = {};
+    const auto ime_step = [&](etch::Vec2 pointer, bool down) noexcept {
+        etch::begin_frame(ctx, {.viewport_w = 400, .viewport_h = 300, .pointer_pos = pointer, .pointer_down = down});
+        etch::begin_box({.axis = etch::Axis::Col, .width = etch::Sizing::grow(), .height = etch::Sizing::grow()});
+        etch::box({.id = background, .width = etch::Sizing::fixed(120), .height = etch::Sizing::fixed(30), .focusable = true});
+        etch::begin_focus_scope(scope, true);
+        const etch::TextInputResult result = etch::text_input({.id = modal_input, .buffer = modal_text,
+            .capacity = sizeof(modal_text), .width = etch::Sizing::fixed(200)});
+        etch::end_focus_scope();
+        etch::end_box();
+        etch::end_frame(ctx);
+        return etch::focused(modal_input) && result.composing;
+    };
+    ime_step({-1, -1}, false);
+    SDL_Event editing = {};
+    editing.type = SDL_EVENT_TEXT_EDITING;
+    editing.edit.text = "ni";
+    editing.edit.start = 2;
+    etch::process_event(ctx, editing);
+    bool modal_ime_ok = ime_step({-1, -1}, false);
+    modal_ime_ok &= ime_step({300, 250}, true); // Non-focusable space.
+    modal_ime_ok &= ime_step({300, 250}, false);
+    modal_ime_ok &= ime_step({10, 10}, true); // Focusable background outside the modal.
+    modal_ime_ok &= ime_step({10, 10}, false);
+    ok &= modal_ime_ok;
+    if (!modal_ime_ok) std::fprintf(stderr, "Headless assert [15] failed: rejected modal focus dropped IME preedit\n");
+    SDL_Window* a = SDL_CreateWindow("Etch v1.5 A", 400, 300, SDL_WINDOW_HIDDEN);
+    SDL_Window* b = SDL_CreateWindow("Etch v1.5 B", 500, 350, SDL_WINDOW_HIDDEN);
+    ok &= a && b;
+    if (a && b) {
+        for (SDL_Window* win : {a,b}) {
+            etch::begin_window_frame(ctx, win, 0.016f); build(false, false); etch::end_window_frame(ctx);
+        }
+        SDL_Event ev = {}; ev.type = SDL_EVENT_MOUSE_BUTTON_DOWN;
+        ev.button.windowID = SDL_GetWindowID(a); ev.button.button = SDL_BUTTON_LEFT; ev.button.x = 10; ev.button.y = 10;
+        etch::process_event(ctx, ev);
+        etch::begin_window_frame(ctx, a, 0.016f); build(false, false); etch::end_window_frame(ctx);
+        ok &= etch::active(background);
+        ev.button.windowID = SDL_GetWindowID(b); etch::process_event(ctx, ev);
+        etch::begin_window_frame(ctx, b, 0.016f); build(false, false); etch::end_window_frame(ctx);
+        ev.type = SDL_EVENT_MOUSE_BUTTON_UP; etch::process_event(ctx, ev);
+        etch::begin_window_frame(ctx, b, 0.016f);
+        ok &= etch::clicked(background); build(false, false); etch::end_window_frame(ctx);
+        etch::begin_window_frame(ctx, a, 0.016f);
+        ok &= etch::active(background); build(false, false); etch::end_window_frame(ctx);
+        if (!ok) std::fprintf(stderr, "v15 dual input failed\n");
+        ev.type = SDL_EVENT_MOUSE_MOTION; ev.motion.windowID = SDL_GetWindowID(a);
+        ev.motion.x = 40; ev.motion.y = 15; etch::process_event(ctx, ev);
+        etch::begin_window_frame(ctx, a, 0.016f);
+        ok &= etch::dragging(background); build(false, false); etch::end_window_frame(ctx);
+        ev = {}; ev.type = SDL_EVENT_MOUSE_BUTTON_UP; ev.button.button = SDL_BUTTON_LEFT;
+        ev.button.x = 40; ev.button.y = 15; ev.button.windowID = SDL_GetWindowID(a); etch::process_event(ctx, ev);
+        etch::begin_window_frame(ctx, a, 0.016f); build(false, false); etch::end_window_frame(ctx);
+        // Momentum advances only when its owning window builds.
+        SDL_Event wheel = {}; wheel.type = SDL_EVENT_MOUSE_WHEEL; wheel.wheel.windowID = SDL_GetWindowID(a);
+        wheel.wheel.y = -3;
+        const float input_scale = SDL_GetWindowDisplayScale(a) / SDL_GetWindowPixelDensity(a);
+        wheel.wheel.mouse_x = 20 * input_scale; wheel.wheel.mouse_y = 160 * input_scale;
+        etch::process_event(ctx, wheel);
+        etch::begin_window_frame(ctx, a, 0.016f); build(false, false); etch::end_window_frame(ctx);
+        const float scroll_a = etch::scroll_offset(scroll_id).y;
+        etch::begin_window_frame(ctx, b, 0.016f); build(false, false); etch::end_window_frame(ctx);
+        ok &= etch::scroll_offset(scroll_id).y == 0;
+        etch::begin_window_frame(ctx, a, 0.016f); build(false, false); etch::end_window_frame(ctx);
+        if (etch::scroll_offset(scroll_id).y == scroll_a) {
+            const etch::Rect bounds = etch::element_bounds(scroll_id);
+            std::fprintf(stderr, "v15 scroll: before=%.2f after=%.2f rect=%.1f,%.1f,%.1f,%.1f pointer=%.1f,%.1f\n", scroll_a, etch::scroll_offset(scroll_id).y, bounds.x,bounds.y,bounds.w,bounds.h,etch::pointer_pos().x,etch::pointer_pos().y);
+        }
+        ok &= etch::scroll_offset(scroll_id).y != scroll_a;
+        if (!ok) std::fprintf(stderr, "v15 scroll inertia failed\n");
+        // Alternate window layouts with independent blur state.
+        blur = true;
+        etch::begin_window_frame(ctx, a, 0.016f); build(false, false); etch::end_window_frame(ctx);
+        etch::begin_window_frame(ctx, b, 0.016f); build(false, false); etch::end_window_frame(ctx);
+        etch::begin_window_frame(ctx, a, 0.016f); build(false, false); etch::end_window_frame(ctx);
+        ok &= etch::frame_stats(ctx).blur_pass_count > 0;
+        if (!ok) std::fprintf(stderr, "v15 blur failed\n");
+        blur = false;
+        etch::set_window_chrome({.enabled = true, .resizable = true}, a);
+        etch::set_window_chrome({.enabled = false}, b);
+        ok &= etch::evaluate_window_hit(ctx, {1,1}, a) == etch::WindowHit::ResizeTopLeft;
+        ok &= etch::evaluate_window_hit(ctx, {1,1}, b) == etch::WindowHit::Normal;
+        SDL_Event drop = {}; drop.type = SDL_EVENT_DROP_BEGIN; drop.drop.windowID = SDL_GetWindowID(b);
+        drop.drop.x = pos.x; drop.drop.y = pos.y; etch::process_event(ctx, drop);
+        drop.type = SDL_EVENT_DROP_POSITION; etch::process_event(ctx, drop);
+        char external[] = "Window B";
+        drop.type = SDL_EVENT_DROP_TEXT; drop.drop.data = external; etch::process_event(ctx, drop);
+        external[0] = 'X';
+        etch::begin_window_frame(ctx, b, 0.016f);
+        ok &= etch::os_drag_hovering(target) && etch::dropped_texts().empty();
+        build(false, false); etch::end_window_frame(ctx);
+        drop.type = SDL_EVENT_DROP_COMPLETE; drop.drop.data = nullptr; etch::process_event(ctx, drop);
+        etch::release_window(ctx, a);
+        ok &= etch::claimed_window_count(ctx) == 1;
+        etch::begin_window_frame(ctx, b, 0.016f);
+        const auto delivered = etch::dropped_texts_on(target);
+        ok &= delivered.size() == 1 && delivered[0].chars[0] == 'W';
+        build(false, false); etch::end_window_frame(ctx);
+        if (!ok) std::fprintf(stderr, "v15 release failed\n");
+        etch::release_window(ctx, b);
+        ok &= etch::claimed_window_count(ctx) == 0;
+    }
+    if (!a || !b) std::fprintf(stderr, "v15 hidden windows: %s\n", SDL_GetError());
+    if (a && b) {
+        // Keep A's Clay layout open across window claim/release and destruction of B.
+        etch::Context* other = etch::create_context({.window = b, .headless = true});
+        ok &= other != nullptr;
+        if (other) {
+            const uint32_t probe = etch::id("v15_cross_context");
+            etch::begin_frame(ctx, {.viewport_w = 400, .viewport_h = 300});
+            Clay_Context* clay_a = Clay_GetCurrentContext();
+            etch::begin_box({.width = etch::Sizing::fixed(80), .height = etch::Sizing::fixed(60)});
+            ok &= etch::render_window(other, {}, a);
+            ok &= etch::current_context() == ctx && Clay_GetCurrentContext() == clay_a;
+            etch::release_window(other, a);
+            ok &= etch::claimed_window_count(other) == 1;
+            ok &= etch::current_context() == ctx && Clay_GetCurrentContext() == clay_a;
+            etch::destroy_context(other); // B still owns b, so this also releases its window.
+            const bool preserved = etch::current_context() == ctx && Clay_GetCurrentContext() == clay_a;
+            ok &= preserved;
+            if (!preserved) etch::set_current_context(ctx); // Finish A safely on regression failure.
+            etch::box({.id = probe, .width = etch::Sizing::fixed(30), .height = etch::Sizing::fixed(20),
+                .background = etch::Color::rgb_hex(0x334155)});
+            etch::end_box();
+            etch::end_frame(ctx);
+            const etch::Rect bounds = etch::element_bounds(probe);
+            ok &= bounds.w == 30 && bounds.h == 20 && etch::frame_stats(ctx).prim_count > 0;
+            if (!ok) std::fprintf(stderr, "v15 cross-context Clay lifetime failed\n");
+        }
+    }
+    if (a) SDL_DestroyWindow(a);
+    if (b) SDL_DestroyWindow(b);
+    etch::destroy_context(ctx);
+    etch::set_current_context(previous);
+    if (!ok) std::fprintf(stderr, "Milestone 2 window/drop/focus/theme assertions failed\n");
+    return ok;
+}
+
 
 inline constexpr uint32_t kOscWidth = 256u;
 inline constexpr uint32_t kOscHeight = 256u;
@@ -35,6 +281,7 @@ struct AppState {
     etch::TextInputResult single_res = {};
     etch::TextInputResult multi_res = {};
     bool                  running = true;
+    bool                  rendering = false;
 };
 
 void init_sandbox_icons(AppState* app) noexcept {
@@ -1044,14 +1291,16 @@ void step_headless_frame(AppState* app, uint32_t w, uint32_t h, float dt_seconds
 }
 
 void render_window_frame(AppState* app, float dt_seconds) noexcept {
-    if (!app || !app->ctx || !app->window) {
+    if (!app || !app->ctx || !app->window || app->rendering || etch::frame_in_progress(app->ctx)) {
         return;
     }
 
+    app->rendering = true;
     int px_w = 1280;
     int px_h = 800;
     SDL_GetWindowSizeInPixels(app->window, &px_w, &px_h);
     if (px_w <= 0 || px_h <= 0) {
+        app->rendering = false;
         return;
     }
 
@@ -1089,17 +1338,19 @@ void render_window_frame(AppState* app, float dt_seconds) noexcept {
     etch::end_frame(app->ctx);
 
     etch::render_window(app->ctx, etch::Color::rgb_hex(0x0B0D12));
+    app->rendering = false;
 }
 
 bool SDLCALL window_event_watch(void* userdata, SDL_Event* event) noexcept {
     AppState* app = static_cast<AppState*>(userdata);
-    if (!app || !event) {
+    if (!app || !event || etch::frame_in_progress(app->ctx) || !app->window || app->rendering) {
         return true;
     }
-    if (event->type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED ||
-        event->type == SDL_EVENT_WINDOW_EXPOSED)
+    if ((event->type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED ||
+         event->type == SDL_EVENT_WINDOW_EXPOSED) &&
+        event->window.windowID == SDL_GetWindowID(app->window))
     {
-        etch::request_redraw(app->ctx);
+        etch::request_window_redraw(app->ctx, app->window);
         render_window_frame(app, 0.0f);
     }
     return true;
@@ -1437,6 +1688,11 @@ int run_headless(const char* out_png_path) noexcept {
         step_headless_frame(&app, kHeadlessW, kHeadlessH, kStepDt);
     }
 
+    const etch::FrameStats final_stats = etch::frame_stats(ctx);
+    // Leave a real keyboard focus ring visible in the requested output.
+    etch::request_focus(etch::id("btn_accent"));
+    inject_key(SDLK_TAB);
+    step_headless_frame(&app, kHeadlessW, kHeadlessH, kStepDt);
     const bool png_ok = etch::render_headless_png(
         ctx,
         kHeadlessW,
@@ -1444,7 +1700,6 @@ int run_headless(const char* out_png_path) noexcept {
         out_png_path,
         etch::Color::rgb_hex(0x0B0D12));
 
-    const etch::FrameStats final_stats = etch::frame_stats(ctx);
     const etch::Vec2 final_scroll = etch::scroll_offset(scroll_id);
     const bool stats_ok = (final_stats.draw_call_count == 2u) && final_stats.idle_sleeping;
     if (!stats_ok) {
@@ -2426,9 +2681,11 @@ int run_headless(const char* out_png_path) noexcept {
         }
     }
 
-    const bool ok = png_ok && stats_ok && slug_ok && v10a_ok && v11_ok && v12_ok && v13_ok && v14_ok;
+    // [15] Multi-window isolation, spatial OS drop, modal focus and system theme.
+    const bool v15_ok = check_v15_window_ui();
+    const bool ok = v15_ok && png_ok && stats_ok && slug_ok && v10a_ok && v11_ok && v12_ok && v13_ok && v14_ok;
     std::printf(
-        "Headless %s -> %s (asserts=14/14, prims=%u, draw_calls=%u, slug_glyphs=%u, slug_curves=%u, layout_ms=%.3f, gpu_submit_ms=%.3f, arena_used=%zuB, scroll_y=%.1f, focus=0x%08X, idle=%d)\n",
+        "Headless %s -> %s (asserts=15/15, prims=%u, draw_calls=%u, slug_glyphs=%u, slug_curves=%u, layout_ms=%.3f, gpu_submit_ms=%.3f, arena_used=%zuB, scroll_y=%.1f, focus=0x%08X, idle=%d)\n",
         ok ? "OK" : "FAILED",
         out_png_path,
         final_stats.prim_count,

@@ -46,6 +46,7 @@ struct WidgetState {
     uint32_t prev_seen_frame = 0;
     bool     is_user_element = false;
     bool     is_focusable = false;
+    uint32_t focus_scope = 0;
     bool     pressed_down = false;
     bool     pressed_this_frame = false;
     bool     clicked_this_frame = false;
@@ -284,10 +285,6 @@ struct DrawCmdNode {
     ImageDrawDesc image_cmd = {};
 };
 
-struct ClaimedWindowSlot {
-    SDL_Window* window = nullptr;
-    bool        hit_test_attached = false;
-};
 
 SDL_HitTestResult SDLCALL etch_sdl_hit_test(SDL_Window* win, const SDL_Point* area, void* data) noexcept;
 
@@ -324,6 +321,7 @@ struct BoxExtra {
     DrawCmdNode*     draw_tail = nullptr;
     DrawCmdNode*     fg_draw_head = nullptr;
     DrawCmdNode*     fg_draw_tail = nullptr;
+    bool             keyboard_focus_ring = false;
     bool             is_virtual_list = false;
     bool             is_canvas = false;
 };
@@ -385,6 +383,7 @@ struct SpanHitRegion {
     uint32_t id = 0; // 0 marks a floating overlay blocker rect
     uint32_t clay_elem_id = 0;
     Rect     rect = {};
+    uint32_t paint_order = 0;
     int16_t  z_index = 0;
     Rect     clip_rect = {};
     bool     has_clip = false;
@@ -483,72 +482,41 @@ struct TableStackEntry {
     uint32_t cursor_row = 0; uint32_t end_row = 0; uint32_t col_cursor = 0;
     bool row_open = false; bool cell_open = false;
 };
-struct Context {
-    Arena         frame_arena = {};
-    void*         clay_mem = nullptr;
+struct ModalFocusScope { uint32_t id = 0; uint32_t restore = 0; uint32_t seen = 0; };
+
+struct WindowUiState {
+    ModalFocusScope modal_scopes[32] = {};
+    uint32_t modal_count = 0;
+    void* clay_mem = nullptr;
     Clay_Context* clay_ctx = nullptr;
-    StateMap      states = {};
-    FontAtlas     atlas = {};
-
-    Prim*         prims = nullptr;
-    uint32_t      max_prims = 0;
-    uint32_t      prim_count = 0;
-    DrawBatch     batches[kMaxBatches] = {};
-    uint32_t      batch_count = 0;
-    BlurSplit     blur_splits[kMaxBlurSplits] = {};
-    uint32_t      blur_split_count = 0;
-    bool          layer_has_bg_prims = false;
-
-    // GPU objects
-    SDL_GPUDevice*           device = nullptr;
-    SDL_Window*              window = nullptr;
-    ClaimedWindowSlot        claimed_windows[kMaxClaimedWindows] = {};
-    uint32_t                 claimed_window_count = 0;
-    bool                     owns_video_init = false;
-    bool                     headless = false;
-    SDL_GPUShader*           vs_shader = nullptr;
-    SDL_GPUShader*           ps_shader = nullptr;
-    SDL_GPUShader*           kawase_vs_shader = nullptr;
-    SDL_GPUShader*           kawase_ps_shader = nullptr;
-    SDL_GPUSampler*          linear_sampler = nullptr;
-    CachedPipeline           pipelines[kMaxCachedPipelines] = {};
-    uint32_t                 pipeline_count = 0;
-    SDL_GPUGraphicsPipeline* kawase_pipe = nullptr;
-    CachedPipeline           present_pipelines[kMaxCachedPipelines] = {};
-    uint32_t                 present_pipeline_count = 0;
-    SDL_GPUBuffer*           prim_gpu_buf = nullptr;
-    SDL_GPUTransferBuffer*   prim_transfer_buf = nullptr;
-    SDL_GPUTransferBuffer*   atlas_transfer_buf = nullptr;
-    SDL_GPUBuffer*           slug_curve_gpu_buf = nullptr;
-    uint32_t                 slug_curve_gpu_cap = 0;
-    SDL_GPUBuffer*           slug_band_gpu_buf = nullptr;
-    uint32_t                 slug_band_gpu_cap = 0;
-    SDL_GPUTransferBuffer*   slug_curve_tbuf = nullptr;
-    uint32_t                 slug_curve_tbuf_cap = 0;
-    SDL_GPUTransferBuffer*   slug_band_tbuf = nullptr;
-    uint32_t                 slug_band_tbuf_cap = 0;
-
-    // Offscreen scene + dual-Kawase pyramid textures (R8G8B8A8_UNORM_SRGB)
-    SDL_GPUTexture*          scene_tex = nullptr;
-    SDL_GPUTexture*          blur_half_tex = nullptr;
-    SDL_GPUTexture*          blur_quarter_tex = nullptr;
-    uint32_t                 blur_rt_w = 0;
-    uint32_t                 blur_rt_h = 0;
-
-    // Reusable offscreen target & readback buffer for render_headless_png
-    SDL_GPUTexture*          headless_tex = nullptr;
-    uint32_t                 headless_w = 0;
-    uint32_t                 headless_h = 0;
-    SDL_GPUTransferBuffer*   headless_dl_buf = nullptr;
-    uint32_t                 headless_dl_size = 0;
-
+    StateMap states = {};
+    SDL_GPUTexture* scene_tex = nullptr;
+    SDL_GPUTexture* blur_ping_tex = nullptr;
+    SDL_GPUTexture* blur_pong_tex = nullptr;
+    uint32_t blur_rt_w = 0;
+    uint32_t blur_rt_h = 0;
+    bool keyboard_focus_active = false;
+    uint32_t focus_scope = 0;
+    uint32_t focus_scopes[32] = {};
+    uint32_t focus_scope_depth = 0;
+    uint32_t modal_scope = 0;
+    bool modal_needs_focus = false;
+    bool os_dragging = false;
+    bool has_os_drop_pos = false;
+    Vec2 os_drop_pos = {};
+    Vec2 delivered_drop_pos = {};
+    bool has_delivered_drop_pos = false;
+    uint16_t pending_text_drop_offsets[kMaxDroppedFiles] = {};
+    uint16_t pending_text_drop_lengths[kMaxDroppedFiles] = {};
+    uint32_t pending_text_drop_count = 0;
+    Str frame_text_drops[kMaxDroppedFiles] = {};
+    uint32_t frame_text_drop_count = 0;
     // Per-frame & input tracking
     uint32_t   viewport_w = 1280u;
     uint32_t   viewport_h = 720u;
     float      dpi_scale = 1.0f;
     float      elapsed_seconds = 0.0f;
     uint32_t   frame_index = 0;
-    bool       in_frame = false;
 
     Vec2       event_pointer_pos = {-1.0f, -1.0f};
     bool       has_event_pointer = false;
@@ -585,11 +553,8 @@ struct Context {
     uint32_t    prev_focus_count = 0;
     int32_t     pending_tab_delta = 0;
     Cursor      desired_cursor = Cursor::Arrow;
-    Cursor      applied_cursor = Cursor::Arrow;
-    SDL_Cursor* system_cursors[kCursorCount] = {};
     uint32_t    redraw_budget = 2u;
     uint32_t    active_anim_count = 0u;
-    uint32_t    wake_event_type = 0u;
     float       sim_dt = 0.0f;
 
     DockSpaceSlot dock_spaces[kMaxDockSpaces] = {};
@@ -660,6 +625,8 @@ struct Context {
     uint32_t      caret_blink_cycles = 0;
 
     uint32_t      applied_font_revision = 0;
+    SpanHitRegion drop_hits[1024] = {};
+    uint32_t drop_hit_count = 0;
     SpanHitRegion span_hits[kMaxSpanHitsPerFrame] = {};
     uint32_t      span_hit_count = 0;
 
@@ -687,6 +654,75 @@ struct Context {
     uint32_t         drag_label_len = 0;
     char             drag_label[kMaxDragLabelBytes] = {};
 
+
+};
+
+struct ClaimedWindowSlot {
+    SDL_Window* window = nullptr;
+    bool hit_test_attached = false;
+    WindowUiState ui = {};
+};
+
+struct Context {
+    WindowUiState headless_ui = {};
+    WindowUiState* active_ui = nullptr;
+    SDL_Window* active_window = nullptr;
+    SDL_Window* draw_list_window = nullptr;
+    SDL_Window* mouse_capture_window = nullptr;
+    SDL_Window* ime_active_window = nullptr;
+    bool in_frame = false;
+    uint32_t wake_event_type = 0;
+    SDL_Cursor* system_cursors[kCursorCount] = {};
+    Cursor applied_cursor = Cursor::Arrow;
+
+    Arena         frame_arena = {};
+    FontAtlas     atlas = {};
+
+    Prim*         prims = nullptr;
+    uint32_t      max_prims = 0;
+    uint32_t      prim_count = 0;
+    DrawBatch     batches[kMaxBatches] = {};
+    uint32_t      batch_count = 0;
+    BlurSplit     blur_splits[kMaxBlurSplits] = {};
+    uint32_t      blur_split_count = 0;
+    bool          layer_has_bg_prims = false;
+
+    // GPU objects
+    SDL_GPUDevice*           device = nullptr;
+    SDL_Window*              window = nullptr;
+    ClaimedWindowSlot        claimed_windows[kMaxClaimedWindows] = {};
+    uint32_t                 claimed_window_count = 0;
+    bool                     owns_video_init = false;
+    bool                     headless = false;
+    SDL_GPUShader*           vs_shader = nullptr;
+    SDL_GPUShader*           ps_shader = nullptr;
+    SDL_GPUShader*           kawase_vs_shader = nullptr;
+    SDL_GPUShader*           kawase_ps_shader = nullptr;
+    SDL_GPUSampler*          linear_sampler = nullptr;
+    CachedPipeline           pipelines[kMaxCachedPipelines] = {};
+    uint32_t                 pipeline_count = 0;
+    SDL_GPUGraphicsPipeline* kawase_pipe = nullptr;
+    CachedPipeline           present_pipelines[kMaxCachedPipelines] = {};
+    uint32_t                 present_pipeline_count = 0;
+    SDL_GPUBuffer*           prim_gpu_buf = nullptr;
+    SDL_GPUTransferBuffer*   prim_transfer_buf = nullptr;
+    SDL_GPUTransferBuffer*   atlas_transfer_buf = nullptr;
+    SDL_GPUBuffer*           slug_curve_gpu_buf = nullptr;
+    uint32_t                 slug_curve_gpu_cap = 0;
+    SDL_GPUBuffer*           slug_band_gpu_buf = nullptr;
+    uint32_t                 slug_band_gpu_cap = 0;
+    SDL_GPUTransferBuffer*   slug_curve_tbuf = nullptr;
+    uint32_t                 slug_curve_tbuf_cap = 0;
+    SDL_GPUTransferBuffer*   slug_band_tbuf = nullptr;
+    uint32_t                 slug_band_tbuf_cap = 0;
+
+    // Reusable offscreen target & readback buffer for render_headless_png
+    SDL_GPUTexture*          headless_tex = nullptr;
+    uint32_t                 headless_w = 0;
+    uint32_t                 headless_h = 0;
+    SDL_GPUTransferBuffer*   headless_dl_buf = nullptr;
+    uint32_t                 headless_dl_size = 0;
+
     char*         clipboard_fallback = nullptr;
     uint32_t      clipboard_fallback_cap = 0;
 
@@ -697,6 +733,24 @@ struct Context {
 namespace {
 
 thread_local Context* g_current_context = nullptr;
+
+WindowUiState* window_ui(Context* ctx, SDL_Window* window) noexcept {
+    SDL_Window* target = window ? window : ctx->window;
+    for (uint32_t i = 0; i < kMaxClaimedWindows; ++i)
+        if (target && ctx->claimed_windows[i].window == target) return &ctx->claimed_windows[i].ui;
+    return window ? nullptr : &ctx->headless_ui;
+}
+const WindowUiState* window_ui(const Context* ctx, SDL_Window* window) noexcept {
+    return window_ui(const_cast<Context*>(ctx), window);
+}
+bool claim_window_swapchain(Context* ctx, SDL_Window* win) noexcept;
+
+bool focus_scope_contains(const WindowUiState& ui, uint32_t scope) noexcept {
+    if (ui.focus_scope == scope) return true;
+    for (uint32_t i = 0; i < ui.focus_scope_depth; ++i)
+        if (ui.focus_scopes[i] == scope) return true;
+    return false;
+}
 
 constexpr uint32_t hash_u32(uint32_t x) noexcept {
     x ^= x >> 16;
@@ -955,8 +1009,8 @@ Context* current_context() noexcept {
 
 void set_current_context(Context* ctx) noexcept {
     g_current_context = ctx;
-    if (ctx && ctx->clay_ctx) {
-        Clay_SetCurrentContext(ctx->clay_ctx);
+    if (ctx && ctx->active_ui->clay_ctx) {
+        Clay_SetCurrentContext(ctx->active_ui->clay_ctx);
     }
 }
 

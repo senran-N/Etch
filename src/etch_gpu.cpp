@@ -169,25 +169,25 @@ SDL_GPUGraphicsPipeline* get_or_create_kawase_pipeline(Context* ctx) noexcept {
 }
 
 void release_blur_targets(Context* ctx) noexcept {
-    if (ctx->scene_tex) {
-        SDL_ReleaseGPUTexture(ctx->device, ctx->scene_tex);
-        ctx->scene_tex = nullptr;
+    if (ctx->active_ui->scene_tex) {
+        SDL_ReleaseGPUTexture(ctx->device, ctx->active_ui->scene_tex);
+        ctx->active_ui->scene_tex = nullptr;
     }
-    if (ctx->blur_half_tex) {
-        SDL_ReleaseGPUTexture(ctx->device, ctx->blur_half_tex);
-        ctx->blur_half_tex = nullptr;
+    if (ctx->active_ui->blur_ping_tex) {
+        SDL_ReleaseGPUTexture(ctx->device, ctx->active_ui->blur_ping_tex);
+        ctx->active_ui->blur_ping_tex = nullptr;
     }
-    if (ctx->blur_quarter_tex) {
-        SDL_ReleaseGPUTexture(ctx->device, ctx->blur_quarter_tex);
-        ctx->blur_quarter_tex = nullptr;
+    if (ctx->active_ui->blur_pong_tex) {
+        SDL_ReleaseGPUTexture(ctx->device, ctx->active_ui->blur_pong_tex);
+        ctx->active_ui->blur_pong_tex = nullptr;
     }
-    ctx->blur_rt_w = 0u;
-    ctx->blur_rt_h = 0u;
+    ctx->active_ui->blur_rt_w = 0u;
+    ctx->active_ui->blur_rt_h = 0u;
 }
 
 bool ensure_blur_targets(Context* ctx, uint32_t width, uint32_t height) noexcept {
-    if (ctx->scene_tex && ctx->blur_half_tex && ctx->blur_quarter_tex &&
-        ctx->blur_rt_w == width && ctx->blur_rt_h == height)
+    if (ctx->active_ui->scene_tex && ctx->active_ui->blur_ping_tex && ctx->active_ui->blur_pong_tex &&
+        ctx->active_ui->blur_rt_w == width && ctx->active_ui->blur_rt_h == height)
     {
         return true;
     }
@@ -213,15 +213,15 @@ bool ensure_blur_targets(Context* ctx, uint32_t width, uint32_t height) noexcept
         return SDL_CreateGPUTexture(ctx->device, &info);
     };
 
-    ctx->scene_tex = make_rt(width, height);
-    ctx->blur_half_tex = make_rt(half_w, half_h);
-    ctx->blur_quarter_tex = make_rt(quarter_w, quarter_h);
-    if (!ctx->scene_tex || !ctx->blur_half_tex || !ctx->blur_quarter_tex) {
+    ctx->active_ui->scene_tex = make_rt(width, height);
+    ctx->active_ui->blur_ping_tex = make_rt(half_w, half_h);
+    ctx->active_ui->blur_pong_tex = make_rt(quarter_w, quarter_h);
+    if (!ctx->active_ui->scene_tex || !ctx->active_ui->blur_ping_tex || !ctx->active_ui->blur_pong_tex) {
         release_blur_targets(ctx);
         return false;
     }
-    ctx->blur_rt_w = width;
-    ctx->blur_rt_h = height;
+    ctx->active_ui->blur_rt_w = width;
+    ctx->active_ui->blur_rt_h = height;
     return true;
 }
 
@@ -375,7 +375,7 @@ void emit_uber_batches(
 
         auto resolve_tex = [&](SDL_GPUTexture* t) noexcept -> SDL_GPUTexture* {
             if (t == sentinel) {
-                return ctx->blur_half_tex ? ctx->blur_half_tex : ctx->atlas.gpu_tex;
+                return ctx->active_ui->blur_ping_tex ? ctx->active_ui->blur_ping_tex : ctx->atlas.gpu_tex;
             }
             return t ? t : ctx->atlas.gpu_tex;
         };
@@ -391,9 +391,9 @@ void emit_uber_batches(
         const GlobalsUniform globals = {
             .viewport_size = { static_cast<float>(target_w), static_cast<float>(target_h) },
             .inv_viewport_size = { inv_w, inv_h },
-            .dpi_scale = ctx->dpi_scale,
-            .time_seconds = ctx->elapsed_seconds,
-            .frame_index = ctx->frame_index,
+            .dpi_scale = ctx->active_ui->dpi_scale,
+            .time_seconds = ctx->active_ui->elapsed_seconds,
+            .frame_index = ctx->active_ui->frame_index,
             .flags = (batch.first_prim & 0x00FFFFFFu) | manual_srgb_bit,
         };
         SDL_PushGPUVertexUniformData(cmd, 0u, &globals, static_cast<Uint32>(sizeof(globals)));
@@ -492,25 +492,32 @@ bool claim_window_swapchain(Context* ctx, SDL_Window* win) noexcept {
     if (!ctx || !ctx->device || !win) {
         return false;
     }
-    for (uint32_t i = 0u; i < ctx->claimed_window_count; ++i) {
-        if (ctx->claimed_windows[i].window == win) {
-            ctx->window = win;
-            return true;
-        }
-    }
-    if (ctx->claimed_window_count >= kMaxClaimedWindows) {
-        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "claim_window_swapchain exceeded kMaxClaimedWindows (%u)", kMaxClaimedWindows);
-        return false;
+    for (uint32_t i = 0; i < kMaxClaimedWindows; ++i)
+        if (ctx->claimed_windows[i].window == win) return true;
+    if (ctx->claimed_window_count == kMaxClaimedWindows) return false;
+    uint32_t index = 0;
+    while (ctx->claimed_windows[index].window) ++index;
+    ClaimedWindowSlot& slot = ctx->claimed_windows[index];
+    WindowUiState& ui = slot.ui;
+    ui = WindowUiState{};
+    if (!state_map_init(&ui.states, kDefaultStateCapacity)) return false;
+    const uint32_t size = Clay_MinMemorySize();
+    ui.clay_mem = std::malloc(size);
+    if (!ui.clay_mem) { state_map_destroy(&ui.states); return false; }
+    Clay_Context* prev_clay = Clay_GetCurrentContext();
+    ui.clay_ctx = Clay_Initialize(Clay_CreateArenaWithCapacityAndMemory(size, ui.clay_mem),
+        Clay_Dimensions{1280, 720}, Clay_ErrorHandler{etch_clay_error_handler, ctx});
+    if (ui.clay_ctx) Clay_SetMeasureTextFunction(etch_measure_text, ctx);
+    Clay_SetCurrentContext(prev_clay);
+    if (!ui.clay_ctx) {
+        std::free(ui.clay_mem); state_map_destroy(&ui.states); ui = WindowUiState{}; return false;
     }
     if (!SDL_ClaimWindowForGPUDevice(ctx->device, win)) {
-        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "SDL_ClaimWindowForGPUDevice failed: %s", SDL_GetError());
-        return false;
+        std::free(ui.clay_mem); state_map_destroy(&ui.states); ui = WindowUiState{}; return false;
     }
-    ctx->claimed_windows[ctx->claimed_window_count++] = ClaimedWindowSlot{
-        .window = win,
-        .hit_test_attached = false,
-    };
-    ctx->window = win;
+    slot.window = win;
+    ++ctx->claimed_window_count;
+    if (!ctx->window) ctx->window = win;
 
     if (SDL_WindowSupportsGPUSwapchainComposition(
             ctx->device,
@@ -526,12 +533,8 @@ bool claim_window_swapchain(Context* ctx, SDL_Window* win) noexcept {
 
     const SDL_GPUTextureFormat swap_fmt = SDL_GetGPUSwapchainTextureFormat(ctx->device, win);
     get_or_create_pipeline(ctx, swap_fmt);
-    if (ctx->chrome_desc.enabled && !ctx->headless && ctx->claimed_window_count > 0u) {
-        ClaimedWindowSlot& slot = ctx->claimed_windows[ctx->claimed_window_count - 1u];
-        if (slot.window == win && SDL_SetWindowHitTest(win, etch_sdl_hit_test, ctx)) {
-            slot.hit_test_attached = true;
-        }
-    }
+    if (ui.chrome_desc.enabled && SDL_SetWindowHitTest(win, etch_sdl_hit_test, ctx))
+        slot.hit_test_attached = true;
     return true;
 }
 
@@ -699,7 +702,7 @@ bool record_frame_commands(
             if (!run_uber_render_pass(
                     ctx,
                     cmd,
-                    ctx->scene_tex,
+                    ctx->active_ui->scene_tex,
                     kBlurTexFormat,
                     target_w,
                     target_h,
@@ -719,7 +722,7 @@ bool record_frame_commands(
 
         if (!run_kawase_step(
                 ctx, cmd, kawase_pipe,
-                ctx->scene_tex, ctx->blur_half_tex, half_w, half_h,
+                ctx->active_ui->scene_tex, ctx->active_ui->blur_ping_tex, half_w, half_h,
                 1.0f / static_cast<float>(target_w), 1.0f / static_cast<float>(target_h),
                 off_down1, 0u))
         {
@@ -727,7 +730,7 @@ bool record_frame_commands(
         }
         if (!run_kawase_step(
                 ctx, cmd, kawase_pipe,
-                ctx->blur_half_tex, ctx->blur_quarter_tex, quarter_w, quarter_h,
+                ctx->active_ui->blur_ping_tex, ctx->active_ui->blur_pong_tex, quarter_w, quarter_h,
                 1.0f / static_cast<float>(half_w), 1.0f / static_cast<float>(half_h),
                 off_down2, 0u))
         {
@@ -735,7 +738,7 @@ bool record_frame_commands(
         }
         if (!run_kawase_step(
                 ctx, cmd, kawase_pipe,
-                ctx->blur_quarter_tex, ctx->blur_half_tex, half_w, half_h,
+                ctx->active_ui->blur_pong_tex, ctx->active_ui->blur_ping_tex, half_w, half_h,
                 1.0f / static_cast<float>(quarter_w), 1.0f / static_cast<float>(quarter_h),
                 off_up, 1u))
         {
@@ -747,7 +750,7 @@ bool record_frame_commands(
     if (target_srgb) {
         const SDL_GPUBlitInfo blit = {
             .source = {
-                .texture = ctx->scene_tex,
+                .texture = ctx->active_ui->scene_tex,
                 .mip_level = 0u,
                 .layer_or_depth_plane = 0u,
                 .x = 0u,
@@ -788,7 +791,7 @@ bool record_frame_commands(
     if (!run_uber_render_pass(
             ctx,
             cmd,
-            ctx->scene_tex,
+            ctx->active_ui->scene_tex,
             kBlurTexFormat,
             target_w,
             target_h,
@@ -802,7 +805,7 @@ bool record_frame_commands(
     }
     return run_kawase_step(
         ctx, cmd, present_pipe,
-        ctx->scene_tex, target_tex, target_w, target_h,
+        ctx->active_ui->scene_tex, target_tex, target_w, target_h,
         1.0f / static_cast<float>(target_w), 1.0f / static_cast<float>(target_h),
         0.0f, 2u);
 }
@@ -870,6 +873,7 @@ Context* create_context(const ContextDesc& desc) noexcept {
         return nullptr;
     }
 
+    ctx->active_ui = &ctx->headless_ui;
     ctx->headless = desc.headless;
     ctx->max_prims = (desc.max_prims_per_frame > 0u) ? desc.max_prims_per_frame : 65536u;
     if (ctx->max_prims > (1u << 20)) {
@@ -881,7 +885,7 @@ Context* create_context(const ContextDesc& desc) noexcept {
         return nullptr;
     }
 
-    if (!state_map_init(&ctx->states, kDefaultStateCapacity)) {
+    if (!state_map_init(&ctx->active_ui->states, kDefaultStateCapacity)) {
         destroy_context(ctx);
         return nullptr;
     }
@@ -899,22 +903,23 @@ Context* create_context(const ContextDesc& desc) noexcept {
 
     // Initialize Clay layout arena cleanly.
     const uint32_t clay_min = Clay_MinMemorySize();
-    ctx->clay_mem = std::malloc(clay_min);
-    if (!ctx->clay_mem) {
+    ctx->active_ui->clay_mem = std::malloc(clay_min);
+    if (!ctx->active_ui->clay_mem) {
         destroy_context(ctx);
         return nullptr;
     }
-    const Clay_Arena clay_arena = Clay_CreateArenaWithCapacityAndMemory(clay_min, ctx->clay_mem);
-    ctx->clay_ctx = Clay_Initialize(
+    const Clay_Arena clay_arena = Clay_CreateArenaWithCapacityAndMemory(clay_min, ctx->active_ui->clay_mem);
+    Clay_Context* prev_clay = Clay_GetCurrentContext();
+    ctx->active_ui->clay_ctx = Clay_Initialize(
         clay_arena,
         Clay_Dimensions{ 1280.0f, 720.0f },
         Clay_ErrorHandler{ etch_clay_error_handler, ctx });
-    if (!ctx->clay_ctx) {
+    if (ctx->active_ui->clay_ctx) Clay_SetMeasureTextFunction(etch_measure_text, ctx);
+    Clay_SetCurrentContext(prev_clay);
+    if (!ctx->active_ui->clay_ctx) {
         destroy_context(ctx);
         return nullptr;
     }
-    Clay_SetCurrentContext(ctx->clay_ctx);
-    Clay_SetMeasureTextFunction(etch_measure_text, ctx);
 
     // Initialize SDL3 GPU device (DXIL + SPIR-V).
     const SDL_GPUShaderFormat want_formats = SDL_GPU_SHADERFORMAT_DXIL | SDL_GPU_SHADERFORMAT_SPIRV;
@@ -1123,13 +1128,16 @@ Context* create_context(const ContextDesc& desc) noexcept {
         return nullptr;
     }
     if (desc.window) {
+        ctx->headless_ui.redraw_budget = 0;
+        ctx->active_ui = window_ui(ctx, desc.window);
+        ctx->active_window = desc.window;
         const float init_dpi = SDL_GetWindowDisplayScale(desc.window);
         if (init_dpi > 0.0f) {
-            ctx->dpi_scale = init_dpi;
+            ctx->active_ui->dpi_scale = init_dpi;
         }
     }
 
-    ctx->redraw_budget = 2u;
+    ctx->active_ui->redraw_budget = 2u;
     if (SDL_WasInit(SDL_INIT_EVENTS) || SDL_WasInit(SDL_INIT_VIDEO)) {
         ctx->wake_event_type = SDL_RegisterEvents(1);
     }
@@ -1144,18 +1152,15 @@ void destroy_context(Context* ctx) noexcept {
     }
     if (current_context() == ctx) {
         set_current_context(nullptr);
+        Clay_SetCurrentContext(nullptr);
     }
 
-    if (ctx->ime_input_started && !ctx->headless && ctx->window) {
-        SDL_ClearComposition(ctx->window);
-        SDL_SetTextInputArea(ctx->window, nullptr, 0);
-        SDL_StopTextInput(ctx->window);
-        ctx->ime_input_started = false;
-    }
-
+    ctx->in_frame = false;
+    if (ctx->device) SDL_WaitForGPUIdle(ctx->device);
+    for (uint32_t i = 0; i < kMaxClaimedWindows; ++i)
+        if (ctx->claimed_windows[i].window) release_window(ctx, ctx->claimed_windows[i].window);
+    ctx->active_ui = &ctx->headless_ui;
     if (ctx->device) {
-        SDL_WaitForGPUIdle(ctx->device);
-
         for (uint32_t i = 0u; i < ctx->pipeline_count; ++i) {
             if (ctx->pipelines[i].pipeline) {
                 SDL_ReleaseGPUGraphicsPipeline(ctx->device, ctx->pipelines[i].pipeline);
@@ -1183,27 +1188,13 @@ void destroy_context(Context* ctx) noexcept {
         release_blur_targets(ctx);
         if (ctx->headless_tex) SDL_ReleaseGPUTexture(ctx->device, ctx->headless_tex);
         if (ctx->headless_dl_buf) SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->headless_dl_buf);
-        for (uint32_t i = 0u; i < ctx->claimed_window_count; ++i) {
-            ClaimedWindowSlot& slot = ctx->claimed_windows[i];
-            if (slot.window) {
-                if (slot.hit_test_attached) {
-                    SDL_SetWindowHitTest(slot.window, nullptr, nullptr);
-                    slot.hit_test_attached = false;
-                }
-                SDL_ReleaseWindowFromGPUDevice(ctx->device, slot.window);
-                slot.window = nullptr;
-            }
-        }
-        ctx->claimed_window_count = 0u;
-        ctx->window = nullptr;
-
         SDL_DestroyGPUDevice(ctx->device);
         ctx->device = nullptr;
     }
 
-    if (ctx->mouse_captured) {
+    if (ctx->active_ui->mouse_captured) {
         SDL_CaptureMouse(false);
-        ctx->mouse_captured = false;
+        ctx->active_ui->mouse_captured = false;
     }
     for (uint32_t i = 0u; i < kCursorCount; ++i) {
         if (ctx->system_cursors[i]) {
@@ -1217,8 +1208,8 @@ void destroy_context(Context* ctx) noexcept {
     ctx->clipboard_fallback = nullptr;
     ctx->clipboard_fallback_cap = 0u;
     std::free(ctx->prims);
-    std::free(ctx->clay_mem);
-    state_map_destroy(&ctx->states);
+    std::free(ctx->active_ui->clay_mem);
+    state_map_destroy(&ctx->active_ui->states);
     arena_destroy(&ctx->frame_arena);
 
     if (ctx->owns_video_init) {
@@ -1231,7 +1222,8 @@ bool render_window(Context* ctx, Color clear_color, SDL_Window* window_override)
     if (!ctx || !ctx->device) {
         return false;
     }
-    SDL_Window* target_win = window_override ? window_override : ctx->window;
+    SDL_Window* target_win = window_override ? window_override : (ctx->draw_list_window ? ctx->draw_list_window : ctx->window);
+    if (ctx->in_frame || (ctx->draw_list_window && target_win != ctx->draw_list_window)) return false;
     if (!target_win || !claim_window_swapchain(ctx, target_win)) {
         return false;
     }
@@ -1484,43 +1476,36 @@ LoadedTexture upload_sdl_surface(Context* ctx, SDL_Surface* surf, bool srgb, con
 } // namespace
 
 void release_window(Context* ctx, SDL_Window* window) noexcept {
-    if (!ctx || !window) {
-        return;
-    }
-
-    for (uint32_t i = 0u; i < ctx->claimed_window_count; ++i) {
-        if (ctx->claimed_windows[i].window != window) {
-            continue;
+    if (!ctx || !window || ctx->in_frame) return;
+    for (uint32_t i = 0; i < kMaxClaimedWindows; ++i) {
+        ClaimedWindowSlot& slot = ctx->claimed_windows[i];
+        if (slot.window != window) continue;
+        if (ctx->ime_active_window == window) {
+            SDL_StopTextInput(window); ctx->ime_active_window = nullptr;
         }
-        if (ctx->window == window) {
-            if (ctx->ime_input_started && !ctx->headless) {
-                SDL_ClearComposition(window);
-                SDL_SetTextInputArea(window, nullptr, 0);
-                SDL_StopTextInput(window);
-                ctx->ime_input_started = false;
-            }
-            ctx->applied_ime_rect = SDL_Rect{-1, -1, 0, 0};
-            ctx->applied_ime_cursor = -1;
-            ctx->ime_comp_len = 0u;
-            ctx->ime_comp_utf8[0] = '\0';
-            ctx->ime_comp_cursor_byte = 0u;
-            ctx->ime_comp_sel_len_byte = 0u;
+        if (ctx->mouse_capture_window == window) {
+            SDL_CaptureMouse(false); ctx->mouse_capture_window = nullptr;
         }
-        if (ctx->claimed_windows[i].hit_test_attached) {
-            SDL_SetWindowHitTest(window, nullptr, nullptr);
-            ctx->claimed_windows[i].hit_test_attached = false;
-        }
-        if (ctx->device) {
-            SDL_ReleaseWindowFromGPUDevice(ctx->device, window);
-        }
-        for (uint32_t j = i + 1u; j < ctx->claimed_window_count; ++j) {
-            ctx->claimed_windows[j - 1u] = ctx->claimed_windows[j];
-        }
+        if (slot.hit_test_attached) SDL_SetWindowHitTest(window, nullptr, nullptr);
+        WindowUiState* saved = ctx->active_ui;
+        ctx->active_ui = &slot.ui;
+        release_blur_targets(ctx);
+        ctx->active_ui = saved == &slot.ui ? &ctx->headless_ui : saved;
+        std::free(slot.ui.clay_mem);
+        state_map_destroy(&slot.ui.states);
+        SDL_ReleaseWindowFromGPUDevice(ctx->device, window);
+        slot.window = nullptr;
+        slot.hit_test_attached = false;
+        slot.ui = WindowUiState{};
         --ctx->claimed_window_count;
-        ctx->claimed_windows[ctx->claimed_window_count] = {};
+        if (ctx->active_window == window) ctx->active_window = nullptr;
+        if (ctx->draw_list_window == window) ctx->draw_list_window = nullptr;
         if (ctx->window == window) {
-            ctx->window = (ctx->claimed_window_count > 0u) ? ctx->claimed_windows[0].window : nullptr;
+            ctx->window = nullptr;
+            for (uint32_t j = 0; j < kMaxClaimedWindows; ++j)
+                if (ctx->claimed_windows[j].window) { ctx->window = ctx->claimed_windows[j].window; break; }
         }
+        if (current_context() == ctx) Clay_SetCurrentContext(ctx->active_ui->clay_ctx);
         return;
     }
 }

@@ -1,5 +1,5 @@
-// Etch Studio 1.4 — Pure-GPU Render-Graph & 1M Telemetry Workbench.
-// Showcases Etch 1.4 capabilities (frameless window chrome, box-local draw_text,
+// Etch Studio 1.5 — Pure-GPU Render-Graph & 1M Telemetry Workbench.
+// Showcases Etch 1.5 capabilities (frameless window chrome, box-local draw_text,
 // native RGBA texture upload/update, zero-heap drag-drop, canvas marquee
 // multi-selection, RingArc & SVG Slug icons) in Orthodox C++20 with zero
 // per-frame heap allocations, 1-3 draw-call batching, and "--headless" checks.
@@ -12,6 +12,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+
 
 namespace {
 
@@ -78,6 +79,8 @@ struct StudioApp {
     etch::Context* ctx = nullptr;
     SDL_Window* window = nullptr;
     SDL_GPUTexture* preview_tex = nullptr;
+    SDL_Window* tear_off_window = nullptr;
+    bool rendering = false;
 
     GraphNode nodes[kMaxNodes] = {
         { "Camera HDR",     "RGBA16F Linear",   { 36.0f,  42.0f }, 196.0f, etch::Color::rgb_hex(0x38BDF8), UINT32_MAX, UINT32_MAX },
@@ -90,6 +93,7 @@ struct StudioApp {
         {},
     };
 
+    char drop_labels[kMaxNodes][128] = {};
     uint32_t node_count = kInitialNodes;
     uint32_t trace_sort_column = 0;
     uint32_t trace_first_row = 0;
@@ -297,6 +301,7 @@ bool upload_preview_texture(StudioApp* app, float bloom, float exposure, uint32_
         app->uploaded_bloom = bloom;
         app->uploaded_exposure = exposure;
         app->uploaded_preset = preset_idx;
+        if (app->tear_off_window) etch::request_window_redraw(app->ctx, app->tear_off_window);
     }
     return uploaded;
 }
@@ -494,6 +499,23 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
         etch::virtual_list_scroll_to_row(kTraceList, 999990u, kTraceRowHeight, etch::AlignY::Top);
     }
 
+    const etch::CanvasState drop_view = etch::canvas_state(kCanvas);
+    const etch::Rect drop_canvas = etch::element_bounds(kCanvas);
+    const etch::Vec2 drop_pos = etch::os_drop_pos();
+    const auto files = etch::dropped_files_on(kCanvas);
+    const auto texts = etch::dropped_texts_on(kCanvas);
+    for (uint32_t i = 0; i < files.size() + texts.size() && app->node_count < kMaxNodes; ++i) {
+        const etch::Str value = i < files.size() ? files[i] : texts[i - static_cast<uint32_t>(files.size())];
+        const uint32_t n = app->node_count++;
+        uint32_t len = value.length < 127 ? value.length : 127;
+        while (len < value.length && len && (static_cast<uint8_t>(value.chars[len]) & 0xC0u) == 0x80u) --len;
+        std::memcpy(app->drop_labels[n], value.chars, len);
+        app->drop_labels[n][len] = '\0';
+        app->nodes[n] = GraphNode{app->drop_labels[n], i < files.size() ? "External asset" : "Dropped note",
+            {(drop_pos.x - drop_canvas.x - drop_view.pan.x) / drop_view.zoom,
+             (drop_pos.y - drop_canvas.y - drop_view.pan.y) / drop_view.zoom},
+            210.0f, etch::Color::rgb_hex(0x34D399), UINT32_MAX, UINT32_MAX};
+    }
     const etch::CanvasState prev_cs = etch::canvas_state(kCanvas);
 
     const etch::Rect tb_bounds = etch::element_bounds(kToolbar);
@@ -563,18 +585,29 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
                         .color = etch::Color::white(),
                     });
                 }
-                etch::text(etch::str_lit("ETCH 1.4"), {
+                etch::text(etch::str_lit("ETCH 1.5"), {
                     .color = etch::Color::white(),
                     .font_size_px = 12.0f,
                     .wrap = false,
                 });
             }
 
-            etch::text(etch::str_lit("Etch Studio 1.4 — GPU Render-Graph & Telemetry"), {
+            etch::text(etch::str_lit("Etch Studio 1.5 — GPU Render-Graph & Telemetry"), {
                 .color = etch::Color::rgb_hex(0xE2E8F0),
                 .font_size_px = 14.0f,
                 .wrap = false,
             });
+            const uint32_t tear_id = etch::id("studio_tear_off");
+            if (etch::clicked(tear_id)) {
+                if (app->tear_off_window) {
+                    // Destruction occurs after the serialized main build ends.
+                    SDL_HideWindow(app->tear_off_window);
+                } else {
+                    app->tear_off_window = SDL_CreateWindow("Etch Studio 1.5 — Tear-Off Preview", 480, 360, SDL_WINDOW_RESIZABLE);
+                }
+            }
+            draw_button(tear_id, "Tear-Off Preview", etch::Color::rgb_hex(0x1E293B), etch::Color::rgb_hex(0x475569));
+
 
             char preset_btn_label[64] = {};
             std::snprintf(preset_btn_label, sizeof(preset_btn_label), "Preset: %s", kPresets[app->selected_preset].name);
@@ -1042,7 +1075,7 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
             }
             etch::text_spans({
                 etch::TextSpan{
-                    .text = etch::str_lit("v1.4 "),
+                    .text = etch::str_lit("v1.5 "),
                     .color = etch::Color::rgb_hex(0xF8FAFC),
                     .font_id = etch::kFontBold,
                 },
@@ -1223,7 +1256,7 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
             .background = etch::Color::rgb_hex(0x090D16),
             .minor_grid_color = etch::Color::rgba8(148, 163, 184, 34),
             .major_grid_color = etch::Color::rgba8(56, 189, 248, 30),
-            .border_color = etch::Color::rgba8(148, 163, 184, 44),
+            .border_color = etch::os_drag_hovering(kCanvas) ? etch::Color::rgb_hex(0x34D399) : etch::Color::rgba8(148, 163, 184, 44),
             .border_width = 1.0f,
             .radius = etch::Corners::all(10.0f),
             .show_grid = true,
@@ -1533,6 +1566,7 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
 
     // Floating Dual-Kawase Frosted-Glass Preset Popover (NO clip_children on floating element)
     if (app->preset_popover_open) {
+        etch::begin_focus_scope(kPresetPopover, true);
         ETCH_BOX({
             .id = kPresetPopover,
             .axis = etch::Axis::Col,
@@ -1583,6 +1617,7 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
                     .border_color = active_p ? kPresets[p].primary : etch::Color::rgba8(148, 163, 184, 34),
                     .border_width = 1.0f,
                     .radius = etch::Corners::all(7.0f),
+                    .focusable = true,
                 }) {
                     etch::text(etch::str_cstr(kPresets[p].name), {
                         .color = etch::Color::rgb_hex(0xF8FAFC),
@@ -1597,6 +1632,7 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
                 }
             }
         }
+        etch::end_focus_scope();
     }
 
     // Floating Right-Click Canvas Context Menu (Frame-0 clamp_to_viewport)
@@ -1679,6 +1715,7 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
 
     // Floating Ctrl+K Command Palette Overlay (Search with Undo/Redo + Frosted Glass)
     if (app->cmd_palette_open) {
+        etch::begin_focus_scope(kCmdPalette, true);
         ETCH_BOX({
             .id = kCmdPalette,
             .axis = etch::Axis::Col,
@@ -1755,6 +1792,7 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
                     .border_color = chov ? etch::Color::rgba8(45, 212, 191, 130) : etch::Color::rgba8(148, 163, 184, 28),
                     .border_width = 1.0f,
                     .radius = etch::Corners::all(6.0f),
+                    .focusable = true,
                 }) {
                     etch::text(etch::str_cstr(kPaletteCmds[c]), {
                         .color = etch::Color::rgb_hex(0xF8FAFC),
@@ -1764,6 +1802,7 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
                 }
             }
         }
+        etch::end_focus_scope();
     }
 }
 
@@ -1796,11 +1835,21 @@ void step_headless_frame(
     etch::end_frame(app->ctx);
 }
 
+void build_preview_ui(StudioApp* app) noexcept {
+    ETCH_BOX({.id = etch::id("tear_preview"), .width = etch::Sizing::grow(), .height = etch::Sizing::grow(), .background = etch::Color::rgb_hex(0x111827), .focusable = true}) {
+        etch::text(etch::str_lit("Etch Studio 1.5 — Preview"));
+        etch::image({.texture = app->preview_tex, .width = etch::Sizing::fixed(256), .height = etch::Sizing::fixed(256)});
+    }
+}
+
 void render_window_frame(StudioApp* app, float dt_seconds) noexcept {
+    if (app->rendering || etch::frame_in_progress(app->ctx)) return;
+    app->rendering = true;
     int px_w = 1440;
     int px_h = 900;
     SDL_GetWindowSizeInPixels(app->window, &px_w, &px_h);
     if (px_w <= 0 || px_h <= 0) {
+        app->rendering = false;
         return;
     }
 
@@ -1837,17 +1886,30 @@ void render_window_frame(StudioApp* app, float dt_seconds) noexcept {
     etch::end_frame(app->ctx);
 
     etch::render_window(app->ctx, etch::Color::rgb_hex(0x090C12));
+    if (app->tear_off_window) {
+        if (SDL_GetWindowFlags(app->tear_off_window) & SDL_WINDOW_HIDDEN) {
+            etch::release_window(app->ctx, app->tear_off_window);
+            SDL_DestroyWindow(app->tear_off_window); app->tear_off_window = nullptr;
+        } else if (etch::claimed_window_count(app->ctx) < 2 || etch::needs_window_redraw(app->ctx, app->tear_off_window)) {
+            etch::begin_window_frame(app->ctx, app->tear_off_window, dt_seconds);
+            build_preview_ui(app);
+            etch::end_window_frame(app->ctx);
+            etch::render_window(app->ctx, etch::Color::rgb_hex(0x090C12), app->tear_off_window);
+        }
+    }
+    app->rendering = false;
 }
 
 bool SDLCALL window_event_watch(void* userdata, SDL_Event* event) noexcept {
     StudioApp* app = static_cast<StudioApp*>(userdata);
-    if (!app || !event) {
+    if (!app || !event || etch::frame_in_progress(app->ctx) || !app->window || app->rendering) {
         return true;
     }
-    if (event->type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED ||
-        event->type == SDL_EVENT_WINDOW_EXPOSED)
+    if ((event->type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED ||
+         event->type == SDL_EVENT_WINDOW_EXPOSED) &&
+        event->window.windowID == SDL_GetWindowID(app->window))
     {
-        etch::request_redraw(app->ctx);
+        etch::request_window_redraw(app->ctx, app->window);
         render_window_frame(app, 0.0f);
     }
     return true;
@@ -2222,7 +2284,7 @@ int run_headless(const char* out_png_path) noexcept {
         step_headless_frame(&app, kW, kH, kDt);
     }
 
-    // [S9] Etch 1.4 Chrome Hit-Test, Box-Local draw_text, Palette->Canvas DND & Marquee Group Drag
+    // [S9] Etch 1.5 Chrome Hit-Test, Box-Local draw_text, Palette->Canvas DND & Marquee Group Drag
     const etch::Rect tb_r = etch::element_bounds(etch::id("studio_toolbar"));
     const etch::Rect pr_r = etch::element_bounds(etch::id("studio_btn_presets"));
     if (etch::evaluate_window_hit(ctx, etch::Vec2{2.0f, 2.0f}) != etch::WindowHit::ResizeTopLeft ||
@@ -2407,9 +2469,69 @@ int run_headless(const char* out_png_path) noexcept {
         return 1;
     }
 
+    // [S11] Exercise Studio's own palette, spatial canvas drops and preview UI.
+    app.preset_popover_open = false;
+    app.ctx_menu_open = false;
+    step_headless_frame(&app, kW, kH, kDt);
+    const uint32_t restore_focus = etch::id("studio_filter");
+    etch::request_focus(restore_focus);
+    app.cmd_palette_open = true;
+    step_headless_frame(&app, kW, kH, kDt);
+    bool s11_ok = etch::focused(etch::id("studio_cmd_input"));
+    // Ctrl+K is Studio's background palette toggle: the modal must block it.
+    step_headless_frame(&app, kW, kH, kDt, {-1,-1}, false, false, 0, etch::Mod_Primary, SDLK_K);
+    s11_ok &= app.cmd_palette_open && etch::focused(etch::id("studio_cmd_input"));
+    app.cmd_palette_open = false;
+    step_headless_frame(&app, kW, kH, kDt);
+    s11_ok &= etch::focused(restore_focus);
+    const etch::Rect drop_rect = etch::element_bounds(kCanvas);
+    const uint32_t before_drop = app.node_count;
+    const etch::Vec2 external_pos = {drop_rect.x + drop_rect.w * 0.5f, drop_rect.y + drop_rect.h * 0.5f};
+    etch::inject_os_drop_begin(ctx, external_pos);
+    step_headless_frame(&app, kW, kH, kDt);
+    etch::inject_drop_file(ctx, etch::str_lit("C:/assets/S11.svg"));
+    etch::inject_drop_text(ctx, etch::str_lit("S11 canvas note"));
+    step_headless_frame(&app, kW, kH, kDt);
+    s11_ok &= etch::os_drag_hovering(kCanvas) && app.node_count == before_drop;
+    etch::inject_os_drop_complete(ctx, external_pos);
+    step_headless_frame(&app, kW, kH, kDt);
+    s11_ok &= before_drop + 2 <= kMaxNodes && app.node_count == before_drop + 2;
+    if (app.node_count == before_drop + 2) {
+        s11_ok &= std::strcmp(app.nodes[before_drop].title, "C:/assets/S11.svg") == 0 &&
+            std::strcmp(app.nodes[before_drop].subtitle, "External asset") == 0 &&
+            std::strcmp(app.nodes[before_drop + 1].title, "S11 canvas note") == 0 &&
+            std::strcmp(app.nodes[before_drop + 1].subtitle, "Dropped note") == 0;
+    }
+    step_headless_frame(&app, kW, kH, kDt);
+    s11_ok &= app.node_count == before_drop + 2;
+    app.tear_off_window = SDL_CreateWindow("Etch Studio 1.5 — Tear-Off Preview", 480, 360, SDL_WINDOW_HIDDEN);
+    s11_ok &= app.tear_off_window != nullptr;
+    if (app.tear_off_window) {
+        etch::begin_window_frame(ctx, app.tear_off_window, kDt);
+        s11_ok &= etch::frame_in_progress(ctx) && etch::claimed_window_count(ctx) == 1;
+        build_preview_ui(&app);
+        etch::end_window_frame(ctx);
+        s11_ok &= etch::element_bounds(etch::id("tear_preview")).w > 0;
+        for (int f = 0; f < 3; ++f) {
+            etch::begin_window_frame(ctx, app.tear_off_window, kDt);
+            build_preview_ui(&app);
+            etch::end_window_frame(ctx);
+        }
+        s11_ok &= !etch::needs_window_redraw(ctx, app.tear_off_window);
+        etch::request_window_redraw(ctx, app.tear_off_window);
+        s11_ok &= etch::needs_window_redraw(ctx, app.tear_off_window);
+        etch::release_window(ctx, app.tear_off_window);
+        s11_ok &= etch::claimed_window_count(ctx) == 0;
+        SDL_DestroyWindow(app.tear_off_window);
+        app.tear_off_window = nullptr;
+    }
+    if (!s11_ok) {
+        std::fprintf(stderr, "Headless Studio [S11] failed: palette/drop/preview regression\n");
+        cleanup_release(); return 1;
+    }
     const char* driver = SDL_GetGPUDeviceDriver(etch::gpu_device(ctx));
     std::printf(
-        "Headless Studio OK (%s) -> %s (asserts=10/10, prims=%u, draw_calls=%u, blur_pass=%u, slug_glyphs=%u, grid=%u, wire=%u, layout_us=%.0f, vrows=[%u..%u))\n",
+        "Headless Studio OK (%s) -> %s (asserts=11/11, prims=%u, draw_calls=%u, blur_pass=%u, slug_glyphs=%u, grid=%u, wire=%u, layout_us=%.0f, vrows=[%u..%u))\n",
         driver ? driver : "unknown",
         out_png_path,
         final_stats.prim_count,
@@ -2433,7 +2555,7 @@ int run_interactive() noexcept {
     }
 
     SDL_Window* window = SDL_CreateWindow(
-        "Etch Studio 1.4 — GPU Render-Graph & 1M Trace Workbench",
+        "Etch Studio 1.5 — GPU Render-Graph & 1M Trace Workbench",
         1440,
         900,
         SDL_WINDOW_BORDERLESS | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
@@ -2478,7 +2600,10 @@ int run_interactive() noexcept {
                 etch::process_event(ctx, ev);
                 if (ev.type == SDL_EVENT_QUIT) {
                     app.running = false;
-                } else if (ev.type == SDL_EVENT_KEY_DOWN && ev.key.key == SDLK_ESCAPE) {
+                } else if (ev.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED) {
+                    if (app.tear_off_window && ev.window.windowID == SDL_GetWindowID(app.tear_off_window)) SDL_HideWindow(app.tear_off_window);
+                    else if (ev.window.windowID == SDL_GetWindowID(app.window)) app.running = false;
+                } else if (ev.type == SDL_EVENT_KEY_DOWN && ev.key.windowID == SDL_GetWindowID(app.window) && ev.key.key == SDLK_ESCAPE) {
                     if (was_dragging) {
                         etch::request_redraw(ctx);
                     } else if (app.cmd_palette_open) {
@@ -2518,6 +2643,7 @@ int run_interactive() noexcept {
     }
 
     SDL_RemoveEventWatch(window_event_watch, &app);
+    if (app.tear_off_window) { etch::release_window(ctx, app.tear_off_window); SDL_DestroyWindow(app.tear_off_window); }
 
     if (app.preview_tex) {
         etch::destroy_texture(ctx, app.preview_tex);

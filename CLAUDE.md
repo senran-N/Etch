@@ -22,8 +22,8 @@
 - **Layout**: `third_party/clay.h` (pure C single-header Flexbox layout).
 - **Text Pipeline**:
   - Phase 1 (v0.1–v0.3, retired): `third_party/stb_truetype.h` bitmap glyph atlas.
-  - Phase 2 (v0.6–v1.4, active): Multi-font slots (`kFontSans`/`kFontBold`/`kFontMono`/user slots), cluster-safe HarfBuzz OpenType shaping (`kern`/`liga`/`calt`) with automatic fallback chain, inline rich `text_spans` (`TextSpan`/`RichTextDesc`), SVG-to-Slug vector icons (`register_svg_icon` / `icon`), analytic `RingArc` & immediate box-local `draw_*` (`draw_text`/`draw_image`/`measure_text`), native RGBA/PNG/BMP GPU texture loader (`create_texture_rgba`/`load_texture_file`/`load_texture_memory`), frameless custom window chrome & multi-window swapchains (`claim_window_swapchain`/`set_window_chrome`), zero-heap drag-and-drop & canvas marquee multi-selection, pro desktop shortcuts/popover clamping/UTF-8 undo-redo, and Public Domain / MIT `Slug` quadratic Bezier GPU curve evaluation (`src/etch_slug.cpp`).
-- **Etch v1.4 workbench**: binary-split multi-tab `DockSpace`, resizable/sortable virtual `Table`, and collapsible hierarchical `Tree`, demonstrated by Etch Studio 1.4.
+  - Phase 2 (v0.6–v1.5, active): Multi-font slots (`kFontSans`/`kFontBold`/`kFontMono`/user slots), cluster-safe HarfBuzz OpenType shaping (`kern`/`liga`/`calt`) with automatic fallback chain, inline rich `text_spans` (`TextSpan`/`RichTextDesc`), SVG-to-Slug vector icons (`register_svg_icon` / `icon`), analytic `RingArc` & immediate box-local `draw_*` (`draw_text`/`draw_image`/`measure_text`), native RGBA/PNG/BMP GPU texture loader (`create_texture_rgba`/`load_texture_file`/`load_texture_memory`), frameless custom window chrome & multi-window swapchains (`claim_window_swapchain`/`set_window_chrome`), zero-heap drag-and-drop & canvas marquee multi-selection, pro desktop shortcuts/popover clamping/UTF-8 undo-redo, and Public Domain / MIT `Slug` quadratic Bezier GPU curve evaluation (`src/etch_slug.cpp`).
+- **Etch v1.5 workbench**: isolated multi-window UI frames, spatial OS file/text drop, modal focus scopes, keyboard focus rings, and system theme; binary-split multi-tab `DockSpace`, resizable/sortable virtual `Table`, and collapsible hierarchical `Tree`, demonstrated by Etch Studio 1.5.
 - **Memory & State**:
   - Frame temporaries: `etch::Arena` linear allocator, $O(1)$ reset at frame end.
   - Cross-frame state: flat hash table keyed by `uint32_t` semantic ID (focus, hover, scroll inertia, spring animation).
@@ -50,7 +50,7 @@ etch/
 │   └── etch_unity.cpp        # Unity build translation unit including all engine .cpp files
 └── examples/
     ├── sandbox.cpp           # Core interactive & "--headless" regression harness
-    └── etch_studio.cpp       # Etch Studio 1.4 flagship DockSpace, resizable/sortable Table, hierarchical Tree, render-graph, vector dials, custom chrome, DND & 1M workbench + "--headless"
+    └── etch_studio.cpp       # Etch Studio 1.5 flagship DockSpace, resizable/sortable Table, hierarchical Tree, render-graph, vector dials, custom chrome, DND & 1M workbench + "--headless"
 ```
 
 ---

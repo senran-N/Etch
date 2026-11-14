@@ -1105,7 +1105,9 @@ uint16_t load_font_file(
     }
     const bool loaded = try_load_font_file_into_slot(&ctx->atlas, target_slot, path, face_index);
     if (loaded) {
-        ctx->redraw_budget = 2u;
+        ctx->headless_ui.redraw_budget = 2u;
+        for (uint32_t i = 0; i < kMaxClaimedWindows; ++i)
+            if (ctx->claimed_windows[i].window) ctx->claimed_windows[i].ui.redraw_budget = 2u;
     }
     return loaded ? target_slot : kInvalidFont;
 }
@@ -1133,7 +1135,9 @@ uint16_t load_font_memory(
         (static_cast<uint64_t>(face_index) * 0x9E3779B97F4A7C15ULL);
     const bool loaded = init_font_slot_from_owned_bytes(&ctx->atlas, target_slot, copy, size_bytes, source_hash, face_index);
     if (loaded) {
-        ctx->redraw_budget = 2u;
+        ctx->headless_ui.redraw_budget = 2u;
+        for (uint32_t i = 0; i < kMaxClaimedWindows; ++i)
+            if (ctx->claimed_windows[i].window) ctx->claimed_windows[i].ui.redraw_budget = 2u;
     }
     return loaded ? target_slot : kInvalidFont;
 }
@@ -1536,7 +1540,9 @@ uint16_t register_svg_icon(
         .loaded = true,
         .has_outline = true,
     };
-    ctx->redraw_budget = 2u;
+    ctx->headless_ui.redraw_budget = 2u;
+        for (uint32_t i = 0; i < kMaxClaimedWindows; ++i)
+            if (ctx->claimed_windows[i].window) ctx->claimed_windows[i].ui.redraw_budget = 2u;
     return slot;
 }
 
