@@ -1,0 +1,1399 @@
+// Etch v0.3-A sandbox & "--headless" verification harness.
+// Strictly follows Orthodox C++20 (zero exceptions, RTTI, virtual trees, or hot-path heap containers).
+
+#include "etch.h"
+
+#include <SDL3/SDL.h>
+#include <SDL3/SDL_gpu.h>
+
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+
+namespace {
+
+inline constexpr uint32_t kOscWidth = 256u;
+inline constexpr uint32_t kOscHeight = 256u;
+
+struct AppState {
+    etch::Context*        ctx = nullptr;
+    SDL_Window*           window = nullptr;
+    SDL_GPUTexture*       osc_tex = nullptr;
+    uint32_t              click_count = 0u;
+    uint32_t              selected_preset = 0u;
+    uint32_t              submit_count = 0u;
+    bool                  toggle_on = false;
+    bool                  popover_open = false;
+    float                 last_toggle_t = 0.0f;
+    char                  single_buf[256] = "Etch 纯血 GPU";
+    char                  multi_buf[512] = "Line 1: 零拷贝 SDF 合批\nLine 2: Ctrl+C/V · 纯血 GPU 多行选区";
+    etch::TextInputResult single_res = {};
+    etch::TextInputResult multi_res = {};
+    bool                  running = true;
+};
+
+constexpr float clamp_f(float x, float lo, float hi) noexcept {
+    return (x < lo) ? lo : ((x > hi) ? hi : x);
+}
+
+inline uint8_t clamp_u8(float x) noexcept {
+    if (x <= 0.0f) return 0u;
+    if (x >= 255.0f) return 255u;
+    return static_cast<uint8_t>(x + 0.5f);
+}
+
+inline float smooth_line_cov(float dist_px, float half_thickness) noexcept {
+    const float edge = half_thickness + 0.90f;
+    if (dist_px >= edge) return 0.0f;
+    if (dist_px <= half_thickness - 0.90f) return 1.0f;
+    const float t = (edge - dist_px) / 1.80f;
+    return t * t * (3.0f - 2.0f * t);
+}
+
+SDL_GPUTexture* create_oscilloscope_texture(etch::Context* ctx) noexcept {
+    SDL_GPUDevice* dev = etch::gpu_device(ctx);
+    if (!dev) {
+        return nullptr;
+    }
+
+    const SDL_GPUTextureCreateInfo tex_info = {
+        .type = SDL_GPU_TEXTURETYPE_2D,
+        .format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB,
+        .usage = SDL_GPU_TEXTUREUSAGE_SAMPLER,
+        .width = kOscWidth,
+        .height = kOscHeight,
+        .layer_count_or_depth = 1u,
+        .num_levels = 1u,
+        .sample_count = SDL_GPU_SAMPLECOUNT_1,
+        .props = 0u,
+    };
+    SDL_GPUTexture* tex = SDL_CreateGPUTexture(dev, &tex_info);
+    if (!tex) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "SDL_CreateGPUTexture (osc) failed: %s", SDL_GetError());
+        return nullptr;
+    }
+
+    const uint32_t byte_size = kOscWidth * kOscHeight * 4u;
+    const SDL_GPUTransferBufferCreateInfo tbuf_info = {
+        .usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD,
+        .size = byte_size,
+        .props = 0u,
+    };
+    SDL_GPUTransferBuffer* tbuf = SDL_CreateGPUTransferBuffer(dev, &tbuf_info);
+    if (!tbuf) {
+        SDL_ReleaseGPUTexture(dev, tex);
+        return nullptr;
+    }
+
+    uint8_t* dst = static_cast<uint8_t*>(SDL_MapGPUTransferBuffer(dev, tbuf, false));
+    if (!dst) {
+        SDL_ReleaseGPUTransferBuffer(dev, tbuf);
+        SDL_ReleaseGPUTexture(dev, tex);
+        return nullptr;
+    }
+
+    constexpr float kTwoPi = 6.2831853f;
+    constexpr float kOmega = kTwoPi * 2.0f;
+    for (uint32_t py = 0u; py < kOscHeight; ++py) {
+        const float fy = static_cast<float>(py);
+        const float v = (fy + 0.5f) / static_cast<float>(kOscHeight);
+        for (uint32_t px = 0u; px < kOscWidth; ++px) {
+            const float fx = static_cast<float>(px);
+            const float u = (fx + 0.5f) / static_cast<float>(kOscWidth);
+
+            // Subtle blueprint radial background gradient
+            const float cx = u - 0.5f;
+            const float cy = v - 0.5f;
+            const float glow = 1.0f - std::sqrt(cx * cx + cy * cy) * 1.15f;
+            const float bg_scale = (glow > 0.0f) ? glow : 0.0f;
+            float r = 10.0f + 8.0f * bg_scale;
+            float g = 16.0f + 16.0f * bg_scale;
+            float b = 29.0f + 26.0f * bg_scale;
+
+            // Major & minor oscilloscope reticle grid
+            const bool major_x = (px % 64u) == 0u;
+            const bool major_y = (py % 64u) == 0u;
+            const bool minor_x = (px % 16u) == 0u;
+            const bool minor_y = (py % 16u) == 0u;
+            if (major_x || major_y) {
+                r += 24.0f;
+                g += 38.0f;
+                b += 58.0f;
+            } else if (minor_x || minor_y) {
+                r += 9.0f;
+                g += 15.0f;
+                b += 26.0f;
+            }
+
+            if ((py == kOscHeight / 2u && (px % 4u) < 2u) || (px == kOscWidth / 2u && (py % 4u) < 2u)) {
+                r += 22.0f;
+                g += 32.0f;
+                b += 48.0f;
+            }
+
+            // Dual continuous Euclidean-distance AA traces (no beading on steep slopes)
+            const float phase = u * kOmega;
+            const float env1 = std::exp(-cx * cx * 2.8f);
+            const float wave1 = 0.28f * std::sin(phase) + 0.09f * std::sin(phase * 3.0f + 0.6f);
+            const float dwave1 = (0.28f * kOmega * std::cos(phase) + 0.27f * kOmega * std::cos(phase * 3.0f + 0.6f)) * env1
+                               - wave1 * env1 * (5.6f * cx);
+            const float y1_px = (0.50f - wave1 * env1) * static_cast<float>(kOscHeight);
+            const float slope1 = -dwave1 * (static_cast<float>(kOscHeight) / static_cast<float>(kOscWidth));
+            const float dist1 = std::fabs(fy - y1_px) / std::sqrt(1.0f + slope1 * slope1);
+
+            const float env2 = std::exp(-cx * cx * 2.2f);
+            const float wave2 = 0.22f * std::cos(phase * 1.5f - 0.5f) - 0.08f * std::sin(phase * 4.0f);
+            const float dwave2 = (-0.33f * kOmega * std::sin(phase * 1.5f - 0.5f) - 0.32f * kOmega * std::cos(phase * 4.0f)) * env2
+                               - wave2 * env2 * (4.4f * cx);
+            const float y2_px = (0.50f - wave2 * env2) * static_cast<float>(kOscHeight);
+            const float slope2 = -dwave2 * (static_cast<float>(kOscHeight) / static_cast<float>(kOscWidth));
+            const float dist2 = std::fabs(fy - y2_px) / std::sqrt(1.0f + slope2 * slope2);
+
+            const float glow1 = std::exp(-dist1 * 0.24f) * 0.45f;
+            const float line1 = smooth_line_cov(dist1, 1.35f);
+            r = r * (1.0f - line1) + 56.0f * line1 + 24.0f * glow1;
+            g = g * (1.0f - line1) + 225.0f * line1 + 195.0f * glow1;
+            b = b * (1.0f - line1) + 255.0f * line1 + 235.0f * glow1;
+
+            const float glow2 = std::exp(-dist2 * 0.24f) * 0.40f;
+            const float line2 = smooth_line_cov(dist2, 1.25f);
+            r = r * (1.0f - line2) + 251.0f * line2 + 235.0f * glow2;
+            g = g * (1.0f - line2) + 146.0f * line2 + 120.0f * glow2;
+            b = b * (1.0f - line2) + 60.0f * line2 + 50.0f * glow2;
+
+            uint8_t* out = dst + (size_t(py) * kOscWidth + px) * 4u;
+            out[0] = clamp_u8(r);
+            out[1] = clamp_u8(g);
+            out[2] = clamp_u8(b);
+            out[3] = 255u;
+        }
+    }
+
+    SDL_UnmapGPUTransferBuffer(dev, tbuf);
+
+    SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(dev);
+    bool uploaded = false;
+    if (cmd) {
+        SDL_GPUCopyPass* copy_pass = SDL_BeginGPUCopyPass(cmd);
+        if (copy_pass) {
+            const SDL_GPUTextureTransferInfo src = {
+                .transfer_buffer = tbuf,
+                .offset = 0u,
+                .pixels_per_row = kOscWidth,
+                .rows_per_layer = kOscHeight,
+            };
+            const SDL_GPUTextureRegion region = {
+                .texture = tex,
+                .mip_level = 0u,
+                .layer = 0u,
+                .x = 0u,
+                .y = 0u,
+                .z = 0u,
+                .w = kOscWidth,
+                .h = kOscHeight,
+                .d = 1u,
+            };
+            SDL_UploadToGPUTexture(copy_pass, &src, &region, false);
+            SDL_EndGPUCopyPass(copy_pass);
+            SDL_GPUFence* fence = SDL_SubmitGPUCommandBufferAndAcquireFence(cmd);
+            if (fence) {
+                uploaded = SDL_WaitForGPUFences(dev, true, &fence, 1u);
+                SDL_ReleaseGPUFence(dev, fence);
+            }
+        } else {
+            SDL_CancelGPUCommandBuffer(cmd);
+        }
+    }
+
+    SDL_ReleaseGPUTransferBuffer(dev, tbuf);
+    if (!uploaded) {
+        SDL_ReleaseGPUTexture(dev, tex);
+        return nullptr;
+    }
+    return tex;
+}
+
+void build_sandbox_ui(AppState* app, const etch::FrameStats& prev_stats) noexcept {
+    using namespace etch;
+    if (!app) {
+        return;
+    }
+
+    const Color panel_bg     = Color::rgb_hex(0x131722);
+    const Color panel_border = Color::rgba8(148, 163, 184, 38);
+    const Color sub_surface  = Color::rgb_hex(0x1A2130);
+    const Color text_primary = Color::rgb_hex(0xF1F5F9);
+    const Color text_muted   = Color::rgb_hex(0x94A3B8);
+    const Color shadow_col   = Color::rgba8(0, 0, 0, 132);
+
+    const uint32_t single_id      = id("input_single");
+    const uint32_t multi_id       = id("input_multi");
+    const uint32_t btn_accent_id  = id("btn_accent");
+    const uint32_t btn_toggle_id  = id("btn_toggle");
+    const uint32_t btn_popover_id = id("btn_popover");
+    const uint32_t scroll_id      = id("scroll_list");
+
+    const bool accent_hov   = hovered(btn_accent_id);
+    const bool accent_focus = focused(btn_accent_id);
+    const bool toggle_hov   = hovered(btn_toggle_id);
+    const bool toggle_focus = focused(btn_toggle_id);
+    const bool pop_hov      = hovered(btn_popover_id);
+    const bool pop_focus    = focused(btn_popover_id);
+
+    if (accent_hov || toggle_hov || pop_hov) {
+        set_cursor(Cursor::Hand);
+    }
+
+    if (clicked(btn_accent_id)) {
+        ++app->click_count;
+    }
+    if (clicked(btn_toggle_id)) {
+        app->toggle_on = !app->toggle_on;
+    }
+    if (clicked(btn_popover_id)) {
+        app->popover_open = !app->popover_open;
+    }
+
+    const SpringSpec preset_spec = (app->selected_preset == 1u)
+        ? SpringSpec{ .response = 0.28f, .damping_ratio = 0.62f }
+        : ((app->selected_preset == 2u)
+            ? SpringSpec{ .response = 0.14f, .damping_ratio = 1.00f }
+            : SpringSpec{ .response = 0.22f, .damping_ratio = 0.72f });
+
+    const float accent_ring_t = spring(id("sp_accent_ring"), (accent_hov || accent_focus) ? 1.0f : 0.0f, { .response = 0.14f, .damping_ratio = 1.0f });
+    const float toggle_t = spring(id("sp_toggle"), app->toggle_on ? 1.0f : 0.0f, preset_spec);
+    app->last_toggle_t = toggle_t;
+
+    const Vec2 cur_scroll = scroll_offset(scroll_id);
+
+    // Root container
+    ETCH_BOX({
+        .id = id("root"),
+        .axis = Axis::Col,
+        .width = Sizing::grow(),
+        .height = Sizing::grow(),
+        .padding = Padding::all(24.0f),
+        .gap = 18.0f,
+    }) {
+        // 1. Header bar
+        ETCH_BOX({
+            .id = id("header"),
+            .axis = Axis::Row,
+            .width = Sizing::grow(),
+            .height = Sizing::fit(),
+            .padding = Padding::xy(18.0f, 13.0f),
+            .gap = 16.0f,
+            .align_y = AlignY::Center,
+            .background = panel_bg,
+            .border_color = panel_border,
+            .border_width = 1.0f,
+            .radius = Corners::all(14.0f),
+            .shadow_color = shadow_col,
+            .shadow_blur = 18.0f,
+            .shadow_offset = {0.0f, 6.0f},
+        }) {
+            ETCH_BOX({
+                .padding = Padding::xy(12.0f, 6.0f),
+                .align_x = AlignX::Center,
+                .align_y = AlignY::Center,
+                .background = Color::rgb_hex(0x2563EB),
+                .background_end = Color::rgb_hex(0x06B6D4),
+                .gradient_dir = {1.0f, 0.2f},
+                .radius = Corners::all(999.0f),
+            }) {
+                text("ETCH v0.3", {
+                    .color = Color::white(),
+                    .font_size_px = 13.0f,
+                    .letter_spacing = 0.4f,
+                    .wrap = false,
+                });
+            }
+
+            ETCH_BOX({
+                .axis = Axis::Col,
+                .width = Sizing::grow(),
+                .gap = 3.0f,
+            }) {
+                text("Etch Pure-GPU Interaction Heart (UTF-8 Text · IME · Springs · Scroll)", {
+                    .color = text_primary,
+                    .font_size_px = 19.0f,
+                    .wrap = false,
+                });
+                text("UTF-8 单/多行编辑 · 原生剪贴板 · 中文 IME 候选框追踪 · 阻尼弹簧 · 惯性滚动 · 0% 休眠", {
+                    .color = text_muted,
+                    .font_size_px = 13.0f,
+                    .wrap = false,
+                });
+            }
+
+            char hdr_stat[96] = {};
+            const char* sleep_tag = needs_redraw(app->ctx)
+                ? "ACTIVE"
+                : "IDLE 0% SLEEP";
+            std::snprintf(
+                hdr_stat,
+                sizeof(hdr_stat),
+                "%u Draw Call | %s",
+                prev_stats.draw_call_count > 0u ? prev_stats.draw_call_count : 1u,
+                sleep_tag);
+            ETCH_BOX({
+                .padding = Padding::xy(14.0f, 7.0f),
+                .align_x = AlignX::Center,
+                .align_y = AlignY::Center,
+                .background = sub_surface,
+                .border_color = Color::rgba8(52, 211, 153, 110),
+                .border_width = 1.0f,
+                .radius = Corners::all(999.0f),
+            }) {
+                text(hdr_stat, {
+                    .color = Color::rgb_hex(0x6EE7B7),
+                    .font_size_px = 12.5f,
+                    .wrap = false,
+                });
+            }
+        }
+
+        // 2. Main 2-column layout
+        ETCH_BOX({
+            .id = id("main_columns"),
+            .axis = Axis::Row,
+            .width = Sizing::grow(),
+            .height = Sizing::grow(),
+            .gap = 18.0f,
+        }) {
+            // Left column: Interaction + Text Input Card & Scrollable Inertial List
+            ETCH_BOX({
+                .id = id("left_col"),
+                .axis = Axis::Col,
+                .width = Sizing::grow(),
+                .height = Sizing::grow(),
+                .gap = 18.0f,
+            }) {
+                // Card 1: Text Core, IME, Springs & Floating Popover
+                ETCH_BOX({
+                    .id = id("card_controls"),
+                    .axis = Axis::Col,
+                    .width = Sizing::grow(),
+                    .height = Sizing::fit(),
+                    .padding = Padding::xy(20.0f, 16.0f),
+                    .gap = 10.0f,
+                    .background = panel_bg,
+                    .border_color = panel_border,
+                    .border_width = 1.0f,
+                    .radius = Corners::all(16.0f),
+                    .shadow_color = shadow_col,
+                    .shadow_blur = 20.0f,
+                    .shadow_offset = {0.0f, 7.0f},
+                }) {
+                    text("UTF-8 Text Core, Chinese IME, Springs & Popover", {
+                        .color = text_primary,
+                        .font_size_px = 16.5f,
+                        .wrap = false,
+                    });
+
+                    // Row 1: Single-line UTF-8 + IME input and status badge
+                    ETCH_BOX({
+                        .axis = Axis::Row,
+                        .width = Sizing::grow(),
+                        .height = Sizing::fit(),
+                        .gap = 10.0f,
+                        .align_y = AlignY::Center,
+                    }) {
+                        app->single_res = text_input({
+                            .id = single_id,
+                            .buffer = app->single_buf,
+                            .capacity = static_cast<uint32_t>(sizeof(app->single_buf)),
+                            .placeholder = "输入中文 / UTF-8 文本 · Ctrl+A/C/X/V...",
+                            .width = Sizing::grow(),
+                            .height = Sizing::fixed(36.0f),
+                            .padding = Padding::xy(12.0f, 8.0f),
+                            .font_size_px = 14.0f,
+                        });
+                        if (app->single_res.submitted) {
+                            ++app->submit_count;
+                        }
+
+                        char single_badge[48] = {};
+                        if (app->single_res.composing) {
+                            std::snprintf(single_badge, sizeof(single_badge), "IME Preedit");
+                        } else {
+                            std::snprintf(single_badge, sizeof(single_badge), "Submits: %u", app->submit_count);
+                        }
+                        ETCH_BOX({
+                            .padding = Padding::xy(12.0f, 8.0f),
+                            .align_x = AlignX::Center,
+                            .align_y = AlignY::Center,
+                            .background = app->single_res.composing
+                                ? Color::rgba8(251, 191, 36, 36)
+                                : sub_surface,
+                            .border_color = app->single_res.composing
+                                ? Color::rgba8(251, 191, 36, 175)
+                                : Color::rgba8(148, 163, 184, 70),
+                            .border_width = 1.0f,
+                            .radius = Corners::all(9.0f),
+                        }) {
+                            text(single_badge, {
+                                .color = app->single_res.composing
+                                    ? Color::rgb_hex(0xFDE68A)
+                                    : Color::rgb_hex(0x94A3B8),
+                                .font_size_px = 12.5f,
+                                .wrap = false,
+                            });
+                        }
+                    }
+
+                    // Row 2: Multiline UTF-8 text editor
+                    app->multi_res = text_input({
+                        .id = multi_id,
+                        .buffer = app->multi_buf,
+                        .capacity = static_cast<uint32_t>(sizeof(app->multi_buf)),
+                        .placeholder = "多行编辑 · Enter 换行 · Up/Down 跨行 · Ctrl+C/V...",
+                        .width = Sizing::grow(),
+                        .height = Sizing::fixed(58.0f),
+                        .padding = Padding::xy(12.0f, 8.0f),
+                        .font_size_px = 13.0f,
+                        .multiline = true,
+                    });
+
+                    // Analytic spring progress bar
+                    ETCH_BOX({
+                        .axis = Axis::Row,
+                        .width = Sizing::grow(),
+                        .height = Sizing::fit(),
+                        .gap = 12.0f,
+                        .align_y = AlignY::Center,
+                    }) {
+                        const float bar_ratio = clamp_f(0.08f + toggle_t * 0.88f, 0.04f, 0.99f);
+                        ETCH_BOX({
+                            .width = Sizing::grow(),
+                            .height = Sizing::fixed(16.0f),
+                            .padding = Padding::all(2.0f),
+                            .background = Color::rgb_hex(0x0B0F18),
+                            .border_color = panel_border,
+                            .border_width = 1.0f,
+                            .radius = Corners::all(999.0f),
+                        }) {
+                            box({
+                                .width = Sizing::percent(bar_ratio),
+                                .height = Sizing::grow(),
+                                .background = Color::rgb_hex(0x2563EB),
+                                .background_end = Color::rgb_hex(0x22D3EE),
+                                .gradient_dir = {1.0f, 0.0f},
+                                .radius = Corners::all(999.0f),
+                            });
+                        }
+
+                        char sp_txt[48] = {};
+                        std::snprintf(sp_txt, sizeof(sp_txt), "Spring t = %.2f", toggle_t);
+                        text(sp_txt, {
+                            .color = Color::rgb_hex(0x7DD3FC),
+                            .font_size_px = 12.5f,
+                            .wrap = false,
+                        });
+                    }
+
+                    // Row 3: Interactive controls + right-anchored Z=50 Popover
+                    ETCH_BOX({
+                        .axis = Axis::Row,
+                        .width = Sizing::grow(),
+                        .height = Sizing::fit(),
+                        .gap = 12.0f,
+                        .align_y = AlignY::Center,
+                    }) {
+                        // Focusable pill button
+                        char btn_label[64] = {};
+                        std::snprintf(btn_label, sizeof(btn_label), "Capture Pill · Clicks: %u", app->click_count);
+                        const Color accent_border = accent_focus
+                            ? Color::rgb_hex(0x38BDF8)
+                            : Color::lerp(Color::rgba8(255, 255, 255, 75), Color::rgb_hex(0x67E8F9), accent_ring_t);
+                        ETCH_BOX({
+                            .id = btn_accent_id,
+                            .padding = Padding::xy(16.0f, 9.5f),
+                            .align_x = AlignX::Center,
+                            .align_y = AlignY::Center,
+                            .background = accent_hov ? Color::rgb_hex(0x3B82F6) : Color::rgb_hex(0x2563EB),
+                            .background_end = accent_hov ? Color::rgb_hex(0x22D3EE) : Color::rgb_hex(0x7C3AED),
+                            .gradient_dir = {1.0f, 0.25f},
+                            .border_color = accent_border,
+                            .border_width = accent_focus ? 2.5f : 1.0f,
+                            .radius = Corners::all(999.0f),
+                            .shadow_color = Color::rgba8(56, 189, 248, accent_focus ? 140u : 70u),
+                            .shadow_blur = accent_focus ? 18.0f : 12.0f,
+                            .shadow_offset = {0.0f, 4.0f},
+                            .focusable = true,
+                        }) {
+                            text(btn_label, {
+                                .color = Color::white(),
+                                .font_size_px = 13.5f,
+                                .wrap = false,
+                            });
+                        }
+
+                        // Spring toggle switch
+                        const float knob_clamped = clamp_f(toggle_t, 0.0f, 1.0f);
+                        const Color track_bg = Color::lerp(Color::rgb_hex(0x273247), Color::rgb_hex(0x0284C7), knob_clamped);
+                        ETCH_BOX({
+                            .id = btn_toggle_id,
+                            .axis = Axis::Row,
+                            .width = Sizing::fixed(60.0f),
+                            .height = Sizing::fixed(30.0f),
+                            .padding = Padding{ .left = 4.0f + knob_clamped * 30.0f, .right = 4.0f, .top = 4.0f, .bottom = 4.0f },
+                            .align_y = AlignY::Center,
+                            .background = track_bg,
+                            .border_color = toggle_focus ? Color::rgb_hex(0x38BDF8) : Color::rgba8(255, 255, 255, 65),
+                            .border_width = toggle_focus ? 2.0f : 1.0f,
+                            .radius = Corners::all(999.0f),
+                            .focusable = true,
+                        }) {
+                            box({
+                                .width = Sizing::fixed(22.0f),
+                                .height = Sizing::fixed(22.0f),
+                                .background = Color::white(),
+                                .radius = Corners::all(11.0f),
+                                .shadow_color = Color::rgba8(0, 0, 0, 110),
+                                .shadow_blur = 6.0f,
+                            });
+                        }
+
+                        // Asymmetric badge
+                        ETCH_BOX({
+                            .padding = Padding::xy(11.0f, 7.5f),
+                            .background = Color::transparent(),
+                            .border_color = Color::rgb_hex(0xF472B6),
+                            .border_width = 1.5f,
+                            .radius = Corners{14.0f, 4.0f, 14.0f, 4.0f},
+                        }) {
+                            text("Tab + IME Focus", {
+                                .color = Color::rgb_hex(0xF9A8D4),
+                                .font_size_px = 12.0f,
+                                .wrap = false,
+                            });
+                        }
+
+                        // Right-aligned Floating Popover trigger + anchored Z-ordered menu
+                        ETCH_BOX({
+                            .width = Sizing::grow(),
+                            .align_x = AlignX::Right,
+                        }) {
+                            ETCH_BOX({
+                                .id = btn_popover_id,
+                                .padding = Padding::xy(14.0f, 9.0f),
+                                .align_x = AlignX::Center,
+                                .align_y = AlignY::Center,
+                                .background = app->popover_open ? Color::rgb_hex(0x1E293B) : sub_surface,
+                                .border_color = (pop_focus || app->popover_open)
+                                    ? Color::rgb_hex(0x38BDF8)
+                                    : Color::rgba8(148, 163, 184, 80),
+                                .border_width = pop_focus ? 2.0f : 1.0f,
+                                .radius = Corners::all(10.0f),
+                                .focusable = true,
+                            }) {
+                                text(app->popover_open ? "Spring Popover  ▲" : "Spring Popover  ▼", {
+                                    .color = Color::rgb_hex(0xE2E8F0),
+                                    .font_size_px = 13.0f,
+                                    .wrap = false,
+                                });
+
+                                if (app->popover_open) {
+                                    ETCH_BOX({
+                                        .id = id("popover_menu"),
+                                        .axis = Axis::Col,
+                                        .width = Sizing::fixed(244.0f),
+                                        .height = Sizing::fit(),
+                                        .padding = Padding::all(10.0f),
+                                        .gap = 5.0f,
+                                        .background = Color::rgb_hex(0x161D2E),
+                                        .border_color = Color::rgba8(56, 189, 248, 160),
+                                        .border_width = 1.0f,
+                                        .radius = Corners::all(12.0f),
+                                        .shadow_color = Color::rgba8(0, 0, 0, 190),
+                                        .shadow_blur = 26.0f,
+                                        .shadow_offset = {0.0f, 10.0f},
+                                        .attach_to = AttachTo::Parent,
+                                        .anchor_element = Anchor::TopRight,
+                                        .anchor_parent = Anchor::BottomRight,
+                                        .floating_offset = {-16.0f, 8.0f},
+                                        .z_index = 50,
+                                    }) {
+                                        text("Floating Z=50 Layer (Passthrough Guarded)", {
+                                            .color = Color::rgb_hex(0x7DD3FC),
+                                            .font_size_px = 11.5f,
+                                            .wrap = false,
+                                        });
+                                        const char* presets[3] = {
+                                            "Spring: Balanced (0.22s / 0.72)",
+                                            "Spring: Bouncy (0.28s / 0.62)",
+                                            "Spring: Critical (0.14s / 1.00)",
+                                        };
+                                        for (uint32_t pi = 0u; pi < 3u; ++pi) {
+                                            const uint32_t item_id = id_index(id("popover_item"), pi);
+                                            const bool item_hov = hovered(item_id);
+                                            const bool is_sel = (app->selected_preset == pi);
+                                            if (item_hov) {
+                                                set_cursor(Cursor::Hand);
+                                            }
+                                            if (clicked(item_id)) {
+                                                app->selected_preset = pi;
+                                                app->popover_open = false;
+                                            }
+                                            ETCH_BOX({
+                                                .id = item_id,
+                                                .width = Sizing::grow(),
+                                                .padding = Padding::xy(10.0f, 7.0f),
+                                                .background = item_hov
+                                                    ? Color::rgb_hex(0x2563EB)
+                                                    : (is_sel ? Color::rgba8(56, 189, 248, 38) : Color::transparent()),
+                                                .radius = Corners::all(7.0f),
+                                            }) {
+                                                text(presets[pi], {
+                                                    .color = item_hov ? Color::white() : (is_sel ? Color::rgb_hex(0xBAE6FD) : text_primary),
+                                                    .font_size_px = 12.5f,
+                                                    .wrap = false,
+                                                });
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Card 2: Inertial Scrollable Container (32 rows, SDF overlay scrollbar, rounded clipping, offscreen cull)
+                ETCH_BOX({
+                    .id = scroll_id,
+                    .axis = Axis::Col,
+                    .width = Sizing::grow(),
+                    .height = Sizing::grow(),
+                    .padding = Padding::all(0.0f),
+                    .gap = 0.0f,
+                    .background = panel_bg,
+                    .border_color = Color::rgba8(96, 165, 250, 125),
+                    .border_width = 1.5f,
+                    .radius = Corners::all(16.0f),
+                    .shadow_color = shadow_col,
+                    .shadow_blur = 20.0f,
+                    .shadow_offset = {0.0f, 6.0f},
+                    .scroll_y = true,
+                    .show_scrollbar = true,
+                }) {
+                    // Flush sharp-cornered banner inside scroll viewport (shaved by parent 16px rounded clip when at y=0)
+                    ETCH_BOX({
+                        .width = Sizing::grow(),
+                        .height = Sizing::fit(),
+                        .padding = Padding::xy(20.0f, 13.0f),
+                        .background = Color::rgb_hex(0x1D4ED8),
+                        .background_end = Color::rgb_hex(0x0284C7),
+                        .gradient_dir = {1.0f, 0.0f},
+                        .radius = Corners::all(0.0f),
+                    }) {
+                        text("Inertial Scroll Container (32 Rows · Wheel + Draggable Scrollbar + Offscreen Cull)", {
+                            .color = Color::white(),
+                            .font_size_px = 14.5f,
+                            .wrap = false,
+                        });
+                    }
+
+                    // Scrollable inner list wrapper
+                    ETCH_BOX({
+                        .axis = Axis::Col,
+                        .width = Sizing::grow(),
+                        .height = Sizing::fit(),
+                        .padding = Padding{ .left = 16.0f, .right = 24.0f, .top = 12.0f, .bottom = 14.0f },
+                        .gap = 8.0f,
+                    }) {
+                        for (uint32_t r = 0u; r < 32u; ++r) {
+                            const uint32_t row_id = id_index(id("scroll_row"), r);
+                            const bool row_hov = hovered(row_id);
+                            if (row_hov) {
+                                set_cursor(Cursor::Hand);
+                            }
+
+                            ETCH_BOX({
+                                .id = row_id,
+                                .axis = Axis::Row,
+                                .width = Sizing::grow(),
+                                .height = Sizing::fixed(40.0f),
+                                .padding = Padding::xy(14.0f, 0.0f),
+                                .gap = 12.0f,
+                                .align_y = AlignY::Center,
+                                .background = row_hov
+                                    ? Color::rgb_hex(0x1E293B)
+                                    : ((r & 1u) ? Color::rgb_hex(0x0F1420) : Color::rgb_hex(0x151B2B)),
+                                .border_color = row_hov ? Color::rgba8(56, 189, 248, 120) : Color::rgba8(148, 163, 184, 24),
+                                .border_width = 1.0f,
+                                .radius = Corners::all(9.0f),
+                            }) {
+                                char idx_buf[24] = {};
+                                std::snprintf(idx_buf, sizeof(idx_buf), "ITEM #%02u", r + 1u);
+                                ETCH_BOX({
+                                    .padding = Padding::xy(8.0f, 3.5f),
+                                    .background = Color::rgba8(37, 99, 235, 55),
+                                    .radius = Corners::all(6.0f),
+                                }) {
+                                    text(idx_buf, {
+                                        .color = Color::rgb_hex(0x93C5FD),
+                                        .font_size_px = 11.5f,
+                                        .wrap = false,
+                                    });
+                                }
+
+                                char desc_buf[96] = {};
+                                std::snprintf(
+                                    desc_buf,
+                                    sizeof(desc_buf),
+                                    "虚拟列表行 %02u · Offscreen Culled + SDF Rounded Clip",
+                                    r + 1u);
+                                ETCH_BOX({ .width = Sizing::grow() }) {
+                                    text(desc_buf, {
+                                        .color = text_primary,
+                                        .font_size_px = 13.0f,
+                                        .wrap = false,
+                                    });
+                                }
+
+                                char badge_buf[24] = {};
+                                std::snprintf(badge_buf, sizeof(badge_buf), "Batch 0");
+                                text(badge_buf, {
+                                    .color = Color::rgb_hex(0x34D399),
+                                    .font_size_px = 12.0f,
+                                    .wrap = false,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Right column: External SDL_GPUTexture* + v0.3-A Telemetry
+            ETCH_BOX({
+                .id = id("right_col"),
+                .axis = Axis::Col,
+                .width = Sizing::fixed(410.0f),
+                .height = Sizing::grow(),
+                .gap = 18.0f,
+            }) {
+                // Card 3: Zero-copy external GPU texture slot
+                ETCH_BOX({
+                    .id = id("card_texture"),
+                    .axis = Axis::Col,
+                    .width = Sizing::grow(),
+                    .height = Sizing::fit(),
+                    .padding = Padding::all(18.0f),
+                    .gap = 10.0f,
+                    .background = panel_bg,
+                    .border_color = panel_border,
+                    .border_width = 1.0f,
+                    .radius = Corners::all(16.0f),
+                    .shadow_color = shadow_col,
+                    .shadow_blur = 20.0f,
+                    .shadow_offset = {0.0f, 7.0f},
+                }) {
+                    text("Zero-Copy SDL_GPUTexture* Slot", {
+                        .color = text_primary,
+                        .font_size_px = 16.5f,
+                        .wrap = false,
+                    });
+                    text("外部 GPU 纹理直嵌圆角容器（槽位 1 · 连续斜率抗锯齿波形）", {
+                        .color = text_muted,
+                        .font_size_px = 12.5f,
+                        .wrap = false,
+                    });
+
+                    image({
+                        .id = id("osc_viewport"),
+                        .texture = app->osc_tex,
+                        .width = Sizing::grow(),
+                        .height = Sizing::fixed(220.0f),
+                        .radius = Corners::all(12.0f),
+                        .border_color = Color::rgba8(56, 189, 248, 120),
+                        .border_width = 1.0f,
+                    });
+                }
+
+                // Card 4: Live v0.3 Telemetry HUD
+                ETCH_BOX({
+                    .id = id("card_stats"),
+                    .axis = Axis::Col,
+                    .width = Sizing::grow(),
+                    .height = Sizing::grow(),
+                    .padding = Padding::all(18.0f),
+                    .gap = 7.0f,
+                    .background = panel_bg,
+                    .border_color = panel_border,
+                    .border_width = 1.0f,
+                    .radius = Corners::all(16.0f),
+                    .shadow_color = shadow_col,
+                    .shadow_blur = 18.0f,
+                    .shadow_offset = {0.0f, 6.0f},
+                }) {
+                    text("v0.3 Telemetry (文本核心 · IME · 裁剪休眠探针)", {
+                        .color = text_primary,
+                        .font_size_px = 15.5f,
+                        .wrap = false,
+                    });
+
+                    char line1[96] = {};
+                    std::snprintf(
+                        line1,
+                        sizeof(line1),
+                        "Draw Calls: %u  |  GPU Prims: %u (32-row culled list)",
+                        prev_stats.draw_call_count,
+                        prev_stats.prim_count);
+                    text(line1, { .color = Color::rgb_hex(0x38BDF8), .font_size_px = 12.5f, .wrap = false });
+
+                    char line2[96] = {};
+                    std::snprintf(
+                        line2,
+                        sizeof(line2),
+                        "Scroll Y: %.1f px  |  Focus ID: 0x%08X",
+                        cur_scroll.y,
+                        focused_id());
+                    text(line2, { .color = Color::rgb_hex(0xC084FC), .font_size_px = 12.5f, .wrap = false });
+
+                    char line3[96] = {};
+                    std::snprintf(
+                        line3,
+                        sizeof(line3),
+                        "Arena: %zu B  |  Layout: %.3f ms  |  Anims: %u",
+                        prev_stats.arena_used_bytes,
+                        prev_stats.layout_ms,
+                        prev_stats.active_animations);
+                    text(line3, { .color = Color::rgb_hex(0x34D399), .font_size_px = 12.5f, .wrap = false });
+
+                    const Rect tracked_ime = ime_cursor_rect(app->ctx);
+                    char line4[96] = {};
+                    std::snprintf(
+                        line4,
+                        sizeof(line4),
+                        "IME Rect: (%.0f, %.0f, %.0fx%.0f)  |  Composing: %s",
+                        tracked_ime.x,
+                        tracked_ime.y,
+                        tracked_ime.w,
+                        tracked_ime.h,
+                        app->single_res.composing ? "YES" : "NO");
+                    text(line4, { .color = Color::rgb_hex(0xFBBF24), .font_size_px = 12.5f, .wrap = false });
+
+                    char line5[96] = {};
+                    std::snprintf(
+                        line5,
+                        sizeof(line5),
+                        "Bytes/Caret: %u/%u B  |  Multi Sel: [%u, %u)",
+                        app->single_res.byte_length,
+                        app->single_res.cursor_byte,
+                        app->multi_res.selection_anchor_byte,
+                        app->multi_res.cursor_byte);
+                    text(line5, { .color = Color::rgb_hex(0x7DD3FC), .font_size_px = 12.5f, .wrap = false });
+
+                    text("UTF-8 Edit · Ctrl+A/C/X/V · 中文 IME 候选框追踪 · Tab", {
+                        .color = Color::rgb_hex(0x64748B),
+                        .font_size_px = 12.0f,
+                        .wrap = false,
+                    });
+                }
+            }
+        }
+    }
+}
+
+void step_headless_frame(AppState* app, uint32_t w, uint32_t h, float dt_seconds) noexcept {
+    const etch::FrameStats prev_stats = etch::frame_stats(app->ctx);
+    etch::begin_frame(app->ctx, etch::FrameDesc{
+        .viewport_w = w,
+        .viewport_h = h,
+        .dpi_scale = 1.0f,
+        .dt_seconds = dt_seconds,
+    });
+    build_sandbox_ui(app, prev_stats);
+    etch::end_frame(app->ctx);
+}
+
+void render_window_frame(AppState* app, float dt_seconds) noexcept {
+    if (!app || !app->ctx || !app->window) {
+        return;
+    }
+
+    int px_w = 1280;
+    int px_h = 800;
+    SDL_GetWindowSizeInPixels(app->window, &px_w, &px_h);
+    if (px_w <= 0 || px_h <= 0) {
+        return;
+    }
+
+    float dpi = SDL_GetWindowDisplayScale(app->window);
+    if (dpi <= 0.0f) {
+        dpi = 1.0f;
+    }
+
+    etch::Vec2 pointer = {-1.0f, -1.0f};
+    bool left_down = false;
+    const SDL_WindowFlags wflags = SDL_GetWindowFlags(app->window);
+    if ((wflags & SDL_WINDOW_MOUSE_FOCUS) != 0u || etch::active_id() != 0u) {
+        float mx = -1.0f;
+        float my = -1.0f;
+        const SDL_MouseButtonFlags mb = SDL_GetMouseState(&mx, &my);
+        float density = SDL_GetWindowPixelDensity(app->window);
+        if (density <= 0.0f) {
+            density = 1.0f;
+        }
+        const float pscale = density / dpi;
+        pointer = {mx * pscale, my * pscale};
+        left_down = (mb & SDL_BUTTON_LMASK) != 0u;
+    }
+
+    const etch::FrameStats prev_stats = etch::frame_stats(app->ctx);
+    etch::begin_frame(app->ctx, etch::FrameDesc{
+        .viewport_w = static_cast<uint32_t>(px_w),
+        .viewport_h = static_cast<uint32_t>(px_h),
+        .dpi_scale = dpi,
+        .dt_seconds = dt_seconds,
+        .pointer_pos = pointer,
+        .pointer_down = left_down,
+    });
+    build_sandbox_ui(app, prev_stats);
+    etch::end_frame(app->ctx);
+
+    etch::render_window(app->ctx, etch::Color::rgb_hex(0x0B0D12));
+}
+
+bool SDLCALL window_event_watch(void* userdata, SDL_Event* event) noexcept {
+    AppState* app = static_cast<AppState*>(userdata);
+    if (!app || !event) {
+        return true;
+    }
+    if (event->type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED ||
+        event->type == SDL_EVENT_WINDOW_EXPOSED)
+    {
+        etch::request_redraw(app->ctx);
+        render_window_frame(app, 0.0f);
+    }
+    return true;
+}
+
+int run_headless(const char* out_png_path) noexcept {
+    etch::Context* ctx = etch::create_context(etch::ContextDesc{
+        .headless = true,
+    });
+    if (!ctx) {
+        std::fprintf(stderr, "Etch headless error: create_context failed (%s)\n", SDL_GetError());
+        return 1;
+    }
+
+    SDL_GPUTexture* osc_tex = create_oscilloscope_texture(ctx);
+    if (!osc_tex) {
+        etch::destroy_context(ctx);
+        std::fprintf(stderr, "Etch headless error: create_oscilloscope_texture failed\n");
+        return 1;
+    }
+
+    AppState app = {
+        .ctx = ctx,
+        .osc_tex = osc_tex,
+    };
+    constexpr uint32_t kHeadlessW = 1280u;
+    constexpr uint32_t kHeadlessH = 800u;
+    constexpr float kStepDt = 1.0f / 60.0f;
+
+    const auto cleanup_release = [&]() noexcept {
+        SDL_GPUDevice* dev = etch::gpu_device(ctx);
+        if (dev) {
+            SDL_WaitForGPUIdle(dev);
+            SDL_ReleaseGPUTexture(dev, osc_tex);
+        }
+        etch::destroy_context(ctx);
+    };
+
+    const auto inject_key = [&](SDL_Keycode key, SDL_Keymod mod = 0u) noexcept {
+        SDL_Event ev = {};
+        ev.type = SDL_EVENT_KEY_DOWN;
+        ev.key.key = key;
+        ev.key.mod = mod;
+        etch::process_event(ctx, ev);
+    };
+    const auto inject_text = [&](const char* utf8) noexcept {
+        SDL_Event ev = {};
+        ev.type = SDL_EVENT_TEXT_INPUT;
+        ev.text.text = utf8;
+        etch::process_event(ctx, ev);
+    };
+    const auto inject_editing = [&](const char* utf8, int32_t start, int32_t length) noexcept {
+        SDL_Event ev = {};
+        ev.type = SDL_EVENT_TEXT_EDITING;
+        ev.edit.text = utf8;
+        ev.edit.start = start;
+        ev.edit.length = length;
+        etch::process_event(ctx, ev);
+    };
+
+    // 1. Idle Sleep Assertion: after 2 initial settle frames with no motion, needs_redraw() must be false.
+    step_headless_frame(&app, kHeadlessW, kHeadlessH, kStepDt);
+    step_headless_frame(&app, kHeadlessW, kHeadlessH, kStepDt);
+    if (etch::needs_redraw(ctx)) {
+        std::fprintf(stderr, "Headless assert [1] failed: expected needs_redraw() == false after idle settle\n");
+        cleanup_release();
+        return 1;
+    }
+
+    // 2. Analytic Spring Assertion: flip toggle_on = true, verify mid-flight & auto-wakeup, then settle to 1.0.
+    app.toggle_on = true;
+    for (int f = 0; f < 4; ++f) {
+        step_headless_frame(&app, kHeadlessW, kHeadlessH, kStepDt);
+    }
+    if (!etch::needs_redraw(ctx) || app.last_toggle_t <= 0.05f || app.last_toggle_t >= 0.98f) {
+        std::fprintf(
+            stderr,
+            "Headless assert [2a] failed: expected mid-flight spring (needs_redraw=%d, t=%.4f)\n",
+            etch::needs_redraw(ctx) ? 1 : 0,
+            app.last_toggle_t);
+        cleanup_release();
+        return 1;
+    }
+    for (int f = 0; f < 70; ++f) {
+        step_headless_frame(&app, kHeadlessW, kHeadlessH, kStepDt);
+    }
+    if (std::fabs(app.last_toggle_t - 1.0f) > 0.01f || etch::needs_redraw(ctx)) {
+        std::fprintf(
+            stderr,
+            "Headless assert [2b] failed: spring failed to converge to idle (t=%.4f, needs_redraw=%d)\n",
+            app.last_toggle_t,
+            etch::needs_redraw(ctx) ? 1 : 0);
+        cleanup_release();
+        return 1;
+    }
+
+    // 3. Tab & Shift+Tab Focus Traversal Assertion: input_single -> input_multi -> btn_accent -> input_multi -> input_single.
+    inject_key(SDLK_TAB);
+    step_headless_frame(&app, kHeadlessW, kHeadlessH, kStepDt);
+    if (etch::focused_id() != etch::id("input_single")) {
+        std::fprintf(stderr, "Headless assert [3a] failed: expected focus == input_single, got 0x%08X\n", etch::focused_id());
+        cleanup_release();
+        return 1;
+    }
+    inject_key(SDLK_TAB);
+    step_headless_frame(&app, kHeadlessW, kHeadlessH, kStepDt);
+    if (etch::focused_id() != etch::id("input_multi")) {
+        std::fprintf(stderr, "Headless assert [3b] failed: expected focus == input_multi, got 0x%08X\n", etch::focused_id());
+        cleanup_release();
+        return 1;
+    }
+    inject_key(SDLK_TAB);
+    step_headless_frame(&app, kHeadlessW, kHeadlessH, kStepDt);
+    if (etch::focused_id() != etch::id("btn_accent")) {
+        std::fprintf(stderr, "Headless assert [3c] failed: expected focus == btn_accent, got 0x%08X\n", etch::focused_id());
+        cleanup_release();
+        return 1;
+    }
+    inject_key(SDLK_TAB, SDL_KMOD_SHIFT);
+    step_headless_frame(&app, kHeadlessW, kHeadlessH, kStepDt);
+    if (etch::focused_id() != etch::id("input_multi")) {
+        std::fprintf(stderr, "Headless assert [3d] failed: expected Shift+Tab == input_multi, got 0x%08X\n", etch::focused_id());
+        cleanup_release();
+        return 1;
+    }
+    inject_key(SDLK_TAB, SDL_KMOD_SHIFT);
+    step_headless_frame(&app, kHeadlessW, kHeadlessH, kStepDt);
+    if (etch::focused_id() != etch::id("input_single")) {
+        std::fprintf(stderr, "Headless assert [3e] failed: expected Shift+Tab == input_single, got 0x%08X\n", etch::focused_id());
+        cleanup_release();
+        return 1;
+    }
+
+    // 4. UTF-8 4-byte & 3-byte Codepoint Atomic Backspace + Enter Submit Assertion.
+    const uint32_t base_len = static_cast<uint32_t>(std::strlen(app.single_buf)); // 15 B ("Etch 纯血 GPU")
+    inject_text("\xF0\x9F\x9A\x80"); // 4-byte emoji
+    step_headless_frame(&app, kHeadlessW, kHeadlessH, kStepDt);
+    if (app.single_res.byte_length != base_len + 4u || app.single_res.cursor_byte != base_len + 4u) {
+        std::fprintf(stderr, "Headless assert [4a] failed: 4-byte UTF-8 insert len=%u\n", app.single_res.byte_length);
+        cleanup_release();
+        return 1;
+    }
+    inject_key(SDLK_BACKSPACE);
+    step_headless_frame(&app, kHeadlessW, kHeadlessH, kStepDt);
+    if (app.single_res.byte_length != base_len || std::strcmp(app.single_buf, "Etch 纯血 GPU") != 0) {
+        std::fprintf(stderr, "Headless assert [4b] failed: 4-byte atomic backspace failed (%s)\n", app.single_buf);
+        cleanup_release();
+        return 1;
+    }
+    inject_text("\xE4\xB8\xAD"); // 3-byte CJK "中"
+    step_headless_frame(&app, kHeadlessW, kHeadlessH, kStepDt);
+    if (app.single_res.byte_length != base_len + 3u) {
+        std::fprintf(stderr, "Headless assert [4c] failed: 3-byte UTF-8 insert len=%u\n", app.single_res.byte_length);
+        cleanup_release();
+        return 1;
+    }
+    inject_key(SDLK_BACKSPACE);
+    inject_key(SDLK_RETURN);
+    step_headless_frame(&app, kHeadlessW, kHeadlessH, kStepDt);
+    if (!app.single_res.submitted || app.submit_count != 1u || std::strcmp(app.single_buf, "Etch 纯血 GPU") != 0) {
+        std::fprintf(
+            stderr,
+            "Headless assert [4d] failed: expected submit_count=1 & text restored (submits=%u, buf=%s)\n",
+            app.submit_count,
+            app.single_buf);
+        cleanup_release();
+        return 1;
+    }
+
+    // 5. Clipboard Roundtrip (Ctrl+A/C/X/V) + Multiline "纯血 GPU" Highlight Assertion.
+    inject_key(SDLK_A, SDL_KMOD_CTRL);
+    inject_key(SDLK_C, SDL_KMOD_CTRL);
+    inject_key(SDLK_X, SDL_KMOD_CTRL);
+    step_headless_frame(&app, kHeadlessW, kHeadlessH, kStepDt);
+    if (app.single_res.byte_length != 0u) {
+        std::fprintf(stderr, "Headless assert [5a] failed: expected Ctrl+A/X empty buffer, len=%u\n", app.single_res.byte_length);
+        cleanup_release();
+        return 1;
+    }
+    inject_key(SDLK_V, SDL_KMOD_CTRL);
+    step_headless_frame(&app, kHeadlessW, kHeadlessH, kStepDt);
+    if (std::strcmp(app.single_buf, "Etch 纯血 GPU") != 0) {
+        std::fprintf(stderr, "Headless assert [5b] failed: expected Ctrl+V restore 'Etch 纯血 GPU', got '%s'\n", app.single_buf);
+        cleanup_release();
+        return 1;
+    }
+
+    const char* target_tok = "\xE7\xBA\xAF\xE8\xA1\x80 GPU"; // "纯血 GPU"
+    const char* found_tok = std::strstr(app.multi_buf, target_tok);
+    if (!found_tok) {
+        std::fprintf(stderr, "Headless assert [5c] failed: missing target token in multi_buf\n");
+        cleanup_release();
+        return 1;
+    }
+    const uint32_t m_sel_a = static_cast<uint32_t>(found_tok - app.multi_buf);
+    const uint32_t m_sel_b = m_sel_a + static_cast<uint32_t>(std::strlen(target_tok));
+    etch::set_text_selection(etch::id("input_multi"), m_sel_a, m_sel_b);
+    inject_key(SDLK_TAB); // Focus input_multi to verify multiline selection copy roundtrip
+    step_headless_frame(&app, kHeadlessW, kHeadlessH, kStepDt);
+    inject_key(SDLK_C, SDL_KMOD_CTRL);
+    step_headless_frame(&app, kHeadlessW, kHeadlessH, kStepDt);
+    const etch::Str clip_check = etch::get_clipboard_text(etch::frame_arena(ctx));
+    if (clip_check.length != (m_sel_b - m_sel_a) || std::memcmp(clip_check.chars, target_tok, clip_check.length) != 0) {
+        std::fprintf(stderr, "Headless assert [5d] failed: multiline Ctrl+C mismatch (len=%u)\n", clip_check.length);
+        cleanup_release();
+        return 1;
+    }
+    inject_key(SDLK_TAB, SDL_KMOD_SHIFT); // Return focus to input_single, leaving muted selection on input_multi!
+    step_headless_frame(&app, kHeadlessW, kHeadlessH, kStepDt);
+    if (etch::focused_id() != etch::id("input_single") ||
+        app.multi_res.selection_anchor_byte != m_sel_a ||
+        app.multi_res.cursor_byte != m_sel_b)
+    {
+        std::fprintf(stderr, "Headless assert [5e] failed: expected muted selection preserved on input_multi\n");
+        cleanup_release();
+        return 1;
+    }
+
+    // 6. Chinese IME Preedit, ime_cursor_rect Tracking, Commit & Inline Active "nihao" Assertion.
+    inject_key(SDLK_END);
+    inject_text(" \xC2\xB7 "); // " · "
+    step_headless_frame(&app, kHeadlessW, kHeadlessH, kStepDt);
+    const etch::Rect ime_before = app.single_res.ime_cursor_rect;
+    if (ime_before.w <= 0.0f || ime_before.h <= 0.0f) {
+        std::fprintf(stderr, "Headless assert [6a] failed: expected valid initial ime_cursor_rect\n");
+        cleanup_release();
+        return 1;
+    }
+
+    inject_editing("zhongwen", 5, 3);
+    step_headless_frame(&app, kHeadlessW, kHeadlessH, kStepDt);
+    const etch::Rect ime_comp = app.single_res.ime_cursor_rect;
+    if (!app.single_res.composing || ime_comp.w <= ime_before.w || std::strcmp(app.single_buf, "Etch \xE7\xBA\xAF\xE8\xA1\x80 GPU \xC2\xB7 ") != 0) {
+        std::fprintf(stderr, "Headless assert [6b] failed: expected IME preedit expanded rect & uncommitted buffer\n");
+        cleanup_release();
+        return 1;
+    }
+
+    inject_text("\xE4\xB8\xAD\xE6\x96\x87\xE8\xBE\x93\xE5\x85\xA5"); // "中文输入"
+    step_headless_frame(&app, kHeadlessW, kHeadlessH, kStepDt);
+    const etch::Rect ime_after = app.single_res.ime_cursor_rect;
+    if (app.single_res.composing || !app.single_res.changed ||
+        std::strcmp(app.single_buf, "Etch \xE7\xBA\xAF\xE8\xA1\x80 GPU \xC2\xB7 \xE4\xB8\xAD\xE6\x96\x87\xE8\xBE\x93\xE5\x85\xA5") != 0 ||
+        ime_after.x <= ime_before.x)
+    {
+        std::fprintf(stderr, "Headless assert [6c] failed: expected IME commit + cursor rect advance (%.1f -> %.1f)\n", ime_before.x, ime_after.x);
+        cleanup_release();
+        return 1;
+    }
+
+    inject_editing("nihao", 2, 3);
+    step_headless_frame(&app, kHeadlessW, kHeadlessH, kStepDt);
+    if (!app.single_res.composing) {
+        std::fprintf(stderr, "Headless assert [6d] failed: expected active inline 'nihao' preedit\n");
+        cleanup_release();
+        return 1;
+    }
+
+    // 7. Inertial Wheel Scroll + Popover Open + Idle Sleep Settle Assertion.
+    const etch::Rect sb_bounds = etch::element_bounds(etch::id("scroll_list"));
+    if (sb_bounds.w <= 10.0f || sb_bounds.h <= 10.0f) {
+        std::fprintf(stderr, "Headless assert [7a] failed: invalid scroll_list bounds\n");
+        cleanup_release();
+        return 1;
+    }
+    SDL_Event wheel_ev = {};
+    wheel_ev.type = SDL_EVENT_MOUSE_WHEEL;
+    wheel_ev.wheel.y = -3.0f;
+    wheel_ev.wheel.direction = SDL_MOUSEWHEEL_NORMAL;
+    wheel_ev.wheel.mouse_x = sb_bounds.x + 0.5f * sb_bounds.w;
+    wheel_ev.wheel.mouse_y = sb_bounds.y + 0.5f * sb_bounds.h;
+    etch::process_event(ctx, wheel_ev);
+
+    for (int f = 0; f < 15; ++f) {
+        step_headless_frame(&app, kHeadlessW, kHeadlessH, kStepDt);
+    }
+    const uint32_t scroll_id = etch::id("scroll_list");
+    const etch::Vec2 mid_scroll = etch::scroll_offset(scroll_id);
+    if (mid_scroll.y <= 30.0f) {
+        std::fprintf(stderr, "Headless assert [7b] failed: expected inertial scroll > 30px, got %.2f\n", mid_scroll.y);
+        cleanup_release();
+        return 1;
+    }
+
+    app.popover_open = true;
+    app.selected_preset = 1u;
+    for (int f = 0; f < 90 && (f < 2 || etch::needs_redraw(ctx)); ++f) {
+        step_headless_frame(&app, kHeadlessW, kHeadlessH, kStepDt);
+    }
+    if (etch::needs_redraw(ctx) || !app.single_res.composing) {
+        std::fprintf(stderr, "Headless assert [7c] failed: expected idle settle with active IME preedit\n");
+        cleanup_release();
+        return 1;
+    }
+
+    const bool png_ok = etch::render_headless_png(
+        ctx,
+        kHeadlessW,
+        kHeadlessH,
+        out_png_path,
+        etch::Color::rgb_hex(0x0B0D12));
+
+    const etch::FrameStats final_stats = etch::frame_stats(ctx);
+    const etch::Vec2 final_scroll = etch::scroll_offset(scroll_id);
+    const bool stats_ok = (final_stats.draw_call_count == 1u) && final_stats.idle_sleeping;
+    const bool ok = png_ok && stats_ok;
+    std::printf(
+        "Headless %s -> %s (asserts=7/7, prims=%u, draw_calls=%u, layout_ms=%.3f, gpu_submit_ms=%.3f, arena_used=%zuB, scroll_y=%.1f, focus=0x%08X, idle=%d)\n",
+        ok ? "OK" : "FAILED",
+        out_png_path,
+        final_stats.prim_count,
+        final_stats.draw_call_count,
+        final_stats.layout_ms,
+        final_stats.gpu_submit_ms,
+        final_stats.arena_used_bytes,
+        final_scroll.y,
+        etch::focused_id(),
+        final_stats.idle_sleeping ? 1 : 0);
+
+    cleanup_release();
+    return ok ? 0 : 1;
+}
+
+int run_interactive() noexcept {
+    if (!SDL_Init(SDL_INIT_VIDEO)) {
+        std::fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
+        return 1;
+    }
+
+    SDL_Window* window = SDL_CreateWindow(
+        "Etch v0.3 — Pure-GPU Interaction Heart",
+        1280,
+        800,
+        SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
+    if (!window) {
+        std::fprintf(stderr, "SDL_CreateWindow failed: %s\n", SDL_GetError());
+        SDL_Quit();
+        return 1;
+    }
+
+    etch::Context* ctx = etch::create_context(etch::ContextDesc{
+        .window = window,
+    });
+    if (!ctx) {
+        std::fprintf(stderr, "etch::create_context failed\n");
+        SDL_DestroyWindow(window);
+        SDL_Quit();
+        return 1;
+    }
+
+    SDL_GPUTexture* osc_tex = create_oscilloscope_texture(ctx);
+    AppState app = {
+        .ctx = ctx,
+        .window = window,
+        .osc_tex = osc_tex,
+        .running = true,
+    };
+
+    SDL_AddEventWatch(window_event_watch, &app);
+    render_window_frame(&app, 0.0f);
+
+    Uint64 prev_ns = SDL_GetTicksNS();
+    while (app.running) {
+        SDL_Event ev;
+        if (etch::wait_events(ctx, &ev)) {
+            do {
+                etch::process_event(ctx, ev);
+                if (ev.type == SDL_EVENT_QUIT) {
+                    app.running = false;
+                } else if (ev.type == SDL_EVENT_KEY_DOWN && ev.key.key == SDLK_ESCAPE) {
+                    if (app.popover_open) {
+                        app.popover_open = false;
+                        etch::request_redraw(ctx);
+                    } else {
+                        app.running = false;
+                    }
+                }
+            } while (SDL_PollEvent(&ev));
+        }
+
+        if (!app.running) {
+            break;
+        }
+
+        if (etch::needs_redraw(ctx)) {
+            const Uint64 now_ns = SDL_GetTicksNS();
+            float dt = static_cast<float>(now_ns - prev_ns) * 1e-9f;
+            prev_ns = now_ns;
+            if (dt <= 0.0f || dt > 0.05f) {
+                dt = 1.0f / 60.0f;
+            }
+            render_window_frame(&app, dt);
+        } else {
+            prev_ns = SDL_GetTicksNS();
+        }
+    }
+
+    SDL_RemoveEventWatch(window_event_watch, &app);
+
+    SDL_GPUDevice* dev = etch::gpu_device(ctx);
+    if (dev && osc_tex) {
+        SDL_WaitForGPUIdle(dev);
+        SDL_ReleaseGPUTexture(dev, osc_tex);
+    }
+    etch::destroy_context(ctx);
+    SDL_DestroyWindow(window);
+    SDL_Quit();
+    return 0;
+}
+
+} // namespace
+
+int main(int argc, char** argv) {
+    bool headless = false;
+    const char* out_png = "frame_check.png";
+
+    for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--headless") == 0) {
+            headless = true;
+            if ((i + 1) < argc && argv[i + 1][0] != '-') {
+                out_png = argv[i + 1];
+                ++i;
+            }
+        }
+    }
+
+    if (headless) {
+        return run_headless(out_png);
+    }
+    return run_interactive();
+}

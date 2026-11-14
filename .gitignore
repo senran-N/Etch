@@ -1,0 +1,34 @@
+# Build directories & compiled binaries
+/build/
+/out/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+compile_commands.json
+*.obj
+*.o
+*.pdb
+*.ilk
+*.exp
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Local binary toolchains & SDK binaries (vendored headers stay tracked)
+/third_party/dxc/
+/third_party/SDL3/lib/
+/third_party/SDL3/cmake/
+/third_party/SDL3/share/
+/third_party/SDL3/docs/
+
+# Headless visual check outputs & FlowGuard local state
+/frame_check*.png
+/.flowguard/
+
+# IDE / OS metadata
+.vs/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
