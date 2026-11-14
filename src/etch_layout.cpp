@@ -117,6 +117,69 @@ constexpr float clamp_range(float v, float lo, float hi) noexcept {
     return (v < lo) ? lo : ((v > hi) ? hi : v);
 }
 
+constexpr double clamp_double(double v, double lo, double hi) noexcept {
+    return (v < lo) ? lo : ((v > hi) ? hi : v);
+}
+
+constexpr Padding scale_padding(const Padding& p, float scale) noexcept {
+    return Padding{
+        .left = p.left * scale,
+        .right = p.right * scale,
+        .top = p.top * scale,
+        .bottom = p.bottom * scale,
+    };
+}
+
+constexpr Corners scale_corners_uniform(const Corners& c, float scale) noexcept {
+    return Corners{
+        .tl = c.tl * scale,
+        .tr = c.tr * scale,
+        .br = c.br * scale,
+        .bl = c.bl * scale,
+    };
+}
+
+constexpr Sizing scale_sizing(const Sizing& s, float scale) noexcept {
+    return Sizing{
+        .kind = s.kind,
+        .value = (s.kind == SizingKind::Fixed) ? (s.value * scale) : s.value,
+        .min = s.min * scale,
+        .max = s.max * scale,
+    };
+}
+
+inline float current_world_scale(const Context* ctx) noexcept {
+    if (ctx && ctx->canvas_depth > 0u) {
+        const CanvasStackEntry& ce = ctx->canvas_stack[ctx->canvas_depth - 1u];
+        if (ce.in_node && ce.state.zoom > 1e-4f) {
+            return ce.state.zoom;
+        }
+    }
+    return 1.0f;
+}
+
+WidgetState* resolve_canvas_owner(Context* ctx, const Clay_ElementIdArray& over) noexcept {
+    if (!ctx) {
+        return nullptr;
+    }
+    for (int32_t i = over.length - 1; i >= 0; --i) {
+        WidgetState* ws = state_map_find(&ctx->states, over.internalArray[i].id);
+        if (!ws || !ws->is_user_element) {
+            continue;
+        }
+        if (ws->is_canvas && ws->canvas_interactive) {
+            return ws;
+        }
+        if (ws->owner_canvas_id != 0u) {
+            WidgetState* cws = state_map_find(&ctx->states, ws->owner_canvas_id);
+            if (cws && cws->is_canvas && cws->canvas_interactive) {
+                return cws;
+            }
+        }
+    }
+    return nullptr;
+}
+
 constexpr Clay_FloatingAttachPointType to_clay_attach_point(Anchor a) noexcept {
     switch (a) {
         case Anchor::TopLeft:      return CLAY_ATTACH_POINT_LEFT_TOP;
@@ -157,7 +220,8 @@ constexpr SDL_SystemCursor to_sdl_system_cursor(Cursor c) noexcept {
     return SDL_SYSTEM_CURSOR_DEFAULT;
 }
 
-inline constexpr uint32_t kScrollbarYTag = 0x53435259u;
+inline constexpr uint32_t kScrollbarYTag   = 0x53435259u;
+inline constexpr uint32_t kSplitDividerTag = 0x53504C54u;
 inline constexpr float    kSbMargin      = 4.0f;
 inline constexpr float    kSbHitWidth    = 12.0f;
 inline constexpr float    kSbThumbWidth  = 6.0f;
@@ -173,7 +237,22 @@ struct ScrollbarGeom {
 
 ScrollbarGeom compute_vscrollbar_geom(const WidgetState* ws) noexcept {
     ScrollbarGeom g = {};
-    if (!ws || !ws->is_scroll_y || ws->scroll_max.y <= 0.5f || ws->content_dim.y <= 0.5f) {
+    if (!ws || (!ws->is_scroll_y && !ws->is_virtual_list)) {
+        return g;
+    }
+    double scroll_y = 0.0;
+    double scroll_max_y = 0.0;
+    double content_h = 0.0;
+    if (ws->is_virtual_list) {
+        scroll_y = ws->vscroll_pos_y;
+        scroll_max_y = ws->vscroll_max_y;
+        content_h = ws->vscroll_total_h;
+    } else {
+        scroll_y = static_cast<double>(ws->scroll_pos.y);
+        scroll_max_y = static_cast<double>(ws->scroll_max.y);
+        content_h = static_cast<double>(ws->content_dim.y);
+    }
+    if (scroll_max_y <= 0.5 || content_h <= 0.5) {
         return g;
     }
     const Rect& b = ws->last_box_logical;
@@ -181,14 +260,16 @@ ScrollbarGeom compute_vscrollbar_geom(const WidgetState* ws) noexcept {
     if (b.w <= kSbHitWidth + 4.0f || track_h <= kSbMinThumbH) {
         return g;
     }
-    const float visible_ratio = (ws->viewport_dim.y < ws->content_dim.y)
-        ? (ws->viewport_dim.y / ws->content_dim.y)
-        : 1.0f;
-    float thumb_h = track_h * visible_ratio;
+    const double view_h = static_cast<double>(ws->viewport_dim.y);
+    const double visible_ratio = (view_h < content_h) ? (view_h / content_h) : 1.0;
+    float thumb_h = static_cast<float>(static_cast<double>(track_h) * visible_ratio);
     if (thumb_h < kSbMinThumbH) thumb_h = kSbMinThumbH;
     if (thumb_h > track_h) thumb_h = track_h;
     const float travel = track_h - thumb_h;
-    const float ratio = clamp_range(ws->scroll_pos.y / ws->scroll_max.y, 0.0f, 1.0f);
+    double r_d = (scroll_max_y > 0.0) ? (scroll_y / scroll_max_y) : 0.0;
+    if (r_d < 0.0) r_d = 0.0;
+    if (r_d > 1.0) r_d = 1.0;
+    const float ratio = static_cast<float>(r_d);
     const float thumb_x = b.x + b.w - kSbMargin - kSbThumbWidth;
     const float track_y = b.y + kSbMargin;
 
@@ -219,6 +300,30 @@ bool step_scroll_axis(float* pos, float* vel, float max_val, float decay, float 
     }
     if (std::fabs(*vel) <= 1.0f) {
         *vel = 0.0f;
+        return false;
+    }
+    return true;
+}
+
+bool step_scroll_axis_d(double* pos, double* vel, double max_val, double decay, double step_factor) noexcept {
+    if (!pos || !vel || std::fabs(*vel) <= 1.0) {
+        if (vel) *vel = 0.0;
+        return false;
+    }
+    *pos += (*vel) * step_factor;
+    *vel *= decay;
+    if (*pos <= 0.0) {
+        *pos = 0.0;
+        *vel = 0.0;
+        return false;
+    }
+    if (*pos >= max_val) {
+        *pos = max_val;
+        *vel = 0.0;
+        return false;
+    }
+    if (std::fabs(*vel) <= 1.0) {
+        *vel = 0.0;
         return false;
     }
     return true;
@@ -409,13 +514,21 @@ void measure_line_segment_x(
     if (out_total_w) *out_total_w = total_w;
 }
 
+constexpr float decode_clay_font_px(uint16_t font_size, uint16_t font_id) noexcept {
+    const uint32_t frac = (font_id >> 8) & 0xFFu;
+    if (font_size == 0u && frac == 0u) {
+        return 16.0f;
+    }
+    return static_cast<float>(font_size) + static_cast<float>(frac) * (1.0f / 256.0f);
+}
+
 Clay_Dimensions etch_measure_text(
     Clay_StringSlice text,
     Clay_TextElementConfig* config,
     void* user_data) noexcept
 {
     Context* ctx = static_cast<Context*>(user_data);
-    const float logical_font_px = (config && config->fontSize > 0u) ? static_cast<float>(config->fontSize) : 16.0f;
+    const float logical_font_px = config ? decode_clay_font_px(config->fontSize, config->fontId) : 16.0f;
     const float letter_spacing = config ? static_cast<float>(config->letterSpacing) : 0.0f;
     if (!text.chars || text.length <= 0) {
         return Clay_Dimensions{ .width = 0.0f, .height = logical_font_px };
@@ -574,6 +687,13 @@ bool begin_blur_layer(Context* ctx, Rect box_px, float radius_px) noexcept {
     return true;
 }
 
+void emit_canvas_grid_command(
+    Context* ctx,
+    const CanvasGridExtra* cg,
+    Rect box_px,
+    const ClipEntry& clip,
+    float dpi) noexcept;
+
 void emit_box_background_and_shadow(
     Context* ctx,
     const BoxExtra* extra,
@@ -620,52 +740,69 @@ void emit_box_background_and_shadow(
     const bool has_fill = (d.background.a > 0u) || has_grad;
     const bool any_clip = d.clip_children || d.scroll_x || d.scroll_y;
     const bool draw_border_here = !any_clip && d.border_width > 0.0f && d.border_color.a > 0u;
-    if (!has_fill && !draw_border_here && !use_blur) {
-        return;
+    if (has_fill || draw_border_here || use_blur) {
+        const Color border_col = draw_border_here ? d.border_color : Color{};
+        const float border_w = draw_border_here ? (d.border_width * dpi) : 0.0f;
+
+        if (use_blur) {
+            push_prim(
+                ctx,
+                Prim::make_blur_glass(
+                    box_px,
+                    clip.rect,
+                    d.background,
+                    rad_px,
+                    border_col,
+                    border_w,
+                    0u,
+                    clip.radius),
+                blur_tex_sentinel());
+        } else if (has_grad) {
+            push_prim(
+                ctx,
+                Prim::make_gradient_rect(
+                    box_px,
+                    clip.rect,
+                    d.background,
+                    d.background_end,
+                    d.gradient_dir,
+                    rad_px,
+                    border_col,
+                    border_w,
+                    clip.radius,
+                    d.radial_gradient));
+        } else {
+            push_prim(
+                ctx,
+                Prim::make_rect(
+                    box_px,
+                    clip.rect,
+                    d.background,
+                    rad_px,
+                    border_col,
+                    border_w,
+                    1.0f,
+                    clip.radius));
+        }
     }
 
-    const Color border_col = draw_border_here ? d.border_color : Color{};
-    const float border_w = draw_border_here ? (d.border_width * dpi) : 0.0f;
-
-    if (use_blur) {
-        push_prim(
+    if (extra->is_canvas && extra->canvas_grid && box_visible) {
+        const Rect canvas_clip_rect = rect_intersect(clip.rect, box_px);
+        float canvas_clip_r = min4f(rad_px.tl, rad_px.tr, rad_px.br, rad_px.bl);
+        if (canvas_clip_r <= 0.0f &&
+            canvas_clip_rect.x == clip.rect.x &&
+            canvas_clip_rect.y == clip.rect.y &&
+            canvas_clip_rect.w == clip.rect.w &&
+            canvas_clip_rect.h == clip.rect.h)
+        {
+            canvas_clip_r = clip.radius;
+        }
+        emit_canvas_grid_command(
             ctx,
-            Prim::make_blur_glass(
-                box_px,
-                clip.rect,
-                d.background,
-                rad_px,
-                border_col,
-                border_w,
-                0u,
-                clip.radius),
-            blur_tex_sentinel());
-    } else if (has_grad) {
-        push_prim(
-            ctx,
-            Prim::make_gradient_rect(
-                box_px,
-                clip.rect,
-                d.background,
-                d.background_end,
-                d.gradient_dir,
-                rad_px,
-                border_col,
-                border_w,
-                clip.radius,
-                d.radial_gradient));
-    } else {
-        push_prim(
-            ctx,
-            Prim::make_rect(
-                box_px,
-                clip.rect,
-                d.background,
-                rad_px,
-                border_col,
-                border_w,
-                1.0f,
-                clip.radius));
+            extra->canvas_grid,
+            box_px,
+            ClipEntry{ .rect = canvas_clip_rect, .radius = canvas_clip_r },
+            dpi);
     }
 }
 
@@ -717,7 +854,7 @@ void emit_text_command(
         return;
     }
 
-    const float logical_font_px = (td.fontSize > 0u) ? static_cast<float>(td.fontSize) : 16.0f;
+    const float logical_font_px = decode_clay_font_px(td.fontSize, td.fontId);
     const float phys_px = logical_font_px * dpi;
     const float scale = stbtt_ScaleForPixelHeight(&ctx->atlas.font_info, phys_px);
     const float ascender_px = static_cast<float>(ctx->atlas.font_ascent) * scale;
@@ -768,7 +905,7 @@ WidgetState* find_scrollbar_owner(Context* ctx, uint32_t thumb_active_id) noexce
     }
     for (uint32_t i = 0u; i < ctx->states.capacity; ++i) {
         WidgetState& ws = ctx->states.entries[i];
-        if (ws.key != 0u && ws.is_scroll_y && id_index(ws.key, kScrollbarYTag) == thumb_active_id) {
+        if (ws.key != 0u && (ws.is_scroll_y || ws.is_virtual_list) && id_index(ws.key, kScrollbarYTag) == thumb_active_id) {
             return &ws;
         }
     }
@@ -783,8 +920,140 @@ void apply_scrollbar_drag(WidgetState* ws, float pointer_y, float grab_offset) n
     if (sb.visible && sb.travel_h > 0.0f) {
         const float rel = (pointer_y - grab_offset) - sb.track.y;
         const float ratio = clamp_range(rel / sb.travel_h, 0.0f, 1.0f);
-        ws->scroll_pos.y = ratio * ws->scroll_max.y;
-        ws->scroll_vel.y = 0.0f;
+        if (ws->is_virtual_list) {
+            ws->vscroll_pos_y = static_cast<double>(ratio) * ws->vscroll_max_y;
+            ws->vscroll_vel_y = 0.0;
+        } else {
+            ws->scroll_pos.y = ratio * ws->scroll_max.y;
+            ws->scroll_vel.y = 0.0f;
+        }
+    }
+}
+
+void emit_canvas_grid_command(
+    Context* ctx,
+    const CanvasGridExtra* cg,
+    Rect box_px,
+    const ClipEntry& clip,
+    float dpi) noexcept
+{
+    if (!cg) {
+        return;
+    }
+    const float world_step = (cg->grid_step_world > 2.0f) ? cg->grid_step_world : 24.0f;
+    const uint32_t subdiv = (cg->major_subdiv >= 2u) ? cg->major_subdiv : 4u;
+    float minor_px = world_step * cg->zoom * dpi;
+    while (minor_px < 12.0f * dpi) {
+        minor_px *= static_cast<float>(subdiv);
+    }
+    while (minor_px > 64.0f * dpi) {
+        minor_px /= static_cast<float>(subdiv);
+    }
+    const float major_px = minor_px * static_cast<float>(subdiv);
+    const float fade_t = clamp_range((minor_px / dpi - 10.0f) / 14.0f, 0.25f, 1.0f);
+
+    const float ox = cg->pan.x * dpi;
+    const float oy = cg->pan.y * dpi;
+    const auto wrap_phase = [](float offset, float step) noexcept -> float {
+        float m = std::fmod(offset, step);
+        if (m < 0.0f) {
+            m += step;
+        }
+        return m;
+    };
+    const Vec2 phase_px = { wrap_phase(ox, major_px), wrap_phase(oy, major_px) };
+    const float dot_r = clamp_range(1.25f * dpi, 0.8f, 2.5f);
+
+    push_prim(
+        ctx,
+        Prim::make_canvas_grid(
+            box_px,
+            clip.rect,
+            phase_px,
+            minor_px,
+            major_px,
+            Vec2{ ox, oy },
+            cg->minor_color,
+            cg->major_color,
+            dot_r,
+            fade_t,
+            clip.radius));
+}
+
+void emit_canvas_wire_command(
+    Context* ctx,
+    const CanvasWireExtra* cw,
+    Clay_BoundingBox fallback_box_logical,
+    const ClipEntry& clip,
+    float dpi) noexcept
+{
+    if (!cw) {
+        return;
+    }
+    const WidgetState* cws = (cw->canvas_id != 0u) ? state_map_find(&ctx->states, cw->canvas_id) : nullptr;
+    const Vec2 pan = cws ? cws->canvas_pan : Vec2{};
+    const float zoom = (cws && cws->canvas_zoom > 1e-4f) ? cws->canvas_zoom : 1.0f;
+
+    Rect canvas_logical = {
+        fallback_box_logical.x,
+        fallback_box_logical.y,
+        fallback_box_logical.width,
+        fallback_box_logical.height,
+    };
+    if (cw->canvas_id != 0u) {
+        const Clay_ElementData ed = Clay_GetElementData(make_clay_id(cw->canvas_id));
+        if (ed.found) {
+            canvas_logical = Rect{ ed.boundingBox.x, ed.boundingBox.y, ed.boundingBox.width, ed.boundingBox.height };
+        }
+    }
+
+    const Vec2 p0_px = (Vec2{ canvas_logical.x, canvas_logical.y } + pan + cw->from_world * zoom) * dpi;
+    const Vec2 p1_px = (Vec2{ canvas_logical.x, canvas_logical.y } + pan + cw->to_world * zoom) * dpi;
+    const float dx = std::fabs(p1_px.x - p0_px.x);
+    const float dy = std::fabs(p1_px.y - p0_px.y);
+    const float handle = clamp_range(
+        ((dx > 40.0f * dpi) ? dx : (dy * 0.55f + 40.0f * dpi)) * cw->tangent_bias,
+        24.0f * dpi,
+        260.0f * dpi);
+    const Vec2 mid_px = (p0_px + p1_px) * 0.5f;
+    const Vec2 q0_ctrl = { p0_px.x + handle, p0_px.y };
+    const Vec2 q1_ctrl = { p1_px.x - handle, p1_px.y };
+    const Color c_mid = Color::lerp(cw->color_start, cw->color_end, 0.5f);
+    const float half_w_px = 0.5f * ((cw->thickness_world * zoom > 0.75f) ? (cw->thickness_world * zoom) : 0.75f) * dpi;
+    const float glow_px = cw->glow_world * zoom * dpi;
+
+    push_prim(
+        ctx,
+        Prim::make_bezier_wire(
+            p0_px, q0_ctrl, mid_px, clip.rect, cw->color_start, c_mid, half_w_px, cw->glow_color, glow_px, clip.radius));
+    push_prim(
+        ctx,
+        Prim::make_bezier_wire(
+            mid_px, q1_ctrl, p1_px, clip.rect, c_mid, cw->color_end, half_w_px, cw->glow_color, glow_px, clip.radius));
+}
+
+void emit_direct_text_px(
+    Context* ctx,
+    const char* s,
+    float x_logical,
+    float y_logical,
+    float font_px,
+    Color tint,
+    const ClipEntry& clip,
+    float dpi) noexcept
+{
+    if (!ctx || !ctx->atlas.font_valid || !s || s[0] == '\0') {
+        return;
+    }
+    const float phys_px = font_px * dpi;
+    const float scale_px = stbtt_ScaleForPixelHeight(&ctx->atlas.font_info, phys_px);
+    const float ascender_px = static_cast<float>(ctx->atlas.font_ascent) * scale_px;
+    float pen_x = x_logical * dpi;
+    const float base_y = y_logical * dpi + ascender_px;
+    const std::span<const ShapedGlyph> glyphs = shape_utf8_run(ctx, s, static_cast<uint32_t>(std::strlen(s)));
+    for (const ShapedGlyph& g : glyphs) {
+        emit_slug_glyph_quad(ctx, g.glyph_id, scale_px, pen_x, base_y, g.x_offset_em, g.y_offset_em, clip, tint);
+        pen_x += g.x_advance_em * scale_px;
     }
 }
 
@@ -1949,6 +2218,11 @@ void process_event(Context* ctx, const SDL_Event& event) noexcept {
                     ctx->caret_blink_cycles = 0u;
                 }
                 request_redraw(ctx);
+            } else if (event.button.button == SDL_BUTTON_MIDDLE || event.button.button == SDL_BUTTON_RIGHT) {
+                ctx->event_pointer_pos = window_to_logical_pos(ctx, event.button.x, event.button.y);
+                ctx->has_event_pointer = true;
+                ctx->event_pan_button_down = (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN);
+                request_redraw(ctx);
             }
             break;
         case SDL_EVENT_MOUSE_WHEEL: {
@@ -2005,6 +2279,19 @@ void process_event(Context* ctx, const SDL_Event& event) noexcept {
             break;
         }
         case SDL_EVENT_KEY_DOWN:
+            if (event.key.key == SDLK_F12 && !event.key.repeat) {
+                ctx->debug_hud_open = !ctx->debug_hud_open;
+                request_redraw(ctx);
+                break;
+            }
+            if (event.key.key == SDLK_F11 && !event.key.repeat && ctx->debug_hud_open) {
+                ctx->debug_wireframe_open = !ctx->debug_wireframe_open;
+                request_redraw(ctx);
+                break;
+            }
+            if (event.key.key == SDLK_SPACE) {
+                ctx->space_down = true;
+            }
             ctx->caret_blink_on = true;
             ctx->caret_blink_cycles = 0u;
             if (ctx->ime_comp_len > 0u) {
@@ -2031,6 +2318,9 @@ void process_event(Context* ctx, const SDL_Event& event) noexcept {
             request_redraw(ctx);
             break;
         case SDL_EVENT_KEY_UP:
+            if (event.key.key == SDLK_SPACE) {
+                ctx->space_down = false;
+            }
             request_redraw(ctx);
             break;
         case SDL_EVENT_WINDOW_MOUSE_LEAVE:
@@ -2042,6 +2332,9 @@ void process_event(Context* ctx, const SDL_Event& event) noexcept {
             break;
         case SDL_EVENT_WINDOW_FOCUS_LOST:
             ctx->event_pointer_down = false;
+            ctx->event_pan_button_down = false;
+            ctx->pan_canvas_id = 0u;
+            ctx->space_down = false;
             ctx->active_id = 0u;
             clear_ime_composition(ctx);
             if (ctx->mouse_captured) {
@@ -2131,6 +2424,10 @@ void begin_frame(Context* ctx, const FrameDesc& desc) noexcept {
     ctx->batch_count = 0u;
     ctx->blur_split_count = 0u;
     ctx->layer_has_bg_prims = true;
+    ctx->split_depth = 0u;
+    ctx->canvas_depth = 0u;
+    ctx->last_canvas_clip_px = {};
+    ctx->last_canvas_clip_radius_px = 0.0f;
 
     const float dpi = (desc.dpi_scale > 0.0f) ? desc.dpi_scale : 1.0f;
     ctx->viewport_w = (desc.viewport_w > 0u) ? desc.viewport_w : 1u;
@@ -2143,6 +2440,7 @@ void begin_frame(Context* ctx, const FrameDesc& desc) noexcept {
     };
     Clay_SetLayoutDimensions(logical_dims);
 
+    ctx->prev_pointer_pos = ctx->pointer_pos;
     Vec2 pointer_pos = desc.pointer_pos;
     if (pointer_pos.x < 0.0f && pointer_pos.y < 0.0f && ctx->has_event_pointer) {
         pointer_pos = ctx->event_pointer_pos;
@@ -2153,6 +2451,10 @@ void begin_frame(Context* ctx, const FrameDesc& desc) noexcept {
     const bool pressed_this_frame = pointer_down && !ctx->prev_pointer_down;
     const bool released_this_frame = !pointer_down && ctx->prev_pointer_down;
     ctx->prev_pointer_down = pointer_down;
+
+    const bool pan_button_down = ctx->event_pan_button_down;
+    const bool pan_pressed_this_frame = pan_button_down && !ctx->prev_pan_button_down;
+    ctx->prev_pan_button_down = pan_button_down;
 
     const Vec2 scroll = (desc.scroll_delta.x != 0.0f || desc.scroll_delta.y != 0.0f)
         ? desc.scroll_delta
@@ -2165,52 +2467,73 @@ void begin_frame(Context* ctx, const FrameDesc& desc) noexcept {
 
     state_map_clear_flags(&ctx->states, true, false);
     const Clay_ElementIdArray over = Clay_GetPointerOverIds();
+    bool pan_started_this_frame = false;
+
+    if (pan_pressed_this_frame) {
+        if (WidgetState* cws = resolve_canvas_owner(ctx, over)) {
+            ctx->pan_canvas_id = cws->key;
+            pan_started_this_frame = true;
+            request_redraw(ctx);
+        }
+    }
 
     if (pressed_this_frame) {
         state_map_clear_flags(&ctx->states, false, true);
-        bool handled_scrollbar = false;
-        for (int32_t i = over.length - 1; i >= 0; --i) {
-            WidgetState* ws = state_map_find(&ctx->states, over.internalArray[i].id);
-            if (!ws || !ws->is_user_element || !ws->is_scroll_y) {
-                continue;
-            }
-            const ScrollbarGeom sb = compute_vscrollbar_geom(ws);
-            if (sb.visible && sb.hit_track.contains(pointer_pos)) {
-                ctx->active_id = id_index(ws->key, kScrollbarYTag);
-                ws->scroll_vel.y = 0.0f;
-                if (pointer_pos.y >= sb.thumb.y && pointer_pos.y <= (sb.thumb.y + sb.thumb.h)) {
-                    ctx->scrollbar_drag_grab_offset = pointer_pos.y - sb.thumb.y;
-                } else {
-                    ctx->scrollbar_drag_grab_offset = 0.5f * sb.thumb.h;
-                    apply_scrollbar_drag(ws, pointer_pos.y, ctx->scrollbar_drag_grab_offset);
-                }
-                request_redraw(ctx);
-                handled_scrollbar = true;
-                break;
-            }
-        }
-        if (!handled_scrollbar) {
-            uint32_t top_hit = 0u;
-            uint32_t top_focus = 0u;
+        WidgetState* space_pan_canvas = (ctx->space_down && ctx->focus_id == 0u) ? resolve_canvas_owner(ctx, over) : nullptr;
+        if (space_pan_canvas) {
+            ctx->pan_canvas_id = space_pan_canvas->key;
+            pan_started_this_frame = true;
+            request_redraw(ctx);
+        } else {
+            bool handled_scrollbar = false;
             for (int32_t i = over.length - 1; i >= 0; --i) {
-                const uint32_t oid = over.internalArray[i].id;
-                WidgetState* ws = state_map_find(&ctx->states, oid);
-                if (ws && ws->is_user_element) {
-                    if (top_hit == 0u) {
-                        top_hit = oid;
-                        ws->pressed_down = true;
-                        ws->pressed_this_frame = true;
+                WidgetState* ws = state_map_find(&ctx->states, over.internalArray[i].id);
+                if (!ws || !ws->is_user_element || (!ws->is_scroll_y && !ws->is_virtual_list)) {
+                    continue;
+                }
+                const ScrollbarGeom sb = compute_vscrollbar_geom(ws);
+                if (sb.visible && sb.hit_track.contains(pointer_pos)) {
+                    ctx->active_id = id_index(ws->key, kScrollbarYTag);
+                    ws->scroll_vel.y = 0.0f;
+                    ws->vscroll_vel_y = 0.0;
+                    if (pointer_pos.y >= sb.thumb.y && pointer_pos.y <= (sb.thumb.y + sb.thumb.h)) {
+                        ctx->scrollbar_drag_grab_offset = pointer_pos.y - sb.thumb.y;
+                    } else {
+                        ctx->scrollbar_drag_grab_offset = 0.5f * sb.thumb.h;
+                        apply_scrollbar_drag(ws, pointer_pos.y, ctx->scrollbar_drag_grab_offset);
                     }
-                    if (top_focus == 0u && ws->is_focusable) {
-                        top_focus = oid;
-                    }
+                    request_redraw(ctx);
+                    handled_scrollbar = true;
+                    break;
                 }
             }
-            if (top_focus != ctx->focus_id) {
-                clear_ime_composition(ctx);
+            if (!handled_scrollbar) {
+                uint32_t top_hit = 0u;
+                uint32_t top_focus = 0u;
+                for (int32_t i = over.length - 1; i >= 0; --i) {
+                    const uint32_t oid = over.internalArray[i].id;
+                    WidgetState* ws = state_map_find(&ctx->states, oid);
+                    if (ws && ws->is_user_element) {
+                        if (top_hit == 0u) {
+                            top_hit = oid;
+                            ws->pressed_down = true;
+                            ws->pressed_this_frame = true;
+                            if (ws->is_canvas && ws->canvas_interactive && ctx->pan_canvas_id == 0u) {
+                                ctx->pan_canvas_id = oid;
+                                pan_started_this_frame = true;
+                            }
+                        }
+                        if (top_focus == 0u && ws->is_focusable) {
+                            top_focus = oid;
+                        }
+                    }
+                }
+                if (top_focus != ctx->focus_id) {
+                    clear_ime_composition(ctx);
+                }
+                ctx->active_id = top_hit;
+                ctx->focus_id = top_focus;
             }
-            ctx->active_id = top_hit;
-            ctx->focus_id = top_focus;
         }
     }
 
@@ -2225,7 +2548,7 @@ void begin_frame(Context* ctx, const FrameDesc& desc) noexcept {
             ctx->desired_cursor = Cursor::Hand;
         }
     } else if (released_this_frame) {
-        if (ctx->mouse_captured) {
+        if (ctx->mouse_captured && ctx->pan_canvas_id == 0u) {
             SDL_CaptureMouse(false);
             ctx->mouse_captured = false;
         }
@@ -2240,44 +2563,145 @@ void begin_frame(Context* ctx, const FrameDesc& desc) noexcept {
         ctx->active_id = 0u;
     }
 
-    // Apply scroll wheel impulses to the deepest hovered scroll container that has remaining room
+    if (ctx->pan_canvas_id != 0u && (pointer_down || pan_button_down)) {
+        if (!ctx->headless && ctx->window && !ctx->mouse_captured) {
+            if (SDL_CaptureMouse(true)) {
+                ctx->mouse_captured = true;
+            }
+        }
+        if (WidgetState* cws = state_map_find(&ctx->states, ctx->pan_canvas_id)) {
+            if (!pan_started_this_frame && ctx->prev_pointer_pos.x >= 0.0f && pointer_pos.x >= 0.0f) {
+                cws->canvas_pan.x += pointer_pos.x - ctx->prev_pointer_pos.x;
+                cws->canvas_pan.y += pointer_pos.y - ctx->prev_pointer_pos.y;
+            }
+            ctx->desired_cursor = Cursor::Move;
+            request_redraw(ctx);
+        } else {
+            ctx->pan_canvas_id = 0u;
+        }
+    } else if (ctx->pan_canvas_id != 0u) {
+        ctx->pan_canvas_id = 0u;
+        if (ctx->mouse_captured && ctx->active_id == 0u) {
+            SDL_CaptureMouse(false);
+            ctx->mouse_captured = false;
+        }
+    }
+
+    // Apply scroll wheel impulses to scrollable/virtual containers, or zoom hovered interactive canvas.
     if (scroll.x != 0.0f || scroll.y != 0.0f) {
         WidgetState* target_scroll = nullptr;
         WidgetState* fallback_scroll = nullptr;
+        WidgetState* target_canvas = nullptr;
         for (int32_t i = over.length - 1; i >= 0; --i) {
             WidgetState* ws = state_map_find(&ctx->states, over.internalArray[i].id);
-            if (!ws || !ws->is_user_element || (!ws->is_scroll_x && !ws->is_scroll_y)) {
+            if (!ws || !ws->is_user_element) {
                 continue;
             }
-            if (!fallback_scroll) {
-                fallback_scroll = ws;
+            if (ws->is_virtual_list) {
+                if (!fallback_scroll) {
+                    fallback_scroll = ws;
+                }
+                const bool can_vy = ws->vscroll_max_y > 0.5 &&
+                    ((scroll.y < 0.0f && ws->vscroll_pos_y < ws->vscroll_max_y - 0.5) ||
+                     (scroll.y > 0.0f && ws->vscroll_pos_y > 0.5));
+                if (can_vy) {
+                    target_scroll = ws;
+                    break;
+                }
+            } else if (ws->is_scroll_x || ws->is_scroll_y) {
+                if (!fallback_scroll) {
+                    fallback_scroll = ws;
+                }
+                const bool can_y = ws->is_scroll_y && ws->scroll_max.y > 0.5f &&
+                    ((scroll.y < 0.0f && ws->scroll_pos.y < ws->scroll_max.y - 0.5f) ||
+                     (scroll.y > 0.0f && ws->scroll_pos.y > 0.5f));
+                const bool can_x = ws->is_scroll_x && ws->scroll_max.x > 0.5f &&
+                    ((scroll.x < 0.0f && ws->scroll_pos.x < ws->scroll_max.x - 0.5f) ||
+                     (scroll.x > 0.0f && ws->scroll_pos.x > 0.5f));
+                if (can_y || can_x) {
+                    target_scroll = ws;
+                    break;
+                }
             }
-            const bool can_y = ws->is_scroll_y && ws->scroll_max.y > 0.5f &&
-                ((scroll.y < 0.0f && ws->scroll_pos.y < ws->scroll_max.y - 0.5f) ||
-                 (scroll.y > 0.0f && ws->scroll_pos.y > 0.5f));
-            const bool can_x = ws->is_scroll_x && ws->scroll_max.x > 0.5f &&
-                ((scroll.x < 0.0f && ws->scroll_pos.x < ws->scroll_max.x - 0.5f) ||
-                 (scroll.x > 0.0f && ws->scroll_pos.x > 0.5f));
-            if (can_y || can_x) {
-                target_scroll = ws;
-                break;
+            if (ws->is_canvas && ws->canvas_interactive) {
+                target_canvas = ws;
+                if (scroll.y != 0.0f) {
+                    break;
+                }
+            } else if (!target_canvas && ws->owner_canvas_id != 0u) {
+                WidgetState* cws = state_map_find(&ctx->states, ws->owner_canvas_id);
+                if (cws && cws->is_canvas && cws->canvas_interactive) {
+                    target_canvas = cws;
+                }
             }
         }
-        WidgetState* sws = target_scroll ? target_scroll : fallback_scroll;
-        if (sws) {
-            if (ctx->sim_dt <= 0.0f) {
-                if (sws->is_scroll_x) {
-                    sws->scroll_pos.x = clamp_range(sws->scroll_pos.x - scroll.x * 48.0f, 0.0f, sws->scroll_max.x);
-                }
-                if (sws->is_scroll_y) {
-                    sws->scroll_pos.y = clamp_range(sws->scroll_pos.y - scroll.y * 48.0f, 0.0f, sws->scroll_max.y);
+        if (target_scroll) {
+            if (target_scroll->is_virtual_list) {
+                if (ctx->sim_dt <= 0.0f) {
+                    target_scroll->vscroll_pos_y = clamp_double(
+                        target_scroll->vscroll_pos_y - static_cast<double>(scroll.y) * 48.0,
+                        0.0,
+                        target_scroll->vscroll_max_y);
+                } else {
+                    target_scroll->vscroll_vel_y += static_cast<double>(-scroll.y) * 560.0;
                 }
             } else {
-                if (sws->is_scroll_x) {
-                    sws->scroll_vel.x += (-scroll.x) * 560.0f;
+                if (ctx->sim_dt <= 0.0f) {
+                    if (target_scroll->is_scroll_x) {
+                        target_scroll->scroll_pos.x = clamp_range(target_scroll->scroll_pos.x - scroll.x * 48.0f, 0.0f, target_scroll->scroll_max.x);
+                    }
+                    if (target_scroll->is_scroll_y) {
+                        target_scroll->scroll_pos.y = clamp_range(target_scroll->scroll_pos.y - scroll.y * 48.0f, 0.0f, target_scroll->scroll_max.y);
+                    }
+                } else {
+                    if (target_scroll->is_scroll_x) {
+                        target_scroll->scroll_vel.x += (-scroll.x) * 560.0f;
+                    }
+                    if (target_scroll->is_scroll_y) {
+                        target_scroll->scroll_vel.y += (-scroll.y) * 560.0f;
+                    }
                 }
-                if (sws->is_scroll_y) {
-                    sws->scroll_vel.y += (-scroll.y) * 560.0f;
+            }
+            request_redraw(ctx);
+        } else if (target_canvas && scroll.y != 0.0f) {
+            const float old_z = (target_canvas->canvas_zoom > 1e-4f) ? target_canvas->canvas_zoom : 1.0f;
+            const float factor = std::pow(1.12f, scroll.y);
+            const float new_z = clamp_range(old_z * factor, target_canvas->canvas_min_zoom, target_canvas->canvas_max_zoom);
+            const Rect vp = target_canvas->last_box_logical;
+            if (vp.w > 0.0f && vp.h > 0.0f && pointer_pos.x >= 0.0f && pointer_pos.y >= 0.0f) {
+                const Vec2 local_ptr = Vec2{ pointer_pos.x - vp.x, pointer_pos.y - vp.y };
+                const Vec2 world_under_ptr = (local_ptr - target_canvas->canvas_pan) * (1.0f / old_z);
+                target_canvas->canvas_zoom = new_z;
+                target_canvas->canvas_pan = local_ptr - world_under_ptr * new_z;
+            } else {
+                target_canvas->canvas_zoom = new_z;
+            }
+            request_redraw(ctx);
+        } else if (fallback_scroll) {
+            if (fallback_scroll->is_virtual_list) {
+                if (ctx->sim_dt <= 0.0f) {
+                    fallback_scroll->vscroll_pos_y = clamp_double(
+                        fallback_scroll->vscroll_pos_y - static_cast<double>(scroll.y) * 48.0,
+                        0.0,
+                        fallback_scroll->vscroll_max_y);
+                } else {
+                    fallback_scroll->vscroll_vel_y += static_cast<double>(-scroll.y) * 560.0;
+                }
+            } else {
+                if (ctx->sim_dt <= 0.0f) {
+                    if (fallback_scroll->is_scroll_x) {
+                        fallback_scroll->scroll_pos.x = clamp_range(fallback_scroll->scroll_pos.x - scroll.x * 48.0f, 0.0f, fallback_scroll->scroll_max.x);
+                    }
+                    if (fallback_scroll->is_scroll_y) {
+                        fallback_scroll->scroll_pos.y = clamp_range(fallback_scroll->scroll_pos.y - scroll.y * 48.0f, 0.0f, fallback_scroll->scroll_max.y);
+                    }
+                } else {
+                    if (fallback_scroll->is_scroll_x) {
+                        fallback_scroll->scroll_vel.x += (-scroll.x) * 560.0f;
+                    }
+                    if (fallback_scroll->is_scroll_y) {
+                        fallback_scroll->scroll_vel.y += (-scroll.y) * 560.0f;
+                    }
                 }
             }
             request_redraw(ctx);
@@ -2291,7 +2715,7 @@ void begin_frame(Context* ctx, const FrameDesc& desc) noexcept {
         const float step_factor = (1.0f - decay) / kScrollFriction;
         for (uint32_t i = 0u; i < ctx->states.capacity; ++i) {
             WidgetState& ws = ctx->states.entries[i];
-            if (ws.key == 0u || (!ws.is_scroll_x && !ws.is_scroll_y)) {
+            if (ws.key == 0u || (!ws.is_scroll_x && !ws.is_scroll_y && !ws.is_virtual_list)) {
                 continue;
             }
             bool moving = false;
@@ -2300,6 +2724,14 @@ void begin_frame(Context* ctx, const FrameDesc& desc) noexcept {
             }
             if (ws.is_scroll_y) {
                 moving |= step_scroll_axis(&ws.scroll_pos.y, &ws.scroll_vel.y, ws.scroll_max.y, decay, step_factor);
+            }
+            if (ws.is_virtual_list) {
+                moving |= step_scroll_axis_d(
+                    &ws.vscroll_pos_y,
+                    &ws.vscroll_vel_y,
+                    ws.vscroll_max_y,
+                    static_cast<double>(decay),
+                    static_cast<double>(step_factor));
             }
             if (moving) {
                 ++ctx->active_anim_count;
@@ -2310,10 +2742,26 @@ void begin_frame(Context* ctx, const FrameDesc& desc) noexcept {
     Clay_BeginLayout();
 }
 
-void begin_box(const BoxDesc& desc) noexcept {
+void begin_box(const BoxDesc& desc_in) noexcept {
     Context* ctx = current_context();
     if (!ctx || !ctx->in_frame) {
         return;
+    }
+
+    const float wscale = current_world_scale(ctx);
+    BoxDesc desc = desc_in;
+    if (wscale != 1.0f) {
+        desc.width = scale_sizing(desc.width, wscale);
+        desc.height = scale_sizing(desc.height, wscale);
+        desc.padding = scale_padding(desc.padding, wscale);
+        desc.gap *= wscale;
+        desc.border_width *= wscale;
+        desc.radius = scale_corners_uniform(desc.radius, wscale);
+        desc.shadow_blur *= wscale;
+        desc.shadow_offset.x *= wscale;
+        desc.shadow_offset.y *= wscale;
+        desc.floating_offset.x *= wscale;
+        desc.floating_offset.y *= wscale;
     }
 
     WidgetState* box_ws = nullptr;
@@ -2324,6 +2772,9 @@ void begin_box(const BoxDesc& desc) noexcept {
             box_ws->is_focusable = desc.focusable;
             box_ws->is_scroll_x = desc.scroll_x;
             box_ws->is_scroll_y = desc.scroll_y;
+            box_ws->owner_canvas_id = (ctx->canvas_depth > 0u)
+                ? ctx->canvas_stack[ctx->canvas_depth - 1u].id
+                : 0u;
         }
         if (desc.focusable && ctx->focus_count < kMaxFocusablePerFrame) {
             ctx->focus_order[ctx->focus_count++] = desc.id;
@@ -2440,21 +2891,48 @@ void text(Str content, const TextDesc& desc) noexcept {
         clay_str.length = static_cast<int32_t>(copied.length);
     }
 
+    const float wscale = current_world_scale(ctx);
+    const float raw_px = (desc.font_size_px > 0.0f) ? desc.font_size_px : 16.0f;
+    const float clamped_px = clamp_range(raw_px * wscale, 0.25f, 65535.0f);
+    const uint32_t size_q8 = static_cast<uint32_t>(clamped_px * 256.0f + 0.5f);
+    uint32_t int_px = size_q8 >> 8;
+    uint32_t frac_px = size_q8 & 0xFFu;
+    if (int_px > 0xFFFFu) {
+        int_px = 0xFFFFu;
+        frac_px = 0xFFu;
+    }
+
     Clay_TextElementConfig cfg = {};
     cfg.textColor = to_clay_color(desc.color);
-    cfg.fontId = desc.font_id;
-    cfg.fontSize = to_u16_round((desc.font_size_px > 0.0f) ? desc.font_size_px : 16.0f);
-    cfg.letterSpacing = to_u16_round(desc.letter_spacing);
-    cfg.lineHeight = cfg.fontSize;
+    cfg.fontId = static_cast<uint16_t>((desc.font_id & 0xFFu) | (frac_px << 8));
+    cfg.fontSize = static_cast<uint16_t>(int_px);
+    cfg.letterSpacing = to_u16_round(desc.letter_spacing * wscale);
+    cfg.lineHeight = 0u;
     cfg.wrapMode = desc.wrap ? CLAY_TEXT_WRAP_WORDS : CLAY_TEXT_WRAP_NONE;
 
     Clay__OpenTextElement(clay_str, cfg);
 }
 
-void image(const ImageDesc& desc) noexcept {
+void image(const ImageDesc& desc_in) noexcept {
     Context* ctx = current_context();
     if (!ctx || !ctx->in_frame) {
         return;
+    }
+
+    const float wscale = current_world_scale(ctx);
+    ImageDesc desc = desc_in;
+    if (wscale != 1.0f) {
+        desc.width = scale_sizing(desc.width, wscale);
+        desc.height = scale_sizing(desc.height, wscale);
+        desc.radius = scale_corners_uniform(desc.radius, wscale);
+        desc.border_width *= wscale;
+    }
+
+    if (desc.id != 0u && ctx->canvas_depth > 0u) {
+        if (WidgetState* ws = state_map_get_or_insert(&ctx->states, desc.id, ctx->frame_index)) {
+            ws->is_user_element = true;
+            ws->owner_canvas_id = ctx->canvas_stack[ctx->canvas_depth - 1u].id;
+        }
     }
 
     ImageExtra* extra = ctx->frame_arena.alloc<ImageExtra>();
@@ -2573,6 +3051,9 @@ TextInputResult text_input(const TextInputDesc& desc) noexcept {
             ws->is_focusable = true;
             ws->is_scroll_x = false;
             ws->is_scroll_y = false;
+            ws->owner_canvas_id = (ctx->canvas_depth > 0u)
+                ? ctx->canvas_stack[ctx->canvas_depth - 1u].id
+                : 0u;
         }
         if (ctx->focus_count < kMaxFocusablePerFrame) {
             ctx->focus_order[ctx->focus_count++] = desc.id;
@@ -2904,6 +3385,7 @@ TextInputResult text_input(const TextInputDesc& desc) noexcept {
     TextInputExtra* ti_extra = ctx->frame_arena.alloc<TextInputExtra>();
     BoxExtra* extra = ctx->frame_arena.alloc<BoxExtra>();
     if (ti_extra && extra) {
+        extra->kind = CustomCmdKind::TextInput;
         ti_extra->desc = desc;
         if (desc.placeholder.chars && desc.placeholder.length > 0u && !desc.placeholder.is_static) {
             ti_extra->desc.placeholder = ctx->frame_arena.push_str(desc.placeholder.chars, desc.placeholder.length);
@@ -3157,6 +3639,690 @@ void set_scroll_offset(uint32_t element_id, Vec2 offset, bool stop_momentum) noe
     }
 }
 
+SplitResult begin_split(const SplitDesc& desc) noexcept {
+    Context* ctx = current_context();
+    const float fallback_ratio = clamp_range(desc.default_ratio, 0.02f, 0.98f);
+    if (!ctx || !ctx->in_frame || desc.id == 0u || ctx->split_depth >= kMaxSplitDepth) {
+        return SplitResult{ .ratio = fallback_ratio, .dragging = false };
+    }
+
+    const uint32_t div_id = id_index(desc.id, kSplitDividerTag);
+    state_map_get_or_insert(&ctx->states, desc.id, ctx->frame_index);
+    WidgetState* ws_div = state_map_get_or_insert(&ctx->states, div_id, ctx->frame_index);
+    WidgetState* ws_split = state_map_find(&ctx->states, desc.id);
+    if (!ws_split || !ws_div) {
+        return SplitResult{ .ratio = fallback_ratio, .dragging = false };
+    }
+
+    ws_split->is_user_element = true;
+    ws_split->owner_canvas_id = (ctx->canvas_depth > 0u)
+        ? ctx->canvas_stack[ctx->canvas_depth - 1u].id
+        : 0u;
+    if (!ws_split->split_initialized) {
+        ws_split->split_ratio = fallback_ratio;
+        ws_split->split_initialized = true;
+    }
+
+    const float div_sz = (desc.divider_size_px > 1.0f) ? desc.divider_size_px : 1.0f;
+    const float total_span = (desc.axis == Axis::Row) ? ws_split->last_box_logical.w : ws_split->last_box_logical.h;
+    const float avail = total_span - div_sz;
+    const bool dragging_div = (ctx->active_id == div_id);
+    const bool hovered_div = (ctx->active_id == 0u) && Clay_PointerOver(make_clay_id(div_id));
+
+    if (ws_div->pressed_this_frame) {
+        if (ctx->last_mouse_clicks >= 2u) {
+            ws_split->split_ratio = fallback_ratio;
+            ws_split->split_grab_offset = 0.0f;
+            request_redraw(ctx);
+        } else if (avail > 1.0f) {
+            const float origin = (desc.axis == Axis::Row) ? ws_split->last_box_logical.x : ws_split->last_box_logical.y;
+            const float ptr_axis = (desc.axis == Axis::Row) ? ctx->pointer_pos.x : ctx->pointer_pos.y;
+            const float div_start = origin + avail * ws_split->split_ratio;
+            ws_split->split_grab_offset = ptr_axis - div_start;
+        }
+    } else if (dragging_div && ctx->prev_pointer_down && avail > 1.0f) {
+        const float origin = (desc.axis == Axis::Row) ? ws_split->last_box_logical.x : ws_split->last_box_logical.y;
+        const float ptr_axis = (desc.axis == Axis::Row) ? ctx->pointer_pos.x : ctx->pointer_pos.y;
+        const float new_first = (ptr_axis - ws_split->split_grab_offset) - origin;
+        ws_split->split_ratio = clamp_range(new_first / avail, 0.0f, 1.0f);
+        request_redraw(ctx);
+    }
+
+    if (avail > 1.0f) {
+        float min_r = desc.min_first_px / avail;
+        float max_r = 1.0f - (desc.min_second_px / avail);
+        if (min_r > max_r) {
+            const float mid = 0.5f * (min_r + max_r);
+            min_r = mid;
+            max_r = mid;
+        }
+        ws_split->split_ratio = clamp_range(
+            ws_split->split_ratio,
+            clamp_range(min_r, 0.0f, 1.0f),
+            clamp_range(max_r, 0.0f, 1.0f));
+    } else {
+        ws_split->split_ratio = clamp_range(ws_split->split_ratio, 0.02f, 0.98f);
+    }
+
+    if (dragging_div || hovered_div) {
+        ctx->desired_cursor = (desc.axis == Axis::Row) ? Cursor::ResizeEW : Cursor::ResizeNS;
+    }
+
+    const float ratio = ws_split->split_ratio;
+    ctx->split_stack[ctx->split_depth++] = SplitStackEntry{
+        .id = desc.id,
+        .axis = desc.axis,
+        .ratio = ratio,
+        .divider_size_px = div_sz,
+        .min_first_px = desc.min_first_px,
+        .min_second_px = desc.min_second_px,
+        .divider_color = desc.divider_color,
+        .divider_hover_color = desc.divider_hover_color,
+        .divider_active_color = desc.divider_active_color,
+        .in_second = false,
+    };
+
+    begin_box(BoxDesc{
+        .id = desc.id,
+        .axis = desc.axis,
+        .width = desc.width,
+        .height = desc.height,
+    });
+
+    const Sizing first_primary = (avail > 1.0f)
+        ? Sizing::fixed(avail * ratio)
+        : Sizing::percent(clamp_range(ratio, 0.02f, 0.95f));
+    begin_box(BoxDesc{
+        .axis = Axis::Col,
+        .width = (desc.axis == Axis::Row) ? first_primary : Sizing::grow(),
+        .height = (desc.axis == Axis::Col) ? first_primary : Sizing::grow(),
+        .clip_children = true,
+    });
+
+    return SplitResult{ .ratio = ratio, .dragging = dragging_div };
+}
+
+void split_second() noexcept {
+    Context* ctx = current_context();
+    if (!ctx || !ctx->in_frame || ctx->split_depth == 0u) {
+        return;
+    }
+    SplitStackEntry& se = ctx->split_stack[ctx->split_depth - 1u];
+    if (se.in_second) {
+        return;
+    }
+    end_box();
+
+    const uint32_t div_id = id_index(se.id, kSplitDividerTag);
+    const bool dragging_div = (ctx->active_id == div_id);
+    const bool hovered_div = (ctx->active_id == 0u) && Clay_PointerOver(make_clay_id(div_id));
+    const Color div_col = dragging_div
+        ? se.divider_active_color
+        : (hovered_div ? se.divider_hover_color : se.divider_color);
+    const Color grip_col = dragging_div
+        ? Color::white()
+        : (hovered_div ? Color::rgba8(226, 232, 240, 220) : Color::rgba8(148, 163, 184, 110));
+
+    begin_box(BoxDesc{
+        .id = div_id,
+        .axis = se.axis,
+        .width = (se.axis == Axis::Row) ? Sizing::fixed(se.divider_size_px) : Sizing::grow(),
+        .height = (se.axis == Axis::Col) ? Sizing::fixed(se.divider_size_px) : Sizing::grow(),
+        .align_x = AlignX::Center,
+        .align_y = AlignY::Center,
+        .background = div_col,
+    });
+    box(BoxDesc{
+        .width = Sizing::fixed((se.axis == Axis::Row) ? 2.0f : 28.0f),
+        .height = Sizing::fixed((se.axis == Axis::Col) ? 2.0f : 28.0f),
+        .background = grip_col,
+        .radius = Corners::all(1.0f),
+    });
+    end_box();
+
+    begin_box(BoxDesc{
+        .axis = Axis::Col,
+        .width = Sizing::grow(),
+        .height = Sizing::grow(),
+        .clip_children = true,
+    });
+    se.in_second = true;
+}
+
+void end_split() noexcept {
+    Context* ctx = current_context();
+    if (!ctx || !ctx->in_frame || ctx->split_depth == 0u) {
+        return;
+    }
+    --ctx->split_depth;
+    end_box();
+    end_box();
+}
+
+float split_ratio(uint32_t split_id) noexcept {
+    Context* ctx = current_context();
+    if (!ctx || split_id == 0u) {
+        return 0.5f;
+    }
+    const WidgetState* ws = state_map_find(&ctx->states, split_id);
+    return (ws && ws->split_initialized) ? ws->split_ratio : 0.5f;
+}
+
+void set_split_ratio(uint32_t split_id, float ratio) noexcept {
+    Context* ctx = current_context();
+    if (!ctx || split_id == 0u) {
+        return;
+    }
+    if (WidgetState* ws = state_map_get_or_insert(&ctx->states, split_id, ctx->frame_index)) {
+        ws->is_user_element = true;
+        ws->split_initialized = true;
+        ws->split_ratio = clamp_range(ratio, 0.02f, 0.98f);
+        request_redraw(ctx);
+    }
+}
+
+VirtualListSlice begin_virtual_list(const VirtualListDesc& desc) noexcept {
+    Context* ctx = current_context();
+    if (!ctx || !ctx->in_frame || desc.id == 0u) {
+        return VirtualListSlice{};
+    }
+    WidgetState* ws = state_map_get_or_insert(&ctx->states, desc.id, ctx->frame_index);
+    if (!ws) {
+        return VirtualListSlice{};
+    }
+
+    const float item_h = (desc.item_height_px > 1.0f) ? desc.item_height_px : 1.0f;
+    const uint16_t gap_u16 = to_u16_round((desc.row_gap_px > 0.0f) ? desc.row_gap_px : 0.0f);
+    const float gap_px = static_cast<float>(gap_u16);
+    const double stride = static_cast<double>(item_h) + static_cast<double>(gap_px);
+
+    ws->is_user_element = true;
+    ws->is_scroll_x = false;
+    ws->is_scroll_y = false;
+    ws->is_virtual_list = true;
+    ws->vlist_stride = static_cast<float>(stride);
+    ws->owner_canvas_id = (ctx->canvas_depth > 0u)
+        ? ctx->canvas_stack[ctx->canvas_depth - 1u].id
+        : 0u;
+
+    const double pad_v = static_cast<double>(desc.padding.top) + static_cast<double>(desc.padding.bottom);
+    const double items_h = (desc.item_count > 0u)
+        ? (static_cast<double>(desc.item_count) * static_cast<double>(item_h) +
+           static_cast<double>(desc.item_count - 1u) * static_cast<double>(gap_px))
+        : 0.0;
+    const double total_h = items_h + pad_v;
+
+    double view_h = static_cast<double>(ws->last_box_logical.h);
+    if (view_h <= 0.5) {
+        if (desc.height.kind == SizingKind::Fixed && desc.height.value > 0.0f) {
+            view_h = static_cast<double>(desc.height.value);
+        } else {
+            view_h = static_cast<double>(ctx->viewport_h) / static_cast<double>(ctx->dpi_scale);
+        }
+    }
+    const double max_scroll = (total_h > view_h) ? (total_h - view_h) : 0.0;
+    ws->vscroll_total_h = total_h;
+    ws->vscroll_max_y = max_scroll;
+    ws->vscroll_pos_y = clamp_double(ws->vscroll_pos_y, 0.0, max_scroll);
+    ws->viewport_dim.y = static_cast<float>(view_h);
+
+    const double content_scroll_y = (ws->vscroll_pos_y > static_cast<double>(desc.padding.top))
+        ? (ws->vscroll_pos_y - static_cast<double>(desc.padding.top))
+        : 0.0;
+    const double inner_view_h = (view_h > pad_v) ? (view_h - pad_v) : view_h;
+
+    uint32_t first_idx = 0u;
+    uint32_t end_idx = 0u;
+    if (desc.item_count > 0u && stride > 0.0) {
+        const double raw_first = std::floor(content_scroll_y / stride);
+        const double raw_last = std::floor((content_scroll_y + inner_view_h) / stride) + 1.0;
+        const int64_t os = static_cast<int64_t>(desc.overscan_rows);
+        int64_t fi = static_cast<int64_t>(raw_first) - os;
+        int64_t ei = static_cast<int64_t>(raw_last) + os;
+        if (fi < 0) fi = 0;
+        if (ei > static_cast<int64_t>(desc.item_count)) ei = static_cast<int64_t>(desc.item_count);
+        if (fi > ei) fi = ei;
+        first_idx = static_cast<uint32_t>(fi);
+        end_idx = static_cast<uint32_t>(ei);
+    }
+
+    const double first_row_top = static_cast<double>(first_idx) * stride;
+    const float child_offset_y = static_cast<float>(first_row_top - ws->vscroll_pos_y);
+
+    BoxExtra* extra = ctx->frame_arena.alloc<BoxExtra>();
+    if (extra) {
+        extra->kind = CustomCmdKind::Box;
+        extra->is_virtual_list = true;
+        extra->desc = BoxDesc{
+            .id = desc.id,
+            .axis = Axis::Col,
+            .width = desc.width,
+            .height = desc.height,
+            .padding = desc.padding,
+            .gap = gap_px,
+            .background = desc.background,
+            .border_color = desc.border_color,
+            .border_width = desc.border_width,
+            .radius = desc.radius,
+            .clip_children = true,
+            .show_scrollbar = desc.show_scrollbar,
+        };
+    }
+
+    Clay__OpenElementWithId(make_clay_id(desc.id));
+
+    const bool has_border = (desc.border_width > 0.0f && desc.border_color.a > 0u);
+    const bool has_visual = (desc.background.a > 0u) || has_border;
+
+    Clay_ElementDeclaration decl = {};
+    decl.layout.sizing.width = to_clay_sizing(desc.width);
+    decl.layout.sizing.height = to_clay_sizing(desc.height);
+    decl.layout.padding = Clay_Padding{
+        .left = to_u16_round(desc.padding.left),
+        .right = to_u16_round(desc.padding.right),
+        .top = to_u16_round(desc.padding.top),
+        .bottom = to_u16_round(desc.padding.bottom),
+    };
+    decl.layout.childGap = gap_u16;
+    decl.layout.layoutDirection = CLAY_TOP_TO_BOTTOM;
+    decl.cornerRadius = to_clay_corners(desc.radius);
+    decl.userData = extra;
+    if (has_visual && extra) {
+        decl.custom.customData = extra;
+    }
+    decl.clip.horizontal = true;
+    decl.clip.vertical = true;
+    decl.clip.childOffset = Clay_Vector2{ 0.0f, child_offset_y };
+    if (has_border || desc.show_scrollbar) {
+        decl.border.color = Clay_Color{255.0f, 255.0f, 255.0f, 1.0f};
+        decl.border.width = Clay_BorderWidth{1u, 1u, 1u, 1u, 0u};
+    }
+
+    Clay__ConfigureOpenElement(decl);
+
+    return VirtualListSlice{
+        .first_index = first_idx,
+        .end_index = end_idx,
+        .total_count = desc.item_count,
+        .scroll_y = ws->vscroll_pos_y,
+        .max_scroll_y = max_scroll,
+        .viewport_height = static_cast<float>(view_h),
+    };
+}
+
+void end_virtual_list() noexcept {
+    if (!current_context() || !current_context()->in_frame) {
+        return;
+    }
+    Clay__CloseElement();
+}
+
+double virtual_list_scroll_offset(uint32_t list_id) noexcept {
+    Context* ctx = current_context();
+    if (!ctx || list_id == 0u) {
+        return 0.0;
+    }
+    const WidgetState* ws = state_map_find(&ctx->states, list_id);
+    return ws ? ws->vscroll_pos_y : 0.0;
+}
+
+void set_virtual_list_scroll_offset(uint32_t list_id, double offset_y, bool stop_momentum) noexcept {
+    Context* ctx = current_context();
+    if (!ctx || list_id == 0u) {
+        return;
+    }
+    if (WidgetState* ws = state_map_get_or_insert(&ctx->states, list_id, ctx->frame_index)) {
+        ws->is_user_element = true;
+        ws->is_virtual_list = true;
+        double clamped = (offset_y > 0.0) ? offset_y : 0.0;
+        if (ws->vscroll_max_y > 0.0) {
+            clamped = clamp_double(clamped, 0.0, ws->vscroll_max_y);
+        }
+        ws->vscroll_pos_y = clamped;
+        if (stop_momentum) {
+            ws->vscroll_vel_y = 0.0;
+        }
+        request_redraw(ctx);
+    }
+}
+
+void virtual_list_scroll_to_row(
+    uint32_t list_id,
+    uint32_t row_index,
+    float item_height_px,
+    AlignY align) noexcept
+{
+    Context* ctx = current_context();
+    if (!ctx || list_id == 0u) {
+        return;
+    }
+    WidgetState* ws = state_map_get_or_insert(&ctx->states, list_id, ctx->frame_index);
+    if (!ws) {
+        return;
+    }
+    const float item_h = (item_height_px > 1.0f) ? item_height_px : 1.0f;
+    const double stride = (ws->vlist_stride >= item_h)
+        ? static_cast<double>(ws->vlist_stride)
+        : static_cast<double>(item_h);
+    const double view_h = (ws->viewport_dim.y > 1.0f)
+        ? static_cast<double>(ws->viewport_dim.y)
+        : (static_cast<double>(ctx->viewport_h) / static_cast<double>(ctx->dpi_scale));
+    double target_y = static_cast<double>(row_index) * stride;
+    if (align == AlignY::Center) {
+        target_y -= 0.5 * (view_h - static_cast<double>(item_h));
+    } else if (align == AlignY::Bottom) {
+        target_y -= (view_h - static_cast<double>(item_h));
+    }
+    if (target_y < 0.0) {
+        target_y = 0.0;
+    }
+    if (ws->vscroll_max_y > 0.0 && target_y > ws->vscroll_max_y) {
+        target_y = ws->vscroll_max_y;
+    }
+    ws->is_user_element = true;
+    ws->is_virtual_list = true;
+    ws->vscroll_pos_y = target_y;
+    ws->vscroll_vel_y = 0.0;
+    request_redraw(ctx);
+}
+
+CanvasState begin_canvas(const CanvasDesc& desc) noexcept {
+    Context* ctx = current_context();
+    if (!ctx || !ctx->in_frame || desc.id == 0u || ctx->canvas_depth >= kMaxCanvasDepth) {
+        return CanvasState{};
+    }
+    WidgetState* ws = state_map_get_or_insert(&ctx->states, desc.id, ctx->frame_index);
+    if (!ws) {
+        return CanvasState{};
+    }
+
+    const float min_z = (desc.min_zoom > 0.02f) ? desc.min_zoom : 0.02f;
+    const float max_z = (desc.max_zoom > min_z) ? desc.max_zoom : min_z;
+    if (!ws->canvas_initialized) {
+        const float def_z = (desc.default_zoom > 1e-4f) ? desc.default_zoom : 1.0f;
+        ws->canvas_pan = desc.default_pan;
+        ws->canvas_zoom = clamp_range(def_z, min_z, max_z);
+        ws->canvas_initialized = true;
+    }
+    ws->is_user_element = true;
+    ws->is_canvas = true;
+    ws->canvas_interactive = desc.interactive;
+    ws->canvas_min_zoom = min_z;
+    ws->canvas_max_zoom = max_z;
+    ws->canvas_zoom = clamp_range(ws->canvas_zoom, min_z, max_z);
+    ws->owner_canvas_id = (ctx->canvas_depth > 0u)
+        ? ctx->canvas_stack[ctx->canvas_depth - 1u].id
+        : 0u;
+
+    const bool panning = (ctx->pan_canvas_id == desc.id);
+    if (panning) {
+        ctx->desired_cursor = Cursor::Move;
+    }
+
+    const CanvasState cs = {
+        .pan = ws->canvas_pan,
+        .zoom = ws->canvas_zoom,
+        .viewport = ws->last_box_logical,
+        .panning = panning,
+    };
+
+    ctx->canvas_stack[ctx->canvas_depth++] = CanvasStackEntry{
+        .id = desc.id,
+        .desc = desc,
+        .state = cs,
+        .in_node = false,
+    };
+
+    BoxExtra* extra = ctx->frame_arena.alloc<BoxExtra>();
+    if (extra) {
+        extra->kind = CustomCmdKind::Box;
+        extra->is_canvas = true;
+        extra->desc = BoxDesc{
+            .id = desc.id,
+            .axis = Axis::Col,
+            .width = desc.width,
+            .height = desc.height,
+            .background = desc.background,
+            .radius = desc.radius,
+            .clip_children = true,
+        };
+        if (desc.show_grid) {
+            CanvasGridExtra* cg = ctx->frame_arena.alloc<CanvasGridExtra>();
+            if (cg) {
+                cg->pan = ws->canvas_pan;
+                cg->zoom = ws->canvas_zoom;
+                cg->grid_step_world = desc.grid_step_world;
+                cg->major_subdiv = desc.major_grid_subdiv;
+                cg->minor_color = desc.minor_grid_color;
+                cg->major_color = desc.major_grid_color;
+                extra->canvas_grid = cg;
+            }
+        }
+    }
+
+    Clay__OpenElementWithId(make_clay_id(desc.id));
+
+    Clay_ElementDeclaration decl = {};
+    decl.layout.sizing.width = to_clay_sizing(desc.width);
+    decl.layout.sizing.height = to_clay_sizing(desc.height);
+    decl.layout.layoutDirection = CLAY_TOP_TO_BOTTOM;
+    decl.cornerRadius = to_clay_corners(desc.radius);
+    decl.userData = extra;
+    if (extra) {
+        decl.custom.customData = extra;
+    }
+    decl.clip.horizontal = true;
+    decl.clip.vertical = true;
+
+    Clay__ConfigureOpenElement(decl);
+    return cs;
+}
+
+void end_canvas() noexcept {
+    Context* ctx = current_context();
+    if (!ctx || !ctx->in_frame || ctx->canvas_depth == 0u) {
+        return;
+    }
+    const CanvasStackEntry ce = ctx->canvas_stack[--ctx->canvas_depth];
+    if (ce.desc.border_width > 0.0f && ce.desc.border_color.a > 0u) {
+        box(BoxDesc{
+            .width = Sizing::grow(),
+            .height = Sizing::grow(),
+            .border_color = ce.desc.border_color,
+            .border_width = ce.desc.border_width,
+            .radius = ce.desc.radius,
+            .attach_to = AttachTo::Parent,
+            .anchor_element = Anchor::TopLeft,
+            .anchor_parent = Anchor::TopLeft,
+            .z_index = 8,
+            .pointer_passthrough = true,
+            .clip_to_parent = false,
+        });
+    }
+    Clay__CloseElement();
+}
+
+void canvas_wire(const CanvasWireDesc& desc) noexcept {
+    Context* ctx = current_context();
+    if (!ctx || !ctx->in_frame || ctx->canvas_depth == 0u) {
+        return;
+    }
+    const CanvasStackEntry& ce = ctx->canvas_stack[ctx->canvas_depth - 1u];
+    BoxExtra* extra = ctx->frame_arena.alloc<BoxExtra>();
+    CanvasWireExtra* cw = ctx->frame_arena.alloc<CanvasWireExtra>();
+    if (!extra || !cw) {
+        return;
+    }
+    cw->canvas_id = ce.id;
+    cw->from_world = desc.from_world;
+    cw->to_world = desc.to_world;
+    cw->color_start = desc.color_start;
+    cw->color_end = desc.color_end;
+    cw->glow_color = desc.glow_color;
+    cw->thickness_world = desc.thickness_world;
+    cw->glow_world = desc.glow_world;
+    cw->tangent_bias = desc.tangent_bias;
+    extra->kind = CustomCmdKind::CanvasWire;
+    extra->canvas_wire = cw;
+
+    Clay__OpenElement();
+    Clay_ElementDeclaration decl = {};
+    decl.layout.sizing.width = CLAY_SIZING_FIXED(0.0f);
+    decl.layout.sizing.height = CLAY_SIZING_FIXED(0.0f);
+    decl.custom.customData = extra;
+    decl.userData = extra;
+    decl.floating.attachTo = CLAY_ATTACH_TO_PARENT;
+    decl.floating.attachPoints = Clay_FloatingAttachPoints{
+        .element = CLAY_ATTACH_POINT_CENTER_CENTER,
+        .parent = CLAY_ATTACH_POINT_CENTER_CENTER,
+    };
+    decl.floating.zIndex = desc.z_index;
+    decl.floating.pointerCaptureMode = CLAY_POINTER_CAPTURE_MODE_PASSTHROUGH;
+    decl.floating.clipTo = CLAY_CLIP_TO_ATTACHED_PARENT;
+    Clay__ConfigureOpenElement(decl);
+    Clay__CloseElement();
+}
+
+CanvasNodeResult begin_canvas_node(const CanvasNodeDesc& desc) noexcept {
+    Context* ctx = current_context();
+    if (!ctx || !ctx->in_frame || ctx->canvas_depth == 0u || desc.id == 0u) {
+        return CanvasNodeResult{};
+    }
+    CanvasStackEntry& ce = ctx->canvas_stack[ctx->canvas_depth - 1u];
+    WidgetState* ws = state_map_get_or_insert(&ctx->states, desc.id, ctx->frame_index);
+    if (!ws) {
+        return CanvasNodeResult{};
+    }
+
+    ws->is_user_element = true;
+    ws->is_canvas_node = true;
+    ws->owner_canvas_id = ce.id;
+
+    Vec2 node_pos = desc.world_pos ? *desc.world_pos : desc.pos_value;
+    const bool hovered_node = Clay_PointerOver(make_clay_id(desc.id));
+    const bool can_drag = desc.draggable && ce.desc.interactive;
+    const bool dragging = can_drag && (ctx->active_id == desc.id) && ctx->prev_pointer_down;
+
+    if (can_drag && ws->pressed_this_frame) {
+        const Vec2 ptr_world = ce.state.screen_to_world(ctx->pointer_pos);
+        ws->drag_grab = node_pos - ptr_world;
+        ctx->desired_cursor = Cursor::Move;
+    } else if (dragging) {
+        const Vec2 ptr_world = ce.state.screen_to_world(ctx->pointer_pos);
+        node_pos = ptr_world + ws->drag_grab;
+        if (desc.world_pos) {
+            *desc.world_pos = node_pos;
+        }
+        ctx->desired_cursor = Cursor::Move;
+    }
+
+    const float z = ce.state.zoom;
+    const Vec2 local_offset = ce.state.world_to_local(node_pos);
+    const bool pressed_now = ws->pressed_down;
+    const bool clicked_now = ws->clicked_this_frame;
+    ce.in_node = false;
+
+    begin_box(BoxDesc{
+        .id = desc.id,
+        .axis = desc.axis,
+        .width = scale_sizing(desc.width_world, z),
+        .height = scale_sizing(desc.height_world, z),
+        .padding = scale_padding(desc.padding_world, z),
+        .gap = desc.gap_world * z,
+        .background = desc.background,
+        .background_end = desc.background_end,
+        .gradient_dir = desc.gradient_dir,
+        .border_color = desc.border_color,
+        .border_width = desc.border_width_world * z,
+        .radius = scale_corners_uniform(desc.radius_world, z),
+        .shadow_color = desc.shadow_color,
+        .shadow_blur = desc.shadow_blur_world * z,
+        .shadow_offset = Vec2{ desc.shadow_offset_world.x * z, desc.shadow_offset_world.y * z },
+        .attach_to = AttachTo::Parent,
+        .anchor_element = Anchor::TopLeft,
+        .anchor_parent = Anchor::TopLeft,
+        .floating_offset = local_offset,
+        .z_index = desc.z_index,
+        .pointer_passthrough = false,
+        .clip_to_parent = true,
+    });
+    ce.in_node = true;
+
+    return CanvasNodeResult{
+        .hovered = hovered_node,
+        .pressed = pressed_now,
+        .dragging = dragging,
+        .clicked = clicked_now,
+    };
+}
+
+void end_canvas_node() noexcept {
+    Context* ctx = current_context();
+    if (!ctx || !ctx->in_frame || ctx->canvas_depth == 0u) {
+        return;
+    }
+    ctx->canvas_stack[ctx->canvas_depth - 1u].in_node = false;
+    end_box();
+}
+
+CanvasState canvas_state(uint32_t canvas_id) noexcept {
+    Context* ctx = current_context();
+    if (!ctx || canvas_id == 0u) {
+        return CanvasState{};
+    }
+    const WidgetState* ws = state_map_find(&ctx->states, canvas_id);
+    if (!ws || !ws->canvas_initialized) {
+        return CanvasState{};
+    }
+    return CanvasState{
+        .pan = ws->canvas_pan,
+        .zoom = ws->canvas_zoom,
+        .viewport = ws->last_box_logical,
+        .panning = (ctx->pan_canvas_id == canvas_id),
+    };
+}
+
+void set_canvas_view(uint32_t canvas_id, Vec2 pan, float zoom) noexcept {
+    Context* ctx = current_context();
+    if (!ctx || canvas_id == 0u) {
+        return;
+    }
+    if (WidgetState* ws = state_map_get_or_insert(&ctx->states, canvas_id, ctx->frame_index)) {
+        const float min_z = (ws->canvas_min_zoom > 0.02f) ? ws->canvas_min_zoom : 0.02f;
+        const float max_z = (ws->canvas_max_zoom > min_z) ? ws->canvas_max_zoom : 16.0f;
+        ws->canvas_pan = pan;
+        ws->canvas_zoom = clamp_range(zoom, min_z, max_z);
+        ws->canvas_initialized = true;
+        request_redraw(ctx);
+    }
+}
+
+void set_debug_hud_open(Context* ctx_arg, bool open) noexcept {
+    Context* ctx = ctx_arg ? ctx_arg : current_context();
+    if (ctx && ctx->debug_hud_open != open) {
+        ctx->debug_hud_open = open;
+        request_redraw(ctx);
+    }
+}
+
+bool debug_hud_open(const Context* ctx_arg) noexcept {
+    const Context* ctx = ctx_arg ? ctx_arg : current_context();
+    return ctx != nullptr && ctx->debug_hud_open;
+}
+
+void set_debug_wireframe(Context* ctx_arg, bool enabled) noexcept {
+    Context* ctx = ctx_arg ? ctx_arg : current_context();
+    if (ctx && ctx->debug_wireframe_open != enabled) {
+        ctx->debug_wireframe_open = enabled;
+        request_redraw(ctx);
+    }
+}
+
+bool debug_wireframe(const Context* ctx_arg) noexcept {
+    const Context* ctx = ctx_arg ? ctx_arg : current_context();
+    return ctx != nullptr && ctx->debug_wireframe_open;
+}
+
 void end_frame(Context* ctx_arg) noexcept {
     Context* ctx = ctx_arg ? ctx_arg : current_context();
     if (!ctx || !ctx->in_frame || !ctx->clay_ctx) {
@@ -3193,40 +4359,61 @@ void end_frame(Context* ctx_arg) noexcept {
         switch (cmd->commandType) {
             case CLAY_RENDER_COMMAND_TYPE_CUSTOM: {
                 const BoxExtra* extra = static_cast<const BoxExtra*>(cmd->renderData.custom.customData);
-                if (extra && extra->text_input) {
-                    emit_text_input_command(ctx, extra->text_input, cmd->boundingBox, box_px, cur_clip, dpi);
-                } else {
-                    emit_box_background_and_shadow(ctx, extra, box_px, cur_clip, dpi);
+                if (extra) {
+                    if (extra->text_input) {
+                        emit_text_input_command(ctx, extra->text_input, cmd->boundingBox, box_px, cur_clip, dpi);
+                    } else if (extra->kind == CustomCmdKind::CanvasWire && extra->canvas_wire) {
+                        emit_canvas_wire_command(ctx, extra->canvas_wire, cmd->boundingBox, cur_clip, dpi);
+                    } else {
+                        emit_box_background_and_shadow(ctx, extra, box_px, cur_clip, dpi);
+                    }
                 }
                 break;
             }
             case CLAY_RENDER_COMMAND_TYPE_SCISSOR_START: {
                 const BoxExtra* extra = static_cast<const BoxExtra*>(cmd->userData);
-                if (extra && extra->desc.id != 0u && (extra->desc.scroll_x || extra->desc.scroll_y)) {
-                    if (WidgetState* ws = state_map_find(&ctx->states, extra->desc.id)) {
-                        const Clay_ScrollContainerData sc = Clay_GetScrollContainerData(make_clay_id(extra->desc.id));
-                        if (sc.found) {
-                            ws->viewport_dim = Vec2{ sc.scrollContainerDimensions.width, sc.scrollContainerDimensions.height };
-                            ws->content_dim = Vec2{ sc.contentDimensions.width, sc.contentDimensions.height };
-                            ws->scroll_max = Vec2{
-                                (sc.contentDimensions.width > sc.scrollContainerDimensions.width)
-                                    ? (sc.contentDimensions.width - sc.scrollContainerDimensions.width) : 0.0f,
-                                (sc.contentDimensions.height > sc.scrollContainerDimensions.height)
-                                    ? (sc.contentDimensions.height - sc.scrollContainerDimensions.height) : 0.0f,
-                            };
-                            ws->scroll_pos.x = clamp_range(ws->scroll_pos.x, 0.0f, ws->scroll_max.x);
-                            ws->scroll_pos.y = clamp_range(ws->scroll_pos.y, 0.0f, ws->scroll_max.y);
-                        } else {
+                if (extra && extra->desc.id != 0u) {
+                    if (extra->is_virtual_list) {
+                        if (WidgetState* ws = state_map_find(&ctx->states, extra->desc.id)) {
+                            const double view_h = static_cast<double>(cmd->boundingBox.height);
                             ws->viewport_dim = Vec2{ cmd->boundingBox.width, cmd->boundingBox.height };
-                            ws->content_dim = ws->viewport_dim;
-                            ws->scroll_max = {};
+                            ws->last_box_logical = Rect{
+                                cmd->boundingBox.x,
+                                cmd->boundingBox.y,
+                                cmd->boundingBox.width,
+                                cmd->boundingBox.height,
+                            };
+                            ws->vscroll_max_y = (ws->vscroll_total_h > view_h)
+                                ? (ws->vscroll_total_h - view_h)
+                                : 0.0;
+                            ws->vscroll_pos_y = clamp_double(ws->vscroll_pos_y, 0.0, ws->vscroll_max_y);
                         }
-                        ws->last_box_logical = Rect{
-                            cmd->boundingBox.x,
-                            cmd->boundingBox.y,
-                            cmd->boundingBox.width,
-                            cmd->boundingBox.height,
-                        };
+                    } else if (extra->desc.scroll_x || extra->desc.scroll_y) {
+                        if (WidgetState* ws = state_map_find(&ctx->states, extra->desc.id)) {
+                            const Clay_ScrollContainerData sc = Clay_GetScrollContainerData(make_clay_id(extra->desc.id));
+                            if (sc.found) {
+                                ws->viewport_dim = Vec2{ sc.scrollContainerDimensions.width, sc.scrollContainerDimensions.height };
+                                ws->content_dim = Vec2{ sc.contentDimensions.width, sc.contentDimensions.height };
+                                ws->scroll_max = Vec2{
+                                    (sc.contentDimensions.width > sc.scrollContainerDimensions.width)
+                                        ? (sc.contentDimensions.width - sc.scrollContainerDimensions.width) : 0.0f,
+                                    (sc.contentDimensions.height > sc.scrollContainerDimensions.height)
+                                        ? (sc.contentDimensions.height - sc.scrollContainerDimensions.height) : 0.0f,
+                                };
+                                ws->scroll_pos.x = clamp_range(ws->scroll_pos.x, 0.0f, ws->scroll_max.x);
+                                ws->scroll_pos.y = clamp_range(ws->scroll_pos.y, 0.0f, ws->scroll_max.y);
+                            } else {
+                                ws->viewport_dim = Vec2{ cmd->boundingBox.width, cmd->boundingBox.height };
+                                ws->content_dim = ws->viewport_dim;
+                                ws->scroll_max = {};
+                            }
+                            ws->last_box_logical = Rect{
+                                cmd->boundingBox.x,
+                                cmd->boundingBox.y,
+                                cmd->boundingBox.width,
+                                cmd->boundingBox.height,
+                            };
+                        }
                     }
                 }
                 if (clip_stack.depth < kMaxClipDepth) {
@@ -3235,6 +4422,16 @@ void end_frame(Context* ctx_arg) noexcept {
                     if (extra) {
                         const Corners& c = extra->desc.radius;
                         next_radius = min4f(c.tl, c.tr, c.br, c.bl) * dpi;
+                        if (extra->is_canvas) {
+                            ctx->last_canvas_clip_px = clipped_rect;
+                            ctx->last_canvas_clip_radius_px = next_radius;
+                        }
+                    } else if (clipped_rect.x == ctx->last_canvas_clip_px.x &&
+                               clipped_rect.y == ctx->last_canvas_clip_px.y &&
+                               clipped_rect.w == ctx->last_canvas_clip_px.w &&
+                               clipped_rect.h == ctx->last_canvas_clip_px.h)
+                    {
+                        next_radius = ctx->last_canvas_clip_radius_px;
                     }
                     if (next_radius <= 0.0f &&
                         clipped_rect.x == cur_clip.rect.x &&
@@ -3263,10 +4460,10 @@ void end_frame(Context* ctx_arg) noexcept {
                     break;
                 }
                 const BoxDesc& d = extra->desc;
-                const bool is_scroll = d.scroll_x || d.scroll_y;
+                const bool is_scroll = d.scroll_x || d.scroll_y || extra->is_virtual_list;
                 const bool any_clip = d.clip_children || is_scroll;
 
-                if (d.scroll_y && d.show_scrollbar && d.id != 0u) {
+                if ((d.scroll_y || extra->is_virtual_list) && d.show_scrollbar && d.id != 0u) {
                     if (const WidgetState* ws = state_map_find(&ctx->states, d.id)) {
                         const ScrollbarGeom sb = compute_vscrollbar_geom(ws);
                         if (sb.visible) {
@@ -3453,20 +4650,242 @@ void end_frame(Context* ctx_arg) noexcept {
         ctx->redraw_budget = 2u;
     }
 
+    if (ctx->states.entries) {
+        for (uint32_t i = 0u; i < ctx->states.capacity; ++i) {
+            WidgetState& ws = ctx->states.entries[i];
+            if (ws.key == 0u || ws.last_seen_frame != ctx->frame_index) {
+                continue;
+            }
+            if (ws.split_initialized || ws.is_canvas || ws.is_canvas_node || ws.is_virtual_list) {
+                const Clay_ElementData ed = Clay_GetElementData(make_clay_id(ws.key));
+                if (ed.found) {
+                    ws.last_box_logical = Rect{
+                        ed.boundingBox.x,
+                        ed.boundingBox.y,
+                        ed.boundingBox.width,
+                        ed.boundingBox.height,
+                    };
+                }
+            }
+        }
+    }
+
     const uint64_t end_ticks = SDL_GetPerformanceCounter();
     const uint64_t freq = SDL_GetPerformanceFrequency();
+    const double layout_ms = (freq > 0u)
+        ? (static_cast<double>(end_ticks - ctx->layout_start_ticks) * 1000.0 / static_cast<double>(freq))
+        : 0.0;
+
+    ctx->layout_us_hist[ctx->hud_hist_cursor] = static_cast<float>(layout_ms * 1000.0);
+    ctx->gpu_us_hist[ctx->hud_hist_cursor] = static_cast<float>(ctx->stats.gpu_submit_ms * 1000.0);
+    ctx->hud_hist_cursor = (ctx->hud_hist_cursor + 1u) % kHudHistorySamples;
+    if (ctx->hud_hist_count < kHudHistorySamples) {
+        ++ctx->hud_hist_count;
+    }
+
+    const uint32_t app_prim_count = ctx->prim_count;
+    const uint32_t app_batch_count = ctx->batch_count;
+    const uint32_t app_blur_count = ctx->blur_split_count;
+
+    if (ctx->debug_wireframe_open && app_prim_count > 0u) {
+        const uint32_t step = (app_prim_count > 320u) ? ((app_prim_count + 319u) / 320u) : 1u;
+        for (uint32_t pi = 0u; pi < app_prim_count; pi += step) {
+            const Prim src = ctx->prims[pi];
+            const uint32_t kind = src.style.x & 0xFu;
+            if (kind == static_cast<uint32_t>(PrimKind::Shadow)) {
+                continue;
+            }
+            if (src.bounds.z < 1.0f || src.bounds.w < 1.0f) {
+                continue;
+            }
+            Color wc = Color::rgba8(56, 189, 248, 165);
+            if (kind == static_cast<uint32_t>(PrimKind::Glyph) || kind == static_cast<uint32_t>(PrimKind::SlugGlyph)) {
+                wc = Color::rgba8(251, 191, 36, 145);
+            } else if (kind == static_cast<uint32_t>(PrimKind::Texture) || kind == static_cast<uint32_t>(PrimKind::BlurGlass)) {
+                wc = Color::rgba8(244, 114, 182, 180);
+            } else if (kind == static_cast<uint32_t>(PrimKind::BezierWire)) {
+                wc = Color::rgba8(52, 211, 153, 185);
+            } else if (kind == static_cast<uint32_t>(PrimKind::CanvasGrid)) {
+                wc = Color::rgba8(148, 163, 184, 110);
+            }
+            push_prim(
+                ctx,
+                Prim::make_rect(
+                    Rect{ src.bounds.x, src.bounds.y, src.bounds.z, src.bounds.w },
+                    root_clip,
+                    Color::transparent(),
+                    {},
+                    wc,
+                    1.0f * dpi,
+                    1.0f,
+                    0.0f),
+                nullptr,
+                0.0f);
+        }
+    }
+
+    const bool idle_now = !needs_redraw(ctx);
+    if (ctx->debug_hud_open) {
+        const float vp_w = static_cast<float>(ctx->viewport_w) / dpi;
+        const float hud_w = (vp_w > 340.0f) ? 292.0f : ((vp_w > 180.0f) ? (vp_w - 20.0f) : 160.0f);
+        const float hud_h = 154.0f;
+        const float hud_x = (vp_w - hud_w - 14.0f > 4.0f) ? (vp_w - hud_w - 14.0f) : 4.0f;
+        const float hud_y = 14.0f;
+        const ClipEntry hud_clip = { .rect = root_clip, .radius = 0.0f };
+
+        push_prim(
+            ctx,
+            Prim::make_shadow(
+                Rect{ hud_x * dpi, (hud_y + 4.0f) * dpi, hud_w * dpi, hud_h * dpi },
+                root_clip,
+                Color::rgba8(0, 0, 0, 150),
+                Corners::all(10.0f * dpi),
+                14.0f * dpi,
+                0.0f));
+        push_prim(
+            ctx,
+            Prim::make_rect(
+                Rect{ hud_x * dpi, hud_y * dpi, hud_w * dpi, hud_h * dpi },
+                root_clip,
+                Color::rgba8(9, 13, 22, 236),
+                Corners::all(10.0f * dpi),
+                Color::rgba8(56, 189, 248, 95),
+                1.0f * dpi,
+                1.0f,
+                0.0f));
+        push_prim(
+            ctx,
+            Prim::make_gradient_rect(
+                Rect{ (hud_x + 10.0f) * dpi, (hud_y + 1.0f) * dpi, (hud_w - 20.0f) * dpi, 2.5f * dpi },
+                root_clip,
+                Color::rgb_hex(0x38BDF8),
+                Color::rgb_hex(0x818CF8),
+                Vec2{ 1.0f, 0.0f },
+                Corners::all(1.25f * dpi)));
+
+        emit_direct_text_px(
+            ctx,
+            "ETCH 1.0 INSPECTOR   [F12]",
+            hud_x + 12.0f,
+            hud_y + 10.0f,
+            12.0f,
+            Color::rgb_hex(0xF8FAFC),
+            hud_clip,
+            dpi);
+        if (ctx->debug_wireframe_open) {
+            emit_direct_text_px(
+                ctx,
+                "[F11 WIRE]",
+                hud_x + hud_w - 72.0f,
+                hud_y + 10.5f,
+                11.0f,
+                Color::rgb_hex(0xFBBF24),
+                hud_clip,
+                dpi);
+        }
+
+        char line[96] = {};
+        std::snprintf(
+            line,
+            sizeof(line),
+            "Layout: %.0f us   GPU: %.0f us",
+            layout_ms * 1000.0,
+            ctx->stats.gpu_submit_ms * 1000.0);
+        emit_direct_text_px(ctx, line, hud_x + 12.0f, hud_y + 30.0f, 11.0f, Color::rgb_hex(0x38BDF8), hud_clip, dpi);
+
+        std::snprintf(
+            line,
+            sizeof(line),
+            "Batches: %u DC   Blur: %u pass",
+            app_batch_count,
+            app_blur_count);
+        emit_direct_text_px(ctx, line, hud_x + 12.0f, hud_y + 47.0f, 11.0f, Color::rgb_hex(0xE2E8F0), hud_clip, dpi);
+
+        std::snprintf(
+            line,
+            sizeof(line),
+            "Prims: %u   Glyphs: %u   Curves: %u",
+            app_prim_count,
+            ctx->atlas.slug_glyph_count,
+            ctx->atlas.slug_curve_count);
+        emit_direct_text_px(ctx, line, hud_x + 12.0f, hud_y + 64.0f, 10.5f, Color::rgb_hex(0xCBD5E1), hud_clip, dpi);
+
+        const uint32_t arena_kb = static_cast<uint32_t>((ctx->frame_arena.used() + 512u) / 1024u);
+        const uint32_t arena_cap_kb = static_cast<uint32_t>(ctx->frame_arena.capacity / 1024u);
+        std::snprintf(
+            line,
+            sizeof(line),
+            "Arena: %u / %u KB   State: %s",
+            arena_kb,
+            arena_cap_kb,
+            idle_now ? "SLEEP 0%" : "ACTIVE");
+        emit_direct_text_px(
+            ctx,
+            line,
+            hud_x + 12.0f,
+            hud_y + 81.0f,
+            10.5f,
+            idle_now ? Color::rgb_hex(0x34D399) : Color::rgb_hex(0x94A3B8),
+            hud_clip,
+            dpi);
+
+        const float chart_x = hud_x + 12.0f;
+        const float chart_y = hud_y + 104.0f;
+        const float chart_w = hud_w - 24.0f;
+        const float chart_h = 38.0f;
+        push_prim(
+            ctx,
+            Prim::make_rect(
+                Rect{ chart_x * dpi, chart_y * dpi, chart_w * dpi, chart_h * dpi },
+                root_clip,
+                Color::rgba8(15, 23, 42, 215),
+                Corners::all(5.0f * dpi),
+                Color::rgba8(148, 163, 184, 34),
+                1.0f * dpi));
+
+        float peak_us = 250.0f;
+        for (uint32_t hi = 0u; hi < ctx->hud_hist_count; ++hi) {
+            if (ctx->layout_us_hist[hi] > peak_us) {
+                peak_us = ctx->layout_us_hist[hi];
+            }
+        }
+        const uint32_t bar_slots = kHudHistorySamples;
+        const float inner_w = chart_w - 8.0f;
+        const float pitch = inner_w / static_cast<float>(bar_slots);
+        const float bar_w = (pitch > 1.5f) ? (pitch - 0.8f) : pitch;
+        const uint32_t n = ctx->hud_hist_count;
+        const uint32_t start = (n == kHudHistorySamples) ? ctx->hud_hist_cursor : 0u;
+        for (uint32_t bi = 0u; bi < n; ++bi) {
+            const uint32_t idx = (start + bi) % kHudHistorySamples;
+            const float us = ctx->layout_us_hist[idx];
+            const float norm = clamp_range(us / peak_us, 0.06f, 1.0f);
+            const float bh = norm * (chart_h - 8.0f);
+            const float bx = chart_x + 4.0f + static_cast<float>(bar_slots - n + bi) * pitch;
+            const float by = chart_y + chart_h - 4.0f - bh;
+            const Color bc = (us > 200.0f)
+                ? Color::rgba8(251, 191, 36, 225)
+                : Color::rgba8(56, 189, 248, 210);
+            push_prim(
+                ctx,
+                Prim::make_rect(
+                    Rect{ bx * dpi, by * dpi, bar_w * dpi, bh * dpi },
+                    root_clip,
+                    bc,
+                    Corners::all(1.0f * dpi)));
+        }
+    }
+
     ctx->in_frame = false;
     ctx->stats.prim_count = ctx->prim_count;
     ctx->stats.draw_call_count = ctx->batch_count;
+    ctx->stats.blur_pass_count = app_blur_count;
     ctx->stats.slug_glyph_count = ctx->atlas.slug_glyph_count;
     ctx->stats.slug_curve_count = ctx->atlas.slug_curve_count;
     ctx->stats.arena_used_bytes = ctx->frame_arena.used();
     ctx->stats.arena_peak_bytes = ctx->frame_arena.peak_offset;
-    ctx->stats.layout_ms = (freq > 0u)
-        ? (static_cast<double>(end_ticks - ctx->layout_start_ticks) * 1000.0 / static_cast<double>(freq))
-        : 0.0;
+    ctx->stats.layout_ms = layout_ms;
     ctx->stats.active_animations = ctx->active_anim_count;
-    ctx->stats.idle_sleeping = !needs_redraw(ctx);
+    ctx->stats.idle_sleeping = idle_now;
 }
 
 } // namespace etch

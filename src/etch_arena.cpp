@@ -18,7 +18,10 @@ inline constexpr uint32_t kDefaultStateCapacity = 1024u;
 inline constexpr uint32_t kMaxBatches = 256u;
 inline constexpr uint32_t kMaxClipDepth = 64u;
 inline constexpr uint32_t kMaxCachedPipelines = 4u;
-inline constexpr uint32_t kMaxBlurSplits = 2u;
+inline constexpr uint32_t kMaxBlurSplits = 4u;
+inline constexpr uint32_t kMaxSplitDepth = 16u;
+inline constexpr uint32_t kMaxCanvasDepth = 8u;
+inline constexpr uint32_t kHudHistorySamples = 64u;
 inline constexpr uint32_t kMaxFocusablePerFrame = 256u;
 inline constexpr uint32_t kCursorCount = 9u;
 inline constexpr uint32_t kMaxTextOpsPerFrame = 32u;
@@ -50,6 +53,31 @@ struct WidgetState {
     float    edit_scroll_x = 0.0f;
     float    edit_scroll_y = 0.0f;
     float    edit_preferred_x = -1.0f;
+
+    // Split Pane state
+    bool     split_initialized = false;
+    float    split_ratio = 0.5f;
+    float    split_grab_offset = 0.0f;
+
+    // Virtual List state (double-precision scroll prevents float32 ULP degradation past 16.7M px)
+    bool     is_virtual_list = false;
+    double   vscroll_pos_y = 0.0;
+    double   vscroll_vel_y = 0.0;
+    double   vscroll_max_y = 0.0;
+    double   vscroll_total_h = 0.0;
+    float    vlist_stride = 28.0f;
+
+    // Infinite 2D Canvas & Node Drag state
+    bool     is_canvas = false;
+    bool     canvas_initialized = false;
+    bool     canvas_interactive = true;
+    bool     is_canvas_node = false;
+    uint32_t owner_canvas_id = 0;
+    Vec2     canvas_pan = {};
+    float    canvas_zoom = 1.0f;
+    float    canvas_min_zoom = 0.15f;
+    float    canvas_max_zoom = 8.0f;
+    Vec2     drag_grab = {};
 };
 
 struct StateMap {
@@ -158,9 +186,63 @@ struct TextInputExtra {
     bool          is_focused = false;
 };
 
+enum class CustomCmdKind : uint8_t {
+    Box = 0,
+    TextInput = 1,
+    CanvasGrid = 2,
+    CanvasWire = 3,
+};
+
+struct CanvasGridExtra {
+    uint32_t canvas_id = 0;
+    Vec2     pan = {};
+    float    zoom = 1.0f;
+    float    grid_step_world = 24.0f;
+    uint32_t major_subdiv = 4u;
+    Color    minor_color = {};
+    Color    major_color = {};
+};
+
+struct CanvasWireExtra {
+    uint32_t canvas_id = 0;
+    Vec2     from_world = {};
+    Vec2     to_world = {};
+    Color    color_start = {};
+    Color    color_end = {};
+    Color    glow_color = {};
+    float    thickness_world = 2.2f;
+    float    glow_world = 0.0f;
+    float    tangent_bias = 0.45f;
+};
+
 struct BoxExtra {
-    BoxDesc         desc = {};
-    TextInputExtra* text_input = nullptr;
+    CustomCmdKind    kind = CustomCmdKind::Box;
+    BoxDesc          desc = {};
+    TextInputExtra*  text_input = nullptr;
+    CanvasGridExtra* canvas_grid = nullptr;
+    CanvasWireExtra* canvas_wire = nullptr;
+    bool             is_virtual_list = false;
+    bool             is_canvas = false;
+};
+
+struct SplitStackEntry {
+    uint32_t id = 0;
+    Axis     axis = Axis::Row;
+    float    ratio = 0.5f;
+    float    divider_size_px = 6.0f;
+    float    min_first_px = 120.0f;
+    float    min_second_px = 120.0f;
+    Color    divider_color = {};
+    Color    divider_hover_color = {};
+    Color    divider_active_color = {};
+    bool     in_second = false;
+};
+
+struct CanvasStackEntry {
+    uint32_t    id = 0;
+    CanvasDesc  desc = {};
+    CanvasState state = {};
+    bool        in_node = false;
 };
 
 struct ImageExtra {
@@ -261,11 +343,16 @@ struct Context {
     Vec2       event_pointer_pos = {-1.0f, -1.0f};
     bool       has_event_pointer = false;
     bool       event_pointer_down = false;
+    bool       event_pan_button_down = false;
     Vec2       event_scroll_delta = {};
     bool       prev_pointer_down = false;
+    bool       prev_pan_button_down = false;
+    Vec2       prev_pointer_pos = {-1.0f, -1.0f};
+    bool       space_down = false;
 
     uint32_t    active_id = 0;
     uint32_t    focus_id = 0;
+    uint32_t    pan_canvas_id = 0;
     bool        mouse_captured = false;
     Vec2        pointer_pos = {-1.0f, -1.0f};
     float       scrollbar_drag_grab_offset = 0.0f;
@@ -281,6 +368,20 @@ struct Context {
     uint32_t    active_anim_count = 0u;
     uint32_t    wake_event_type = 0u;
     float       sim_dt = 0.0f;
+
+    SplitStackEntry  split_stack[kMaxSplitDepth] = {};
+    uint32_t         split_depth = 0;
+    CanvasStackEntry canvas_stack[kMaxCanvasDepth] = {};
+    uint32_t         canvas_depth = 0;
+    Rect             last_canvas_clip_px = {};
+    float            last_canvas_clip_radius_px = 0.0f;
+
+    bool        debug_hud_open = false;
+    bool        debug_wireframe_open = false;
+    float       layout_us_hist[kHudHistorySamples] = {};
+    float       gpu_us_hist[kHudHistorySamples] = {};
+    uint32_t    hud_hist_cursor = 0;
+    uint32_t    hud_hist_count = 0;
 
     uint8_t       last_mouse_clicks = 1u;
     PendingTextOp pending_text_ops[kMaxTextOpsPerFrame] = {};

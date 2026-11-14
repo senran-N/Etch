@@ -1306,6 +1306,39 @@ int run_headless(const char* out_png_path) noexcept {
         return 1;
     }
 
+    // 10a. F12 Inspector HUD Toggle Assertion (adds HUD prims with 0 extra draw calls, then restores off).
+    const etch::FrameStats pre_hud_stats = etch::frame_stats(ctx);
+    inject_key(SDLK_F12);
+    if (!etch::debug_hud_open(ctx)) {
+        std::fprintf(stderr, "Headless assert [10a-1] failed: SDLK_F12 did not open HUD\n");
+        cleanup_release();
+        return 1;
+    }
+    step_headless_frame(&app, kHeadlessW, kHeadlessH, kStepDt);
+    const etch::FrameStats hud_stats = etch::frame_stats(ctx);
+    if (hud_stats.prim_count <= pre_hud_stats.prim_count + 16u ||
+        hud_stats.draw_call_count != pre_hud_stats.draw_call_count)
+    {
+        std::fprintf(
+            stderr,
+            "Headless assert [10a-2] failed: HUD expected more prims & 0 extra draw calls (%u->%u prims, %u->%u dc)\n",
+            pre_hud_stats.prim_count,
+            hud_stats.prim_count,
+            pre_hud_stats.draw_call_count,
+            hud_stats.draw_call_count);
+        cleanup_release();
+        return 1;
+    }
+    inject_key(SDLK_F12);
+    if (etch::debug_hud_open(ctx)) {
+        std::fprintf(stderr, "Headless assert [10a-3] failed: second SDLK_F12 did not close HUD\n");
+        cleanup_release();
+        return 1;
+    }
+    for (int f = 0; f < 4; ++f) {
+        step_headless_frame(&app, kHeadlessW, kHeadlessH, kStepDt);
+    }
+
     const bool png_ok = etch::render_headless_png(
         ctx,
         kHeadlessW,
@@ -1336,9 +1369,154 @@ int run_headless(const char* out_png_path) noexcept {
         std::fprintf(stderr, "Headless assert [9a] failed: expected Slug text pipeline (slug_prims=%u, legacy=%u, glyphs=%u, curves=%u)\n",
             slug_prim_count, legacy_glyph_count, final_stats.slug_glyph_count, final_stats.slug_curve_count);
     }
-    const bool ok = png_ok && stats_ok && slug_ok;
+
+    // 10b. Split Pane, Million-Row Virtual List, Infinite 2D Canvas + Wires + Node Drag Assertion.
+    bool v10a_ok = false;
+    {
+        etch::Context* vctx = etch::create_context(etch::ContextDesc{ .headless = true });
+        if (!vctx) {
+            std::fprintf(stderr, "Headless assert [10b] failed: create_context for v1.0 primitives failed\n");
+        } else {
+            etch::Vec2 node_pos = { 120.0f, 80.0f };
+            etch::VirtualListSlice last_slice = {};
+            etch::CanvasState last_cs = {};
+            const uint32_t kSplitId = etch::id("v10_split");
+            const uint32_t kListId = etch::id("v10_vlist");
+            const uint32_t kCanvasId = etch::id("v10_canvas");
+            const uint32_t kNodeId = etch::id("v10_node");
+
+            const auto step_v10_frame = [&](etch::Vec2 ptr, bool down, etch::Vec2 wheel) noexcept {
+                etch::begin_frame(vctx, etch::FrameDesc{
+                    .viewport_w = kHeadlessW,
+                    .viewport_h = kHeadlessH,
+                    .dpi_scale = 1.0f,
+                    .dt_seconds = kStepDt,
+                    .pointer_pos = ptr,
+                    .pointer_down = down,
+                    .scroll_delta = wheel,
+                });
+                etch::begin_split(etch::SplitDesc{
+                    .id = kSplitId,
+                    .axis = etch::Axis::Row,
+                    .width = etch::Sizing::grow(),
+                    .height = etch::Sizing::grow(),
+                    .default_ratio = 0.40f,
+                    .min_first_px = 120.0f,
+                    .min_second_px = 120.0f,
+                    .divider_size_px = 6.0f,
+                });
+                last_slice = etch::begin_virtual_list(etch::VirtualListDesc{
+                    .id = kListId,
+                    .item_count = 1000000u,
+                    .item_height_px = 28.0f,
+                    .row_gap_px = 2.0f,
+                    .overscan_rows = 2u,
+                    .width = etch::Sizing::grow(),
+                    .height = etch::Sizing::grow(),
+                });
+                for (uint32_t r = last_slice.first_index; r < last_slice.end_index; ++r) {
+                    char row_lbl[32] = {};
+                    std::snprintf(row_lbl, sizeof(row_lbl), "Row %u", r);
+                    etch::begin_box(etch::BoxDesc{
+                        .width = etch::Sizing::grow(),
+                        .height = etch::Sizing::fixed(28.0f),
+                    });
+                    etch::text(etch::str_cstr(row_lbl), etch::TextDesc{ .font_size_px = 13.0f, .wrap = false });
+                    etch::end_box();
+                }
+                etch::end_virtual_list();
+                etch::split_second();
+                last_cs = etch::begin_canvas(etch::CanvasDesc{
+                    .id = kCanvasId,
+                    .width = etch::Sizing::grow(),
+                    .height = etch::Sizing::grow(),
+                });
+                etch::canvas_wire(etch::CanvasWireDesc{
+                    .from_world = node_pos + etch::Vec2{ 180.0f, 36.0f },
+                    .to_world = node_pos + etch::Vec2{ 360.0f, 140.0f },
+                    .glow_color = etch::Color::rgba8(56, 189, 248, 80),
+                    .glow_world = 8.0f,
+                });
+                etch::begin_canvas_node(etch::CanvasNodeDesc{
+                    .id = kNodeId,
+                    .world_pos = &node_pos,
+                    .width_world = etch::Sizing::fixed(180.0f),
+                    .padding_world = etch::Padding::all(10.0f),
+                });
+                etch::text("Canvas Node Alpha", etch::TextDesc{ .font_size_px = 13.5f, .wrap = false });
+                etch::end_canvas_node();
+                etch::end_canvas();
+                etch::end_split();
+                etch::end_frame(vctx);
+            };
+
+            // Warmup & verify initial 1M list O(visible) slice + Canvas prims
+            step_v10_frame({-1.0f, -1.0f}, false, {});
+            step_v10_frame({-1.0f, -1.0f}, false, {});
+
+            const float div_x = (static_cast<float>(kHeadlessW) - 6.0f) * 0.40f + 3.0f;
+            step_v10_frame({div_x, 400.0f}, true, {});
+            step_v10_frame({div_x + 120.0f, 400.0f}, true, {});
+            step_v10_frame({div_x + 120.0f, 400.0f}, false, {});
+            const float dragged_ratio = etch::split_ratio(kSplitId);
+
+            etch::virtual_list_scroll_to_row(kListId, 999990u, 28.0f, etch::AlignY::Top);
+            step_v10_frame({-1.0f, -1.0f}, false, {});
+
+            const etch::Vec2 zoom_anchor = { 860.0f, 380.0f };
+            const etch::Vec2 world_before = etch::canvas_state(kCanvasId).screen_to_world(zoom_anchor);
+            step_v10_frame(zoom_anchor, false, {0.0f, 2.0f});
+            const etch::CanvasState zoomed_cs = etch::canvas_state(kCanvasId);
+            const etch::Vec2 world_after = zoomed_cs.screen_to_world(zoom_anchor);
+            const float anchor_dx = (world_after.x > world_before.x) ? (world_after.x - world_before.x) : (world_before.x - world_after.x);
+            const float anchor_dy = (world_after.y > world_before.y) ? (world_after.y - world_before.y) : (world_before.y - world_after.y);
+
+            const etch::Rect nb = etch::element_bounds(kNodeId);
+            const etch::Vec2 node_grab = { nb.x + 20.0f, nb.y + 18.0f };
+            const etch::Vec2 orig_node_pos = node_pos;
+            step_v10_frame(node_grab, true, {});
+            step_v10_frame({node_grab.x + 60.0f, node_grab.y + 40.0f}, true, {});
+            step_v10_frame({node_grab.x + 60.0f, node_grab.y + 40.0f}, false, {});
+            step_v10_frame({-1.0f, -1.0f}, false, {});
+
+            uint32_t grid_prims = 0u;
+            uint32_t wire_prims = 0u;
+            for (const etch::Prim& p : etch::frame_prims(vctx)) {
+                const auto kind = static_cast<etch::PrimKind>(p.style.x & 0xFu);
+                if (kind == etch::PrimKind::CanvasGrid) ++grid_prims;
+                if (kind == etch::PrimKind::BezierWire) ++wire_prims;
+            }
+            const etch::FrameStats vstats = etch::frame_stats(vctx);
+            const bool split_ok = dragged_ratio > 0.47f;
+            const bool vlist_ok = (last_slice.total_count == 1000000u) &&
+                                  (last_slice.first_index <= 999990u) &&
+                                  (last_slice.end_index > 999990u) &&
+                                  ((last_slice.end_index - last_slice.first_index) < 64u) &&
+                                  (last_slice.scroll_y > 27000000.0);
+            const bool canvas_ok = (zoomed_cs.zoom > 1.20f) &&
+                                   (anchor_dx < 0.05f) && (anchor_dy < 0.05f) &&
+                                   (node_pos.x > orig_node_pos.x + 20.0f) &&
+                                   (node_pos.y > orig_node_pos.y + 15.0f) &&
+                                   (grid_prims >= 1u) && (wire_prims >= 2u) &&
+                                   (vstats.draw_call_count == 1u);
+            v10a_ok = split_ok && vlist_ok && canvas_ok;
+            if (!v10a_ok) {
+                std::fprintf(
+                    stderr,
+                    "Headless assert [10b] failed: split=%d(r=%.3f) vlist=%d([%u,%u) y=%.1f) canvas=%d(z=%.3f ad=%.3f,%.3f pos=%.1f,%.1f grid=%u wire=%u dc=%u)\n",
+                    split_ok ? 1 : 0, dragged_ratio,
+                    vlist_ok ? 1 : 0, last_slice.first_index, last_slice.end_index, last_slice.scroll_y,
+                    canvas_ok ? 1 : 0, zoomed_cs.zoom, anchor_dx, anchor_dy, node_pos.x, node_pos.y,
+                    grid_prims, wire_prims, vstats.draw_call_count);
+            }
+            etch::destroy_context(vctx);
+            etch::set_current_context(ctx);
+        }
+    }
+
+    const bool ok = png_ok && stats_ok && slug_ok && v10a_ok;
     std::printf(
-        "Headless %s -> %s (asserts=9/9, prims=%u, draw_calls=%u, slug_glyphs=%u, slug_curves=%u, layout_ms=%.3f, gpu_submit_ms=%.3f, arena_used=%zuB, scroll_y=%.1f, focus=0x%08X, idle=%d)\n",
+        "Headless %s -> %s (asserts=10/10, prims=%u, draw_calls=%u, slug_glyphs=%u, slug_curves=%u, layout_ms=%.3f, gpu_submit_ms=%.3f, arena_used=%zuB, scroll_y=%.1f, focus=0x%08X, idle=%d)\n",
         ok ? "OK" : "FAILED",
         out_png_path,
         final_stats.prim_count,

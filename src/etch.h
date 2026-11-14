@@ -422,6 +422,8 @@ enum class PrimKind : uint8_t {
     Texture = 3,
     SlugGlyph = 4,
     BlurGlass = 5,
+    CanvasGrid = 6,
+    BezierWire = 7,
 };
 
 enum PrimFlags : uint8_t {
@@ -666,6 +668,89 @@ struct alignas(16) Prim {
             },
         };
     }
+
+    static constexpr Prim make_canvas_grid(
+        Rect rect,
+        Rect clip_rect,
+        Vec2 phase_px,
+        float minor_step_px,
+        float major_step_px,
+        Vec2 origin_rel_px,
+        Color minor_color,
+        Color major_color,
+        float dot_radius_px = 1.35f,
+        float minor_alpha_scale = 1.0f,
+        float clip_radius = 0.0f) noexcept
+    {
+        const auto clamp_origin = [](float v) constexpr noexcept -> float {
+            return (v < -32000.0f) ? -32000.0f : ((v > 32000.0f) ? 32000.0f : v);
+        };
+        const uint8_t flags = (clip_radius > 0.0f) ? PrimFlag_RoundedClip : PrimFlag_None;
+        return Prim{
+            .bounds = {rect.x, rect.y, rect.w, rect.h},
+            .clip = {clip_rect.x, clip_rect.y, clip_rect.x + clip_rect.w, clip_rect.y + clip_rect.h},
+            .payload = {
+                std::bit_cast<uint32_t>(phase_px.x),
+                std::bit_cast<uint32_t>(phase_px.y),
+                pack_f16x2(minor_step_px, major_step_px),
+                pack_f16x2(clamp_origin(origin_rel_px.x), clamp_origin(origin_rel_px.y)),
+            },
+            .style = {
+                pack_header(PrimKind::CanvasGrid, flags, 0u, clip_radius),
+                minor_color.pack_rgba8(),
+                major_color.pack_rgba8(),
+                pack_f16x2(dot_radius_px, minor_alpha_scale),
+            },
+        };
+    }
+
+    static constexpr Prim make_bezier_wire(
+        Vec2 q0_px,
+        Vec2 q1_px,
+        Vec2 q2_px,
+        Rect clip_rect,
+        Color color_start,
+        Color color_end,
+        float half_width_px = 1.5f,
+        Color glow_color = {},
+        float glow_px = 0.0f,
+        float clip_radius = 0.0f) noexcept
+    {
+        const auto min3f = [](float a, float b, float c) constexpr noexcept -> float {
+            const float ab = (a < b) ? a : b;
+            return (ab < c) ? ab : c;
+        };
+        const auto max3f = [](float a, float b, float c) constexpr noexcept -> float {
+            const float ab = (a > b) ? a : b;
+            return (ab > c) ? ab : c;
+        };
+        const float hw = (half_width_px > 0.5f) ? half_width_px : 0.5f;
+        const float gw = (glow_px > 0.0f) ? glow_px : 0.0f;
+        const float margin = hw + gw + 2.0f;
+        const float bx = min3f(q0_px.x, q1_px.x, q2_px.x) - margin;
+        const float by = min3f(q0_px.y, q1_px.y, q2_px.y) - margin;
+        const float raw_w = (max3f(q0_px.x, q1_px.x, q2_px.x) + margin) - bx;
+        const float raw_h = (max3f(q0_px.y, q1_px.y, q2_px.y) + margin) - by;
+        const float bw = (raw_w > 1.0f) ? raw_w : 1.0f;
+        const float bh = (raw_h > 1.0f) ? raw_h : 1.0f;
+        const uint8_t flags = (clip_radius > 0.0f) ? PrimFlag_RoundedClip : PrimFlag_None;
+        return Prim{
+            .bounds = {bx, by, bw, bh},
+            .clip = {clip_rect.x, clip_rect.y, clip_rect.x + clip_rect.w, clip_rect.y + clip_rect.h},
+            .payload = {
+                pack_unorm16x2((q0_px.x - bx) / bw, (q0_px.y - by) / bh),
+                pack_unorm16x2((q1_px.x - bx) / bw, (q1_px.y - by) / bh),
+                pack_unorm16x2((q2_px.x - bx) / bw, (q2_px.y - by) / bh),
+                color_end.pack_rgba8(),
+            },
+            .style = {
+                pack_header(PrimKind::BezierWire, flags, 0u, clip_radius),
+                color_start.pack_rgba8(),
+                glow_color.pack_rgba8(),
+                pack_f16x2(hw, gw),
+            },
+        };
+    }
 };
 
 static_assert(sizeof(Prim) == 64);
@@ -723,6 +808,7 @@ struct FrameDesc {
 struct FrameStats {
     uint32_t prim_count = 0;
     uint32_t draw_call_count = 0;
+    uint32_t blur_pass_count = 0;
     uint32_t slug_glyph_count = 0;
     uint32_t slug_curve_count = 0;
     size_t arena_used_bytes = 0;
@@ -910,6 +996,125 @@ struct TextInputResult {
     Rect ime_cursor_rect = {};
 };
 
+struct SplitDesc {
+    uint32_t id = 0;
+    Axis axis = Axis::Row; // Row = Left|Right (ResizeEW), Col = Top/Bottom (ResizeNS)
+    Sizing width = Sizing::grow();
+    Sizing height = Sizing::grow();
+    float default_ratio = 0.5f;
+    float min_first_px = 120.0f;
+    float min_second_px = 120.0f;
+    float divider_size_px = 6.0f;
+    Color divider_color = Color::rgba8(148, 163, 184, 34);
+    Color divider_hover_color = Color::rgba8(56, 189, 248, 165);
+    Color divider_active_color = Color::rgb_hex(0x38BDF8);
+};
+
+struct SplitResult {
+    float ratio = 0.5f;
+    bool dragging = false;
+};
+
+struct VirtualListDesc {
+    uint32_t id = 0;
+    uint32_t item_count = 0;
+    float item_height_px = 28.0f;
+    float row_gap_px = 0.0f;
+    uint32_t overscan_rows = 2u;
+    Sizing width = Sizing::grow();
+    Sizing height = Sizing::grow();
+    Padding padding = {};
+    Color background = {};
+    Color border_color = {};
+    float border_width = 0.0f;
+    Corners radius = {};
+    bool show_scrollbar = true;
+};
+
+struct VirtualListSlice {
+    uint32_t first_index = 0;
+    uint32_t end_index = 0;
+    uint32_t total_count = 0;
+    double scroll_y = 0.0;
+    double max_scroll_y = 0.0;
+    float viewport_height = 0.0f;
+};
+
+struct CanvasDesc {
+    uint32_t id = 0;
+    Sizing width = Sizing::grow();
+    Sizing height = Sizing::grow();
+    Vec2 default_pan = {};
+    float default_zoom = 1.0f;
+    float min_zoom = 0.15f;
+    float max_zoom = 8.0f;
+    float grid_step_world = 24.0f;
+    uint32_t major_grid_subdiv = 4u;
+    Color background = Color::rgb_hex(0x090C12);
+    Color minor_grid_color = Color::rgba8(148, 163, 184, 40);
+    Color major_grid_color = Color::rgba8(148, 163, 184, 28);
+    Color border_color = Color::rgba8(148, 163, 184, 44);
+    float border_width = 1.0f;
+    Corners radius = Corners::all(10.0f);
+    bool show_grid = true;
+    bool interactive = true;
+};
+
+struct CanvasState {
+    Vec2 pan = {};
+    float zoom = 1.0f;
+    Rect viewport = {};
+    bool panning = false;
+
+    constexpr Vec2 world_to_local(Vec2 world) const noexcept { return pan + world * zoom; }
+    constexpr Vec2 world_to_screen(Vec2 world) const noexcept { return Vec2{viewport.x, viewport.y} + pan + world * zoom; }
+    constexpr Vec2 screen_to_world(Vec2 screen) const noexcept {
+        const float inv_z = (zoom > 1e-4f) ? (1.0f / zoom) : 1.0f;
+        return (screen - Vec2{viewport.x, viewport.y} - pan) * inv_z;
+    }
+};
+
+struct CanvasWireDesc {
+    Vec2 from_world = {};
+    Vec2 to_world = {};
+    Color color_start = Color::rgb_hex(0x38BDF8);
+    Color color_end = Color::rgb_hex(0x818CF8);
+    Color glow_color = {};
+    float thickness_world = 2.2f;
+    float glow_world = 0.0f;
+    float tangent_bias = 0.45f;
+    int16_t z_index = 0;
+};
+
+struct CanvasNodeDesc {
+    uint32_t id = 0;
+    Vec2* world_pos = nullptr;
+    Vec2 pos_value = {};
+    Sizing width_world = Sizing::fixed(200.0f);
+    Sizing height_world = Sizing::fit();
+    Padding padding_world = {};
+    float gap_world = 0.0f;
+    Axis axis = Axis::Col;
+    Color background = Color::rgb_hex(0x111726);
+    Color background_end = {};
+    Vec2 gradient_dir = {0.0f, 1.0f};
+    Color border_color = Color::rgba8(148, 163, 184, 56);
+    float border_width_world = 1.0f;
+    Corners radius_world = Corners::all(10.0f);
+    Color shadow_color = Color::rgba8(0, 0, 0, 130);
+    float shadow_blur_world = 14.0f;
+    Vec2 shadow_offset_world = {0.0f, 6.0f};
+    int16_t z_index = 2;
+    bool draggable = true;
+};
+
+struct CanvasNodeResult {
+    bool hovered = false;
+    bool pressed = false;
+    bool dragging = false;
+    bool clicked = false;
+};
+
 Context* create_context(const ContextDesc& desc) noexcept;
 void destroy_context(Context* ctx) noexcept;
 
@@ -979,6 +1184,39 @@ float spring(uint32_t anim_id, float target, SpringSpec spec = {}) noexcept;
 Vec2 spring_vec2(uint32_t anim_id, Vec2 target, SpringSpec spec = {}) noexcept;
 Vec2 scroll_offset(uint32_t element_id) noexcept;
 void set_scroll_offset(uint32_t element_id, Vec2 offset, bool stop_momentum = true) noexcept;
+
+// Resizable Split Pane
+SplitResult begin_split(const SplitDesc& desc) noexcept;
+void split_second() noexcept;
+void end_split() noexcept;
+float split_ratio(uint32_t split_id) noexcept;
+void set_split_ratio(uint32_t split_id, float ratio) noexcept;
+
+// Million-Row Virtual List (double-precision scrolling, O(visible) layout)
+VirtualListSlice begin_virtual_list(const VirtualListDesc& desc) noexcept;
+void end_virtual_list() noexcept;
+double virtual_list_scroll_offset(uint32_t list_id) noexcept;
+void set_virtual_list_scroll_offset(uint32_t list_id, double offset_y, bool stop_momentum = true) noexcept;
+void virtual_list_scroll_to_row(
+    uint32_t list_id,
+    uint32_t row_index,
+    float item_height_px,
+    AlignY align = AlignY::Top) noexcept;
+
+// Infinite 2D Canvas & Node-Graph Wires
+CanvasState begin_canvas(const CanvasDesc& desc) noexcept;
+void end_canvas() noexcept;
+void canvas_wire(const CanvasWireDesc& desc) noexcept;
+CanvasNodeResult begin_canvas_node(const CanvasNodeDesc& desc) noexcept;
+void end_canvas_node() noexcept;
+CanvasState canvas_state(uint32_t canvas_id) noexcept;
+void set_canvas_view(uint32_t canvas_id, Vec2 pan, float zoom) noexcept;
+
+// F12 Real-Time Performance & Batch Inspector HUD
+void set_debug_hud_open(Context* ctx, bool open) noexcept;
+bool debug_hud_open(const Context* ctx = nullptr) noexcept;
+void set_debug_wireframe(Context* ctx, bool enabled) noexcept;
+bool debug_wireframe(const Context* ctx = nullptr) noexcept;
 
 struct BoxScope {
     bool active = true;

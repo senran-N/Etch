@@ -2,6 +2,9 @@
 
 #include "etch.h"
 
+#include <cmath>
+#include <cstdio>
+
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_gpu.h>
 

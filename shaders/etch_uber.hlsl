@@ -1,12 +1,14 @@
 // Etch Pure-GPU Uber Shader (SM 6.0 HLSL -> DXIL & Vulkan 1.0 SPIR-V)
 // Compiled offline via dxc.exe to src/shaders_gen/etch_uber_{vs,ps}_{dxil,spv}.h.
 
-#define ETCH_PRIM_RECT       0u
-#define ETCH_PRIM_SHADOW     1u
-#define ETCH_PRIM_GLYPH      2u
-#define ETCH_PRIM_TEXTURE    3u
-#define ETCH_PRIM_SLUG_GLYPH 4u
-#define ETCH_PRIM_BLUR_GLASS 5u
+#define ETCH_PRIM_RECT        0u
+#define ETCH_PRIM_SHADOW      1u
+#define ETCH_PRIM_GLYPH       2u
+#define ETCH_PRIM_TEXTURE     3u
+#define ETCH_PRIM_SLUG_GLYPH  4u
+#define ETCH_PRIM_BLUR_GLASS  5u
+#define ETCH_PRIM_CANVAS_GRID 6u
+#define ETCH_PRIM_BEZIER_WIRE 7u
 
 #define ETCH_FLAG_LINEAR_GRAD   (1u << 0)
 #define ETCH_FLAG_RADIAL_GRAD   (1u << 1)
@@ -176,9 +178,9 @@ VSOut vs_main(uint vertex_id : SV_VertexID, uint instance_id : SV_InstanceID)
     float2 r_br_bl   = unpack_f16x2_custom(p.payload.w);
 
     float pad = 1.0f;
-    if (kind == ETCH_PRIM_GLYPH)
+    if (kind == ETCH_PRIM_GLYPH || kind == ETCH_PRIM_CANVAS_GRID || kind == ETCH_PRIM_BEZIER_WIRE)
     {
-        // Keep glyph quad strictly inside glyph texel bounds so linear sampling never leaks adjacent atlas glyphs.
+        // Keep glyph quad inside texel bounds; CanvasGrid & BezierWire already include AA/glow bounds.
         pad = 0.0f;
     }
     else if (kind == ETCH_PRIM_SHADOW)
@@ -218,6 +220,18 @@ VSOut vs_main(uint vertex_id : SV_VertexID, uint instance_id : SV_InstanceID)
     else if (kind == ETCH_PRIM_BLUR_GLASS)
     {
         uv_rect = float4(g_inv_viewport_size, 0.0f, 0.0f);
+    }
+    else if (kind == ETCH_PRIM_CANVAS_GRID)
+    {
+        uv_rect = float4(asfloat(p.payload.x), asfloat(p.payload.y), r_tl_tr.x, r_tl_tr.y);
+        col1    = float4(r_br_bl.x, r_br_bl.y, 0.0f, 0.0f);
+    }
+    else if (kind == ETCH_PRIM_BEZIER_WIRE)
+    {
+        uv_rect = float4(unpack_unorm16x2(p.payload.x), unpack_unorm16x2(p.payload.y));
+        r_tl_tr = unpack_unorm16x2(p.payload.z);
+        r_br_bl = float2(0.0f, 0.0f);
+        col1    = unpack_rgba8_srgb_to_linear(p.payload.w);
     }
     else if ((flags & (ETCH_FLAG_LINEAR_GRAD | ETCH_FLAG_RADIAL_GRAD)) != 0u)
     {
@@ -394,6 +408,61 @@ float sd_rounded_box(float2 p, float2 half_size, float4 radii)
     return min(max(q.x, q.y), 0.0f) + length(max(q, 0.0f)) - r;
 }
 
+float2 sd_quadratic_bezier(float2 pos, float2 A, float2 B, float2 C)
+{
+    float2 a = B - A;
+    float2 b = A - 2.0f * B + C;
+    if (dot(b, b) < 1e-2f)
+    {
+        float2 ac = C - A;
+        float t_seg = saturate(dot(pos - A, ac) / max(dot(ac, ac), 1e-4f));
+        return float2(length(pos - lerp(A, C, t_seg)), t_seg);
+    }
+    float2 c  = a * 2.0f;
+    float2 d  = A - pos;
+    float  kk = 1.0f / dot(b, b);
+    float  kx = kk * dot(a, b);
+    float  ky = kk * (2.0f * dot(a, a) + dot(d, b)) / 3.0f;
+    float  kz = kk * dot(d, a);
+
+    float p  = ky - kx * kx;
+    float p3 = p * p * p;
+    float q  = kx * (2.0f * kx * kx - 3.0f * ky) + kz;
+    float h  = q * q + 4.0f * p3;
+
+    float best_d2 = 1e20f;
+    float best_t  = 0.0f;
+    if (h >= 0.0f)
+    {
+        h = sqrt(h);
+        float2 x  = (float2(h, -h) - q) * 0.5f;
+        float2 uv = sign(x) * pow(max(abs(x), 1e-12f), float2(1.0f / 3.0f, 1.0f / 3.0f));
+        float  t  = saturate(uv.x + uv.y - kx);
+        float2 dv = d + (c + b * t) * t;
+        best_d2   = dot(dv, dv);
+        best_t    = t;
+    }
+    else
+    {
+        float  z   = sqrt(max(-p, 1e-8f));
+        float  v   = acos(clamp(q / (-2.0f * z * z * z), -1.0f, 1.0f)) / 3.0f;
+        float  m   = cos(v);
+        float  n   = sin(v) * 1.732050808f;
+        float3 t   = saturate(float3(m + m, -n - m, n - m) * z - kx);
+        float2 dv1 = d + (c + b * t.x) * t.x;
+        float2 dv2 = d + (c + b * t.y) * t.y;
+        float2 dv3 = d + (c + b * t.z) * t.z;
+        float  d1  = dot(dv1, dv1);
+        float  d2  = dot(dv2, dv2);
+        float  d3  = dot(dv3, dv3);
+        best_d2    = d1;
+        best_t     = t.x;
+        if (d2 < best_d2) { best_d2 = d2; best_t = t.y; }
+        if (d3 < best_d2) { best_d2 = d3; best_t = t.z; }
+    }
+    return float2(sqrt(max(best_d2, 0.0f)), best_t);
+}
+
 float erf_approx(float x)
 {
     float ax = abs(x);
@@ -565,6 +634,53 @@ float4 ps_main(VSOut input) : SV_Target0
         float4 b_pm = float4(input.border_color.rgb, 1.0f) * (input.border_color.a * border_t);
         float4 g_pm = float4(glass_lin, 1.0f);
         out_pm      = (b_pm + g_pm * (1.0f - b_pm.a)) * outer_cov;
+    }
+    else if (kind == ETCH_PRIM_CANVAS_GRID)
+    {
+        float2 local_p    = input.pixel_pos - input.bounds.xy;
+        float2 gm         = local_p - input.uv_rect.xy;
+        float  minor_step = max(input.uv_rect.z, 2.0f);
+        float  major_step = max(input.uv_rect.w, 4.0f);
+        float  dot_r      = max(input.grad_params.z, 0.5f);
+        float  minor_fade = saturate(input.grad_params.w);
+
+        float2 cell_m  = gm - floor(gm / minor_step + 0.5f) * minor_step;
+        float  dot_cov = saturate(0.5f - (length(cell_m) - dot_r)) * minor_fade;
+
+        float2 cell_M  = gm - floor(gm / major_step + 0.5f) * major_step;
+        float  maj_d   = min(abs(cell_M.x), abs(cell_M.y));
+        float  maj_cov = saturate(0.85f - maj_d);
+
+        float  axis_d   = min(abs(local_p.x - input.color1.x), abs(local_p.y - input.color1.y));
+        float  axis_cov = saturate(1.1f - axis_d) * 0.65f;
+
+        float4 min_pm = float4(input.color0.rgb, 1.0f) * (input.color0.a * dot_cov);
+        float4 maj_pm = float4(input.border_color.rgb, 1.0f) * saturate(input.border_color.a * max(maj_cov, axis_cov));
+        out_pm        = maj_pm + min_pm * (1.0f - maj_pm.a);
+    }
+    else if (kind == ETCH_PRIM_BEZIER_WIRE)
+    {
+        float2 A  = input.bounds.xy + input.uv_rect.xy * size;
+        float2 B  = input.bounds.xy + input.uv_rect.zw * size;
+        float2 C  = input.bounds.xy + input.radii.xy * size;
+        float2 dt = sd_quadratic_bezier(input.pixel_pos, A, B, C);
+        float  d  = dt.x;
+        float  t  = dt.y;
+
+        float  half_w   = max(input.grad_params.z, 0.5f);
+        float  glow_r   = input.grad_params.w;
+        float  core_cov = saturate(0.5f - (d - half_w));
+        float4 wire_col = lerp(input.color0, input.color1, t);
+        float4 core_pm  = float4(wire_col.rgb, 1.0f) * (wire_col.a * core_cov);
+
+        float4 glow_pm = float4(0.0f, 0.0f, 0.0f, 0.0f);
+        if (glow_r > 0.25f && input.border_color.a > 0.0f)
+        {
+            float gd       = max(d - half_w, 0.0f);
+            float glow_cov = exp(-(gd * gd) / max(0.35f * glow_r * glow_r, 1.0f));
+            glow_pm        = float4(input.border_color.rgb, 1.0f) * (input.border_color.a * glow_cov);
+        }
+        out_pm = core_pm + glow_pm * (1.0f - core_pm.a);
     }
 
     out_pm *= clip_cov;
