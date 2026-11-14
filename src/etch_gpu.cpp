@@ -492,17 +492,24 @@ bool claim_window_swapchain(Context* ctx, SDL_Window* win) noexcept {
     if (!ctx || !ctx->device || !win) {
         return false;
     }
-    if (ctx->window == win) {
-        return true;
+    for (uint32_t i = 0u; i < ctx->claimed_window_count; ++i) {
+        if (ctx->claimed_windows[i].window == win) {
+            ctx->window = win;
+            return true;
+        }
     }
-    if (ctx->window != nullptr) {
-        SDL_ReleaseWindowFromGPUDevice(ctx->device, ctx->window);
-        ctx->window = nullptr;
+    if (ctx->claimed_window_count >= kMaxClaimedWindows) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "claim_window_swapchain exceeded kMaxClaimedWindows (%u)", kMaxClaimedWindows);
+        return false;
     }
     if (!SDL_ClaimWindowForGPUDevice(ctx->device, win)) {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "SDL_ClaimWindowForGPUDevice failed: %s", SDL_GetError());
         return false;
     }
+    ctx->claimed_windows[ctx->claimed_window_count++] = ClaimedWindowSlot{
+        .window = win,
+        .hit_test_attached = false,
+    };
     ctx->window = win;
 
     if (SDL_WindowSupportsGPUSwapchainComposition(
@@ -519,6 +526,12 @@ bool claim_window_swapchain(Context* ctx, SDL_Window* win) noexcept {
 
     const SDL_GPUTextureFormat swap_fmt = SDL_GetGPUSwapchainTextureFormat(ctx->device, win);
     get_or_create_pipeline(ctx, swap_fmt);
+    if (ctx->chrome_desc.enabled && !ctx->headless && ctx->claimed_window_count > 0u) {
+        ClaimedWindowSlot& slot = ctx->claimed_windows[ctx->claimed_window_count - 1u];
+        if (slot.window == win && SDL_SetWindowHitTest(win, etch_sdl_hit_test, ctx)) {
+            slot.hit_test_attached = true;
+        }
+    }
     return true;
 }
 
@@ -1170,7 +1183,19 @@ void destroy_context(Context* ctx) noexcept {
         release_blur_targets(ctx);
         if (ctx->headless_tex) SDL_ReleaseGPUTexture(ctx->device, ctx->headless_tex);
         if (ctx->headless_dl_buf) SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->headless_dl_buf);
-        if (ctx->window) SDL_ReleaseWindowFromGPUDevice(ctx->device, ctx->window);
+        for (uint32_t i = 0u; i < ctx->claimed_window_count; ++i) {
+            ClaimedWindowSlot& slot = ctx->claimed_windows[i];
+            if (slot.window) {
+                if (slot.hit_test_attached) {
+                    SDL_SetWindowHitTest(slot.window, nullptr, nullptr);
+                    slot.hit_test_attached = false;
+                }
+                SDL_ReleaseWindowFromGPUDevice(ctx->device, slot.window);
+                slot.window = nullptr;
+            }
+        }
+        ctx->claimed_window_count = 0u;
+        ctx->window = nullptr;
 
         SDL_DestroyGPUDevice(ctx->device);
         ctx->device = nullptr;
@@ -1341,6 +1366,283 @@ bool render_headless_png(
         : 0.0;
 
     return wrote != 0;
+}
+
+namespace {
+
+bool upload_rgba_rows(
+    Context* ctx,
+    SDL_GPUTexture* texture,
+    uint32_t width,
+    uint32_t height,
+    const void* rgba_pixels,
+    uint32_t row_pitch_bytes,
+    bool cycle) noexcept
+{
+    const uint32_t tight_pitch = width * 4u;
+    const uint32_t src_pitch = (row_pitch_bytes != 0u) ? row_pitch_bytes : tight_pitch;
+    const uint32_t total_bytes = tight_pitch * height;
+
+    const SDL_GPUTransferBufferCreateInfo tb_info = {
+        .usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD,
+        .size = total_bytes,
+        .props = 0u,
+    };
+    SDL_GPUTransferBuffer* tbuf = SDL_CreateGPUTransferBuffer(ctx->device, &tb_info);
+    if (!tbuf) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "SDL_CreateGPUTransferBuffer (upload) failed: %s", SDL_GetError());
+        return false;
+    }
+
+    void* mapped = SDL_MapGPUTransferBuffer(ctx->device, tbuf, false);
+    if (!mapped) {
+        SDL_ReleaseGPUTransferBuffer(ctx->device, tbuf);
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "SDL_MapGPUTransferBuffer (upload) failed: %s", SDL_GetError());
+        return false;
+    }
+
+    if (src_pitch == tight_pitch) {
+        std::memcpy(mapped, rgba_pixels, total_bytes);
+    } else {
+        uint8_t* dst = static_cast<uint8_t*>(mapped);
+        const uint8_t* src = static_cast<const uint8_t*>(rgba_pixels);
+        for (uint32_t y = 0u; y < height; ++y) {
+            std::memcpy(dst + static_cast<size_t>(y) * tight_pitch,
+                        src + static_cast<size_t>(y) * src_pitch,
+                        tight_pitch);
+        }
+    }
+    SDL_UnmapGPUTransferBuffer(ctx->device, tbuf);
+
+    SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(ctx->device);
+    if (!cmd) {
+        SDL_ReleaseGPUTransferBuffer(ctx->device, tbuf);
+        return false;
+    }
+
+    SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(cmd);
+    if (!copy) {
+        SDL_CancelGPUCommandBuffer(cmd);
+        SDL_ReleaseGPUTransferBuffer(ctx->device, tbuf);
+        return false;
+    }
+
+    const SDL_GPUTextureTransferInfo src_info = {
+        .transfer_buffer = tbuf,
+        .offset = 0u,
+        .pixels_per_row = width,
+        .rows_per_layer = height,
+    };
+    const SDL_GPUTextureRegion dst_reg = {
+        .texture = texture,
+        .mip_level = 0u,
+        .layer = 0u,
+        .x = 0u,
+        .y = 0u,
+        .z = 0u,
+        .w = width,
+        .h = height,
+        .d = 1u,
+    };
+    SDL_UploadToGPUTexture(copy, &src_info, &dst_reg, cycle);
+    SDL_EndGPUCopyPass(copy);
+
+    const bool ok = SDL_SubmitGPUCommandBuffer(cmd);
+    SDL_ReleaseGPUTransferBuffer(ctx->device, tbuf);
+    return ok;
+}
+
+LoadedTexture upload_sdl_surface(Context* ctx, SDL_Surface* surf, bool srgb, const char* debug_name) noexcept {
+    if (!surf || surf->w <= 0 || surf->h <= 0 || !surf->pixels) {
+        return {};
+    }
+
+    SDL_Surface* rgba_surf = surf;
+    if (surf->format != SDL_PIXELFORMAT_RGBA32) {
+        rgba_surf = SDL_ConvertSurface(surf, SDL_PIXELFORMAT_RGBA32);
+        if (!rgba_surf) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "SDL_ConvertSurface RGBA32 failed: %s", SDL_GetError());
+            return {};
+        }
+    }
+
+    const LoadedTexture res = create_texture_rgba(ctx, TextureDesc{
+        .rgba_pixels = rgba_surf->pixels,
+        .width = static_cast<uint32_t>(rgba_surf->w),
+        .height = static_cast<uint32_t>(rgba_surf->h),
+        .row_pitch_bytes = static_cast<uint32_t>(rgba_surf->pitch),
+        .srgb = srgb,
+        .debug_name = debug_name,
+    });
+
+    if (rgba_surf != surf) {
+        SDL_DestroySurface(rgba_surf);
+    }
+    return res;
+}
+
+} // namespace
+
+void release_window(Context* ctx, SDL_Window* window) noexcept {
+    if (!ctx || !window) {
+        return;
+    }
+
+    for (uint32_t i = 0u; i < ctx->claimed_window_count; ++i) {
+        if (ctx->claimed_windows[i].window != window) {
+            continue;
+        }
+        if (ctx->window == window) {
+            if (ctx->ime_input_started && !ctx->headless) {
+                SDL_ClearComposition(window);
+                SDL_SetTextInputArea(window, nullptr, 0);
+                SDL_StopTextInput(window);
+                ctx->ime_input_started = false;
+            }
+            ctx->applied_ime_rect = SDL_Rect{-1, -1, 0, 0};
+            ctx->applied_ime_cursor = -1;
+            ctx->ime_comp_len = 0u;
+            ctx->ime_comp_utf8[0] = '\0';
+            ctx->ime_comp_cursor_byte = 0u;
+            ctx->ime_comp_sel_len_byte = 0u;
+        }
+        if (ctx->claimed_windows[i].hit_test_attached) {
+            SDL_SetWindowHitTest(window, nullptr, nullptr);
+            ctx->claimed_windows[i].hit_test_attached = false;
+        }
+        if (ctx->device) {
+            SDL_ReleaseWindowFromGPUDevice(ctx->device, window);
+        }
+        for (uint32_t j = i + 1u; j < ctx->claimed_window_count; ++j) {
+            ctx->claimed_windows[j - 1u] = ctx->claimed_windows[j];
+        }
+        --ctx->claimed_window_count;
+        ctx->claimed_windows[ctx->claimed_window_count] = {};
+        if (ctx->window == window) {
+            ctx->window = (ctx->claimed_window_count > 0u) ? ctx->claimed_windows[0].window : nullptr;
+        }
+        return;
+    }
+}
+
+uint32_t claimed_window_count(const Context* ctx) noexcept {
+    return ctx ? ctx->claimed_window_count : 0u;
+}
+
+LoadedTexture create_texture_rgba(Context* ctx, const TextureDesc& desc) noexcept {
+    if (!ctx || !ctx->device || desc.width == 0u || desc.height == 0u) {
+        return {};
+    }
+    const uint32_t tight_pitch = desc.width * 4u;
+    if (desc.rgba_pixels != nullptr && desc.row_pitch_bytes != 0u && desc.row_pitch_bytes < tight_pitch) {
+        return {};
+    }
+
+    const SDL_GPUTextureCreateInfo tex_info = {
+        .type = SDL_GPU_TEXTURETYPE_2D,
+        .format = desc.srgb ? SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB : SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,
+        .usage = SDL_GPU_TEXTUREUSAGE_SAMPLER,
+        .width = desc.width,
+        .height = desc.height,
+        .layer_count_or_depth = 1u,
+        .num_levels = 1u,
+        .sample_count = SDL_GPU_SAMPLECOUNT_1,
+        .props = 0u,
+    };
+    SDL_GPUTexture* tex = SDL_CreateGPUTexture(ctx->device, &tex_info);
+    if (!tex) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "SDL_CreateGPUTexture failed: %s", SDL_GetError());
+        return {};
+    }
+
+    if (desc.rgba_pixels != nullptr) {
+        if (!upload_rgba_rows(ctx, tex, desc.width, desc.height, desc.rgba_pixels, desc.row_pitch_bytes, false)) {
+            SDL_ReleaseGPUTexture(ctx->device, tex);
+            return {};
+        }
+    }
+
+    return LoadedTexture{
+        .texture = tex,
+        .width = desc.width,
+        .height = desc.height,
+    };
+}
+
+bool update_texture_rgba(
+    Context* ctx,
+    SDL_GPUTexture* texture,
+    uint32_t width,
+    uint32_t height,
+    const void* rgba_pixels,
+    uint32_t row_pitch_bytes) noexcept
+{
+    if (!ctx || !ctx->device || !texture || width == 0u || height == 0u || !rgba_pixels) {
+        return false;
+    }
+    const uint32_t tight_pitch = width * 4u;
+    if (row_pitch_bytes != 0u && row_pitch_bytes < tight_pitch) {
+        return false;
+    }
+    return upload_rgba_rows(ctx, texture, width, height, rgba_pixels, row_pitch_bytes, true);
+}
+
+LoadedTexture load_texture_file(Context* ctx, const char* path, bool srgb) noexcept {
+    if (!ctx || !ctx->device || !path || path[0] == '\0') {
+        return {};
+    }
+    SDL_Surface* surf = SDL_LoadPNG(path);
+    if (!surf) {
+        surf = SDL_LoadBMP(path);
+    }
+    if (!surf) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "load_texture_file('%s') failed: %s", path, SDL_GetError());
+        return {};
+    }
+    const LoadedTexture res = upload_sdl_surface(ctx, surf, srgb, path);
+    SDL_DestroySurface(surf);
+    return res;
+}
+
+LoadedTexture load_texture_memory(Context* ctx, const void* data, size_t size_bytes, bool srgb) noexcept {
+    if (!ctx || !ctx->device || !data || size_bytes == 0u) {
+        return {};
+    }
+    SDL_IOStream* io = SDL_IOFromConstMem(data, size_bytes);
+    if (!io) {
+        return {};
+    }
+    SDL_Surface* surf = SDL_LoadPNG_IO(io, false);
+    if (!surf) {
+        SDL_SeekIO(io, 0, SDL_IO_SEEK_SET);
+        surf = SDL_LoadBMP_IO(io, false);
+    }
+    SDL_CloseIO(io);
+    if (!surf) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "load_texture_memory failed: %s", SDL_GetError());
+        return {};
+    }
+    const LoadedTexture res = upload_sdl_surface(ctx, surf, srgb, nullptr);
+    SDL_DestroySurface(surf);
+    return res;
+}
+
+void destroy_texture(Context* ctx, LoadedTexture* tex) noexcept {
+    if (!tex) {
+        return;
+    }
+    if (ctx && ctx->device && tex->texture) {
+        SDL_ReleaseGPUTexture(ctx->device, tex->texture);
+    }
+    tex->texture = nullptr;
+    tex->width = 0u;
+    tex->height = 0u;
+}
+
+void destroy_texture(Context* ctx, SDL_GPUTexture* tex) noexcept {
+    if (ctx && ctx->device && tex) {
+        SDL_ReleaseGPUTexture(ctx->device, tex);
+    }
 }
 
 } // namespace etch

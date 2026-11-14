@@ -216,6 +216,7 @@ constexpr SDL_SystemCursor to_sdl_system_cursor(Cursor c) noexcept {
         case Cursor::ResizeNESW: return SDL_SYSTEM_CURSOR_NESW_RESIZE;
         case Cursor::Move:       return SDL_SYSTEM_CURSOR_MOVE;
         case Cursor::NotAllowed: return SDL_SYSTEM_CURSOR_NOT_ALLOWED;
+        case Cursor::Crosshair:  return SDL_SYSTEM_CURSOR_CROSSHAIR;
     }
     return SDL_SYSTEM_CURSOR_DEFAULT;
 }
@@ -1409,16 +1410,24 @@ uint32_t hit_test_span_regions(const Context* ctx, Vec2 pointer_pos) noexcept {
     return 0u;
 }
 
-Vec2 window_to_logical_pos(const Context* ctx, float wx, float wy) noexcept {
-    if (!ctx || ctx->headless || !ctx->window || ctx->dpi_scale <= 0.0f) {
+Vec2 window_to_logical_pos_for(const Context* ctx, SDL_Window* win, float wx, float wy) noexcept {
+    if (!ctx || ctx->headless || ctx->dpi_scale <= 0.0f) {
         return Vec2{wx, wy};
     }
-    float density = SDL_GetWindowPixelDensity(ctx->window);
+    SDL_Window* target = win ? win : ctx->window;
+    if (!target) {
+        return Vec2{wx, wy};
+    }
+    float density = SDL_GetWindowPixelDensity(target);
     if (density <= 0.0f) {
         density = 1.0f;
     }
     const float scale = density / ctx->dpi_scale;
     return Vec2{wx * scale, wy * scale};
+}
+
+Vec2 window_to_logical_pos(const Context* ctx, float wx, float wy) noexcept {
+    return window_to_logical_pos_for(ctx, ctx ? ctx->window : nullptr, wx, wy);
 }
 
 float logical_to_window_scale(const Context* ctx) noexcept {
@@ -2796,6 +2805,207 @@ DrawCmdNode* append_open_box_draw_cmd(Context* ctx, bool foreground) noexcept {
     return node;
 }
 
+Vec2 canvas_screen_to_world(const WidgetState* cws, Vec2 screen) noexcept {
+    const float z = (cws->canvas_zoom > 1e-4f) ? cws->canvas_zoom : 1.0f;
+    return Vec2{
+        (screen.x - cws->last_box_logical.x - cws->canvas_pan.x) / z,
+        (screen.y - cws->last_box_logical.y - cws->canvas_pan.y) / z,
+    };
+}
+
+void push_chrome_rect(Rect* dst, uint32_t* count, uint32_t cap, Rect r) noexcept {
+    if (r.w > 0.0f && r.h > 0.0f && *count < cap) {
+        dst[(*count)++] = r;
+    }
+}
+
+Vec2 measure_multiline_text_metrics(
+    Context* ctx,
+    Str text,
+    uint16_t font_id,
+    float size,
+    float letter_spacing,
+    uint32_t* out_line_count,
+    float* out_line_h) noexcept
+{
+    float line_h = size * 1.25f;
+    if (ctx && ctx->atlas.font_valid) {
+        const uint16_t slot_idx = resolve_font_slot_idx(&ctx->atlas, font_id);
+        if (slot_idx != kInvalidFont && ctx->atlas.slots[slot_idx].line_height_em > 0.0f) {
+            line_h = ctx->atlas.slots[slot_idx].line_height_em * size;
+        }
+    }
+    if (out_line_h) {
+        *out_line_h = line_h;
+    }
+    if (!text.chars || text.length == 0u || size <= 0.0f) {
+        if (out_line_count) {
+            *out_line_count = 0u;
+        }
+        return Vec2{ 0.0f, 0.0f };
+    }
+
+    float max_w = 0.0f;
+    uint32_t line_count = 0u;
+    uint32_t pos = 0u;
+    while (pos <= text.length) {
+        uint32_t end = pos;
+        while (end < text.length && text.chars[end] != '\n') {
+            ++end;
+        }
+        uint32_t trim_end = end;
+        if (trim_end > pos && text.chars[trim_end - 1u] == '\r') {
+            --trim_end;
+        }
+        float line_w = 0.0f;
+        measure_line_segment_x(
+            ctx,
+            font_id,
+            text.chars + pos,
+            trim_end - pos,
+            0u,
+            0u,
+            size,
+            letter_spacing,
+            false,
+            false,
+            nullptr,
+            nullptr,
+            &line_w);
+        if (line_w > max_w) {
+            max_w = line_w;
+        }
+        ++line_count;
+        if (end >= text.length) {
+            break;
+        }
+        pos = end + 1u;
+    }
+    if (out_line_count) {
+        *out_line_count = line_count;
+    }
+    return Vec2{ max_w, static_cast<float>(line_count) * line_h };
+}
+
+void emit_draw_text_cmd(
+    Context* ctx,
+    const TextDrawDesc& tc,
+    Vec2 origin,
+    float scale,
+    const ClipEntry& clip) noexcept
+{
+    if (!ctx || !ctx->atlas.font_valid || !tc.text.chars || tc.text.length == 0u || tc.size <= 0.0f || tc.color.a == 0u) {
+        return;
+    }
+    const uint16_t primary_slot = resolve_font_slot_idx(&ctx->atlas, tc.font_id);
+    if (primary_slot == kInvalidFont) {
+        return;
+    }
+    const FontSlot& primary = ctx->atlas.slots[primary_slot];
+
+    uint32_t line_count = 0u;
+    float line_h_logical = 0.0f;
+    const Vec2 total_sz = measure_multiline_text_metrics(
+        ctx,
+        tc.text,
+        tc.font_id,
+        tc.size,
+        tc.letter_spacing,
+        &line_count,
+        &line_h_logical);
+    if (line_count == 0u) {
+        return;
+    }
+
+    float start_y_logical = tc.pos.y;
+    if (tc.align_y == AlignY::Center) {
+        start_y_logical -= total_sz.y * 0.5f;
+    } else if (tc.align_y == AlignY::Bottom) {
+        start_y_logical -= total_sz.y;
+    }
+
+    const float phys_px = tc.size * scale;
+    const float asc_px = primary.ascent_em * phys_px;
+    const float ls_px = tc.letter_spacing * scale;
+
+    uint32_t line_idx = 0u;
+    uint32_t pos = 0u;
+    while (pos <= tc.text.length) {
+        uint32_t end = pos;
+        while (end < tc.text.length && tc.text.chars[end] != '\n') {
+            ++end;
+        }
+        uint32_t trim_end = end;
+        if (trim_end > pos && tc.text.chars[trim_end - 1u] == '\r') {
+            --trim_end;
+        }
+        const uint32_t seg_len = trim_end - pos;
+
+        float line_w_logical = 0.0f;
+        if (tc.align_x != AlignX::Left && seg_len > 0u) {
+            measure_line_segment_x(
+                ctx,
+                tc.font_id,
+                tc.text.chars + pos,
+                seg_len,
+                0u,
+                0u,
+                tc.size,
+                tc.letter_spacing,
+                false,
+                false,
+                nullptr,
+                nullptr,
+                &line_w_logical);
+        }
+
+        float start_x_logical = tc.pos.x;
+        if (tc.align_x == AlignX::Center) {
+            start_x_logical -= line_w_logical * 0.5f;
+        } else if (tc.align_x == AlignX::Right) {
+            start_x_logical -= line_w_logical;
+        }
+
+        float pen_x = origin.x + start_x_logical * scale;
+        const float base_y = origin.y + (start_y_logical + static_cast<float>(line_idx) * line_h_logical) * scale + asc_px;
+
+        uint32_t run_pos = pos;
+        while (run_pos < trim_end) {
+            if (tc.text.chars[run_pos] == '\t') {
+                pen_x += 4.0f * primary.space_advance_em * phys_px + ls_px;
+                ++run_pos;
+                continue;
+            }
+            uint32_t run_end = run_pos;
+            while (run_end < trim_end && tc.text.chars[run_end] != '\t') {
+                ++run_end;
+            }
+            const std::span<const ShapedGlyph> glyphs = shape_utf8_run(ctx, primary_slot, tc.text.chars + run_pos, run_end - run_pos);
+            for (const ShapedGlyph& g : glyphs) {
+                emit_slug_glyph_quad(
+                    ctx,
+                    g.font_slot,
+                    g.glyph_id,
+                    phys_px,
+                    pen_x,
+                    base_y,
+                    g.x_offset_em,
+                    g.y_offset_em,
+                    clip,
+                    tc.color);
+                pen_x += g.x_advance_1px * phys_px + ls_px;
+            }
+            run_pos = run_end;
+        }
+
+        ++line_idx;
+        if (end >= tc.text.length) {
+            break;
+        }
+        pos = end + 1u;
+    }
+}
+
 void emit_draw_list_command(
     Context* ctx,
     const DrawCmdNode* head,
@@ -2975,6 +3185,40 @@ void emit_draw_list_command(
                 emit_vector_icon_quad(ctx, ic.icon_id, target_px, ic.color, clip);
                 break;
             }
+            case DrawCmdKind::Text: {
+                emit_draw_text_cmd(ctx, node->text_cmd, origin, scale, clip);
+                break;
+            }
+            case DrawCmdKind::Image: {
+                const ImageDrawDesc& im = node->image_cmd;
+                if (!im.texture || im.tint.a == 0u || im.rect.w <= 0.0f || im.rect.h <= 0.0f) {
+                    break;
+                }
+                const Rect target_px = {
+                    .x = origin.x + im.rect.x * scale,
+                    .y = origin.y + im.rect.y * scale,
+                    .w = im.rect.w * scale,
+                    .h = im.rect.h * scale,
+                };
+                const Vec2 uv_min = { im.uv_rect.x, im.uv_rect.y };
+                const Vec2 uv_max = { im.uv_rect.x + im.uv_rect.w, im.uv_rect.y + im.uv_rect.h };
+                push_prim(
+                    ctx,
+                    Prim::make_texture(
+                        target_px,
+                        clip.rect,
+                        uv_min,
+                        uv_max,
+                        0u,
+                        Corners::all(im.radius * scale),
+                        im.tint,
+                        Color{},
+                        0.0f,
+                        PrimFlag_None,
+                        clip.radius),
+                    im.texture);
+                break;
+            }
         }
     }
 }
@@ -3042,14 +3286,16 @@ void process_event(Context* ctx, const SDL_Event& event) noexcept {
 
     switch (event.type) {
         case SDL_EVENT_MOUSE_MOTION:
-            ctx->event_pointer_pos = window_to_logical_pos(ctx, event.motion.x, event.motion.y);
+            ctx->event_pointer_pos = window_to_logical_pos_for(
+                ctx, SDL_GetWindowFromID(event.motion.windowID), event.motion.x, event.motion.y);
             ctx->has_event_pointer = true;
             request_redraw(ctx);
             break;
         case SDL_EVENT_MOUSE_BUTTON_DOWN:
         case SDL_EVENT_MOUSE_BUTTON_UP:
             if (event.button.button == SDL_BUTTON_LEFT) {
-                ctx->event_pointer_pos = window_to_logical_pos(ctx, event.button.x, event.button.y);
+                ctx->event_pointer_pos = window_to_logical_pos_for(
+                    ctx, SDL_GetWindowFromID(event.button.windowID), event.button.x, event.button.y);
                 ctx->event_pointer_down = (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN);
                 ctx->has_event_pointer = true;
                 if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
@@ -3059,12 +3305,14 @@ void process_event(Context* ctx, const SDL_Event& event) noexcept {
                 }
                 request_redraw(ctx);
             } else if (event.button.button == SDL_BUTTON_MIDDLE) {
-                ctx->event_pointer_pos = window_to_logical_pos(ctx, event.button.x, event.button.y);
+                ctx->event_pointer_pos = window_to_logical_pos_for(
+                    ctx, SDL_GetWindowFromID(event.button.windowID), event.button.x, event.button.y);
                 ctx->has_event_pointer = true;
                 ctx->event_middle_down = (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN);
                 request_redraw(ctx);
             } else if (event.button.button == SDL_BUTTON_RIGHT) {
-                ctx->event_pointer_pos = window_to_logical_pos(ctx, event.button.x, event.button.y);
+                ctx->event_pointer_pos = window_to_logical_pos_for(
+                    ctx, SDL_GetWindowFromID(event.button.windowID), event.button.x, event.button.y);
                 ctx->has_event_pointer = true;
                 ctx->event_right_down = (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN);
                 request_redraw(ctx);
@@ -3080,7 +3328,8 @@ void process_event(Context* ctx, const SDL_Event& event) noexcept {
             ctx->event_scroll_delta.x += wx;
             ctx->event_scroll_delta.y += wy;
             if (event.wheel.mouse_x >= 0.0f && event.wheel.mouse_y >= 0.0f) {
-                ctx->event_pointer_pos = window_to_logical_pos(ctx, event.wheel.mouse_x, event.wheel.mouse_y);
+                ctx->event_pointer_pos = window_to_logical_pos_for(
+                    ctx, SDL_GetWindowFromID(event.wheel.windowID), event.wheel.mouse_x, event.wheel.mouse_y);
                 ctx->has_event_pointer = true;
             }
             request_redraw(ctx);
@@ -3137,6 +3386,19 @@ void process_event(Context* ctx, const SDL_Event& event) noexcept {
             }
             if (event.key.key == SDLK_SPACE) {
                 ctx->space_down = true;
+            }
+            if (event.key.key == SDLK_ESCAPE && !event.key.repeat) {
+                if (ctx->drag_active) {
+                    ctx->drag_active = false;
+                    ctx->drag_drop_pending = false;
+                    ctx->drag_accepted_this_frame = false;
+                }
+                if (ctx->marquee_canvas_id != 0u) {
+                    if (WidgetState* mws = state_map_find(&ctx->states, ctx->marquee_canvas_id)) {
+                        mws->canvas_marquee_active = false;
+                    }
+                    ctx->marquee_canvas_id = 0u;
+                }
             }
             if (ctx->pending_key_count < kMaxKeyEventsPerFrame) {
                 ctx->pending_keys[ctx->pending_key_count++] = KeyEventEntry{
@@ -3198,6 +3460,15 @@ void process_event(Context* ctx, const SDL_Event& event) noexcept {
             ctx->right_active_id = 0u;
             ctx->right_drag_exceeded = false;
             ctx->pan_canvas_id = 0u;
+            if (ctx->marquee_canvas_id != 0u) {
+                if (WidgetState* mws = state_map_find(&ctx->states, ctx->marquee_canvas_id)) {
+                    mws->canvas_marquee_active = false;
+                }
+                ctx->marquee_canvas_id = 0u;
+            }
+            ctx->drag_active = false;
+            ctx->drag_drop_pending = false;
+            ctx->drag_accepted_this_frame = false;
             ctx->space_down = false;
             ctx->active_id = 0u;
             clear_ime_composition(ctx);
@@ -3340,6 +3611,17 @@ void begin_frame(Context* ctx, const FrameDesc& desc) noexcept {
     ctx->canvas_depth = 0u;
     ctx->last_canvas_clip_px = {};
     ctx->last_canvas_clip_radius_px = 0.0f;
+    ctx->pending_chrome_drag_count = 0u;
+    ctx->pending_chrome_client_count = 0u;
+    ctx->drag_drop_pending = false;
+    ctx->drag_accepted_this_frame = false;
+    if (ctx->marquee_finished_canvas_id != 0u) {
+        if (WidgetState* mws = state_map_find(&ctx->states, ctx->marquee_finished_canvas_id)) {
+            mws->canvas_marquee_finished = false;
+            mws->canvas_marquee_world = {};
+        }
+        ctx->marquee_finished_canvas_id = 0u;
+    }
 
     const float dpi = (desc.dpi_scale > 0.0f) ? desc.dpi_scale : 1.0f;
     ctx->viewport_w = (desc.viewport_w > 0u) ? desc.viewport_w : 1u;
@@ -3522,9 +3804,21 @@ void begin_frame(Context* ctx, const FrameDesc& desc) noexcept {
                             if (ctx->last_mouse_clicks >= 2u) {
                                 ws->double_clicked_this_frame = true;
                             }
-                            if (ws->is_canvas && ws->canvas_interactive && ctx->pan_canvas_id == 0u) {
-                                ctx->pan_canvas_id = oid;
-                                pan_started_this_frame = true;
+                            if (ws->is_canvas && ws->canvas_interactive) {
+                                if (ws->canvas_marquee_enabled) {
+                                    if (ctx->marquee_canvas_id == 0u) {
+                                        ctx->marquee_canvas_id = oid;
+                                        const Vec2 start_w = canvas_screen_to_world(ws, pointer_pos);
+                                        ws->canvas_marquee_start_world = start_w;
+                                        ws->canvas_marquee_world = Rect{ start_w.x, start_w.y, 0.0f, 0.0f };
+                                        ws->canvas_marquee_active = true;
+                                        ws->canvas_marquee_finished = false;
+                                        request_redraw(ctx);
+                                    }
+                                } else if (ctx->pan_canvas_id == 0u) {
+                                    ctx->pan_canvas_id = oid;
+                                    pan_started_this_frame = true;
+                                }
                             }
                         }
                         if (top_focus == 0u && ws->is_focusable) {
@@ -3550,6 +3844,21 @@ void begin_frame(Context* ctx, const FrameDesc& desc) noexcept {
                 ctx->left_max_drag_dist_sq = d2;
             }
         }
+        if (ctx->marquee_canvas_id != 0u && pointer_pos.x >= 0.0f && pointer_pos.y >= 0.0f) {
+            if (WidgetState* mws = state_map_find(&ctx->states, ctx->marquee_canvas_id)) {
+                const Vec2 p0 = mws->canvas_marquee_start_world;
+                const Vec2 p1 = canvas_screen_to_world(mws, pointer_pos);
+                const float x0 = (p0.x < p1.x) ? p0.x : p1.x;
+                const float y0 = (p0.y < p1.y) ? p0.y : p1.y;
+                const float x1 = (p0.x > p1.x) ? p0.x : p1.x;
+                const float y1 = (p0.y > p1.y) ? p0.y : p1.y;
+                mws->canvas_marquee_world = Rect{ x0, y0, x1 - x0, y1 - y0 };
+                ctx->desired_cursor = Cursor::Crosshair;
+                request_redraw(ctx);
+            } else {
+                ctx->marquee_canvas_id = 0u;
+            }
+        }
         if (!ctx->headless && ctx->window && !ctx->mouse_captured) {
             if (SDL_CaptureMouse(true)) {
                 ctx->mouse_captured = true;
@@ -3564,13 +3873,45 @@ void begin_frame(Context* ctx, const FrameDesc& desc) noexcept {
             SDL_CaptureMouse(false);
             ctx->mouse_captured = false;
         }
+        if (ctx->marquee_canvas_id != 0u) {
+            if (WidgetState* mws = state_map_find(&ctx->states, ctx->marquee_canvas_id)) {
+                if (pointer_pos.x >= 0.0f && pointer_pos.y >= 0.0f) {
+                    const Vec2 p0 = mws->canvas_marquee_start_world;
+                    const Vec2 p1 = canvas_screen_to_world(mws, pointer_pos);
+                    const float x0 = (p0.x < p1.x) ? p0.x : p1.x;
+                    const float y0 = (p0.y < p1.y) ? p0.y : p1.y;
+                    const float x1 = (p0.x > p1.x) ? p0.x : p1.x;
+                    const float y1 = (p0.y > p1.y) ? p0.y : p1.y;
+                    mws->canvas_marquee_world = Rect{ x0, y0, x1 - x0, y1 - y0 };
+                }
+                mws->canvas_marquee_active = false;
+                if (mws->canvas_marquee_world.w >= 3.0f ||
+                    mws->canvas_marquee_world.h >= 3.0f ||
+                    ctx->left_max_drag_dist_sq >= 9.0f)
+                {
+                    mws->canvas_marquee_finished = true;
+                    ctx->marquee_finished_canvas_id = ctx->marquee_canvas_id;
+                }
+            }
+            ctx->marquee_canvas_id = 0u;
+        }
+        if (ctx->drag_active) {
+            ctx->drag_active = false;
+            ctx->drag_drop_pending = true;
+            ctx->drag_accepted_this_frame = false;
+        }
         if (ctx->active_id != 0u) {
-            if (WidgetState* ws = state_map_find(&ctx->states, ctx->active_id)) {
-                const bool over_active = ws->is_text_span
-                    ? ws->span_hovered
-                    : Clay_PointerOver(make_clay_id(ctx->active_id));
-                if (ws->is_user_element && over_active) {
-                    ws->clicked_this_frame = true;
+            const bool suppress_click =
+                (ctx->drag_drop_pending && ctx->active_id == ctx->drag_source_id) ||
+                (ctx->marquee_finished_canvas_id != 0u && ctx->active_id == ctx->marquee_finished_canvas_id);
+            if (!suppress_click) {
+                if (WidgetState* ws = state_map_find(&ctx->states, ctx->active_id)) {
+                    const bool over_active = ws->is_text_span
+                        ? ws->span_hovered
+                        : Clay_PointerOver(make_clay_id(ctx->active_id));
+                    if (ws->is_user_element && over_active) {
+                        ws->clicked_this_frame = true;
+                    }
                 }
             }
         }
@@ -4250,6 +4591,327 @@ void draw_icon(const IconDrawDesc& desc) noexcept {
         node->kind = DrawCmdKind::Icon;
         node->icon = desc;
     }
+}
+
+Vec2 measure_text(Str text, uint16_t font_id, float size, float letter_spacing) noexcept {
+    Context* ctx = current_context();
+    if (!ctx || size <= 0.0f) {
+        return Vec2{};
+    }
+    return measure_multiline_text_metrics(ctx, text, font_id, size, letter_spacing, nullptr, nullptr);
+}
+
+void draw_text(const TextDrawDesc& desc) noexcept {
+    Context* ctx = current_context();
+    if (!ctx || !desc.text.chars || desc.text.length == 0u || desc.size <= 0.0f || desc.color.a == 0u) {
+        return;
+    }
+    if (DrawCmdNode* node = append_open_box_draw_cmd(ctx, desc.foreground)) {
+        TextDrawDesc copied = desc;
+        if (!desc.text.is_static) {
+            copied.text = ctx->frame_arena.push_str(desc.text.chars, desc.text.length);
+            if (!copied.text.chars) {
+                copied.text = {};
+            }
+        }
+        node->kind = DrawCmdKind::Text;
+        node->text_cmd = copied;
+    }
+}
+
+void draw_image(const ImageDrawDesc& desc) noexcept {
+    Context* ctx = current_context();
+    if (!ctx || !desc.texture || desc.tint.a == 0u || desc.rect.w <= 0.0f || desc.rect.h <= 0.0f) {
+        return;
+    }
+    if (DrawCmdNode* node = append_open_box_draw_cmd(ctx, desc.foreground)) {
+        node->kind = DrawCmdKind::Image;
+        node->image_cmd = desc;
+    }
+}
+
+SDL_HitTestResult SDLCALL etch_sdl_hit_test(SDL_Window* win, const SDL_Point* area, void* data) noexcept {
+    const Context* ctx = static_cast<const Context*>(data);
+    if (!ctx || !area) {
+        return SDL_HITTEST_NORMAL;
+    }
+    const Vec2 logical_pos = window_to_logical_pos_for(
+        ctx, win, static_cast<float>(area->x), static_cast<float>(area->y));
+    switch (evaluate_window_hit(ctx, logical_pos, win)) {
+        case WindowHit::Caption:           return SDL_HITTEST_DRAGGABLE;
+        case WindowHit::ResizeTopLeft:     return SDL_HITTEST_RESIZE_TOPLEFT;
+        case WindowHit::ResizeTop:         return SDL_HITTEST_RESIZE_TOP;
+        case WindowHit::ResizeTopRight:    return SDL_HITTEST_RESIZE_TOPRIGHT;
+        case WindowHit::ResizeRight:       return SDL_HITTEST_RESIZE_RIGHT;
+        case WindowHit::ResizeBottomRight: return SDL_HITTEST_RESIZE_BOTTOMRIGHT;
+        case WindowHit::ResizeBottom:      return SDL_HITTEST_RESIZE_BOTTOM;
+        case WindowHit::ResizeBottomLeft:  return SDL_HITTEST_RESIZE_BOTTOMLEFT;
+        case WindowHit::ResizeLeft:        return SDL_HITTEST_RESIZE_LEFT;
+        case WindowHit::Normal:
+        case WindowHit::Client:
+        default:                           return SDL_HITTEST_NORMAL;
+    }
+}
+
+void set_window_chrome(const WindowChromeDesc& desc) noexcept {
+    Context* ctx = current_context();
+    if (!ctx) {
+        return;
+    }
+    WindowChromeDesc clean = desc;
+    if (clean.border_thickness < 0.0f) {
+        clean.border_thickness = 0.0f;
+    }
+    if (clean.corner_size < clean.border_thickness) {
+        clean.corner_size = clean.border_thickness;
+    }
+    ctx->chrome_desc = clean;
+    if (!ctx->headless) {
+        for (uint32_t i = 0u; i < ctx->claimed_window_count; ++i) {
+            ClaimedWindowSlot& slot = ctx->claimed_windows[i];
+            if (!slot.window) {
+                continue;
+            }
+            if (clean.enabled) {
+                if (SDL_SetWindowHitTest(slot.window, etch_sdl_hit_test, ctx)) {
+                    slot.hit_test_attached = true;
+                }
+            } else if (slot.hit_test_attached) {
+                SDL_SetWindowHitTest(slot.window, nullptr, nullptr);
+                slot.hit_test_attached = false;
+            }
+        }
+    }
+    request_redraw(ctx);
+}
+
+void window_drag_region(Rect rect_logical) noexcept {
+    Context* ctx = current_context();
+    if (!ctx || !ctx->in_frame) {
+        return;
+    }
+    push_chrome_rect(
+        ctx->pending_chrome_drag_rects,
+        &ctx->pending_chrome_drag_count,
+        kMaxChromeDragRects,
+        rect_logical);
+}
+
+void window_client_region(Rect rect_logical) noexcept {
+    Context* ctx = current_context();
+    if (!ctx || !ctx->in_frame) {
+        return;
+    }
+    push_chrome_rect(
+        ctx->pending_chrome_client_rects,
+        &ctx->pending_chrome_client_count,
+        kMaxChromeClientRects,
+        rect_logical);
+}
+
+WindowHit evaluate_window_hit(const Context* ctx, Vec2 logical_pos, SDL_Window* window) noexcept {
+    if (!ctx || !ctx->chrome_desc.enabled) {
+        return WindowHit::Normal;
+    }
+    SDL_Window* target = window ? window : ctx->window;
+    float w = 0.0f;
+    float h = 0.0f;
+    bool maximized = false;
+    if (target && !ctx->headless) {
+        int iw = 0;
+        int ih = 0;
+        SDL_GetWindowSize(target, &iw, &ih);
+        const Vec2 win_sz = window_to_logical_pos_for(ctx, target, static_cast<float>(iw), static_cast<float>(ih));
+        w = win_sz.x;
+        h = win_sz.y;
+        maximized = (SDL_GetWindowFlags(target) & SDL_WINDOW_MAXIMIZED) != 0u;
+    } else {
+        const float dpi = (ctx->dpi_scale > 0.0f) ? ctx->dpi_scale : 1.0f;
+        w = static_cast<float>(ctx->viewport_w) / dpi;
+        h = static_cast<float>(ctx->viewport_h) / dpi;
+    }
+    if (w <= 0.0f || h <= 0.0f ||
+        logical_pos.x < 0.0f || logical_pos.y < 0.0f ||
+        logical_pos.x >= w || logical_pos.y >= h)
+    {
+        return WindowHit::Normal;
+    }
+
+    if (ctx->chrome_desc.resizable && !maximized) {
+        const float b = ctx->chrome_desc.border_thickness;
+        const float c = ctx->chrome_desc.corner_size;
+        const bool left_edge = logical_pos.x < b;
+        const bool right_edge = logical_pos.x >= (w - b);
+        const bool top_edge = logical_pos.y < b;
+        const bool bottom_edge = logical_pos.y >= (h - b);
+        const bool left_corner = logical_pos.x < c;
+        const bool right_corner = logical_pos.x >= (w - c);
+        const bool top_corner = logical_pos.y < c;
+        const bool bottom_corner = logical_pos.y >= (h - c);
+        if (left_edge || right_edge || top_edge || bottom_edge) {
+            if (top_corner && left_corner) return WindowHit::ResizeTopLeft;
+            if (top_corner && right_corner) return WindowHit::ResizeTopRight;
+            if (bottom_corner && left_corner) return WindowHit::ResizeBottomLeft;
+            if (bottom_corner && right_corner) return WindowHit::ResizeBottomRight;
+            if (top_edge) return WindowHit::ResizeTop;
+            if (bottom_edge) return WindowHit::ResizeBottom;
+            if (left_edge) return WindowHit::ResizeLeft;
+            if (right_edge) return WindowHit::ResizeRight;
+        }
+    }
+
+    for (uint32_t i = 0u; i < ctx->chrome_client_count; ++i) {
+        if (ctx->chrome_client_rects[i].contains(logical_pos)) {
+            return WindowHit::Client;
+        }
+    }
+    for (uint32_t i = 0u; i < ctx->chrome_drag_count; ++i) {
+        if (ctx->chrome_drag_rects[i].contains(logical_pos)) {
+            return WindowHit::Caption;
+        }
+    }
+    return WindowHit::Client;
+}
+
+void minimize_window(SDL_Window* window) noexcept {
+    Context* ctx = current_context();
+    SDL_Window* target = window ? window : (ctx ? ctx->window : nullptr);
+    if (target && (!ctx || !ctx->headless)) {
+        SDL_MinimizeWindow(target);
+        if (ctx) {
+            request_redraw(ctx);
+        }
+    }
+}
+
+void maximize_window(SDL_Window* window) noexcept {
+    Context* ctx = current_context();
+    SDL_Window* target = window ? window : (ctx ? ctx->window : nullptr);
+    if (target && (!ctx || !ctx->headless)) {
+        SDL_MaximizeWindow(target);
+        if (ctx) {
+            request_redraw(ctx);
+        }
+    }
+}
+
+void restore_window(SDL_Window* window) noexcept {
+    Context* ctx = current_context();
+    SDL_Window* target = window ? window : (ctx ? ctx->window : nullptr);
+    if (target && (!ctx || !ctx->headless)) {
+        SDL_RestoreWindow(target);
+        if (ctx) {
+            request_redraw(ctx);
+        }
+    }
+}
+
+bool is_window_maximized(const Context* ctx_arg, SDL_Window* window) noexcept {
+    const Context* ctx = ctx_arg ? ctx_arg : current_context();
+    SDL_Window* target = window ? window : (ctx ? ctx->window : nullptr);
+    if (!target || (ctx && ctx->headless)) {
+        return false;
+    }
+    return (SDL_GetWindowFlags(target) & SDL_WINDOW_MAXIMIZED) != 0u;
+}
+
+bool begin_drag_payload(
+    uint32_t source_id,
+    uint32_t kind_hash,
+    Str label,
+    const void* data,
+    uint32_t size,
+    uint64_t u64,
+    uint32_t u32) noexcept
+{
+    Context* ctx = current_context();
+    if (!ctx || !ctx->in_frame || !ctx->prev_pointer_down || kind_hash == 0u ||
+        size > kMaxDragPayloadBytes || (size > 0u && !data))
+    {
+        return false;
+    }
+
+    ctx->drag_source_id = source_id;
+    ctx->drag_kind_hash = kind_hash;
+    ctx->drag_u64 = u64;
+    ctx->drag_u32 = u32;
+    ctx->drag_size = size;
+    if (size > 0u) {
+        std::memcpy(ctx->drag_data, data, size);
+    }
+
+    uint32_t copy_len = 0u;
+    if (label.chars && label.length > 0u) {
+        const uint32_t raw_cap = (label.length < (kMaxDragLabelBytes - 1u))
+            ? label.length
+            : (kMaxDragLabelBytes - 1u);
+        copy_len = utf8_clamp_boundary(label.chars, label.length, raw_cap);
+        if (copy_len > 0u) {
+            std::memcpy(ctx->drag_label, label.chars, copy_len);
+        }
+    }
+    ctx->drag_label[copy_len] = '\0';
+    ctx->drag_label_len = copy_len;
+
+    ctx->drag_active = true;
+    ctx->drag_drop_pending = false;
+    ctx->drag_accepted_this_frame = false;
+    request_redraw(ctx);
+    return true;
+}
+
+bool is_dragging_payload(uint32_t kind_hash) noexcept {
+    const Context* ctx = current_context();
+    return ctx != nullptr && ctx->drag_active && (kind_hash == 0u || ctx->drag_kind_hash == kind_hash);
+}
+
+bool peek_drag_payload(DragPayloadView* out_view, uint32_t kind_hash) noexcept {
+    const Context* ctx = current_context();
+    if (!ctx || (!ctx->drag_active && !(ctx->drag_drop_pending && !ctx->drag_accepted_this_frame))) {
+        return false;
+    }
+    if (kind_hash != 0u && ctx->drag_kind_hash != kind_hash) {
+        return false;
+    }
+    if (out_view) {
+        *out_view = DragPayloadView{
+            .kind_hash = ctx->drag_kind_hash,
+            .label = (ctx->drag_label_len > 0u) ? Str{ ctx->drag_label, ctx->drag_label_len, false } : Str{},
+            .u64 = ctx->drag_u64,
+            .u32 = ctx->drag_u32,
+            .data = (ctx->drag_size > 0u) ? ctx->drag_data : nullptr,
+            .size = ctx->drag_size,
+        };
+    }
+    return true;
+}
+
+bool accept_drag_payload(uint32_t target_id, uint32_t kind_hash, DragPayloadView* out_view) noexcept {
+    Context* ctx = current_context();
+    if (!ctx || !ctx->drag_drop_pending || ctx->drag_accepted_this_frame || kind_hash == 0u) {
+        return false;
+    }
+    if (ctx->drag_kind_hash != kind_hash) {
+        return false;
+    }
+    if (target_id != 0u) {
+        const bool over_target = hovered(target_id) || element_bounds(target_id).contains(ctx->pointer_pos);
+        if (!over_target) {
+            return false;
+        }
+    }
+    if (out_view) {
+        *out_view = DragPayloadView{
+            .kind_hash = ctx->drag_kind_hash,
+            .label = (ctx->drag_label_len > 0u) ? Str{ ctx->drag_label, ctx->drag_label_len, false } : Str{},
+            .u64 = ctx->drag_u64,
+            .u32 = ctx->drag_u32,
+            .data = (ctx->drag_size > 0u) ? ctx->drag_data : nullptr,
+            .size = ctx->drag_size,
+        };
+    }
+    ctx->drag_accepted_this_frame = true;
+    return true;
 }
 
 bool set_clipboard_text(const char* utf8_text) noexcept {
@@ -5624,6 +6286,11 @@ CanvasState begin_canvas(const CanvasDesc& desc) noexcept {
     ws->is_user_element = true;
     ws->is_canvas = true;
     ws->canvas_interactive = desc.interactive;
+    ws->canvas_marquee_enabled = desc.marquee_select;
+    if (!desc.marquee_select) {
+        ws->canvas_marquee_active = false;
+        ws->canvas_marquee_finished = false;
+    }
     ws->canvas_min_zoom = min_z;
     ws->canvas_max_zoom = max_z;
     ws->canvas_zoom = clamp_range(ws->canvas_zoom, min_z, max_z);
@@ -5641,6 +6308,9 @@ CanvasState begin_canvas(const CanvasDesc& desc) noexcept {
         .zoom = ws->canvas_zoom,
         .viewport = ws->last_box_logical,
         .panning = panning,
+        .marquee_active = ws->canvas_marquee_active,
+        .marquee_finished = ws->canvas_marquee_finished,
+        .marquee_world = ws->canvas_marquee_world,
     };
 
     ctx->canvas_stack[ctx->canvas_depth++] = CanvasStackEntry{
@@ -5701,6 +6371,24 @@ void end_canvas() noexcept {
         return;
     }
     const CanvasStackEntry ce = ctx->canvas_stack[--ctx->canvas_depth];
+    if (ce.state.marquee_active && ce.state.marquee_world.w > 0.0f && ce.state.marquee_world.h > 0.0f) {
+        const Vec2 tl_local = ce.state.world_to_local(Vec2{ ce.state.marquee_world.x, ce.state.marquee_world.y });
+        box(BoxDesc{
+            .width = Sizing::fixed(ce.state.marquee_world.w * ce.state.zoom),
+            .height = Sizing::fixed(ce.state.marquee_world.h * ce.state.zoom),
+            .background = ce.desc.marquee_fill,
+            .border_color = ce.desc.marquee_border,
+            .border_width = 1.0f,
+            .radius = Corners::all(2.0f),
+            .attach_to = AttachTo::Parent,
+            .anchor_element = Anchor::TopLeft,
+            .anchor_parent = Anchor::TopLeft,
+            .floating_offset = tl_local,
+            .z_index = 7,
+            .pointer_passthrough = true,
+            .clip_to_parent = true,
+        });
+    }
     if (ce.desc.border_width > 0.0f && ce.desc.border_color.a > 0u) {
         box(BoxDesc{
             .width = Sizing::grow(),
@@ -5780,11 +6468,14 @@ CanvasNodeResult begin_canvas_node(const CanvasNodeDesc& desc) noexcept {
     const bool can_drag = desc.draggable && ce.desc.interactive;
     const bool dragging = can_drag && (ctx->active_id == desc.id) && ctx->prev_pointer_down;
 
+    Vec2 drag_delta_world = {};
     if (can_drag && ws->pressed_this_frame) {
         const Vec2 ptr_world = ce.state.screen_to_world(ctx->pointer_pos);
         ws->drag_grab = node_pos - ptr_world;
         ctx->desired_cursor = Cursor::Move;
     } else if (dragging) {
+        const float inv_z = (ce.state.zoom > 1e-4f) ? (1.0f / ce.state.zoom) : 1.0f;
+        drag_delta_world = ctx->pointer_delta * inv_z;
         const Vec2 ptr_world = ce.state.screen_to_world(ctx->pointer_pos);
         node_pos = ptr_world + ws->drag_grab;
         if (desc.world_pos) {
@@ -5830,6 +6521,7 @@ CanvasNodeResult begin_canvas_node(const CanvasNodeDesc& desc) noexcept {
         .pressed = pressed_now,
         .dragging = dragging,
         .clicked = clicked_now,
+        .drag_delta_world = drag_delta_world,
     };
 }
 
@@ -5856,6 +6548,9 @@ CanvasState canvas_state(uint32_t canvas_id) noexcept {
         .zoom = ws->canvas_zoom,
         .viewport = ws->last_box_logical,
         .panning = (ctx->pan_canvas_id == canvas_id),
+        .marquee_active = ws->canvas_marquee_active,
+        .marquee_finished = ws->canvas_marquee_finished,
+        .marquee_world = ws->canvas_marquee_world,
     };
 }
 
@@ -6297,6 +6992,50 @@ void end_frame(Context* ctx_arg) noexcept {
         }
     }
 
+    for (uint32_t i = 0u; i < ctx->pending_chrome_drag_count; ++i) {
+        ctx->chrome_drag_rects[i] = ctx->pending_chrome_drag_rects[i];
+    }
+    ctx->chrome_drag_count = ctx->pending_chrome_drag_count;
+    ctx->pending_chrome_drag_count = 0u;
+
+    uint32_t chrome_client_n = 0u;
+    for (uint32_t i = 0u; i < ctx->pending_chrome_client_count && chrome_client_n < kMaxChromeClientRects; ++i) {
+        ctx->chrome_client_rects[chrome_client_n++] = ctx->pending_chrome_client_rects[i];
+    }
+    ctx->pending_chrome_client_count = 0u;
+
+    if (ctx->chrome_desc.enabled && ctx->chrome_drag_count > 0u) {
+        for (uint32_t i = 0u; i < ctx->span_hit_count && chrome_client_n < kMaxChromeClientRects; ++i) {
+            const SpanHitRegion& r = ctx->span_hits[i];
+            if (r.id == 0u && r.rect.w > 0.0f && r.rect.h > 0.0f) {
+                ctx->chrome_client_rects[chrome_client_n++] = r.rect;
+            }
+        }
+        if (ctx->states.entries) {
+            for (uint32_t i = 0u; i < ctx->states.capacity && chrome_client_n < kMaxChromeClientRects; ++i) {
+                const WidgetState& ws = ctx->states.entries[i];
+                if (ws.key == 0u || ws.last_seen_frame != ctx->frame_index || !ws.is_focusable) {
+                    continue;
+                }
+                const Rect r = ws.last_box_logical;
+                if (r.w <= 0.0f || r.h <= 0.0f) {
+                    continue;
+                }
+                bool hits_drag = false;
+                for (uint32_t d = 0u; d < ctx->chrome_drag_count; ++d) {
+                    if (ctx->chrome_drag_rects[d].intersects(r)) {
+                        hits_drag = true;
+                        break;
+                    }
+                }
+                if (hits_drag) {
+                    ctx->chrome_client_rects[chrome_client_n++] = r;
+                }
+            }
+        }
+    }
+    ctx->chrome_client_count = chrome_client_n;
+
     const uint64_t end_ticks = SDL_GetPerformanceCounter();
     const uint64_t freq = SDL_GetPerformanceFrequency();
     const double layout_ms = (freq > 0u)
@@ -6352,6 +7091,59 @@ void end_frame(Context* ctx_arg) noexcept {
         }
     }
 
+    if (ctx->drag_active && ctx->pointer_pos.x >= 0.0f && ctx->pointer_pos.y >= 0.0f) {
+        const float vp_w = static_cast<float>(ctx->viewport_w) / dpi;
+        const float vp_h = static_cast<float>(ctx->viewport_h) / dpi;
+        const Str lbl = (ctx->drag_label_len > 0u)
+            ? Str{ ctx->drag_label, ctx->drag_label_len, false }
+            : str_lit("Item");
+        const Vec2 tsz = measure_multiline_text_metrics(ctx, lbl, kFontSans, 12.0f, 0.0f, nullptr, nullptr);
+        const float pill_w = clamp_range(tsz.x + 26.0f, 76.0f, 240.0f);
+        const float pill_h = 26.0f;
+        const float max_x = (vp_w - pill_w - 4.0f > 4.0f) ? (vp_w - pill_w - 4.0f) : 4.0f;
+        const float max_y = (vp_h - pill_h - 4.0f > 4.0f) ? (vp_h - pill_h - 4.0f) : 4.0f;
+        const float gx = clamp_range(ctx->pointer_pos.x + 14.0f, 4.0f, max_x);
+        const float gy = clamp_range(ctx->pointer_pos.y + 14.0f, 4.0f, max_y);
+        const ClipEntry pill_clip = { .rect = root_clip, .radius = 0.0f };
+
+        push_prim(
+            ctx,
+            Prim::make_shadow(
+                Rect{ gx * dpi, (gy + 3.0f) * dpi, pill_w * dpi, pill_h * dpi },
+                root_clip,
+                Color::rgba8(0, 0, 0, 145),
+                Corners::all(8.0f * dpi),
+                10.0f * dpi,
+                0.0f));
+        push_prim(
+            ctx,
+            Prim::make_rect(
+                Rect{ gx * dpi, gy * dpi, pill_w * dpi, pill_h * dpi },
+                root_clip,
+                Color::rgba8(15, 23, 42, 236),
+                Corners::all(8.0f * dpi),
+                Color::rgba8(56, 189, 248, 195),
+                1.0f * dpi,
+                1.0f,
+                0.0f));
+        push_prim(
+            ctx,
+            Prim::make_rect(
+                Rect{ (gx + 6.0f) * dpi, (gy + 6.0f) * dpi, 3.0f * dpi, (pill_h - 12.0f) * dpi },
+                root_clip,
+                Color::rgb_hex(0x38BDF8),
+                Corners::all(1.5f * dpi)));
+        emit_direct_text_px(
+            ctx,
+            lbl.chars,
+            gx + 14.0f,
+            gy + 6.0f,
+            12.0f,
+            Color::rgb_hex(0xF8FAFC),
+            pill_clip,
+            dpi);
+    }
+
     const bool idle_now = !needs_redraw(ctx);
     if (ctx->debug_hud_open) {
         const float vp_w = static_cast<float>(ctx->viewport_w) / dpi;
@@ -6393,7 +7185,7 @@ void end_frame(Context* ctx_arg) noexcept {
 
         emit_direct_text_px(
             ctx,
-            "ETCH 1.2 INSPECTOR   [F12]",
+            "ETCH 1.3 INSPECTOR   [F12]",
             hud_x + 12.0f,
             hud_y + 10.0f,
             12.0f,

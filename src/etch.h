@@ -10,7 +10,7 @@
 #include <type_traits>
 
 #define ETCH_VERSION_MAJOR 1
-#define ETCH_VERSION_MINOR 2
+#define ETCH_VERSION_MINOR 3
 #define ETCH_VERSION_PATCH 0
 
 #ifndef ETCH_ASSERT
@@ -89,6 +89,12 @@ struct Rect {
 
     constexpr bool contains(Vec2 p) const noexcept {
         return p.x >= x && p.y >= y && p.x < (x + w) && p.y < (y + h);
+    }
+
+    constexpr bool intersects(Rect o) const noexcept {
+        return w > 0.0f && h > 0.0f && o.w > 0.0f && o.h > 0.0f &&
+               x < (o.x + o.w) && (x + w) > o.x &&
+               y < (o.y + o.h) && (y + h) > o.y;
     }
 };
 
@@ -935,6 +941,7 @@ enum class Cursor : uint8_t {
     ResizeNESW,
     Move,
     NotAllowed,
+    Crosshair,
 };
 
 enum class Anchor : uint8_t {
@@ -1127,6 +1134,74 @@ struct IconDrawDesc {
     bool     foreground = false;
 };
 
+struct TextDrawDesc {
+    Str      text = {};
+    Vec2     pos = {}; // Local to current open box top-left (logical px)
+    uint16_t font_id = kFontSans;
+    float    size = 14.0f;
+    Color    color = Color::white();
+    float    letter_spacing = 0.0f;
+    AlignX   align_x = AlignX::Left;
+    AlignY   align_y = AlignY::Top;
+    bool     foreground = false;
+};
+
+struct ImageDrawDesc {
+    SDL_GPUTexture* texture = nullptr;
+    Rect            rect = {}; // Local to current open box (logical px)
+    Rect            uv_rect = {0.0f, 0.0f, 1.0f, 1.0f};
+    Color           tint = Color::white();
+    float           radius = 0.0f;
+    bool            foreground = false;
+};
+
+struct TextureDesc {
+    const void* rgba_pixels = nullptr;
+    uint32_t    width = 0;
+    uint32_t    height = 0;
+    uint32_t    row_pitch_bytes = 0; // 0 = width * 4
+    bool        srgb = true;
+    const char* debug_name = nullptr;
+};
+
+struct LoadedTexture {
+    SDL_GPUTexture* texture = nullptr;
+    uint32_t        width = 0;
+    uint32_t        height = 0;
+
+    constexpr explicit operator bool() const noexcept { return texture != nullptr; }
+};
+
+enum class WindowHit : uint8_t {
+    Normal = 0,
+    Client = 1,
+    Caption = 2,
+    ResizeTopLeft = 3,
+    ResizeTop = 4,
+    ResizeTopRight = 5,
+    ResizeRight = 6,
+    ResizeBottomRight = 7,
+    ResizeBottom = 8,
+    ResizeBottomLeft = 9,
+    ResizeLeft = 10,
+};
+
+struct WindowChromeDesc {
+    bool  enabled = false;
+    bool  resizable = true;
+    float border_thickness = 6.0f;
+    float corner_size = 12.0f;
+};
+
+struct DragPayloadView {
+    uint32_t    kind_hash = 0;
+    Str         label = {};
+    uint64_t    u64 = 0;
+    uint32_t    u32 = 0;
+    const void* data = nullptr;
+    uint32_t    size = 0;
+};
+
 struct TextInputDesc {
     uint32_t id = 0;
     char* buffer = nullptr;            // Caller-owned mutable NUL-terminated UTF-8 buffer
@@ -1227,6 +1302,9 @@ struct CanvasDesc {
     Corners radius = Corners::all(10.0f);
     bool show_grid = true;
     bool interactive = true;
+    bool marquee_select = false;
+    Color marquee_fill = Color::rgba(0.28f, 0.56f, 0.96f, 0.16f);
+    Color marquee_border = Color::rgba(0.38f, 0.68f, 1.00f, 0.85f);
 };
 
 struct CanvasState {
@@ -1234,6 +1312,9 @@ struct CanvasState {
     float zoom = 1.0f;
     Rect viewport = {};
     bool panning = false;
+    bool marquee_active = false;
+    bool marquee_finished = false;
+    Rect marquee_world = {};
 
     constexpr Vec2 world_to_local(Vec2 world) const noexcept { return pan + world * zoom; }
     constexpr Vec2 world_to_screen(Vec2 world) const noexcept { return Vec2{viewport.x, viewport.y} + pan + world * zoom; }
@@ -1282,6 +1363,7 @@ struct CanvasNodeResult {
     bool pressed = false;
     bool dragging = false;
     bool clicked = false;
+    Vec2 drag_delta_world = {};
 };
 
 Context* create_context(const ContextDesc& desc) noexcept;
@@ -1337,6 +1419,17 @@ bool render_window(
     Context* ctx,
     Color clear_color = Color::rgb_hex(0x0E1014),
     SDL_Window* window_override = nullptr) noexcept;
+void release_window(Context* ctx, SDL_Window* window) noexcept;
+uint32_t claimed_window_count(const Context* ctx) noexcept;
+
+void set_window_chrome(const WindowChromeDesc& desc) noexcept;
+void window_drag_region(Rect rect_logical) noexcept;
+void window_client_region(Rect rect_logical) noexcept;
+WindowHit evaluate_window_hit(const Context* ctx, Vec2 logical_pos, SDL_Window* window = nullptr) noexcept;
+void minimize_window(SDL_Window* window = nullptr) noexcept;
+void maximize_window(SDL_Window* window = nullptr) noexcept;
+void restore_window(SDL_Window* window = nullptr) noexcept;
+bool is_window_maximized(const Context* ctx = nullptr, SDL_Window* window = nullptr) noexcept;
 
 bool render_headless_png(
     Context* ctx,
@@ -1364,6 +1457,22 @@ void draw_polyline(const PolylineDesc& desc) noexcept;
 void draw_bezier(const BezierDesc& desc) noexcept;
 void draw_ring(const RingDesc& desc) noexcept;
 void draw_icon(const IconDrawDesc& desc) noexcept;
+Vec2 measure_text(Str text, uint16_t font_id = kFontSans, float size = 14.0f, float letter_spacing = 0.0f) noexcept;
+void draw_text(const TextDrawDesc& desc) noexcept;
+void draw_image(const ImageDrawDesc& desc) noexcept;
+
+LoadedTexture create_texture_rgba(Context* ctx, const TextureDesc& desc) noexcept;
+bool update_texture_rgba(
+    Context* ctx,
+    SDL_GPUTexture* texture,
+    uint32_t width,
+    uint32_t height,
+    const void* rgba_pixels,
+    uint32_t row_pitch_bytes = 0) noexcept;
+LoadedTexture load_texture_file(Context* ctx, const char* path, bool srgb = true) noexcept;
+LoadedTexture load_texture_memory(Context* ctx, const void* data, size_t size_bytes, bool srgb = true) noexcept;
+void destroy_texture(Context* ctx, LoadedTexture* tex) noexcept;
+void destroy_texture(Context* ctx, SDL_GPUTexture* tex) noexcept;
 
 TextInputResult text_input(const TextInputDesc& desc) noexcept;
 void set_text_selection(uint32_t element_id, uint32_t anchor_byte, uint32_t cursor_byte) noexcept;
@@ -1399,6 +1508,18 @@ bool should_close_popover(uint32_t popover_id, uint32_t trigger_id = 0) noexcept
 
 std::span<const Str> dropped_files() noexcept;
 void inject_drop_file(Context* ctx, Str utf8_path) noexcept;
+
+bool begin_drag_payload(
+    uint32_t source_id,
+    uint32_t kind_hash,
+    Str label,
+    const void* data,
+    uint32_t size,
+    uint64_t u64 = 0,
+    uint32_t u32 = 0) noexcept;
+bool is_dragging_payload(uint32_t kind_hash = 0) noexcept;
+bool peek_drag_payload(DragPayloadView* out_view, uint32_t kind_hash = 0) noexcept;
+bool accept_drag_payload(uint32_t target_id, uint32_t kind_hash, DragPayloadView* out_view) noexcept;
 
 // Analytic damped spring animator & inertial scroll container control
 float spring(uint32_t anim_id, float target, SpringSpec spec = {}) noexcept;

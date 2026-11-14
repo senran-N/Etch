@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(etch VERSION 1.2.0 LANGUAGES C CXX)
+project(etch VERSION 1.3.0 LANGUAGES C CXX)
 
 option(ETCH_BUILD_EXAMPLES "Build Etch sandbox and etch_studio examples" ON)
 
@@ -207,6 +207,7 @@ add_library(etch STATIC
     src/etch.h
     ${ETCH_SHADER_HEADERS}
 )
+add_library(Etch::etch ALIAS etch)
 set_source_files_properties(src/etch_unity.cpp PROPERTIES
     OBJECT_DEPENDS
         "${CMAKE_CURRENT_SOURCE_DIR}/src/etch.h;${CMAKE_CURRENT_SOURCE_DIR}/src/etch_arena.cpp;${CMAKE_CURRENT_SOURCE_DIR}/src/etch_slug.cpp;${CMAKE_CURRENT_SOURCE_DIR}/src/etch_layout.cpp;${CMAKE_CURRENT_SOURCE_DIR}/src/etch_gpu.cpp;${CMAKE_CURRENT_SOURCE_DIR}/third_party/clay.h;${CMAKE_CURRENT_SOURCE_DIR}/third_party/stb_truetype.h;${CMAKE_CURRENT_SOURCE_DIR}/third_party/stb_image_write.h"

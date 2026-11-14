@@ -74,44 +74,9 @@ inline float smooth_line_cov(float dist_px, float half_thickness) noexcept {
 }
 
 SDL_GPUTexture* create_oscilloscope_texture(etch::Context* ctx) noexcept {
-    SDL_GPUDevice* dev = etch::gpu_device(ctx);
-    if (!dev) {
-        return nullptr;
-    }
-
-    const SDL_GPUTextureCreateInfo tex_info = {
-        .type = SDL_GPU_TEXTURETYPE_2D,
-        .format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB,
-        .usage = SDL_GPU_TEXTUREUSAGE_SAMPLER,
-        .width = kOscWidth,
-        .height = kOscHeight,
-        .layer_count_or_depth = 1u,
-        .num_levels = 1u,
-        .sample_count = SDL_GPU_SAMPLECOUNT_1,
-        .props = 0u,
-    };
-    SDL_GPUTexture* tex = SDL_CreateGPUTexture(dev, &tex_info);
-    if (!tex) {
-        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "SDL_CreateGPUTexture (osc) failed: %s", SDL_GetError());
-        return nullptr;
-    }
-
     const uint32_t byte_size = kOscWidth * kOscHeight * 4u;
-    const SDL_GPUTransferBufferCreateInfo tbuf_info = {
-        .usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD,
-        .size = byte_size,
-        .props = 0u,
-    };
-    SDL_GPUTransferBuffer* tbuf = SDL_CreateGPUTransferBuffer(dev, &tbuf_info);
-    if (!tbuf) {
-        SDL_ReleaseGPUTexture(dev, tex);
-        return nullptr;
-    }
-
-    uint8_t* dst = static_cast<uint8_t*>(SDL_MapGPUTransferBuffer(dev, tbuf, false));
+    uint8_t* dst = static_cast<uint8_t*>(std::malloc(byte_size));
     if (!dst) {
-        SDL_ReleaseGPUTransferBuffer(dev, tbuf);
-        SDL_ReleaseGPUTexture(dev, tex);
         return nullptr;
     }
 
@@ -192,48 +157,16 @@ SDL_GPUTexture* create_oscilloscope_texture(etch::Context* ctx) noexcept {
         }
     }
 
-    SDL_UnmapGPUTransferBuffer(dev, tbuf);
-
-    SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(dev);
-    bool uploaded = false;
-    if (cmd) {
-        SDL_GPUCopyPass* copy_pass = SDL_BeginGPUCopyPass(cmd);
-        if (copy_pass) {
-            const SDL_GPUTextureTransferInfo src = {
-                .transfer_buffer = tbuf,
-                .offset = 0u,
-                .pixels_per_row = kOscWidth,
-                .rows_per_layer = kOscHeight,
-            };
-            const SDL_GPUTextureRegion region = {
-                .texture = tex,
-                .mip_level = 0u,
-                .layer = 0u,
-                .x = 0u,
-                .y = 0u,
-                .z = 0u,
-                .w = kOscWidth,
-                .h = kOscHeight,
-                .d = 1u,
-            };
-            SDL_UploadToGPUTexture(copy_pass, &src, &region, false);
-            SDL_EndGPUCopyPass(copy_pass);
-            SDL_GPUFence* fence = SDL_SubmitGPUCommandBufferAndAcquireFence(cmd);
-            if (fence) {
-                uploaded = SDL_WaitForGPUFences(dev, true, &fence, 1u);
-                SDL_ReleaseGPUFence(dev, fence);
-            }
-        } else {
-            SDL_CancelGPUCommandBuffer(cmd);
-        }
-    }
-
-    SDL_ReleaseGPUTransferBuffer(dev, tbuf);
-    if (!uploaded) {
-        SDL_ReleaseGPUTexture(dev, tex);
-        return nullptr;
-    }
-    return tex;
+    const etch::LoadedTexture loaded = etch::create_texture_rgba(ctx, etch::TextureDesc{
+        .rgba_pixels = dst,
+        .width = kOscWidth,
+        .height = kOscHeight,
+        .row_pitch_bytes = kOscWidth * 4u,
+        .srgb = true,
+        .debug_name = "oscilloscope_tex",
+    });
+    std::free(dst);
+    return loaded.texture;
 }
 
 void build_sandbox_ui(AppState* app, const etch::FrameStats& prev_stats) noexcept {
@@ -1201,8 +1134,9 @@ int run_headless(const char* out_png_path) noexcept {
         SDL_GPUDevice* dev = etch::gpu_device(ctx);
         if (dev) {
             SDL_WaitForGPUIdle(dev);
-            SDL_ReleaseGPUTexture(dev, osc_tex);
         }
+        etch::destroy_texture(ctx, osc_tex);
+        osc_tex = nullptr;
         etch::destroy_context(ctx);
     };
 
@@ -2110,9 +2044,288 @@ int run_headless(const char* out_png_path) noexcept {
         }
     }
 
-    const bool ok = png_ok && stats_ok && slug_ok && v10a_ok && v11_ok && v12_ok;
+    // 13. v1.3 Window Chrome HitTest, Multi-Window Swapchains, draw_text/draw_image/measure_text, Native Texture Loader, Zero-Heap DND & Canvas Marquee.
+    bool v13_ok = false;
+    {
+        const bool v13_owns_video = !SDL_WasInit(SDL_INIT_VIDEO) && SDL_InitSubSystem(SDL_INIT_VIDEO);
+        etch::Context* v13ctx = etch::create_context(etch::ContextDesc{ .headless = true });
+        if (!v13ctx) {
+            std::fprintf(stderr, "Headless assert [13] failed: create_context failed\n");
+        } else {
+            // 13a. Texture loader (RGBA create/update, BMP file & memory decode)
+            uint8_t tex_px[4u * 4u * 4u] = {};
+            for (uint32_t i = 0u; i < 16u; ++i) {
+                tex_px[i * 4u + 0u] = static_cast<uint8_t>((i * 15u) & 255u);
+                tex_px[i * 4u + 1u] = 180u;
+                tex_px[i * 4u + 2u] = 240u;
+                tex_px[i * 4u + 3u] = 255u;
+            }
+            etch::LoadedTexture dyn_tex = etch::create_texture_rgba(v13ctx, etch::TextureDesc{
+                .rgba_pixels = tex_px,
+                .width = 4u,
+                .height = 4u,
+                .srgb = true,
+            });
+            tex_px[0] = 255u;
+            const bool upd_ok = dyn_tex && etch::update_texture_rgba(v13ctx, dyn_tex.texture, 4u, 4u, tex_px);
+
+            const char* kProbeBmp = "_etch_v13_probe.bmp";
+            etch::LoadedTexture file_tex = {};
+            etch::LoadedTexture mem_tex = {};
+            if (SDL_Surface* surf = SDL_CreateSurface(4, 4, SDL_PIXELFORMAT_RGBA32)) {
+                std::memcpy(surf->pixels, tex_px, sizeof(tex_px));
+                if (SDL_SaveBMP(surf, kProbeBmp)) {
+                    file_tex = etch::load_texture_file(v13ctx, kProbeBmp, true);
+                    if (FILE* f = std::fopen(kProbeBmp, "rb")) {
+                        uint8_t bmp_buf[512] = {};
+                        const size_t nread = std::fread(bmp_buf, 1u, sizeof(bmp_buf), f);
+                        std::fclose(f);
+                        if (nread > 0u) {
+                            mem_tex = etch::load_texture_memory(v13ctx, bmp_buf, nread, true);
+                        }
+                    }
+                    std::remove(kProbeBmp);
+                }
+                SDL_DestroySurface(surf);
+            }
+            const bool tex_ok = dyn_tex && upd_ok && file_tex && file_tex.width == 4u && mem_tex && mem_tex.height == 4u;
+
+            // 13b. Multi-window swapchains + release_window lifecycle
+            SDL_Window* win_a = SDL_CreateWindow("Etch v1.3 Win A", 320, 240, SDL_WINDOW_HIDDEN | SDL_WINDOW_RESIZABLE);
+            SDL_Window* win_b = SDL_CreateWindow("Etch v1.3 Win B", 320, 240, SDL_WINDOW_HIDDEN | SDL_WINDOW_RESIZABLE);
+            bool multi_win_ok = false;
+            if (win_a && win_b) {
+                etch::begin_frame(v13ctx, etch::FrameDesc{ .viewport_w = 320u, .viewport_h = 240u, .dpi_scale = 1.0f, .dt_seconds = kStepDt });
+                etch::box({ .width = etch::Sizing::grow(), .height = etch::Sizing::grow(), .background = etch::Color::rgb_hex(0x0F172A) });
+                etch::end_frame(v13ctx);
+                const bool ra = etch::render_window(v13ctx, etch::Color::rgb_hex(0x0E1014), win_a);
+                const bool rb = etch::render_window(v13ctx, etch::Color::rgb_hex(0x0E1014), win_b);
+                const uint32_t cnt2 = etch::claimed_window_count(v13ctx);
+                etch::release_window(v13ctx, win_b);
+                const uint32_t cnt1 = etch::claimed_window_count(v13ctx);
+                etch::release_window(v13ctx, win_a);
+                const uint32_t cnt0 = etch::claimed_window_count(v13ctx);
+                multi_win_ok = ra && rb && (cnt2 == 2u) && (cnt1 == 1u) && (cnt0 == 0u);
+            }
+
+            // 13c. Box-local draw_text/draw_image/measure_text, Custom Chrome HitTest, Drag-Drop & Canvas Marquee
+            etch::set_window_chrome(etch::WindowChromeDesc{
+                .enabled = true,
+                .resizable = true,
+                .border_thickness = 6.0f,
+                .corner_size = 12.0f,
+            });
+            const etch::Vec2 measured = etch::measure_text(etch::str_lit("ACES\nFilmic"), etch::kFontSans, 14.0f);
+            const bool measure_ok = (measured.x > 10.0f && measured.y > 20.0f);
+
+            const uint32_t kTitleFocusBtn = etch::id("v13_focus_btn");
+            const uint32_t kDragSrcId     = etch::id("v13_dnd_src");
+            const uint32_t kDropDstId     = etch::id("v13_dnd_dst");
+            const uint32_t kMarqueeCanvas = etch::id("v13_marquee_canvas");
+            const uint32_t kPayloadKind   = etch::id("v13_kind");
+
+            uint32_t src_clicks = 0u;
+            bool dnd_active_seen = false;
+            bool dnd_peek_seen = false;
+            bool dnd_drop_ok = false;
+            bool marquee_active_seen = false;
+            etch::Rect marquee_final_rect = {};
+            bool marquee_fin_seen = false;
+
+            const auto step_v13 = [&](etch::Vec2 ptr, bool left_down, bool start_dnd = false) noexcept {
+                etch::begin_frame(v13ctx, etch::FrameDesc{
+                    .viewport_w = kHeadlessW,
+                    .viewport_h = kHeadlessH,
+                    .dpi_scale = 1.0f,
+                    .dt_seconds = kStepDt,
+                    .pointer_pos = ptr,
+                    .pointer_down = left_down,
+                });
+                ETCH_BOX({
+                    .axis = etch::Axis::Col,
+                    .width = etch::Sizing::grow(),
+                    .height = etch::Sizing::grow(),
+                    .background = etch::Color::rgb_hex(0x0B0F17),
+                }) {
+                    // Titlebar region
+                    ETCH_BOX({
+                        .id = etch::id("v13_title"),
+                        .axis = etch::Axis::Row,
+                        .width = etch::Sizing::grow(),
+                        .height = etch::Sizing::fixed(40.0f),
+                        .padding = etch::Padding::xy(16.0f, 6.0f),
+                        .gap = 12.0f,
+                    }) {
+                        etch::window_drag_region(etch::Rect{ 0.0f, 0.0f, 1280.0f, 40.0f });
+                        etch::window_client_region(etch::Rect{ 20.0f, 6.0f, 80.0f, 28.0f });
+                        ETCH_BOX({
+                            .id = kTitleFocusBtn,
+                            .width = etch::Sizing::fixed(70.0f),
+                            .height = etch::Sizing::fixed(28.0f),
+                            .background = etch::Color::rgb_hex(0x1E293B),
+                            .focusable = true,
+                        }) {}
+                    }
+                    // Plot box with draw_image + draw_text
+                    ETCH_BOX({
+                        .width = etch::Sizing::fixed(240.0f),
+                        .height = etch::Sizing::fixed(100.0f),
+                        .background = etch::Color::rgb_hex(0x111827),
+                    }) {
+                        if (dyn_tex) {
+                            etch::draw_image(etch::ImageDrawDesc{
+                                .texture = dyn_tex.texture,
+                                .rect = etch::Rect{ 8.0f, 8.0f, 48.0f, 48.0f },
+                                .radius = 6.0f,
+                            });
+                        }
+                        char dynamic_lbl[48] = {};
+                        std::snprintf(dynamic_lbl, sizeof(dynamic_lbl), "Peak %.1f dB", 3.5f);
+                        etch::draw_text(etch::TextDrawDesc{
+                            .text = etch::str_cstr(dynamic_lbl),
+                            .pos = etch::Vec2{ 64.0f, 16.0f },
+                            .font_id = etch::kFontSans,
+                            .size = 13.0f,
+                            .color = etch::Color::white(),
+                        });
+                    }
+                    // Drag-and-Drop source & target
+                    ETCH_BOX({
+                        .axis = etch::Axis::Row,
+                        .width = etch::Sizing::grow(),
+                        .height = etch::Sizing::fixed(80.0f),
+                        .gap = 20.0f,
+                    }) {
+                        ETCH_BOX({
+                            .id = kDragSrcId,
+                            .width = etch::Sizing::fixed(120.0f),
+                            .height = etch::Sizing::fixed(44.0f),
+                            .background = etch::Color::rgb_hex(0x0EA5E9),
+                        }) {}
+                        if (etch::clicked(kDragSrcId)) {
+                            ++src_clicks;
+                        }
+                        if (start_dnd && etch::dragging(kDragSrcId, 4.0f)) {
+                            const uint32_t node_tag = 42u;
+                            etch::begin_drag_payload(
+                                kDragSrcId,
+                                kPayloadKind,
+                                etch::str_lit("BloomPass"),
+                                &node_tag,
+                                sizeof(node_tag),
+                                777ull,
+                                42u);
+                        }
+                        if (etch::is_dragging_payload(kPayloadKind)) {
+                            dnd_active_seen = true;
+                        }
+                        etch::DragPayloadView pv = {};
+                        if (etch::peek_drag_payload(&pv, kPayloadKind) && pv.u64 == 777ull) {
+                            dnd_peek_seen = true;
+                        }
+
+                        ETCH_BOX({
+                            .id = kDropDstId,
+                            .width = etch::Sizing::fixed(180.0f),
+                            .height = etch::Sizing::fixed(60.0f),
+                            .background = etch::Color::rgb_hex(0x1E293B),
+                        }) {}
+                        etch::DragPayloadView dv = {};
+                        if (etch::accept_drag_payload(kDropDstId, kPayloadKind, &dv)) {
+                            dnd_drop_ok = (dv.u32 == 42u && dv.size == sizeof(uint32_t) &&
+                                           dv.data && *static_cast<const uint32_t*>(dv.data) == 42u &&
+                                           dv.label.length == 9u);
+                        }
+                    }
+                    // Canvas with marquee_select
+                    const etch::CanvasState cs = etch::begin_canvas(etch::CanvasDesc{
+                        .id = kMarqueeCanvas,
+                        .width = etch::Sizing::grow(),
+                        .height = etch::Sizing::grow(),
+                        .default_pan = etch::Vec2{ 0.0f, 0.0f },
+                        .default_zoom = 1.0f,
+                        .marquee_select = true,
+                    });
+                    if (cs.marquee_active) {
+                        marquee_active_seen = true;
+                    }
+                    if (cs.marquee_finished) {
+                        marquee_fin_seen = true;
+                        marquee_final_rect = cs.marquee_world;
+                    }
+                    etch::end_canvas();
+                }
+                etch::end_frame(v13ctx);
+            };
+
+            // Warm layout frame
+            step_v13({ -1.0f, -1.0f }, false);
+            step_v13({ -1.0f, -1.0f }, false);
+
+            // Check Window Chrome HitTests (corners, edges, caption, explicit client, focusable button)
+            const etch::Rect btn_bounds = etch::element_bounds(kTitleFocusBtn);
+            const bool chrome_ok =
+                etch::evaluate_window_hit(v13ctx, { -2.0f, 10.0f }) == etch::WindowHit::Normal &&
+                etch::evaluate_window_hit(v13ctx, { 2.0f, 2.0f }) == etch::WindowHit::ResizeTopLeft &&
+                etch::evaluate_window_hit(v13ctx, { 640.0f, 2.0f }) == etch::WindowHit::ResizeTop &&
+                etch::evaluate_window_hit(v13ctx, { 1278.0f, 2.0f }) == etch::WindowHit::ResizeTopRight &&
+                etch::evaluate_window_hit(v13ctx, { 2.0f, 400.0f }) == etch::WindowHit::ResizeLeft &&
+                etch::evaluate_window_hit(v13ctx, { 1278.0f, 400.0f }) == etch::WindowHit::ResizeRight &&
+                etch::evaluate_window_hit(v13ctx, { 2.0f, 798.0f }) == etch::WindowHit::ResizeBottomLeft &&
+                etch::evaluate_window_hit(v13ctx, { 640.0f, 798.0f }) == etch::WindowHit::ResizeBottom &&
+                etch::evaluate_window_hit(v13ctx, { 1278.0f, 798.0f }) == etch::WindowHit::ResizeBottomRight &&
+                etch::evaluate_window_hit(v13ctx, { 50.0f, 20.0f }) == etch::WindowHit::Client &&
+                btn_bounds.w > 0.0f &&
+                etch::evaluate_window_hit(v13ctx, { btn_bounds.x + 10.0f, btn_bounds.y + 10.0f }) == etch::WindowHit::Client &&
+                etch::evaluate_window_hit(v13ctx, { 640.0f, 20.0f }) == etch::WindowHit::Caption &&
+                etch::evaluate_window_hit(v13ctx, { 640.0f, 300.0f }) == etch::WindowHit::Client;
+
+            // Drag & Drop from kDragSrcId -> kDropDstId
+            const etch::Rect src_r = etch::element_bounds(kDragSrcId);
+            const etch::Rect dst_r = etch::element_bounds(kDropDstId);
+            step_v13({ src_r.x + 15.0f, src_r.y + 15.0f }, true, false);
+            step_v13({ dst_r.x + 40.0f, dst_r.y + 25.0f }, true, true);
+            step_v13({ dst_r.x + 40.0f, dst_r.y + 25.0f }, false, false);
+            step_v13({ src_r.x + 15.0f, src_r.y + 15.0f }, false, false);
+            const bool dnd_ok = dnd_active_seen && dnd_peek_seen && dnd_drop_ok && (src_clicks == 0u);
+
+            // Canvas Marquee Multi-Selection drag inside empty canvas
+            const etch::Rect cv_r = etch::element_bounds(kMarqueeCanvas);
+            const etch::Vec2 m0 = { cv_r.x + 40.0f, cv_r.y + 40.0f };
+            const etch::Vec2 m1 = { cv_r.x + 240.0f, cv_r.y + 160.0f };
+            step_v13(m0, true);
+            step_v13(m1, true);
+            step_v13(m1, false);
+            const bool marquee_ok = marquee_active_seen && marquee_fin_seen &&
+                marquee_final_rect.w > 195.0f && marquee_final_rect.h > 115.0f;
+
+            v13_ok = tex_ok && multi_win_ok && measure_ok && chrome_ok && dnd_ok && marquee_ok;
+            if (!v13_ok) {
+                std::fprintf(
+                    stderr,
+                    "Headless assert [13] failed: tex=%d multi=%d meas=%d chrome=%d dnd=%d(act=%d,pk=%d,drop=%d,clk=%u) marq=%d(act=%d,fin=%d,%.1fx%.1f)\n",
+                    tex_ok ? 1 : 0, multi_win_ok ? 1 : 0, measure_ok ? 1 : 0, chrome_ok ? 1 : 0,
+                    dnd_ok ? 1 : 0, dnd_active_seen ? 1 : 0, dnd_peek_seen ? 1 : 0, dnd_drop_ok ? 1 : 0, src_clicks,
+                    marquee_ok ? 1 : 0, marquee_active_seen ? 1 : 0, marquee_fin_seen ? 1 : 0, marquee_final_rect.w, marquee_final_rect.h);
+            }
+
+            if (SDL_GPUDevice* v13_dev = etch::gpu_device(v13ctx)) {
+                SDL_WaitForGPUIdle(v13_dev);
+            }
+            etch::destroy_texture(v13ctx, &dyn_tex);
+            etch::destroy_texture(v13ctx, &file_tex);
+            etch::destroy_texture(v13ctx, &mem_tex);
+            etch::destroy_context(v13ctx);
+            if (win_b) SDL_DestroyWindow(win_b);
+            if (win_a) SDL_DestroyWindow(win_a);
+            if (v13_owns_video) SDL_QuitSubSystem(SDL_INIT_VIDEO);
+            etch::set_current_context(ctx);
+        }
+    }
+
+    const bool ok = png_ok && stats_ok && slug_ok && v10a_ok && v11_ok && v12_ok && v13_ok;
     std::printf(
-        "Headless %s -> %s (asserts=12/12, prims=%u, draw_calls=%u, slug_glyphs=%u, slug_curves=%u, layout_ms=%.3f, gpu_submit_ms=%.3f, arena_used=%zuB, scroll_y=%.1f, focus=0x%08X, idle=%d)\n",
+        "Headless %s -> %s (asserts=13/13, prims=%u, draw_calls=%u, slug_glyphs=%u, slug_curves=%u, layout_ms=%.3f, gpu_submit_ms=%.3f, arena_used=%zuB, scroll_y=%.1f, focus=0x%08X, idle=%d)\n",
         ok ? "OK" : "FAILED",
         out_png_path,
         final_stats.prim_count,
@@ -2137,7 +2350,7 @@ int run_interactive() noexcept {
     }
 
     SDL_Window* window = SDL_CreateWindow(
-        "Etch v1.2 — Pure-GPU UI Engine",
+        "Etch v1.3 — Pure-GPU UI Engine",
         1280,
         800,
         SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
@@ -2208,10 +2421,11 @@ int run_interactive() noexcept {
     SDL_RemoveEventWatch(window_event_watch, &app);
 
     SDL_GPUDevice* dev = etch::gpu_device(ctx);
-    if (dev && osc_tex) {
+    if (dev) {
         SDL_WaitForGPUIdle(dev);
-        SDL_ReleaseGPUTexture(dev, osc_tex);
     }
+    etch::destroy_texture(ctx, osc_tex);
+    osc_tex = nullptr;
     etch::destroy_context(ctx);
     SDL_DestroyWindow(window);
     SDL_Quit();

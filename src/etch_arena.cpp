@@ -24,7 +24,7 @@ inline constexpr uint32_t kMaxCanvasDepth = 8u;
 inline constexpr uint32_t kHudHistorySamples = 64u;
 inline constexpr uint32_t kMaxFocusablePerFrame = 256u;
 inline constexpr uint32_t kMaxSpanHitsPerFrame = 256u;
-inline constexpr uint32_t kCursorCount = 9u;
+inline constexpr uint32_t kCursorCount = 10u;
 inline constexpr uint32_t kMaxTextOpsPerFrame = 32u;
 inline constexpr uint32_t kMaxPendingTextBytes = 1024u;
 inline constexpr uint32_t kMaxImeCompBytes = 256u;
@@ -34,6 +34,11 @@ inline constexpr uint32_t kMaxDroppedPathBytes = 2048u;
 inline constexpr uint32_t kTextUndoSlots = 8u;
 inline constexpr uint32_t kTextUndoMaxEntries = 32u;
 inline constexpr uint32_t kTextUndoByteCap = 8192u;
+inline constexpr uint32_t kMaxClaimedWindows = 8u;
+inline constexpr uint32_t kMaxChromeDragRects = 16u;
+inline constexpr uint32_t kMaxChromeClientRects = 128u;
+inline constexpr uint32_t kMaxDragPayloadBytes = 64u;
+inline constexpr uint32_t kMaxDragLabelBytes = 64u;
 
 struct WidgetState {
     uint32_t key = 0; // 0 marks an empty hash slot
@@ -82,7 +87,12 @@ struct WidgetState {
     bool     is_canvas = false;
     bool     canvas_initialized = false;
     bool     canvas_interactive = true;
+    bool     canvas_marquee_enabled = false;
+    bool     canvas_marquee_active = false;
+    bool     canvas_marquee_finished = false;
     bool     is_canvas_node = false;
+    Vec2     canvas_marquee_start_world = {};
+    Rect     canvas_marquee_world = {};
     uint32_t owner_canvas_id = 0;
     Vec2     canvas_pan = {};
     float    canvas_zoom = 1.0f;
@@ -240,6 +250,8 @@ enum class DrawCmdKind : uint8_t {
     Bezier = 3,
     Ring = 4,
     Icon = 5,
+    Text = 6,
+    Image = 7,
 };
 
 struct DrawCmdNode {
@@ -258,7 +270,16 @@ struct DrawCmdNode {
     BezierDesc    bezier = {};
     RingDesc      ring = {};
     IconDrawDesc  icon = {};
+    TextDrawDesc  text_cmd = {};
+    ImageDrawDesc image_cmd = {};
 };
+
+struct ClaimedWindowSlot {
+    SDL_Window* window = nullptr;
+    bool        hit_test_attached = false;
+};
+
+SDL_HitTestResult SDLCALL etch_sdl_hit_test(SDL_Window* win, const SDL_Point* area, void* data) noexcept;
 
 struct CanvasGridExtra {
     uint32_t canvas_id = 0;
@@ -432,6 +453,8 @@ struct Context {
     // GPU objects
     SDL_GPUDevice*           device = nullptr;
     SDL_Window*              window = nullptr;
+    ClaimedWindowSlot        claimed_windows[kMaxClaimedWindows] = {};
+    uint32_t                 claimed_window_count = 0;
     bool                     owns_video_init = false;
     bool                     headless = false;
     SDL_GPUShader*           vs_shader = nullptr;
@@ -494,6 +517,8 @@ struct Context {
     uint32_t    active_id = 0;
     uint32_t    focus_id = 0;
     uint32_t    pan_canvas_id = 0;
+    uint32_t    marquee_canvas_id = 0;
+    uint32_t    marquee_finished_canvas_id = 0;
     bool        mouse_captured = false;
     Vec2        pointer_pos = {-1.0f, -1.0f};
     bool        left_pressed_this_frame = false;
@@ -582,6 +607,30 @@ struct Context {
     uint32_t      applied_font_revision = 0;
     SpanHitRegion span_hits[kMaxSpanHitsPerFrame] = {};
     uint32_t      span_hit_count = 0;
+
+    // Frameless Custom Window Chrome (double-buffered for SDL_HitTest callback safety)
+    WindowChromeDesc chrome_desc = {};
+    Rect             chrome_drag_rects[kMaxChromeDragRects] = {};
+    uint32_t         chrome_drag_count = 0;
+    Rect             chrome_client_rects[kMaxChromeClientRects] = {};
+    uint32_t         chrome_client_count = 0;
+    Rect             pending_chrome_drag_rects[kMaxChromeDragRects] = {};
+    uint32_t         pending_chrome_drag_count = 0;
+    Rect             pending_chrome_client_rects[kMaxChromeClientRects] = {};
+    uint32_t         pending_chrome_client_count = 0;
+
+    // Zero-heap in-app Drag-and-Drop
+    bool             drag_active = false;
+    bool             drag_drop_pending = false;
+    bool             drag_accepted_this_frame = false;
+    uint32_t         drag_source_id = 0;
+    uint32_t         drag_kind_hash = 0;
+    uint64_t         drag_u64 = 0;
+    uint32_t         drag_u32 = 0;
+    uint32_t         drag_size = 0;
+    uint8_t          drag_data[kMaxDragPayloadBytes] = {};
+    uint32_t         drag_label_len = 0;
+    char             drag_label[kMaxDragLabelBytes] = {};
 
     char*         clipboard_fallback = nullptr;
     uint32_t      clipboard_fallback_cap = 0;

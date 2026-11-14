@@ -1,7 +1,8 @@
-// Etch Studio 1.2 — Pure-GPU Render-Graph & 1M Telemetry Workbench.
-// Showcases Etch 1.2 primitives (including RingArc & SVG Slug icons) in
-// Orthodox C++20 with zero per-frame heap allocations, 1-3 draw-call batching,
-// and "--headless" validation.
+// Etch Studio 1.3 — Pure-GPU Render-Graph & 1M Telemetry Workbench.
+// Showcases Etch 1.3 capabilities (frameless window chrome, box-local draw_text,
+// native RGBA texture upload/update, zero-heap drag-drop, canvas marquee
+// multi-selection, RingArc & SVG Slug icons) in Orthodox C++20 with zero
+// per-frame heap allocations, 1-3 draw-call batching, and "--headless" checks.
 
 #include "etch.h"
 
@@ -16,12 +17,28 @@ namespace {
 
 inline constexpr uint32_t kPreviewWidth = 256u;
 inline constexpr uint32_t kPreviewHeight = 256u;
-inline constexpr uint32_t kNodeCount = 5u;
+inline constexpr uint32_t kInitialNodes = 5u;
+inline constexpr uint32_t kMaxNodes = 8u;
 inline constexpr uint32_t kTraceRowCount = 1000000u;
 inline constexpr float kTraceRowHeight = 26.0f;
 inline constexpr float kDividerPx = 6.0f;
 inline constexpr float kNodePortOffsetY = 44.0f;
 inline constexpr float kTau = 6.28318530717958647692f;
+inline constexpr uint32_t kDragKindPass = 0x50415353u; // "PASS"
+
+static uint8_t g_preview_rgba[kPreviewWidth * kPreviewHeight * 4u] = {};
+
+struct PalettePassSpec {
+    const char* title;
+    const char* subtitle;
+    etch::Color accent;
+};
+
+inline constexpr PalettePassSpec kPalettePasses[3] = {
+    { "Bloom Pass",    "Mip Chain 5x",   etch::Color::rgb_hex(0xF472B6) },
+    { "CAS Sharpen",   "Adaptive 0.65",  etch::Color::rgb_hex(0x38BDF8) },
+    { "Film Vignette", "Cos4 Falloff",   etch::Color::rgb_hex(0xA78BFA) },
+};
 
 struct GraphNode {
     const char* title;
@@ -62,15 +79,20 @@ struct StudioApp {
     SDL_Window* window = nullptr;
     SDL_GPUTexture* preview_tex = nullptr;
 
-    GraphNode nodes[kNodeCount] = {
+    GraphNode nodes[kMaxNodes] = {
         { "Camera HDR",     "RGBA16F Linear",   { 36.0f,  42.0f }, 196.0f, etch::Color::rgb_hex(0x38BDF8), UINT32_MAX, UINT32_MAX },
         { "Simplex Noise",  "fBm 4 Octaves",    { 36.0f, 224.0f }, 196.0f, etch::Color::rgb_hex(0xA78BFA), UINT32_MAX, UINT32_MAX },
         { "Kawase Bloom",   "Dual-Pass 14 px",  {312.0f, 126.0f }, 204.0f, etch::Color::rgb_hex(0xF472B6), 0u,         1u         },
         { "ACES ToneMap",   "Filmic LUT v1.0",  {584.0f,  42.0f }, 204.0f, etch::Color::rgb_hex(0xFBBF24), 2u,         UINT32_MAX },
         { "Viewport Out",   "Zero-Copy GPU",    {584.0f, 198.0f }, 228.0f, etch::Color::rgb_hex(0x34D399), 3u,         UINT32_MAX },
+        {},
+        {},
+        {},
     };
 
+    uint32_t node_count = kInitialNodes;
     uint32_t selected_node = 2u;
+    uint32_t node_selected_mask = (1u << 2u);
     uint32_t jump_clicks = 0u;
     uint32_t pending_wire_src = UINT32_MAX;
     uint32_t selected_preset = 0u;
@@ -91,6 +113,9 @@ struct StudioApp {
     uint16_t ico_node = etch::kInvalidIcon;
     uint16_t ico_menu = etch::kInvalidIcon;
     uint16_t ico_search = etch::kInvalidIcon;
+    uint16_t ico_win_min = etch::kInvalidIcon;
+    uint16_t ico_win_max = etch::kInvalidIcon;
+    uint16_t ico_win_close = etch::kInvalidIcon;
 
     char filter_buf[256] = "Kawase";
     etch::TextInputResult filter_res = {};
@@ -165,6 +190,22 @@ void init_studio_icons(StudioApp* app) noexcept {
             "M 10.5 5.6 A 4.9 4.9 0 1 0 10.5 15.4 A 4.9 4.9 0 1 0 10.5 5.6 Z "
             "M 16.2 14.8 L 21.4 20.0 L 20.0 21.4 L 14.8 16.2 Z"),
         vb);
+    app->ico_win_min = etch::register_svg_icon(
+        app->ctx,
+        etch::str_lit("M 5 11.2 L 19 11.2 L 19 13.4 L 5 13.4 Z"),
+        vb);
+    app->ico_win_max = etch::register_svg_icon(
+        app->ctx,
+        etch::str_lit(
+            "M 5 5 L 19 5 L 19 19 L 5 19 Z "
+            "M 7.2 7.2 L 7.2 16.8 L 16.8 16.8 L 16.8 7.2 Z"),
+        vb);
+    app->ico_win_close = etch::register_svg_icon(
+        app->ctx,
+        etch::str_lit(
+            "M 6.0 4.6 L 12.0 10.6 L 18.0 4.6 L 19.4 6.0 L 13.4 12.0 L 19.4 18.0 "
+            "L 18.0 19.4 L 12.0 13.4 L 6.0 19.4 L 4.6 18.0 L 10.6 12.0 L 4.6 6.0 Z"),
+        vb);
 }
 
 inline uint8_t to_srgb_u8(float linear_val) noexcept {
@@ -183,43 +224,7 @@ inline float aces_tonemap(float x) noexcept {
 }
 
 bool upload_preview_texture(StudioApp* app, float bloom, float exposure, uint32_t preset_idx) noexcept {
-    SDL_GPUDevice* dev = etch::gpu_device(app->ctx);
-    if (!dev) {
-        return false;
-    }
-
-    if (!app->preview_tex) {
-        const SDL_GPUTextureCreateInfo tex_info = {
-            .type = SDL_GPU_TEXTURETYPE_2D,
-            .format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB,
-            .usage = SDL_GPU_TEXTUREUSAGE_SAMPLER,
-            .width = kPreviewWidth,
-            .height = kPreviewHeight,
-            .layer_count_or_depth = 1u,
-            .num_levels = 1u,
-            .sample_count = SDL_GPU_SAMPLECOUNT_1,
-            .props = 0u,
-        };
-        app->preview_tex = SDL_CreateGPUTexture(dev, &tex_info);
-        if (!app->preview_tex) {
-            return false;
-        }
-    }
-
-    const uint32_t byte_size = kPreviewWidth * kPreviewHeight * 4u;
-    const SDL_GPUTransferBufferCreateInfo tbuf_info = {
-        .usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD,
-        .size = byte_size,
-        .props = 0u,
-    };
-    SDL_GPUTransferBuffer* tbuf = SDL_CreateGPUTransferBuffer(dev, &tbuf_info);
-    if (!tbuf) {
-        return false;
-    }
-
-    uint8_t* mapped = static_cast<uint8_t*>(SDL_MapGPUTransferBuffer(dev, tbuf, false));
-    if (!mapped) {
-        SDL_ReleaseGPUTransferBuffer(dev, tbuf);
+    if (!app || !app->ctx) {
         return false;
     }
 
@@ -253,7 +258,7 @@ bool upload_preview_texture(StudioApp* app, float bloom, float exposure, uint32_
             hdr_g += scan * p1g;
             hdr_b += scan * p1b;
 
-            uint8_t* dst = mapped + (size_t(py) * kPreviewWidth + px) * 4u;
+            uint8_t* dst = g_preview_rgba + (size_t(py) * kPreviewWidth + px) * 4u;
             dst[0] = to_srgb_u8(aces_tonemap(hdr_r));
             dst[1] = to_srgb_u8(aces_tonemap(hdr_g));
             dst[2] = to_srgb_u8(aces_tonemap(hdr_b));
@@ -261,42 +266,29 @@ bool upload_preview_texture(StudioApp* app, float bloom, float exposure, uint32_
         }
     }
 
-    SDL_UnmapGPUTransferBuffer(dev, tbuf);
-
-    SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(dev);
     bool uploaded = false;
-    if (cmd) {
-        SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(cmd);
-        if (copy) {
-            const SDL_GPUTextureTransferInfo src = {
-                .transfer_buffer = tbuf,
-                .offset = 0u,
-                .pixels_per_row = kPreviewWidth,
-                .rows_per_layer = kPreviewHeight,
-            };
-            const SDL_GPUTextureRegion dst_reg = {
-                .texture = app->preview_tex,
-                .mip_level = 0u,
-                .layer = 0u,
-                .x = 0u,
-                .y = 0u,
-                .z = 0u,
-                .w = kPreviewWidth,
-                .h = kPreviewHeight,
-                .d = 1u,
-            };
-            SDL_UploadToGPUTexture(copy, &src, &dst_reg, false);
-            SDL_EndGPUCopyPass(copy);
-            SDL_GPUFence* fence = SDL_SubmitGPUCommandBufferAndAcquireFence(cmd);
-            if (fence) {
-                uploaded = SDL_WaitForGPUFences(dev, true, &fence, 1u);
-                SDL_ReleaseGPUFence(dev, fence);
-            }
-        } else {
-            SDL_CancelGPUCommandBuffer(cmd);
-        }
+    if (!app->preview_tex) {
+        const etch::LoadedTexture created = etch::create_texture_rgba(
+            app->ctx,
+            etch::TextureDesc{
+                .rgba_pixels = g_preview_rgba,
+                .width = kPreviewWidth,
+                .height = kPreviewHeight,
+                .row_pitch_bytes = kPreviewWidth * 4u,
+                .srgb = true,
+            });
+        app->preview_tex = created.texture;
+        uploaded = (app->preview_tex != nullptr);
+    } else {
+        uploaded = etch::update_texture_rgba(
+            app->ctx,
+            app->preview_tex,
+            kPreviewWidth,
+            kPreviewHeight,
+            g_preview_rgba,
+            kPreviewWidth * 4u);
     }
-    SDL_ReleaseGPUTransferBuffer(dev, tbuf);
+
     if (uploaded) {
         app->uploaded_bloom = bloom;
         app->uploaded_exposure = exposure;
@@ -359,10 +351,14 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
         upload_preview_texture(app, anim_bloom, anim_exposure, app->selected_preset);
     }
 
+    const uint32_t kToolbar = etch::id("studio_toolbar");
     const uint32_t kBtnPresets = etch::id("studio_btn_presets");
     const uint32_t kBtnPalette = etch::id("studio_btn_palette");
     const uint32_t kBtnResetView = etch::id("studio_btn_reset_view");
     const uint32_t kBtnHud = etch::id("studio_btn_hud");
+    const uint32_t kBtnWinMin = etch::id("studio_win_min");
+    const uint32_t kBtnWinMax = etch::id("studio_win_max");
+    const uint32_t kBtnWinClose = etch::id("studio_win_close");
     const uint32_t kBtnClearFilter = etch::id("studio_btn_clear_filter");
     const uint32_t kBtnBloomDown = etch::id("studio_btn_bloom_down");
     const uint32_t kBtnBloomUp = etch::id("studio_btn_bloom_up");
@@ -448,6 +444,19 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
     if (etch::clicked(kBtnHud)) {
         etch::set_debug_hud_open(app->ctx, !etch::debug_hud_open(app->ctx));
     }
+    if (etch::clicked(kBtnWinMin)) {
+        etch::minimize_window(app->window);
+    }
+    if (etch::clicked(kBtnWinMax) || etch::double_clicked(kToolbar)) {
+        if (etch::is_window_maximized(app->ctx, app->window)) {
+            etch::restore_window(app->window);
+        } else {
+            etch::maximize_window(app->window);
+        }
+    }
+    if (etch::clicked(kBtnWinClose)) {
+        app->running = false;
+    }
     if (etch::clicked(kBtnClearFilter)) {
         app->filter_buf[0] = '\0';
         etch::set_text_selection(kFilterInput, 0u, 0u);
@@ -483,6 +492,32 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
 
     const etch::CanvasState prev_cs = etch::canvas_state(kCanvas);
 
+    const etch::Rect tb_bounds = etch::element_bounds(kToolbar);
+    etch::window_drag_region(
+        (tb_bounds.w > 20.0f && tb_bounds.h > 10.0f)
+            ? tb_bounds
+            : etch::Rect{10.0f, 10.0f, 1420.0f, 44.0f});
+
+    etch::DragPayloadView dropped_pass = {};
+    if (etch::accept_drag_payload(kCanvas, kDragKindPass, &dropped_pass)) {
+        if (dropped_pass.u32 < 3u && app->node_count < kMaxNodes) {
+            const uint32_t new_idx = app->node_count++;
+            const PalettePassSpec& spec = kPalettePasses[dropped_pass.u32];
+            const etch::Vec2 drop_w = prev_cs.screen_to_world(etch::pointer_pos());
+            app->nodes[new_idx] = GraphNode{
+                spec.title,
+                spec.subtitle,
+                { drop_w.x - 96.0f, drop_w.y - 24.0f },
+                196.0f,
+                spec.accent,
+                (app->selected_node < new_idx) ? app->selected_node : UINT32_MAX,
+                UINT32_MAX,
+            };
+            app->selected_node = new_idx;
+            app->node_selected_mask = (1u << new_idx);
+        }
+    }
+
     // Root workbench frame
     ETCH_BOX({
         .id = etch::id("studio_root"),
@@ -493,9 +528,9 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
         .gap = 8.0f,
         .background = etch::Color::rgb_hex(0x090C12),
     }) {
-        // Top Toolbar
+        // Top Toolbar (Custom Window Chrome Titlebar)
         ETCH_BOX({
-            .id = etch::id("studio_toolbar"),
+            .id = kToolbar,
             .axis = etch::Axis::Row,
             .width = etch::Sizing::grow(),
             .height = etch::Sizing::fixed(44.0f),
@@ -524,14 +559,14 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
                         .color = etch::Color::white(),
                     });
                 }
-                etch::text(etch::str_lit("ETCH 1.2"), {
+                etch::text(etch::str_lit("ETCH 1.3"), {
                     .color = etch::Color::white(),
                     .font_size_px = 12.0f,
                     .wrap = false,
                 });
             }
 
-            etch::text(etch::str_lit("Etch Studio 1.2 — GPU Render-Graph & 1M Trace Workbench"), {
+            etch::text(etch::str_lit("Etch Studio 1.3 — GPU Render-Graph & Telemetry"), {
                 .color = etch::Color::rgb_hex(0xE2E8F0),
                 .font_size_px = 14.0f,
                 .wrap = false,
@@ -580,6 +615,36 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
                 hud_on ? "F12 HUD: ON" : "F12 HUD",
                 hud_on ? etch::Color::rgb_hex(0x0369A1) : etch::Color::rgb_hex(0x172033),
                 etch::Color::rgba8(56, 189, 248, 84));
+
+            const auto draw_chrome_btn = [&](uint32_t btn_id, uint16_t ico_id, etch::Color hover_bg) noexcept {
+                const bool hov = etch::hovered(btn_id);
+                const bool prs = etch::pressed(btn_id);
+                ETCH_BOX({
+                    .id = btn_id,
+                    .width = etch::Sizing::fixed(26.0f),
+                    .height = etch::Sizing::fixed(26.0f),
+                    .align_x = etch::AlignX::Center,
+                    .align_y = etch::AlignY::Center,
+                    .background = prs
+                        ? etch::Color::lerp(hover_bg, etch::Color::white(), 0.18f)
+                        : (hov ? hover_bg : etch::Color::rgb_hex(0x172033)),
+                    .border_color = etch::Color::rgba8(148, 163, 184, 48),
+                    .border_width = 1.0f,
+                    .radius = etch::Corners::all(6.0f),
+                    .focusable = true,
+                }) {
+                    if (ico_id != etch::kInvalidIcon) {
+                        etch::icon(etch::IconDesc{
+                            .icon_id = ico_id,
+                            .size_px = 12.0f,
+                            .color = hov ? etch::Color::white() : etch::Color::rgb_hex(0xCBD5E1),
+                        });
+                    }
+                }
+            };
+            draw_chrome_btn(kBtnWinMin, app->ico_win_min, etch::Color::rgb_hex(0x1E293B));
+            draw_chrome_btn(kBtnWinMax, app->ico_win_max, etch::Color::rgb_hex(0x1E293B));
+            draw_chrome_btn(kBtnWinClose, app->ico_win_close, etch::Color::rgb_hex(0xDC2626));
         }
 
         // Main 3-Pane Split Workspace
@@ -908,6 +973,21 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
                         .thickness = 1.5f,
                         .color = etch::Color::rgb_hex(0x34D399),
                     });
+                    etch::draw_text(etch::TextDrawDesc{
+                        .text = etch::str_lit("1.0"),
+                        .pos = {pad_x + 2.0f, 3.0f},
+                        .font_id = etch::kFontMono,
+                        .size = 9.5f,
+                        .color = etch::Color::rgb_hex(0x94A3B8),
+                    });
+                    etch::draw_text(etch::TextDrawDesc{
+                        .text = etch::str_lit("ACES Filmic"),
+                        .pos = {pw - pad_x, ph - 14.0f},
+                        .font_id = etch::kFontSans,
+                        .size = 9.5f,
+                        .color = etch::Color::rgb_hex(0x7DD3FC),
+                        .align_x = etch::AlignX::Right,
+                    });
                 }
 
                 draw_button(
@@ -927,7 +1007,7 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
             }
             etch::text_spans({
                 etch::TextSpan{
-                    .text = etch::str_lit("v1.2 "),
+                    .text = etch::str_lit("v1.3 "),
                     .color = etch::Color::rgb_hex(0xF8FAFC),
                     .font_id = etch::kFontBold,
                 },
@@ -958,6 +1038,55 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
                 .wrap = true,
             });
 
+            etch::text(etch::str_lit("Pass Palette (Drag -> Canvas)"), {
+                .color = etch::Color::rgb_hex(0x94A3B8),
+                .font_size_px = 11.5f,
+                .wrap = false,
+            });
+            ETCH_BOX({
+                .axis = etch::Axis::Row,
+                .width = etch::Sizing::grow(),
+                .height = etch::Sizing::fit(),
+                .gap = 6.0f,
+            }) {
+                const char* pal_labels[3] = { "Bloom", "Sharpen", "Vignette" };
+                for (uint32_t pi = 0u; pi < 3u; ++pi) {
+                    const uint32_t pal_id = etch::id_index(etch::id("studio_palette"), pi);
+                    if (etch::dragging(pal_id, 4.0f) && !etch::is_dragging_payload()) {
+                        etch::begin_drag_payload(
+                            pal_id,
+                            kDragKindPass,
+                            etch::str_cstr(kPalettePasses[pi].title),
+                            &pi,
+                            sizeof(pi),
+                            0u,
+                            pi);
+                    }
+                    const bool pal_hov = etch::hovered(pal_id);
+                    if (pal_hov) {
+                        etch::set_cursor(etch::Cursor::Hand);
+                    }
+                    ETCH_BOX({
+                        .id = pal_id,
+                        .width = etch::Sizing::grow(),
+                        .height = etch::Sizing::fit(),
+                        .padding = etch::Padding::xy(6.0f, 5.0f),
+                        .align_x = etch::AlignX::Center,
+                        .align_y = etch::AlignY::Center,
+                        .background = pal_hov ? etch::Color::rgb_hex(0x1E293B) : etch::Color::rgb_hex(0x111726),
+                        .border_color = pal_hov ? kPalettePasses[pi].accent : etch::Color::rgba8(148, 163, 184, 42),
+                        .border_width = 1.0f,
+                        .radius = etch::Corners::all(6.0f),
+                    }) {
+                        etch::text(etch::str_cstr(pal_labels[pi]), {
+                            .color = etch::Color::rgb_hex(0xE2E8F0),
+                            .font_size_px = 11.0f,
+                            .wrap = false,
+                        });
+                    }
+                }
+            }
+
             etch::text(etch::str_lit("Render-Graph Nodes (Click to Focus)"), {
                 .color = etch::Color::rgb_hex(0x94A3B8),
                 .font_size_px = 12.0f,
@@ -980,10 +1109,11 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
                 .scroll_y = true,
                 .show_scrollbar = true,
             }) {
-                for (uint32_t i = 0u; i < kNodeCount; ++i) {
+                for (uint32_t i = 0u; i < app->node_count; ++i) {
                     const uint32_t item_id = etch::id_index(etch::id("studio_node_dir"), i);
                     if (etch::clicked(item_id)) {
                         app->selected_node = i;
+                        app->node_selected_mask = (1u << i);
                         const etch::CanvasState cur_cs = etch::canvas_state(kCanvas);
                         if (cur_cs.viewport.w > 20.0f && cur_cs.viewport.h > 20.0f) {
                             const etch::Vec2 center_world = {
@@ -997,7 +1127,8 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
                             etch::set_canvas_view(kCanvas, target_pan, cur_cs.zoom);
                         }
                     }
-                    const bool is_sel = (app->selected_node == i);
+                    const bool is_sel = (app->node_selected_mask & (1u << i)) != 0u ||
+                        (app->node_selected_mask == 0u && app->selected_node == i);
                     const bool is_hov = etch::hovered(item_id);
                     ETCH_BOX({
                         .id = item_id,
@@ -1055,7 +1186,7 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
         });
 
         // Pane 2: Infinite 2D Node-Graph Canvas
-        etch::begin_canvas(etch::CanvasDesc{
+        const etch::CanvasState cs = etch::begin_canvas(etch::CanvasDesc{
             .id = kCanvas,
             .width = etch::Sizing::grow(),
             .height = etch::Sizing::grow(),
@@ -1073,11 +1204,35 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
             .radius = etch::Corners::all(10.0f),
             .show_grid = true,
             .interactive = true,
+            .marquee_select = true,
         });
+
+        if (cs.marquee_finished) {
+            uint32_t mask = 0u;
+            uint32_t first_hit = app->selected_node;
+            for (uint32_t i = 0u; i < app->node_count; ++i) {
+                const etch::Rect nw = {
+                    app->nodes[i].pos.x,
+                    app->nodes[i].pos.y,
+                    app->nodes[i].width_world,
+                    (i == 4u) ? 214.0f : 92.0f,
+                };
+                if (nw.intersects(cs.marquee_world)) {
+                    if (mask == 0u) {
+                        first_hit = i;
+                    }
+                    mask |= (1u << i);
+                }
+            }
+            app->node_selected_mask = mask;
+            if (mask != 0u) {
+                app->selected_node = first_hit;
+            }
+        }
 
         const float wire_glow = app->wire_glow_enabled ? 5.5f : 0.0f;
         const auto emit_link = [&](uint32_t src_idx, uint32_t dst_idx) noexcept {
-            if (src_idx >= kNodeCount || dst_idx >= kNodeCount || src_idx == dst_idx) {
+            if (src_idx >= app->node_count || dst_idx >= app->node_count || src_idx == dst_idx) {
                 return;
             }
             const GraphNode& src = app->nodes[src_idx];
@@ -1095,16 +1250,16 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
             });
         };
 
-        for (uint32_t i = 0u; i < kNodeCount; ++i) {
-            if (app->nodes[i].input_from < kNodeCount) {
+        for (uint32_t i = 0u; i < app->node_count; ++i) {
+            if (app->nodes[i].input_from < app->node_count) {
                 emit_link(app->nodes[i].input_from, i);
             }
-            if (app->nodes[i].aux_from < kNodeCount) {
+            if (app->nodes[i].aux_from < app->node_count) {
                 emit_link(app->nodes[i].aux_from, i);
             }
         }
 
-        for (uint32_t i = 0u; i < kNodeCount; ++i) {
+        for (uint32_t i = 0u; i < app->node_count; ++i) {
             GraphNode& node = app->nodes[i];
             const uint32_t node_id = etch::id_index(etch::id("studio_node"), i);
             const uint32_t in_port_id = etch::id_index(etch::id("studio_port_in"), i);
@@ -1113,16 +1268,19 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
             if (etch::clicked(out_port_id)) {
                 app->pending_wire_src = (app->pending_wire_src == i) ? UINT32_MAX : i;
                 app->selected_node = i;
+                app->node_selected_mask = (1u << i);
             }
             if (etch::clicked(in_port_id)) {
-                if (app->pending_wire_src < kNodeCount && app->pending_wire_src != i) {
+                if (app->pending_wire_src < app->node_count && app->pending_wire_src != i) {
                     node.input_from = app->pending_wire_src;
                     app->pending_wire_src = UINT32_MAX;
                 }
                 app->selected_node = i;
+                app->node_selected_mask = (1u << i);
             }
 
-            const bool is_sel = (app->selected_node == i);
+            const bool is_sel = (app->node_selected_mask & (1u << i)) != 0u ||
+                (app->node_selected_mask == 0u && app->selected_node == i);
             const etch::CanvasNodeResult nr = etch::begin_canvas_node(etch::CanvasNodeDesc{
                 .id = node_id,
                 .world_pos = &node.pos,
@@ -1142,8 +1300,27 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
                 .z_index = is_sel ? int16_t(4) : int16_t(2),
                 .draggable = true,
             });
-            if (nr.pressed || nr.dragging || nr.clicked) {
+            if (nr.pressed) {
                 app->selected_node = i;
+                if ((app->node_selected_mask & (1u << i)) == 0u) {
+                    app->node_selected_mask = (1u << i);
+                }
+            }
+            if (nr.dragging) {
+                app->selected_node = i;
+                if ((app->node_selected_mask & (1u << i)) == 0u) {
+                    app->node_selected_mask = (1u << i);
+                } else if (nr.drag_delta_world.x != 0.0f || nr.drag_delta_world.y != 0.0f) {
+                    for (uint32_t j = 0u; j < app->node_count; ++j) {
+                        if (j != i && (app->node_selected_mask & (1u << j)) != 0u) {
+                            app->nodes[j].pos = app->nodes[j].pos + nr.drag_delta_world;
+                        }
+                    }
+                }
+            }
+            if (nr.clicked) {
+                app->selected_node = i;
+                app->node_selected_mask = (1u << i);
             }
 
             // Header bar: 28 world units tall
@@ -1187,7 +1364,7 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
                 .align_y = etch::AlignY::Center,
             }) {
                 if (i > 1u) {
-                    const bool has_wire = (node.input_from < kNodeCount);
+                    const bool has_wire = (node.input_from < app->node_count);
                     ETCH_BOX({
                         .id = in_port_id,
                         .padding = etch::Padding::xy(7.0f, 3.0f),
@@ -1204,7 +1381,7 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
                     }
                 }
                 ETCH_BOX({ .width = etch::Sizing::grow() }) {}
-                if (i < kNodeCount - 1u) {
+                if (i != 4u) {
                     const bool armed = (app->pending_wire_src == i);
                     ETCH_BOX({
                         .id = out_port_id,
@@ -1719,15 +1896,20 @@ int run_headless(const char* out_png_path) noexcept {
 
     StudioApp app = { .ctx = ctx };
     init_studio_icons(&app);
+    etch::set_window_chrome(etch::WindowChromeDesc{
+        .enabled = true,
+        .resizable = true,
+        .border_thickness = 6.0f,
+        .corner_size = 12.0f,
+    });
     constexpr uint32_t kW = 1440u;
     constexpr uint32_t kH = 900u;
     constexpr float kDt = 1.0f / 60.0f;
 
     const auto cleanup_release = [&]() noexcept {
-        SDL_GPUDevice* dev = etch::gpu_device(ctx);
-        if (dev && app.preview_tex) {
-            SDL_WaitForGPUIdle(dev);
-            SDL_ReleaseGPUTexture(dev, app.preview_tex);
+        if (app.preview_tex) {
+            etch::destroy_texture(ctx, app.preview_tex);
+            app.preview_tex = nullptr;
         }
         etch::destroy_context(ctx);
     };
@@ -2070,6 +2252,89 @@ int run_headless(const char* out_png_path) noexcept {
         step_headless_frame(&app, kW, kH, kDt);
     }
 
+    // [S9] Etch 1.3 Chrome Hit-Test, Box-Local draw_text, Palette->Canvas DND & Marquee Group Drag
+    const etch::Rect tb_r = etch::element_bounds(etch::id("studio_toolbar"));
+    const etch::Rect pr_r = etch::element_bounds(etch::id("studio_btn_presets"));
+    if (etch::evaluate_window_hit(ctx, etch::Vec2{2.0f, 2.0f}) != etch::WindowHit::ResizeTopLeft ||
+        etch::evaluate_window_hit(ctx, etch::Vec2{720.0f, 2.0f}) != etch::WindowHit::ResizeTop ||
+        etch::evaluate_window_hit(ctx, etch::Vec2{tb_r.x + 120.0f, tb_r.y + 22.0f}) != etch::WindowHit::Caption ||
+        etch::evaluate_window_hit(ctx, etch::Vec2{pr_r.x + 0.5f * pr_r.w, pr_r.y + 0.5f * pr_r.h}) != etch::WindowHit::Client)
+    {
+        std::fprintf(stderr, "Headless Studio [S9a] failed: evaluate_window_hit mismatch\n");
+        cleanup_release();
+        return 1;
+    }
+
+    const etch::Rect plot_r = etch::element_bounds(etch::id("studio_curve_plot"));
+    const etch::Vec2 lbl_sz = etch::measure_text(etch::str_lit("ACES Filmic"), etch::kFontSans, 9.5f);
+    if (plot_r.h < 48.0f || lbl_sz.x <= 20.0f) {
+        std::fprintf(stderr, "Headless Studio [S9b] failed: curve plot / measure_text check failed\n");
+        cleanup_release();
+        return 1;
+    }
+
+    const uint32_t kPal0 = etch::id_index(etch::id("studio_palette"), 0u);
+    const etch::Rect pal_r = etch::element_bounds(kPal0);
+    const etch::Rect cv_r = etch::element_bounds(kCanvas);
+    const etch::Vec2 drag_from = { pal_r.x + 0.5f * pal_r.w, pal_r.y + 0.5f * pal_r.h };
+    const etch::Vec2 drag_mid = { drag_from.x + 8.0f, drag_from.y };
+    const etch::Vec2 drop_pt = { cv_r.x + 0.62f * cv_r.w, cv_r.y + 0.82f * cv_r.h };
+    step_headless_frame(&app, kW, kH, kDt, drag_from, true);
+    step_headless_frame(&app, kW, kH, kDt, drag_mid, true);
+    if (!etch::is_dragging_payload(kDragKindPass)) {
+        std::fprintf(stderr, "Headless Studio [S9c] failed: drag payload did not activate from palette\n");
+        cleanup_release();
+        return 1;
+    }
+    step_headless_frame(&app, kW, kH, kDt, drop_pt, true);
+    step_headless_frame(&app, kW, kH, kDt, drop_pt, false);
+    if (etch::is_dragging_payload() || app.node_count != 6u) {
+        std::fprintf(stderr, "Headless Studio [S9c] failed: drop into canvas expected node_count=6, got %u\n", app.node_count);
+        cleanup_release();
+        return 1;
+    }
+    step_headless_frame(&app, kW, kH, kDt);
+
+    const etch::CanvasState cs_m = etch::canvas_state(kCanvas);
+    const etch::Vec2 m_start = cs_m.world_to_screen(etch::Vec2{10.0f, 10.0f});
+    const etch::Vec2 m_end = cs_m.world_to_screen(etch::Vec2{255.0f, 345.0f});
+    step_headless_frame(&app, kW, kH, kDt, m_start, true);
+    step_headless_frame(&app, kW, kH, kDt, m_end, true);
+    if (!etch::canvas_state(kCanvas).marquee_active) {
+        std::fprintf(stderr, "Headless Studio [S9d] failed: marquee did not activate on empty canvas drag\n");
+        cleanup_release();
+        return 1;
+    }
+    step_headless_frame(&app, kW, kH, kDt, m_end, false);
+    if ((app.node_selected_mask & 0x3u) != 0x3u) {
+        std::fprintf(stderr, "Headless Studio [S9d] failed: expected nodes 0 & 1 selected, mask=0x%X\n", app.node_selected_mask);
+        cleanup_release();
+        return 1;
+    }
+
+    const etch::Rect n0_r = etch::element_bounds(etch::id_index(etch::id("studio_node"), 0u));
+    const etch::Vec2 n0_before = app.nodes[0].pos;
+    const etch::Vec2 n1_before = app.nodes[1].pos;
+    const etch::Vec2 g_start = { n0_r.x + 0.5f * n0_r.w, n0_r.y + 12.0f };
+    const etch::Vec2 g_end = { g_start.x + 24.0f, g_start.y + 12.0f };
+    step_headless_frame(&app, kW, kH, kDt, g_start, true);
+    step_headless_frame(&app, kW, kH, kDt, g_end, true);
+    step_headless_frame(&app, kW, kH, kDt, g_end, false);
+    const etch::Vec2 n0_delta = app.nodes[0].pos - n0_before;
+    const etch::Vec2 n1_delta = app.nodes[1].pos - n1_before;
+    const float g_dx = 24.0f / cs_m.zoom;
+    const float g_dy = 12.0f / cs_m.zoom;
+    if (std::fabs(n0_delta.x - g_dx) > 0.6f || std::fabs(n0_delta.y - g_dy) > 0.6f ||
+        std::fabs(n1_delta.x - g_dx) > 0.6f || std::fabs(n1_delta.y - g_dy) > 0.6f)
+    {
+        std::fprintf(
+            stderr,
+            "Headless Studio [S9d] failed: group drag n0=(%.2f,%.2f) n1=(%.2f,%.2f) expected=(%.2f,%.2f)\n",
+            n0_delta.x, n0_delta.y, n1_delta.x, n1_delta.y, g_dx, g_dy);
+        cleanup_release();
+        return 1;
+    }
+
     // [S6] Spring preset change + Dual-Kawase Popover + F12 HUD + PNG Export
     const uint32_t kBtnPresets = etch::id("studio_btn_presets");
     const etch::Rect presets_rect = etch::element_bounds(kBtnPresets);
@@ -2130,7 +2395,7 @@ int run_headless(const char* out_png_path) noexcept {
 
     const char* driver = SDL_GetGPUDeviceDriver(etch::gpu_device(ctx));
     std::printf(
-        "Headless Studio OK (%s) -> %s (asserts=8/8, prims=%u, draw_calls=%u, blur_pass=%u, slug_glyphs=%u, grid=%u, wire=%u, layout_us=%.0f, vrows=[%u..%u))\n",
+        "Headless Studio OK (%s) -> %s (asserts=9/9, prims=%u, draw_calls=%u, blur_pass=%u, slug_glyphs=%u, grid=%u, wire=%u, layout_us=%.0f, vrows=[%u..%u))\n",
         driver ? driver : "unknown",
         out_png_path,
         final_stats.prim_count,
@@ -2154,10 +2419,10 @@ int run_interactive() noexcept {
     }
 
     SDL_Window* window = SDL_CreateWindow(
-        "Etch Studio 1.2 — GPU Render-Graph & 1M Trace Workbench",
+        "Etch Studio 1.3 — GPU Render-Graph & 1M Trace Workbench",
         1440,
         900,
-        SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
+        SDL_WINDOW_BORDERLESS | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
     if (!window) {
         std::fprintf(stderr, "SDL_CreateWindow failed: %s\n", SDL_GetError());
         SDL_Quit();
@@ -2180,6 +2445,12 @@ int run_interactive() noexcept {
         .running = true,
     };
     init_studio_icons(&app);
+    etch::set_window_chrome(etch::WindowChromeDesc{
+        .enabled = true,
+        .resizable = true,
+        .border_thickness = 6.0f,
+        .corner_size = 12.0f,
+    });
 
     SDL_AddEventWatch(window_event_watch, &app);
     render_window_frame(&app, 0.0f);
@@ -2189,11 +2460,14 @@ int run_interactive() noexcept {
         SDL_Event ev;
         if (etch::wait_events(ctx, &ev)) {
             do {
+                const bool was_dragging = etch::is_dragging_payload();
                 etch::process_event(ctx, ev);
                 if (ev.type == SDL_EVENT_QUIT) {
                     app.running = false;
                 } else if (ev.type == SDL_EVENT_KEY_DOWN && ev.key.key == SDLK_ESCAPE) {
-                    if (app.cmd_palette_open) {
+                    if (was_dragging) {
+                        etch::request_redraw(ctx);
+                    } else if (app.cmd_palette_open) {
                         app.cmd_palette_open = false;
                         etch::request_redraw(ctx);
                     } else if (app.ctx_menu_open) {
@@ -2231,10 +2505,9 @@ int run_interactive() noexcept {
 
     SDL_RemoveEventWatch(window_event_watch, &app);
 
-    SDL_GPUDevice* dev = etch::gpu_device(ctx);
-    if (dev && app.preview_tex) {
-        SDL_WaitForGPUIdle(dev);
-        SDL_ReleaseGPUTexture(dev, app.preview_tex);
+    if (app.preview_tex) {
+        etch::destroy_texture(ctx, app.preview_tex);
+        app.preview_tex = nullptr;
     }
     etch::destroy_context(ctx);
     SDL_DestroyWindow(window);
