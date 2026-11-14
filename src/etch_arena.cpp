@@ -9,6 +9,9 @@
 
 namespace etch {
 
+inline constexpr uint32_t kMinPrimCap = 64u;
+inline constexpr uint32_t kMaxPrimHardCap = 1u << 22;
+inline constexpr uint32_t kMaxCollapsibleDepth = 32u;
 inline constexpr uint32_t kAtlasSize = 16u;
 inline constexpr uint32_t kSlugGlyphTableCapacity = 4096u;
 inline constexpr uint32_t kMaxSlugBands = 8u;
@@ -71,6 +74,14 @@ struct WidgetState {
     float    edit_scroll_y = 0.0f;
     float    edit_preferred_x = -1.0f;
 
+    bool is_selectable_text = false;
+    const char* sel_text_ptr = nullptr;
+    uint32_t sel_text_len = 0;
+    uint64_t sel_text_epoch = 0;
+    bool sel_text_static = false;
+    bool collapsible_initialized = false;
+    bool collapsible_open = false;
+    float collapsible_content_h = 0.0f;
     bool tree_initialized = false;
     bool tree_open = false;
     bool table_initialized = false;
@@ -371,7 +382,17 @@ struct RichSpanInternal {
     uint32_t id = 0;
 };
 
+struct SelectableTextExtra {
+    const char* full_utf8 = nullptr;
+    uint32_t total_bytes = 0;
+    uint32_t selectable_id = 0;
+    uint32_t clay_elem_id = 0;
+    Color selection_color = {};
+};
+
 struct RichTextExtra {
+    uint32_t selectable_id = 0;
+    Color selection_color = {};
     RichSpanInternal* spans = nullptr;
     uint32_t          span_count = 0;
     const char*       full_utf8 = nullptr;
@@ -568,6 +589,7 @@ struct WindowUiState {
     TableStackEntry table_stack[8] = {};
     uint32_t table_depth = 0;
     uint32_t tree_depth = 0;
+    uint32_t collapsible_depth = 0;
     SplitStackEntry  split_stack[kMaxSplitDepth] = {};
     uint32_t         split_depth = 0;
     CanvasStackEntry canvas_stack[kMaxCanvasDepth] = {};
@@ -680,6 +702,7 @@ struct Context {
     SDL_Cursor* system_cursors[kCursorCount] = {};
     Cursor applied_cursor = Cursor::Arrow;
 
+    uint64_t arena_epoch = 1u;
     Arena         frame_arena = {};
     FontAtlas     atlas = {};
 
@@ -709,6 +732,8 @@ struct Context {
     SDL_GPUGraphicsPipeline* kawase_pipe = nullptr;
     CachedPipeline           present_pipelines[kMaxCachedPipelines] = {};
     uint32_t                 present_pipeline_count = 0;
+    uint32_t prim_gpu_cap = 0;
+    uint32_t prim_tbuf_cap = 0;
     SDL_GPUBuffer*           prim_gpu_buf = nullptr;
     SDL_GPUTransferBuffer*   prim_transfer_buf = nullptr;
     SDL_GPUTransferBuffer*   atlas_transfer_buf = nullptr;

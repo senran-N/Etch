@@ -1,4 +1,4 @@
-# CLAUDE.md — Etch Architecture Constitution & AI Coding Redlines
+# CLAUDE.md — Etch v2.0 Architecture Constitution & AI Coding Redlines
 
 ## 1. Project Identity & End-State Goals
 - **Codename**: `Etch` (Namespace `etch::`, Macro prefix `ETCH_`, Library `etch` / `libetch`)
@@ -23,7 +23,10 @@
 - **Text Pipeline**:
   - Phase 1 (v0.1–v0.3, retired): `third_party/stb_truetype.h` bitmap glyph atlas.
   - Phase 2 (v0.6–v1.6, active): Multi-font slots (`kFontSans`/`kFontBold`/`kFontMono`/user slots), cluster-safe HarfBuzz OpenType shaping (`kern`/`liga`/`calt`) with automatic fallback chain, inline rich `text_spans` (`TextSpan`/`RichTextDesc`), SVG-to-Slug vector icons (`register_svg_icon` / `icon`), analytic `RingArc` & immediate box-local `draw_*` (`draw_text`/`draw_image`/`measure_text`), native RGBA/PNG/BMP GPU texture loader (`create_texture_rgba`/`load_texture_file`/`load_texture_memory`), frameless custom window chrome & multi-window swapchains (`claim_window_swapchain`/`set_window_chrome`), zero-heap drag-and-drop & canvas marquee multi-selection, pro desktop shortcuts/popover clamping/UTF-8 undo-redo, and Public Domain / MIT `Slug` quadratic Bezier GPU curve evaluation (`src/etch_slug.cpp`).
-- **Etch v1.6 workbench**: isolated multi-window UI frames, spatial OS file/text drop, modal focus scopes, keyboard focus rings, and system theme; binary-split multi-tab `DockSpace`, resizable/sortable virtual `Table`, and collapsible hierarchical `Tree`, demonstrated by Etch Studio 1.6.
+- **Etch v2.0 workbench**: isolated multi-window UI frames, spatial OS file/text drop, modal focus scopes, keyboard focus rings, and system theme; binary-split multi-tab `DockSpace`, resizable/sortable virtual `Table`, and collapsible hierarchical `Tree`, demonstrated by Etch Studio 2.0.
+- **Etch v2.0 completeness**: selectable static `text` / `text_spans` share UTF-8-safe selection with `text_input`; query/copy via `selected_text`, `has_text_selection`, `clear_text_selection`, Ctrl+C and Ctrl+A. Selection highlights stay in the existing UI batch without layout wrappers.
+- CPU/GPU `Prim` buffers reserve `max_prims_per_frame` initially (64–4,194,304), then double elastically at overflow; `FrameStats::prim_capacity` reports the CPU reserve. Steady-state frames retain storage without heap churn.
+- `begin_collapsible` / `end_collapsible` and `ETCH_COLLAPSIBLE` animate clipped body height with a spring, omit settled closed content, and let settled UI sleep.
 - **Memory & State**:
   - Frame temporaries: `etch::Arena` linear allocator, $O(1)$ reset at frame end.
   - Cross-frame state: flat hash table keyed by `uint32_t` semantic ID (focus, hover, scroll inertia, spring animation).
@@ -50,7 +53,7 @@ etch/
 │   └── etch_unity.cpp        # Unity build translation unit including all engine .cpp files
 └── examples/
     ├── sandbox.cpp           # Core interactive & "--headless" regression harness
-    └── etch_studio.cpp       # Etch Studio 1.6 flagship DockSpace, resizable/sortable Table, hierarchical Tree, render-graph, vector dials, custom chrome, DND & 1M workbench + "--headless"
+    └── etch_studio.cpp       # Etch Studio 2.0 flagship DockSpace, resizable/sortable Table, hierarchical Tree, render-graph, vector dials, custom chrome, DND & 1M workbench + "--headless"
 ```
 
 ---

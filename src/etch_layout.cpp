@@ -544,7 +544,7 @@ Clay_Dimensions etch_measure_text(
     Context* ctx = static_cast<Context*>(user_data);
     const size_t arena_mark = ctx ? ctx->frame_arena.mark() : 0u;
     Clay_Dimensions dims = {};
-    if (config && config->userData != nullptr) {
+    if (config && (config->fontId & 0x8000u) != 0u && config->userData != nullptr) {
         dims = measure_rich_slice(ctx, static_cast<const RichTextExtra*>(config->userData), text);
     } else {
         const uint16_t font_id = config ? static_cast<uint16_t>(config->fontId & 0x7Fu) : kFontSans;
@@ -595,8 +595,15 @@ void push_prim(
     SDL_GPUTexture* ext_tex = nullptr,
     float cull_pad_px = 2.0f) noexcept
 {
-    if (!ctx || !ctx->prims || ctx->prim_count >= ctx->max_prims) {
-        return;
+    if (!ctx || !ctx->prims) return;
+    if (ctx->prim_count >= ctx->max_prims) {
+        if (ctx->max_prims >= kMaxPrimHardCap) return;
+        uint32_t cap = ctx->max_prims >= kMinPrimCap ? ctx->max_prims : kMinPrimCap;
+        cap = cap > kMaxPrimHardCap / 2u ? kMaxPrimHardCap : cap * 2u;
+        Prim* grown = static_cast<Prim*>(std::realloc(ctx->prims, static_cast<size_t>(cap) * sizeof(Prim)));
+        if (!grown) return;
+        ctx->prims = grown;
+        ctx->max_prims = cap;
     }
     // CPU-side offscreen clip culling: drop primitives completely outside their active clip rect.
     if (prim.clip.z <= prim.clip.x || prim.clip.w <= prim.clip.y ||
@@ -884,6 +891,131 @@ void emit_slug_glyph_quad(
             PrimFlag_StemDarken));
 }
 
+uint32_t utf8_clamp_boundary(const char*, uint32_t, uint32_t) noexcept;
+
+struct SelectionLine {
+    const char* base = nullptr;
+    uint32_t start = 0, end = 0, id = 0, clay_id = 0;
+    Color color = {};
+    const RichTextExtra* rich = nullptr;
+};
+SelectionLine selection_line(const Clay_RenderCommand* cmd) noexcept {
+    SelectionLine line = {};
+    if (!cmd->userData) return line;
+    if ((cmd->renderData.text.fontId & 0x8000u) != 0u) {
+        const auto* r = static_cast<const RichTextExtra*>(cmd->userData);
+        line.base = r->full_utf8; line.id = r->selectable_id;
+        line.color = r->selection_color; line.clay_id = r->clay_elem_id; line.rich = r;
+    } else {
+        const auto* r = static_cast<const SelectableTextExtra*>(cmd->userData);
+        line.base = r->full_utf8; line.id = r->selectable_id;
+        line.color = r->selection_color; line.clay_id = r->clay_elem_id;
+    }
+    line.start = static_cast<uint32_t>(cmd->renderData.text.stringContents.chars - line.base);
+    line.end = line.start + static_cast<uint32_t>(cmd->renderData.text.stringContents.length);
+    return line;
+}
+
+// Visit visual cluster edges once; ligatures and RTL runs retain their shaped boundaries.
+void selection_line_geometry(Context* ctx, const Clay_RenderCommand* cmd, const SelectionLine& line,
+    uint32_t a, uint32_t b, float pointer_x, float* xa, float* xb, uint32_t* hit) noexcept {
+    float pen = cmd->boundingBox.x;
+    float best = 1.0e30f;
+    bool has_xa = false;
+    bool has_xb = false;
+    *xa = pen; *xb = pen; *hit = line.start;
+    const auto edge = [&](uint32_t byte, float x) noexcept {
+        if (byte == a) { *xa = x; has_xa = true; }
+        if (byte == b) { *xb = x; has_xb = true; }
+        const float dist = std::abs(x - pointer_x);
+        if (dist < best) { best = dist; *hit = byte; }
+    };
+    const auto segment = [&](uint32_t start, uint32_t end, uint16_t font, float size, float spacing, bool trim) noexcept {
+        const uint16_t slot = resolve_font_slot_idx(&ctx->atlas, font);
+        uint32_t pos = start;
+        uint32_t glyph_index = 0;
+        const auto advance_spacing = [&]() noexcept { return (!trim || glyph_index++ > 0u) ? spacing : 0.0f; };
+        while (pos < end) {
+            if (line.base[pos] == '\t' || slot == kInvalidFont) {
+                edge(pos, pen);
+                const bool tab = line.base[pos] == '\t';
+                const char* cp = line.base + pos;
+                (void)next_utf8_codepoint(cp, line.base + end);
+                pen += (tab ? 4.0f : 1.0f) * (slot == kInvalidFont ? 0.55f : ctx->atlas.slots[slot].space_advance_em) * size + advance_spacing();
+                pos = static_cast<uint32_t>(cp - line.base); edge(pos, pen); continue;
+            }
+            uint32_t run_end = pos;
+            while (run_end < end && line.base[run_end] != '\t') ++run_end;
+            bool rtl = false;
+            const auto glyphs = shape_utf8_run(ctx, slot, line.base + pos, run_end - pos, &rtl);
+            for (uint32_t i = 0; i < glyphs.size();) {
+                const uint32_t c0 = glyphs[i].cluster;
+                uint32_t j = i + 1u;
+                while (j < glyphs.size() && glyphs[j].cluster == c0) ++j;
+                const uint32_t c1 = rtl ? (i ? glyphs[i-1u].cluster : run_end-pos)
+                    : (j < glyphs.size() ? glyphs[j].cluster : run_end-pos);
+                const float cluster_x = pen;
+                edge(pos + (rtl ? c1 : c0), pen);
+                for (uint32_t k = i; k < j; ++k) pen += glyphs[k].x_advance_1px * size + advance_spacing();
+                const auto selection_stop = [&](uint32_t stop, float* x, bool* has_x) noexcept {
+                    if (stop > pos+c0 && stop < pos+c1) {
+                        const uint32_t count = count_utf8_cps(line.base+pos+c0,c1-c0);
+                        const uint32_t before = count_utf8_cps(line.base+pos+c0,stop-pos-c0);
+                        const float fraction = static_cast<float>(before)/static_cast<float>(count);
+                        *x = cluster_x+(pen-cluster_x)*(rtl ? 1.0f-fraction : fraction);
+                        *has_x = true;
+                    }
+                };
+                selection_stop(a,xa,&has_xa);
+                selection_stop(b,xb,&has_xb);
+                edge(pos + (rtl ? c0 : c1), pen);
+                i = j;
+            }
+            pos = run_end;
+        }
+    };
+    if (line.rich) {
+        for (uint32_t i = 0; i < line.rich->span_count; ++i) {
+            const auto& sp = line.rich->spans[i];
+            const uint32_t lo = sp.byte_start > line.start ? sp.byte_start : line.start;
+            const uint32_t hi = sp.byte_end < line.end ? sp.byte_end : line.end;
+            if (hi <= lo) continue;
+            if (lo == sp.byte_start) pen += sp.padding_x;
+            segment(lo, hi, sp.font_id, sp.font_size_px, sp.letter_spacing, hi == line.end);
+            if (hi == sp.byte_end) pen += sp.padding_x;
+        }
+    } else {
+        const auto& td = cmd->renderData.text;
+        segment(line.start, line.end, static_cast<uint16_t>(td.fontId & 0x7Fu),
+            decode_clay_font_px(td.fontSize, td.fontId), static_cast<float>(td.letterSpacing), false);
+    }
+    if (!has_xa && a >= line.end) *xa = pen;
+    if (!has_xb && b >= line.end) *xb = pen;
+}
+
+void emit_selection_line(Context* ctx, const Clay_RenderCommand* cmd, const ClipEntry& clip, float dpi) noexcept {
+    const SelectionLine line = selection_line(cmd);
+    if (!line.id) return;
+    if (ctx->active_ui->span_hit_count < kMaxSpanHitsPerFrame) {
+        ctx->active_ui->span_hits[ctx->active_ui->span_hit_count++] = SpanHitRegion{
+            .id = line.id, .clay_elem_id = line.clay_id,
+            .rect = {cmd->boundingBox.x, cmd->boundingBox.y, cmd->boundingBox.width, cmd->boundingBox.height},
+            .z_index = cmd->zIndex, .clip_rect = {clip.rect.x/dpi,clip.rect.y/dpi,clip.rect.w/dpi,clip.rect.h/dpi}, .has_clip = true };
+    }
+    const auto* ws = state_map_find(&ctx->active_ui->states, line.id);
+    if (!ws) return;
+    const uint32_t a = ws->edit_cursor < ws->edit_sel_anchor ? ws->edit_cursor : ws->edit_sel_anchor;
+    const uint32_t b = ws->edit_cursor > ws->edit_sel_anchor ? ws->edit_cursor : ws->edit_sel_anchor;
+    if (a == b || a >= line.end || b <= line.start) return;
+    float xa, xb; uint32_t hit;
+    const size_t mark = ctx->frame_arena.mark();
+    selection_line_geometry(ctx, cmd, line, a < line.start ? line.start : a, b > line.end ? line.end : b, 0, &xa, &xb, &hit);
+    ctx->frame_arena.rewind(mark);
+    if (xa > xb) { const float t = xa; xa = xb; xb = t; }
+    push_prim(ctx, Prim::make_rect({xa*dpi,cmd->boundingBox.y*dpi,(xb-xa)*dpi,cmd->boundingBox.height*dpi},
+        clip.rect,line.color,Corners::all(2.0f*dpi),{},0,1,clip.radius));
+}
+
 void emit_rich_text_command(
     Context* ctx,
     const Clay_RenderCommand* cmd,
@@ -891,6 +1023,7 @@ void emit_rich_text_command(
     const ClipEntry& clip,
     float dpi) noexcept
 {
+    emit_selection_line(ctx, cmd, clip, dpi);
     const Clay_TextRenderData& td = cmd->renderData.text;
     const char* chars = td.stringContents.chars;
     const int32_t len = td.stringContents.length;
@@ -1180,11 +1313,12 @@ void emit_text_command(
     const ClipEntry& clip,
     float dpi) noexcept
 {
-    if (cmd->userData != nullptr) {
+    if ((cmd->renderData.text.fontId & 0x8000u) != 0u && cmd->userData != nullptr) {
         emit_rich_text_command(ctx, cmd, static_cast<const RichTextExtra*>(cmd->userData), clip, dpi);
         return;
     }
 
+    emit_selection_line(ctx, cmd, clip, dpi);
     const Clay_TextRenderData& td = cmd->renderData.text;
     const char* chars = td.stringContents.chars;
     const int32_t len = td.stringContents.length;
@@ -3706,6 +3840,7 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
     }
 
     ctx->frame_arena.reset();
+    ++ctx->arena_epoch;
     ctx->dyn_slug_curve_count = 0;
     ctx->dyn_slug_band_count = 0;
     ctx->prim_count = 0u;
@@ -3892,6 +4027,7 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
                     if (WidgetState* sws = state_map_find(&ctx->active_ui->states, hovered_span_id)) {
                         if (sws->is_user_element) {
                             top_hit = hovered_span_id;
+                            if (sws->is_focusable) top_focus = hovered_span_id;
                             sws->pressed_down = true;
                             sws->pressed_this_frame = true;
                             if (ctx->active_ui->last_mouse_clicks >= 2u) {
@@ -4358,6 +4494,38 @@ void box(const BoxDesc& desc) noexcept {
     end_box();
 }
 
+static void register_selectable_text(Context* ctx, uint32_t element_id, const char* full_utf8, uint32_t total_bytes, bool is_static_backing) noexcept {
+    auto& ui = *ctx->active_ui;
+    WidgetState* ws = state_map_get_or_insert(&ui.states, element_id, ui.frame_index);
+    if (!ws) return;
+    ws->is_user_element = true; ws->is_text_span = true; ws->is_selectable_text = true; ws->is_focusable = true;
+    ws->is_text_input_writable = false; ws->is_scroll_x = false; ws->is_scroll_y = false;
+    ws->owner_canvas_id = ui.canvas_depth ? ui.canvas_stack[ui.canvas_depth-1u].id : 0u;
+    ws->focus_scope = ui.modal_scope && focus_scope_contains(ui,ui.modal_scope) ? ui.modal_scope : ui.focus_scope;
+    const bool allowed = !ui.modal_scope || focus_scope_contains(ui,ui.modal_scope);
+    if (allowed && ui.focus_count < kMaxFocusablePerFrame) ui.focus_order[ui.focus_count++] = element_id;
+    ws->sel_text_ptr = full_utf8; ws->sel_text_len = total_bytes;
+    ws->sel_text_epoch = ctx->arena_epoch; ws->sel_text_static = is_static_backing;
+    ws->edit_sel_anchor = utf8_clamp_boundary(full_utf8,total_bytes,ws->edit_sel_anchor);
+    ws->edit_cursor = utf8_clamp_boundary(full_utf8,total_bytes,ws->edit_cursor);
+    if (ws->span_hovered || ui.active_id == element_id) set_cursor(Cursor::IBeam);
+    if (ui.left_pressed_this_frame && ui.active_id != element_id) ws->edit_sel_anchor = ws->edit_cursor = 0u;
+    if (ui.focus_id != element_id || !allowed) return;
+    for (uint32_t i = 0; i < ui.frame_text_op_count; ++i) {
+        const auto& op = ui.frame_text_ops[i];
+        if (op.kind != TextEditOpKind::KeyPress) continue;
+        const bool primary = (op.mod & (SDL_KMOD_CTRL | SDL_KMOD_GUI)) != 0u;
+        const bool alt = (op.mod & SDL_KMOD_ALT) != 0u;
+        if (primary && !alt && op.key == SDLK_A) { ws->edit_sel_anchor = 0; ws->edit_cursor = total_bytes; request_redraw(ctx); }
+        if (primary && !alt && op.key == SDLK_C) {
+            const uint32_t a = ws->edit_cursor < ws->edit_sel_anchor ? ws->edit_cursor : ws->edit_sel_anchor;
+            const uint32_t b = ws->edit_cursor > ws->edit_sel_anchor ? ws->edit_cursor : ws->edit_sel_anchor;
+            if (b > a) { const Str slice = ctx->frame_arena.push_str(full_utf8+a,b-a); if (slice.chars) (void)set_clipboard_text(slice.chars); }
+        }
+        if (op.key == SDLK_ESCAPE) { ws->edit_sel_anchor = ws->edit_cursor; request_redraw(ctx); }
+    }
+}
+
 void text(Str content, const TextDesc& desc) noexcept {
     Context* ctx = current_context();
     if (!ctx || !ctx->in_frame || !content.chars || content.length == 0u) {
@@ -4399,7 +4567,19 @@ void text(Str content, const TextDesc& desc) noexcept {
     cfg.lineHeight = 0u;
     cfg.wrapMode = desc.wrap ? CLAY_TEXT_WRAP_WORDS : CLAY_TEXT_WRAP_NONE;
 
+    SelectableTextExtra* extra = nullptr;
+    if (desc.selectable && desc.id) {
+        extra = ctx->frame_arena.alloc<SelectableTextExtra>();
+        if (!extra) return;
+        extra->full_utf8 = clay_str.chars; extra->total_bytes = content.length;
+        extra->selectable_id = desc.id; extra->selection_color = desc.selection_color;
+        cfg.userData = extra;
+        register_selectable_text(ctx,desc.id,clay_str.chars,content.length,content.is_static);
+    }
+    Clay_Context* cctx = Clay_GetCurrentContext();
+    const int32_t prev_len = cctx->layoutElements.length;
     Clay__OpenTextElement(clay_str, cfg);
+    if (extra && cctx->layoutElements.length > prev_len) extra->clay_elem_id = cctx->layoutElements.internalArray[cctx->layoutElements.length-1].id;
 }
 
 void text_spans(std::span<const TextSpan> spans, const RichTextDesc& desc) noexcept {
@@ -4527,6 +4707,10 @@ void text_spans(std::span<const TextSpan> spans, const RichTextDesc& desc) noexc
     rich->max_descent_px = max_desc;
     rich->align_x = desc.align_x;
     rich->config_hash = cfg_hash;
+    if (desc.selectable && desc.id) {
+        rich->selectable_id = desc.id; rich->selection_color = desc.selection_color;
+        register_selectable_text(ctx,desc.id,full_utf8,total_bytes,false);
+    }
 
     Clay_TextElementConfig cfg = {};
     cfg.userData = rich;
@@ -5190,10 +5374,35 @@ void set_text_selection(uint32_t element_id, uint32_t anchor_byte, uint32_t curs
         return;
     }
     ws->edit_initialized = true;
-    ws->edit_sel_anchor = anchor_byte;
-    ws->edit_cursor = cursor_byte;
+    const bool valid_backing = ws->sel_text_ptr && (ws->sel_text_static || ws->sel_text_epoch == ctx->arena_epoch);
+    ws->edit_sel_anchor = valid_backing ? utf8_clamp_boundary(ws->sel_text_ptr,ws->sel_text_len,anchor_byte) : anchor_byte;
+    ws->edit_cursor = valid_backing ? utf8_clamp_boundary(ws->sel_text_ptr,ws->sel_text_len,cursor_byte) : cursor_byte;
     ws->edit_preferred_x = -1.0f;
     request_redraw(ctx);
+}
+
+bool has_text_selection(uint32_t element_id) noexcept {
+    Context* ctx = current_context();
+    if (!ctx) return false;
+    auto* ws = state_map_find(&ctx->active_ui->states,element_id ? element_id : ctx->active_ui->focus_id);
+    if (!ws || !ws->sel_text_ptr || (!ws->sel_text_static && ws->sel_text_epoch != ctx->arena_epoch)) return false;
+    return utf8_clamp_boundary(ws->sel_text_ptr,ws->sel_text_len,ws->edit_cursor) != utf8_clamp_boundary(ws->sel_text_ptr,ws->sel_text_len,ws->edit_sel_anchor);
+}
+Str selected_text(uint32_t element_id, Arena* arena) noexcept {
+    Context* ctx = current_context();
+    if (!ctx || !has_text_selection(element_id)) return {};
+    auto* ws = state_map_find(&ctx->active_ui->states,element_id ? element_id : ctx->active_ui->focus_id);
+    const uint32_t a = utf8_clamp_boundary(ws->sel_text_ptr,ws->sel_text_len,ws->edit_sel_anchor);
+    const uint32_t b = utf8_clamp_boundary(ws->sel_text_ptr,ws->sel_text_len,ws->edit_cursor);
+    const uint32_t lo = a < b ? a : b, hi = a > b ? a : b;
+    return (arena ? arena : &ctx->frame_arena)->push_str(ws->sel_text_ptr+lo,hi-lo);
+}
+void clear_text_selection(uint32_t element_id) noexcept {
+    Context* ctx = current_context();
+    if (!ctx) return;
+    if (auto* ws = state_map_find(&ctx->active_ui->states,element_id ? element_id : ctx->active_ui->focus_id)) {
+        ws->edit_sel_anchor = ws->edit_cursor; request_redraw(ctx);
+    }
 }
 
 Rect ime_cursor_rect(const Context* ctx_arg) noexcept {
@@ -5615,6 +5824,12 @@ TextInputResult text_input(const TextInputDesc& desc) noexcept {
     }
 
     const Str committed_slice = (buf && len > 0u) ? ctx->frame_arena.push_str(buf, len) : Str{};
+    if (ws) {
+        ws->sel_text_ptr = committed_slice.chars;
+        ws->sel_text_len = committed_slice.length;
+        ws->sel_text_epoch = ctx->arena_epoch;
+        ws->sel_text_static = false;
+    }
     const bool composing = is_focused && !desc.read_only && !desc.password && ctx->active_ui->ime_comp_len > 0u;
     if (is_focused && ws && ws->last_box_logical.w > 0.0f && !desc.read_only && !desc.password) {
         const TextInnerGeom pre_geom = compute_text_inner_geom(ws->last_box_logical, desc);
@@ -7222,6 +7437,102 @@ void end_tree_node() noexcept {
     --ctx->active_ui->tree_depth; end_box();
 }
 
+bool is_collapsible_open(uint32_t element_id) noexcept {
+    Context* ctx = current_context();
+    if (!ctx || !element_id) return false;
+    auto* ws = state_map_find(&ctx->active_ui->states,element_id);
+    return ws && ws->collapsible_open;
+}
+void set_collapsible_open(uint32_t element_id, bool open) noexcept {
+    Context* ctx = current_context();
+    if (!ctx || !element_id) return;
+    if (auto* ws = state_map_get_or_insert(&ctx->active_ui->states,element_id,ctx->active_ui->frame_index)) {
+        ws->collapsible_initialized = true; ws->collapsible_open = open; request_redraw(ctx);
+    }
+}
+CollapsibleResult begin_collapsible(const CollapsibleDesc& d) noexcept {
+    Context* ctx = current_context();
+    if (!ctx || !ctx->in_frame || !d.id || ctx->active_ui->collapsible_depth >= kMaxCollapsibleDepth) return {};
+    auto* ws = state_map_get_or_insert(&ctx->active_ui->states,d.id,ctx->active_ui->frame_index);
+    if (!ws) return {};
+    if (!ws->collapsible_initialized) { ws->collapsible_initialized = true; ws->collapsible_open = d.default_open; }
+    const uint32_t hdr_id = id_index(d.id,0xC011u);
+    const bool toggle = clicked(hdr_id) || (focused(hdr_id) && (key_pressed(SDLK_RETURN) || key_pressed(SDLK_KP_ENTER) || key_pressed(SDLK_SPACE)));
+    if (toggle) { ws->collapsible_open = !ws->collapsible_open; request_redraw(ctx); }
+    const bool open = ws->collapsible_open;
+    float content_h = ws->collapsible_content_h;
+    const uint32_t clip_id = id_index(d.id,0xC013u), content_id = id_index(d.id,0xC014u);
+    Clay_SetCurrentContext(ctx->active_ui->clay_ctx);
+    const Clay_ScrollContainerData sc = Clay_GetScrollContainerData(make_clay_id(clip_id));
+    if (sc.found && sc.contentDimensions.height > 0.5f) content_h = sc.contentDimensions.height;
+    else if (element_bounds(content_id).h > 0.5f) content_h = element_bounds(content_id).h;
+    ws->collapsible_content_h = content_h;
+    // spring/begin_box may rehash StateMap: retain only values across those calls.
+    const float t = clamp_range(spring(id_index(d.id,0xC012u),open ? 1.0f : 0.0f,d.spring_spec),0,1);
+    const bool visible = open || t > 0.001f;
+    const bool hov = hovered(hdr_id);
+    if (hov) set_cursor(Cursor::Hand);
+    begin_box({.id=d.id,.axis=Axis::Col,.width=Sizing::grow(),.height=Sizing::fit(),
+        .background=visible ? d.body_bg : Color{},.border_color=d.border_color,.border_width=d.border_width,.radius=d.radius,.clip_children=true});
+    begin_box({.id=hdr_id,.axis=Axis::Row,.width=Sizing::grow(),.height=Sizing::fixed(d.header_height_px),
+        .padding=d.header_padding,.gap=6,.align_y=AlignY::Center,.background=hov ? d.header_hover_bg : d.header_bg,.focusable=true});
+    begin_box({.width=Sizing::fixed(14),.height=Sizing::fixed(d.header_height_px)});
+    const float angle = t*1.57079633f, c=std::cos(angle), sn=std::sin(angle);
+    Vec2 pts[3] = {};
+    constexpr Vec2 chevron[3] = {{-2,-4},{2,0},{-2,4}};
+    for (uint32_t i=0;i<3;++i) pts[i]={7+chevron[i].x*c-chevron[i].y*sn,d.header_height_px*.5f+chevron[i].x*sn+chevron[i].y*c};
+    draw_polyline({.points=pts,.color=d.icon_color,.thickness=1.5f});
+    end_box();
+    if (d.icon_id != kInvalidIcon) icon({.icon_id=d.icon_id,.size_px=14,.color=d.icon_color});
+    text(d.title,{.color=d.text_color,.font_size_px=d.font_size_px,.font_id=d.font_id,.wrap=false});
+    end_box();
+    CollapsibleResult result = {.open=open,.visible=visible,.toggled=toggle,.header_hovered=hov,.anim_t=t};
+    if (!visible) { end_box(); return result; }
+    Sizing clip_sizing = Sizing::fit();
+    if (!(open && t >= .999f)) {
+        clip_sizing = Sizing::fixed(content_h > .5f ? content_h*t : 0);
+        if (content_h <= .5f) request_redraw(ctx);
+    }
+    begin_box({.id=clip_id,.axis=Axis::Col,.width=Sizing::grow(),.height=clip_sizing,.clip_children=true});
+    begin_box({.id=content_id,.axis=Axis::Col,.width=Sizing::grow(),.height=Sizing::fit(),.padding=d.body_padding,.gap=d.body_gap});
+    ++ctx->active_ui->collapsible_depth;
+    return result;
+}
+void end_collapsible() noexcept {
+    Context* ctx = current_context();
+    if (!ctx || !ctx->in_frame || !ctx->active_ui->collapsible_depth) return;
+    --ctx->active_ui->collapsible_depth;
+    end_box(); end_box(); end_box();
+}
+
+static void update_selectable_text_pointer(Context* ctx, WidgetState* ws, Clay_RenderCommandArray cmds) noexcept {
+    const Clay_RenderCommand* best = nullptr;
+    float best_y = 1.0e30f, best_x = 1.0e30f;
+    const Vec2 p = ctx->active_ui->pointer_pos;
+    for (int32_t i = 0; i < cmds.length; ++i) {
+        const auto* cmd = Clay_RenderCommandArray_Get(&cmds,i);
+        if (cmd->commandType != CLAY_RENDER_COMMAND_TYPE_TEXT || !cmd->userData || selection_line(cmd).id != ws->key) continue;
+        const auto& bb = cmd->boundingBox;
+        const float dy = p.y < bb.y ? bb.y-p.y : (p.y > bb.y+bb.height ? p.y-bb.y-bb.height : 0);
+        const float dx = p.x < bb.x ? bb.x-p.x : (p.x > bb.x+bb.width ? p.x-bb.x-bb.width : 0);
+        if (dy < best_y || (dy == best_y && dx < best_x)) { best = cmd; best_y = dy; best_x = dx; }
+    }
+    if (!best) return;
+    float xa, xb; uint32_t hit;
+    const size_t mark = ctx->frame_arena.mark();
+    selection_line_geometry(ctx,best,selection_line(best),0,0,p.x,&xa,&xb,&hit);
+    ctx->frame_arena.rewind(mark);
+    hit = utf8_clamp_boundary(ws->sel_text_ptr,ws->sel_text_len,hit);
+    if (ws->pressed_this_frame) {
+        if (ctx->active_ui->last_mouse_clicks >= 3u) {
+            if (std::memchr(ws->sel_text_ptr,'\n',ws->sel_text_len)) line_bounds_at(ws->sel_text_ptr,ws->sel_text_len,hit,&ws->edit_sel_anchor,&ws->edit_cursor);
+            else { ws->edit_sel_anchor = 0; ws->edit_cursor = ws->sel_text_len; }
+        } else if (ctx->active_ui->last_mouse_clicks == 2u) utf8_word_bounds_at(ws->sel_text_ptr,ws->sel_text_len,hit,&ws->edit_sel_anchor,&ws->edit_cursor);
+        else { if (!(ctx->active_ui->frame_key_mods & Mod_Shift)) ws->edit_sel_anchor = hit; ws->edit_cursor = hit; }
+    } else ws->edit_cursor = hit;
+    request_redraw(ctx);
+}
+
 void end_frame(Context* ctx_arg) noexcept {
     Context* ctx = ctx_arg ? ctx_arg : current_context();
     if (!ctx || !ctx->in_frame || !ctx->active_ui->clay_ctx) {
@@ -7229,6 +7540,7 @@ void end_frame(Context* ctx_arg) noexcept {
     }
     Clay_SetCurrentContext(ctx->active_ui->clay_ctx);
 
+    while (ctx->active_ui->collapsible_depth) end_collapsible();
     while (ctx->active_ui->tree_depth) end_tree_node();
     const float dpi = ctx->active_ui->dpi_scale;
     const Rect root_clip = {
@@ -7245,6 +7557,10 @@ void end_frame(Context* ctx_arg) noexcept {
     ctx->active_ui->span_hit_count = 0u;
     ctx->active_ui->drop_hit_count = 0;
     Clay_RenderCommandArray cmds = Clay_EndLayout(0.0f);
+    if (ctx->active_ui->active_id) {
+        auto* ws = state_map_find(&ctx->active_ui->states,ctx->active_ui->active_id);
+        if (ws && ws->is_selectable_text && (ws->pressed_this_frame || ws->pressed_down)) update_selectable_text_pointer(ctx,ws,cmds);
+    }
     for (int32_t i = 0; i < cmds.length; ++i) {
         const Clay_RenderCommand* cmd = Clay_RenderCommandArray_Get(&cmds, i);
         if (!cmd) {
@@ -7834,7 +8150,7 @@ void end_frame(Context* ctx_arg) noexcept {
 
         emit_direct_text_px(
             ctx,
-            "ETCH 1.6 INSPECTOR   [F12]",
+            "ETCH 2.0 INSPECTOR   [F12]",
             hud_x + 12.0f,
             hud_y + 10.0f,
             12.0f,
@@ -7958,6 +8274,7 @@ void end_frame(Context* ctx_arg) noexcept {
     if (!ctx->headless && ctx->active_window == ctx->window) ctx->headless_ui.redraw_budget = 0;
     ctx->in_frame = false;
     ctx->stats.prim_count = ctx->prim_count;
+    ctx->stats.prim_capacity = ctx->max_prims;
     ctx->stats.draw_call_count = ctx->batch_count;
     ctx->stats.blur_pass_count = app_blur_count;
     ctx->stats.slug_glyph_count = ctx->atlas.slug_glyph_count;

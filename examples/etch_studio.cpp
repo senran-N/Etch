@@ -585,14 +585,14 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
                         .color = etch::Color::white(),
                     });
                 }
-                etch::text(etch::str_lit("ETCH 1.6"), {
+                etch::text(etch::str_lit("ETCH 2.0"), {
                     .color = etch::Color::white(),
                     .font_size_px = 12.0f,
                     .wrap = false,
                 });
             }
 
-            etch::text(etch::str_lit("Etch Studio 1.6 — GPU Render-Graph & Telemetry"), {
+            etch::text(etch::str_lit("Etch Studio 2.0 — GPU Render-Graph & Telemetry"), {
                 .color = etch::Color::rgb_hex(0xE2E8F0),
                 .font_size_px = 14.0f,
                 .wrap = false,
@@ -603,7 +603,7 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
                     // Destruction occurs after the serialized main build ends.
                     SDL_HideWindow(app->tear_off_window);
                 } else {
-                    app->tear_off_window = SDL_CreateWindow("Etch Studio 1.6 — Tear-Off Preview", 480, 360, SDL_WINDOW_RESIZABLE);
+                    app->tear_off_window = SDL_CreateWindow("Etch Studio 2.0 — Tear-Off Preview", 480, 360, SDL_WINDOW_RESIZABLE);
                 }
             }
             draw_button(tear_id, "Tear-Off Preview", etch::Color::rgb_hex(0x1E293B), etch::Color::rgb_hex(0x475569));
@@ -1087,7 +1087,7 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
             }
             etch::text_spans({
                 etch::TextSpan{
-                    .text = etch::str_lit("v1.6 "),
+                    .text = etch::str_lit("v2.0 "),
                     .color = etch::Color::rgb_hex(0xF8FAFC),
                     .font_id = etch::kFontBold,
                 },
@@ -1116,55 +1116,57 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
             }, {
                 .font_size_px = 11.5f,
                 .wrap = true,
+                .id = etch::id("studio_telemetry_selection"),
+                .selectable = true,
             });
 
-            etch::text(etch::str_lit("Pass Palette (Drag -> Canvas)"), {
-                .color = etch::Color::rgb_hex(0x94A3B8),
-                .font_size_px = 11.5f,
-                .wrap = false,
-            });
-            ETCH_BOX({
-                .axis = etch::Axis::Row,
-                .width = etch::Sizing::grow(),
-                .height = etch::Sizing::fit(),
-                .gap = 6.0f,
-            }) {
-                const char* pal_labels[3] = { "Bloom", "Sharpen", "Vignette" };
-                for (uint32_t pi = 0u; pi < 3u; ++pi) {
-                    const uint32_t pal_id = etch::id_index(etch::id("studio_palette"), pi);
-                    if (etch::dragging(pal_id, 4.0f) && !etch::is_dragging_payload()) {
-                        etch::begin_drag_payload(
-                            pal_id,
-                            kDragKindPass,
-                            etch::str_cstr(kPalettePasses[pi].title),
-                            &pi,
-                            sizeof(pi),
-                            0u,
-                            pi);
-                    }
-                    const bool pal_hov = etch::hovered(pal_id);
-                    if (pal_hov) {
-                        etch::set_cursor(etch::Cursor::Hand);
-                    }
-                    ETCH_BOX({
-                        .id = pal_id,
-                        .width = etch::Sizing::grow(),
-                        .height = etch::Sizing::fit(),
-                        .padding = etch::Padding::xy(6.0f, 5.0f),
-                        .align_x = etch::AlignX::Center,
-                        .align_y = etch::AlignY::Center,
-                        .background = pal_hov ? etch::Color::rgb_hex(0x1E293B) : etch::Color::rgb_hex(0x111726),
-                        .border_color = pal_hov ? kPalettePasses[pi].accent : etch::Color::rgba8(148, 163, 184, 42),
-                        .border_width = 1.0f,
-                        .radius = etch::Corners::all(6.0f),
-                    }) {
-                        etch::text(etch::str_cstr(pal_labels[pi]), {
-                            .color = etch::Color::rgb_hex(0xE2E8F0),
-                            .font_size_px = 11.0f,
-                            .wrap = false,
-                        });
+            ETCH_COLLAPSIBLE({.id = etch::id("studio_pass_collapsible"),
+                .title = etch::str_lit("Pass Palette (Drag -> Canvas)"), .default_open = true,
+                .header_height_px = 22, .body_padding = etch::Padding::xy(0, 2)}) {
+                ETCH_BOX({
+                    .axis = etch::Axis::Row,
+                    .width = etch::Sizing::grow(),
+                    .height = etch::Sizing::fit(),
+                    .gap = 6.0f,
+                }) {
+                    const char* pal_labels[3] = { "Bloom", "Sharpen", "Vignette" };
+                    for (uint32_t pi = 0u; pi < 3u; ++pi) {
+                        const uint32_t pal_id = etch::id_index(etch::id("studio_palette"), pi);
+                        if (etch::dragging(pal_id, 4.0f) && !etch::is_dragging_payload()) {
+                            etch::begin_drag_payload(
+                                pal_id,
+                                kDragKindPass,
+                                etch::str_cstr(kPalettePasses[pi].title),
+                                &pi,
+                                sizeof(pi),
+                                0u,
+                                pi);
+                        }
+                        const bool pal_hov = etch::hovered(pal_id);
+                        if (pal_hov) {
+                            etch::set_cursor(etch::Cursor::Hand);
+                        }
+                        ETCH_BOX({
+                            .id = pal_id,
+                            .width = etch::Sizing::grow(),
+                            .height = etch::Sizing::fit(),
+                            .padding = etch::Padding::xy(6.0f, 5.0f),
+                            .align_x = etch::AlignX::Center,
+                            .align_y = etch::AlignY::Center,
+                            .background = pal_hov ? etch::Color::rgb_hex(0x1E293B) : etch::Color::rgb_hex(0x111726),
+                            .border_color = pal_hov ? kPalettePasses[pi].accent : etch::Color::rgba8(148, 163, 184, 42),
+                            .border_width = 1.0f,
+                            .radius = etch::Corners::all(6.0f),
+                        }) {
+                            etch::text(etch::str_cstr(pal_labels[pi]), {
+                                .color = etch::Color::rgb_hex(0xE2E8F0),
+                                .font_size_px = 11.0f,
+                                .wrap = false,
+                            });
+                        }
                     }
                 }
+
             }
 
             etch::text(etch::str_lit("Render-Graph Nodes (Click to Focus)"), {
@@ -1849,7 +1851,7 @@ void step_headless_frame(
 
 void build_preview_ui(StudioApp* app) noexcept {
     ETCH_BOX({.id = etch::id("tear_preview"), .width = etch::Sizing::grow(), .height = etch::Sizing::grow(), .background = etch::Color::rgb_hex(0x111827), .focusable = true}) {
-        etch::text(etch::str_lit("Etch Studio 1.6 — Preview"));
+        etch::text(etch::str_lit("Etch Studio 2.0 — Preview"));
         etch::image({.texture = app->preview_tex, .width = etch::Sizing::fixed(256), .height = etch::Sizing::fixed(256)});
     }
 }
@@ -2527,7 +2529,7 @@ int run_headless(const char* out_png_path) noexcept {
     }
     step_headless_frame(&app, kW, kH, kDt);
     s11_ok &= app.node_count == before_drop + 2;
-    app.tear_off_window = SDL_CreateWindow("Etch Studio 1.6 — Tear-Off Preview", 480, 360, SDL_WINDOW_HIDDEN);
+    app.tear_off_window = SDL_CreateWindow("Etch Studio 2.0 — Tear-Off Preview", 480, 360, SDL_WINDOW_HIDDEN);
     s11_ok &= app.tear_off_window != nullptr;
     if (app.tear_off_window) {
         etch::begin_window_frame(ctx, app.tear_off_window, kDt);
@@ -2552,9 +2554,41 @@ int run_headless(const char* out_png_path) noexcept {
         std::fprintf(stderr, "Headless Studio [S11] failed: palette/drop/preview regression\n");
         cleanup_release(); return 1;
     }
+    // [S13] Selectable telemetry and animated Inspector palette.
+    step_headless_frame(&app,kW,kH,kDt);
+    const uint32_t telem_id = etch::id("studio_telemetry_selection"), card_id = etch::id("studio_pass_collapsible");
+    etch::set_text_selection(telem_id,0,8);
+    bool s13_ok = etch::has_text_selection(telem_id) && etch::selected_text(telem_id).length > 0;
+    const auto tb = etch::element_bounds(telem_id);
+    step_headless_frame(&app,kW,kH,kDt,{tb.x+2,tb.y+3},true);
+    step_headless_frame(&app,kW,kH,kDt,{tb.x+tb.w*.6f,tb.y+3},true);
+    s13_ok &= etch::has_text_selection(telem_id);
+    step_headless_frame(&app,kW,kH,kDt,{tb.x+tb.w*.6f,tb.y+3},false);
+    etch::request_focus(telem_id);
+    step_headless_frame(&app,kW,kH,kDt,{-1,-1},false,false,0,etch::Mod_Primary,SDLK_A);
+    step_headless_frame(&app,kW,kH,kDt,{-1,-1},false,false,0,etch::Mod_Primary,SDLK_C);
+    const auto selected = etch::selected_text(telem_id), copied = etch::get_clipboard_text();
+    s13_ok &= selected.length > 8 && copied.length == selected.length && std::memcmp(selected.chars,copied.chars,selected.length)==0;
+    const uint32_t header = etch::id_index(card_id,0xC011u);
+    const auto hb = etch::element_bounds(header);
+    const etch::Vec2 hp = {hb.x+hb.w*.5f,hb.y+hb.h*.5f};
+    step_headless_frame(&app,kW,kH,kDt,hp,true);
+    step_headless_frame(&app,kW,kH,kDt,hp,false);
+    bool intermediate = false;
+    for (int f=0;f<60;++f) {
+        step_headless_frame(&app,kW,kH,kDt);
+        const float h = etch::element_bounds(etch::id_index(card_id,0xC013u)).h;
+        intermediate |= h > .5f && h < 20;
+    }
+    s13_ok &= !etch::is_collapsible_open(card_id) && intermediate;
+    etch::request_focus(header);
+    step_headless_frame(&app,kW,kH,kDt,{-1,-1},false,false,0,etch::Mod_None,SDLK_SPACE);
+    for (int f=0;f<60;++f) step_headless_frame(&app,kW,kH,kDt);
+    s13_ok &= etch::is_collapsible_open(card_id) && etch::element_bounds(etch::id_index(card_id,0xC013u)).h > 1 && etch::frame_stats(ctx).draw_call_count <= 3;
+    if (!s13_ok) { std::fprintf(stderr,"Headless Studio [S13] failed: selection/collapsible regression\n"); cleanup_release(); return 1; }
     const char* driver = SDL_GetGPUDeviceDriver(etch::gpu_device(ctx));
     std::printf(
-        "Headless Studio OK (%s) -> %s (asserts=12/12, prims=%u, draw_calls=%u, blur_pass=%u, slug_glyphs=%u, grid=%u, wire=%u, layout_us=%.0f, vrows=[%u..%u))\n",
+        "Headless Studio OK (%s) -> %s (asserts=13/13, prims=%u, draw_calls=%u, blur_pass=%u, slug_glyphs=%u, grid=%u, wire=%u, layout_us=%.0f, vrows=[%u..%u))\n",
         driver ? driver : "unknown",
         out_png_path,
         final_stats.prim_count,
@@ -2578,7 +2612,7 @@ int run_interactive() noexcept {
     }
 
     SDL_Window* window = SDL_CreateWindow(
-        "Etch Studio 1.6 — GPU Render-Graph & 1M Trace Workbench",
+        "Etch Studio 2.0 — GPU Render-Graph & 1M Trace Workbench",
         1440,
         900,
         SDL_WINDOW_BORDERLESS | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);

@@ -225,6 +225,32 @@ bool ensure_blur_targets(Context* ctx, uint32_t width, uint32_t height) noexcept
     return true;
 }
 
+bool ensure_prim_buffers(Context* ctx, uint32_t needed_count) noexcept {
+    if (needed_count == 0u) return true;
+    if (needed_count > kMaxPrimHardCap) return false;
+    if (!ctx->prim_gpu_buf || ctx->prim_gpu_cap < needed_count) {
+        uint32_t cap = ctx->prim_gpu_cap >= kMinPrimCap ? ctx->prim_gpu_cap : kMinPrimCap;
+        while (cap < needed_count) cap = cap > kMaxPrimHardCap / 2u ? kMaxPrimHardCap : cap * 2u;
+        const SDL_GPUBufferCreateInfo info = { .usage = SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ, .size = cap * static_cast<uint32_t>(sizeof(Prim)), .props = 0u };
+        SDL_GPUBuffer* next = SDL_CreateGPUBuffer(ctx->device, &info);
+        if (!next) return false;
+        if (ctx->prim_gpu_buf) SDL_ReleaseGPUBuffer(ctx->device, ctx->prim_gpu_buf);
+        ctx->prim_gpu_buf = next;
+        ctx->prim_gpu_cap = cap;
+    }
+    if (!ctx->prim_transfer_buf || ctx->prim_tbuf_cap < needed_count) {
+        uint32_t cap = ctx->prim_tbuf_cap >= kMinPrimCap ? ctx->prim_tbuf_cap : kMinPrimCap;
+        while (cap < needed_count) cap = cap > kMaxPrimHardCap / 2u ? kMaxPrimHardCap : cap * 2u;
+        const SDL_GPUTransferBufferCreateInfo info = { .usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD, .size = cap * static_cast<uint32_t>(sizeof(Prim)), .props = 0u };
+        SDL_GPUTransferBuffer* next = SDL_CreateGPUTransferBuffer(ctx->device, &info);
+        if (!next) return false;
+        if (ctx->prim_transfer_buf) SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->prim_transfer_buf);
+        ctx->prim_transfer_buf = next;
+        ctx->prim_tbuf_cap = cap;
+    }
+    return true;
+}
+
 bool ensure_slug_storage_pair(
     SDL_GPUDevice* device,
     uint32_t needed_count,
@@ -596,6 +622,9 @@ bool record_frame_commands(
         ctx->dyn_slug_band_count, static_cast<uint32_t>(sizeof(SlugBandEntryGpu)), &ctx->dyn_slug_band_gpu_buf,
         &ctx->dyn_slug_band_gpu_cap, &ctx->dyn_slug_band_tbuf, &ctx->dyn_slug_band_tbuf_cap,
         &dyn_bands_uploaded)) return false;
+    if (ctx->prim_count > ctx->prim_gpu_cap || ctx->prim_count > ctx->prim_tbuf_cap) {
+        if (!ensure_prim_buffers(ctx, ctx->prim_count)) return false;
+    }
     if (ctx->atlas.dirty || ctx->prim_count > 0u || slug_curves_pending || slug_bands_pending ||
         ctx->dyn_slug_curve_count > 0u || ctx->dyn_slug_band_count > 0u) {
         SDL_GPUCopyPass* copy_pass = SDL_BeginGPUCopyPass(cmd);
@@ -895,12 +924,12 @@ Context* create_context(const ContextDesc& desc) noexcept {
         return nullptr;
     }
 
+    ctx->arena_epoch = 1u;
     ctx->active_ui = &ctx->headless_ui;
     ctx->headless = desc.headless;
     ctx->max_prims = (desc.max_prims_per_frame > 0u) ? desc.max_prims_per_frame : 65536u;
-    if (ctx->max_prims > (1u << 20)) {
-        ctx->max_prims = (1u << 20);
-    }
+    if (ctx->max_prims < kMinPrimCap) ctx->max_prims = kMinPrimCap;
+    if (ctx->max_prims > kMaxPrimHardCap) ctx->max_prims = kMaxPrimHardCap;
     ctx->frame_arena = arena_create(desc.frame_arena_bytes ? desc.frame_arena_bytes : (4u * 1024u * 1024u));
     if (!ctx->frame_arena.base) {
         destroy_context(ctx);
@@ -1093,6 +1122,7 @@ Context* create_context(const ContextDesc& desc) noexcept {
         .props = 0u,
     };
     ctx->prim_gpu_buf = SDL_CreateGPUBuffer(ctx->device, &gpu_buf_info);
+    ctx->prim_gpu_cap = ctx->max_prims;
 
     const SDL_GPUTransferBufferCreateInfo tbuf_info = {
         .usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD,
@@ -1100,6 +1130,7 @@ Context* create_context(const ContextDesc& desc) noexcept {
         .props = 0u,
     };
     ctx->prim_transfer_buf = SDL_CreateGPUTransferBuffer(ctx->device, &tbuf_info);
+    ctx->prim_tbuf_cap = ctx->max_prims;
 
     const SDL_GPUTextureCreateInfo atlas_tex_info = {
         .type = SDL_GPU_TEXTURETYPE_2D,

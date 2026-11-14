@@ -1,3 +1,4 @@
+// Etch v2.0 — Pure-GPU UI Engine
 #ifndef ETCH_H
 #define ETCH_H
 
@@ -10,8 +11,8 @@
 #include <span>
 #include <type_traits>
 
-#define ETCH_VERSION_MAJOR 1
-#define ETCH_VERSION_MINOR 6
+#define ETCH_VERSION_MAJOR 2
+#define ETCH_VERSION_MINOR 0
 #define ETCH_VERSION_PATCH 0
 
 #ifndef ETCH_ASSERT
@@ -864,6 +865,7 @@ struct Context;
 struct ContextDesc {
     SDL_Window* window = nullptr;
     size_t frame_arena_bytes = 4u * 1024u * 1024u;
+    // Initial reserve, clamped [64..4194304]; doubles on demand up to 4194304 prims.
     uint32_t max_prims_per_frame = 65536u;
     const char* font_path = nullptr;
     float font_size_px = 16.0f;
@@ -910,6 +912,7 @@ struct FrameDesc {
 
 struct FrameStats {
     uint32_t prim_count = 0;
+    uint32_t prim_capacity = 0;
     uint32_t draw_call_count = 0;
     uint32_t blur_pass_count = 0;
     uint32_t slug_glyph_count = 0;
@@ -1057,6 +1060,9 @@ struct TextDesc {
     uint16_t font_id = kFontSans;
     float letter_spacing = 0.0f;
     bool wrap = true;
+    uint32_t id = 0;
+    bool selectable = false;
+    Color selection_color = Color::rgba8(56, 189, 248, 88);
 };
 
 struct TextSpan {
@@ -1082,7 +1088,43 @@ struct RichTextDesc {
     float    letter_spacing = 0.0f;
     AlignX   align_x = AlignX::Left;
     bool     wrap = true;
+    uint32_t id = 0;
+    bool selectable = false;
+    Color selection_color = Color::rgba8(56, 189, 248, 88);
 };
+
+struct CollapsibleDesc {
+    uint32_t id = 0;
+    Str title = {};
+    uint16_t icon_id = kInvalidIcon;
+    bool default_open = true;
+    float header_height_px = 28.0f;
+    float font_size_px = 12.5f;
+    uint16_t font_id = kFontSans;
+    Padding header_padding = Padding::xy(10.0f, 0.0f);
+    Padding body_padding = Padding::xy(10.0f, 8.0f);
+    float body_gap = 6.0f;
+    Corners radius = Corners::all(6.0f);
+    Color header_bg = Color::rgba8(30, 41, 59, 190);
+    Color header_hover_bg = Color::rgba8(51, 65, 85, 225);
+    Color body_bg = Color::rgba8(15, 23, 42, 150);
+    Color border_color = Color::rgba8(148, 163, 184, 38);
+    float border_width = 1.0f;
+    Color text_color = Color::rgb_hex(0xE2E8F0);
+    Color icon_color = Color::rgb_hex(0x38BDF8);
+    SpringSpec spring_spec = { .response = 0.20f, .damping_ratio = 0.92f };
+};
+struct CollapsibleResult {
+    bool open = false;
+    bool visible = false;
+    bool toggled = false;
+    bool header_hovered = false;
+    float anim_t = 0.0f;
+};
+CollapsibleResult begin_collapsible(const CollapsibleDesc& desc) noexcept;
+void end_collapsible() noexcept;
+bool is_collapsible_open(uint32_t element_id) noexcept;
+void set_collapsible_open(uint32_t element_id, bool open) noexcept;
 
 struct ImageDesc {
     uint32_t id = 0;
@@ -1646,6 +1688,9 @@ void destroy_texture(Context* ctx, SDL_GPUTexture* tex) noexcept;
 
 TextInputResult text_input(const TextInputDesc& desc) noexcept;
 void set_text_selection(uint32_t element_id, uint32_t anchor_byte, uint32_t cursor_byte) noexcept;
+bool has_text_selection(uint32_t element_id = 0) noexcept;
+Str selected_text(uint32_t element_id = 0, Arena* arena = nullptr) noexcept;
+void clear_text_selection(uint32_t element_id = 0) noexcept;
 Rect ime_cursor_rect(const Context* ctx = nullptr) noexcept;
 bool set_clipboard_text(const char* utf8_text) noexcept;
 Str get_clipboard_text(Arena* arena = nullptr) noexcept;
@@ -1742,6 +1787,14 @@ void set_debug_hud_open(Context* ctx, bool open) noexcept;
 bool debug_hud_open(const Context* ctx = nullptr) noexcept;
 void set_debug_wireframe(Context* ctx, bool enabled) noexcept;
 bool debug_wireframe(const Context* ctx = nullptr) noexcept;
+
+struct CollapsibleScope {
+    CollapsibleResult result = {};
+    ~CollapsibleScope() noexcept { if (result.visible) end_collapsible(); }
+};
+#define ETCH_COLLAPSIBLE(...) \
+    if (::etch::CollapsibleScope ETCH_CONCAT(_etch_col_, __LINE__) = {::etch::begin_collapsible(__VA_ARGS__)}; \
+        ETCH_CONCAT(_etch_col_, __LINE__).result.visible)
 
 struct BoxScope {
     bool active = true;

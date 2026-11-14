@@ -507,7 +507,7 @@ void build_sandbox_ui(AppState* app, const etch::FrameStats& prev_stats) noexcep
                 .gradient_dir = {1.0f, 0.2f},
                 .radius = Corners::all(999.0f),
             }) {
-                text("ETCH v1.6", {
+                text("ETCH v2.0", {
                     .color = Color::white(),
                     .font_size_px = 13.0f,
                     .letter_spacing = 0.4f,
@@ -520,7 +520,7 @@ void build_sandbox_ui(AppState* app, const etch::FrameStats& prev_stats) noexcep
                 .width = Sizing::grow(),
                 .gap = 3.0f,
             }) {
-                text("Etch Pure-GPU Engine v1.6 (Slug · HarfBuzz · Kawase)", {
+                text("Etch Pure-GPU Engine v2.0 (Slug · HarfBuzz · Kawase)", {
                     .color = text_primary,
                     .font_size_px = 19.0f,
                     .wrap = false,
@@ -1019,6 +1019,13 @@ void build_sandbox_ui(AppState* app, const etch::FrameStats& prev_stats) noexcep
                     });
                 }
 
+                ETCH_COLLAPSIBLE({.id = id("demo_v20_collapsible"), .title = str_lit("Selectable text / Ctrl+C"),
+                    .header_height_px = 20, .body_padding = Padding::xy(8, 3), .body_gap = 2}) {
+                    text(str_lit("Etch 2.0 — Select and copy this text"), {.font_size_px=10,.id=id("demo_v20_text"),.selectable=true});
+                    text_spans({{.text=str_lit("Rich text ")},{.text=str_lit("selection"),.color=Color::rgb_hex(0x38BDF8)}},
+                        {.font_size_px=10,.id=id("demo_v20_spans"),.selectable=true});
+                }
+
                 // Card 4: Live v1.6 Telemetry & Slug Specimen
                 ETCH_BOX({
                     .id = id("card_stats"),
@@ -1035,7 +1042,7 @@ void build_sandbox_ui(AppState* app, const etch::FrameStats& prev_stats) noexcep
                     .shadow_blur = 18.0f,
                     .shadow_offset = {0.0f, 6.0f},
                 }) {
-                    text("v1.6 Telemetry (Slug \xE6\x9B\xB2\xE7\xBA\xBF \xC2\xB7 HarfBuzz \xC2\xB7 Kawase)", {
+                    text("v2.0 Telemetry (Slug \xE6\x9B\xB2\xE7\xBA\xBF \xC2\xB7 HarfBuzz \xC2\xB7 Kawase)", {
                         .color = text_primary,
                         .font_size_px = 15.5f,
                         .wrap = false,
@@ -2790,9 +2797,114 @@ int run_headless(const char* out_png_path) noexcept {
     etch::end_frame(ctx);
     v16_ok &= etch::frame_stats(ctx).dynamic_slug_curve_count == 0;
     if (!v16_ok) std::fprintf(stderr, "Headless assert [16] failed: transient fill/rotation/idle regression\n");
-    const bool ok = v16_ok && v15_ok && png_ok && stats_ok && slug_ok && v10a_ok && v11_ok && v12_ok && v13_ok && v14_ok;
+    // [17] Elastic buffers, wrapped UTF-8 selection, clipboard and spring idle.
+    bool v20_ok = true;
+    etch::Context* elastic = etch::create_context({.max_prims_per_frame=64u,.headless=true});
+    if (!elastic) v20_ok = false;
+    else {
+        etch::set_current_context(elastic);
+        etch::begin_frame(elastic,{.viewport_w=256,.viewport_h=128});
+        ETCH_BOX({.width=etch::Sizing::grow(),.height=etch::Sizing::grow()}) {
+            for (uint32_t i=0;i<620;++i) etch::draw_rect({.rect={float(i%200),float(i%100),4,4},.fill=etch::Color::white()});
+        }
+        etch::end_frame(elastic);
+        char elastic_png[1024] = {};
+        std::snprintf(elastic_png,sizeof(elastic_png),"%s.elastic.png",out_png_path);
+        v20_ok &= etch::render_headless_png(elastic,256,128,elastic_png);
+        const auto es = etch::frame_stats(elastic);
+        v20_ok &= es.prim_count >= 620 && es.prim_capacity >= 1024 && es.draw_call_count == 1;
+        std::remove(elastic_png);
+        etch::destroy_context(elastic);
+        etch::set_current_context(ctx);
+    }
+    const uint32_t sel_id = etch::id("v20_sel_text"), rich_id = etch::id("v20_sel_spans"), col_id = etch::id("v20_col");
+    const etch::Str sample = etch::str_lit("Etch 2.0 矢量引擎 — Zero-Heap UI Selection");
+    etch::CollapsibleResult col = {};
+    const auto v20_frame = [&](etch::Vec2 pointer=etch::Vec2{-1,-1}, bool down=false, uint32_t key=0u, uint16_t mods=etch::Mod_None) noexcept {
+        etch::begin_frame(ctx,{.viewport_w=320,.viewport_h=240,.dt_seconds=1.0f/60.0f,.pointer_pos=pointer,.pointer_down=down,.key_mods=mods,.key_pressed_code=key});
+        ETCH_BOX({.axis=etch::Axis::Col,.width=etch::Sizing::fixed(220),.height=etch::Sizing::grow(),.gap=8}) {
+            etch::text(sample,{.font_size_px=16,.id=sel_id,.selectable=true});
+            etch::text_spans({{.text=etch::str_lit("Rich 矢量 ")},{.text=etch::str_lit("selection across wrapped lines"),.font_id=etch::kFontBold}},
+                {.font_size_px=14,.id=rich_id,.selectable=true});
+            col = etch::begin_collapsible({.id=col_id,.title=etch::str_lit("Spring body")});
+            if (col.visible) { etch::text(etch::str_lit("Child text")); etch::end_collapsible(); }
+        }
+        etch::end_frame(ctx);
+    };
+    v20_frame(); v20_frame();
+    for (uint32_t target : {sel_id,rich_id}) {
+        const auto bounds = etch::element_bounds(target);
+        const float y = bounds.y + 5.0f;
+        v20_frame({3,y},true);
+        v20_frame({160,y+20},true);
+        v20_ok &= etch::has_text_selection(target);
+        const etch::Str drag = etch::selected_text(target);
+        v20_ok &= drag.length > 0 && (static_cast<unsigned char>(drag.chars[0]) & 0xC0u) != 0x80u;
+        const etch::Str full = target == sel_id ? sample : etch::str_lit("Rich 矢量 selection across wrapped lines");
+        if (drag.length > 0) {
+            const char* start = nullptr;
+            for (uint32_t off=0;off+drag.length<=full.length;++off) {
+                if (std::memcmp(full.chars+off,drag.chars,drag.length)==0) { start = full.chars+off; break; }
+            }
+            v20_ok &= start && (start+drag.length == full.chars+full.length || (static_cast<unsigned char>(start[drag.length]) & 0xC0u) != 0x80u);
+        }
+        bool highlight = false;
+        for (const auto& prim : etch::frame_prims(ctx)) highlight |= (prim.style.x & 15u) == uint32_t(etch::PrimKind::Rect) && prim.style.y == etch::Color::rgba8(56,189,248,88).pack_rgba8();
+        v20_ok &= highlight && etch::frame_stats(ctx).draw_call_count <= 2;
+        v20_frame({160,y+20},false);
+        etch::request_focus(target);
+        v20_frame({-1,-1},false,SDLK_A,etch::Mod_Primary);
+        v20_ok &= etch::selected_text(target).length == (target == sel_id ? sample.length : etch::str_lit("Rich 矢量 selection across wrapped lines").length);
+        v20_frame({-1,-1},false,SDLK_C,etch::Mod_Primary);
+        const auto selected = etch::selected_text(target), copied = etch::get_clipboard_text();
+        v20_ok &= selected.length == copied.length && selected.length > 0 && std::memcmp(selected.chars,copied.chars,selected.length)==0;
+        etch::clear_text_selection(target);
+        v20_ok &= !etch::has_text_selection(target);
+    }
+    // Isolate the selection color so another element cannot satisfy the geometry check.
+    const uint32_t rtl_id = etch::id("v20_sel_rtl");
+    const etch::Color rtl_selection = etch::Color::rgba8(220,80,160,96);
+    const auto rtl_frame = [&](etch::Str value, uint32_t key=0u, uint16_t mods=etch::Mod_None) noexcept {
+        etch::begin_frame(ctx,{.viewport_w=320,.viewport_h=240,.key_mods=mods,.key_pressed_code=key});
+        ETCH_BOX({.axis=etch::Axis::Col,.width=etch::Sizing::fixed(80),.height=etch::Sizing::grow()}) {
+            etch::text(value,{.font_size_px=16,.id=rtl_id,.selectable=true,.selection_color=rtl_selection});
+        }
+        etch::end_frame(ctx);
+    };
+    const etch::Str rtl_cases[] = {
+        etch::str_lit("\xD7\xA9\xD7\x9C\xD7\x95\xD7\x9D"),
+        etch::str_lit("abc \xD7\xA9\xD7\x9C\xD7\x95\xD7\x9D"),
+        etch::str_lit("\xD7\xA9\xD7\x9C\xD7\x95\xD7\x9D abc"),
+        etch::str_lit("\xD7\xA9\xD7\x9C\xD7\x95\xD7\x9D   \xD7\xA9\xD7\x9C\xD7\x95\xD7\x9D   \xD7\xA9\xD7\x9C\xD7\x95\xD7\x9D")
+    };
+    for (const auto value : rtl_cases) {
+        rtl_frame(value);
+        etch::request_focus(rtl_id);
+        rtl_frame(value,SDLK_A,etch::Mod_Primary);
+        v20_ok &= etch::has_text_selection(rtl_id) && etch::selected_text(rtl_id).length == value.length;
+        uint32_t highlights = 0;
+        for (const auto& prim : etch::frame_prims(ctx)) {
+            if ((prim.style.x & 15u) == uint32_t(etch::PrimKind::Rect) &&
+                prim.style.y == rtl_selection.pack_rgba8() && prim.bounds.z > prim.bounds.x + 1.0f) ++highlights;
+        }
+        v20_ok &= highlights >= (value.length > 20u ? 2u : 1u);
+        etch::clear_text_selection(rtl_id);
+    }
+    v20_frame();
+    etch::Rect hdr = etch::element_bounds(etch::id_index(col_id,0xC011u));
+    const etch::Vec2 hc = {hdr.x+hdr.w*.5f,hdr.y+hdr.h*.5f};
+    v20_frame(hc,true); v20_frame(hc,false);
+    bool intermediate = false;
+    for (int i=0;i<90;++i) { v20_frame(); intermediate |= col.anim_t>.02f && col.anim_t<.98f && col.visible; if (!etch::needs_redraw(ctx)) break; }
+    v20_ok &= intermediate && !col.open && !col.visible && col.anim_t==0 && !etch::needs_redraw(ctx) && etch::frame_stats(ctx).idle_sleeping && etch::frame_stats(ctx).draw_call_count<=3;
+    etch::request_focus(etch::id_index(col_id,0xC011u));
+    v20_frame({-1,-1},false,SDLK_SPACE);
+    for (int i=0;i<90 && etch::needs_redraw(ctx);++i) v20_frame();
+    v20_ok &= col.open && col.visible && col.anim_t==1 && etch::frame_stats(ctx).idle_sleeping && etch::frame_stats(ctx).draw_call_count<=3;
+    if (!v20_ok) std::fprintf(stderr,"Headless assert [17] failed: elastic/selection/collapsible regression\n");
+    const bool ok = v20_ok && v16_ok && v15_ok && png_ok && stats_ok && slug_ok && v10a_ok && v11_ok && v12_ok && v13_ok && v14_ok;
     std::printf(
-        "Headless %s -> %s (asserts=16/16, prims=%u, draw_calls=%u, slug_glyphs=%u, slug_curves=%u, layout_ms=%.3f, gpu_submit_ms=%.3f, arena_used=%zuB, scroll_y=%.1f, focus=0x%08X, idle=%d)\n",
+        "Headless %s -> %s (asserts=17/17, prims=%u, draw_calls=%u, slug_glyphs=%u, slug_curves=%u, layout_ms=%.3f, gpu_submit_ms=%.3f, arena_used=%zuB, scroll_y=%.1f, focus=0x%08X, idle=%d)\n",
         ok ? "OK" : "FAILED",
         out_png_path,
         final_stats.prim_count,
@@ -2817,7 +2929,7 @@ int run_interactive() noexcept {
     }
 
     SDL_Window* window = SDL_CreateWindow(
-        "Etch v1.6 — Pure-GPU UI Engine",
+        "Etch v2.0 — Pure-GPU UI Engine",
         1280,
         800,
         SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
