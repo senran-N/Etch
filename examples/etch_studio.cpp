@@ -69,6 +69,7 @@ struct StudioApp {
     };
 
     uint32_t selected_node = 2u;
+    uint32_t jump_clicks = 0u;
     uint32_t pending_wire_src = UINT32_MAX;
     uint32_t selected_preset = 0u;
     float target_bloom = kPresets[0].bloom;
@@ -293,6 +294,7 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
     const uint32_t kBtnRow0 = etch::id("studio_btn_row0");
     const uint32_t kBtnRow500k = etch::id("studio_btn_row500k");
     const uint32_t kBtnRowEnd = etch::id("studio_btn_rowend");
+    const uint32_t kSpanJumpMid = etch::id("studio_span_jump_mid");
     const uint32_t kSplitH = etch::id("studio_split_h");
     const uint32_t kSplitV = etch::id("studio_split_v");
     const uint32_t kCanvas = etch::id("studio_canvas");
@@ -331,6 +333,10 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
         etch::virtual_list_scroll_to_row(kTraceList, 0u, kTraceRowHeight, etch::AlignY::Top);
     }
     if (etch::clicked(kBtnRow500k)) {
+        etch::virtual_list_scroll_to_row(kTraceList, 500000u, kTraceRowHeight, etch::AlignY::Top);
+    }
+    if (etch::clicked(kSpanJumpMid)) {
+        ++app->jump_clicks;
         etch::virtual_list_scroll_to_row(kTraceList, 500000u, kTraceRowHeight, etch::AlignY::Top);
     }
     if (etch::clicked(kBtnRowEnd)) {
@@ -586,6 +592,43 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
                     12.0f,
                     etch::Sizing::grow());
             }
+
+            const bool jump_hov = etch::hovered(kSpanJumpMid);
+            if (jump_hov) {
+                etch::set_cursor(etch::Cursor::Hand);
+            }
+            etch::text_spans({
+                etch::TextSpan{
+                    .text = etch::str_lit("v1.1 "),
+                    .color = etch::Color::rgb_hex(0xF8FAFC),
+                    .font_id = etch::kFontBold,
+                },
+                etch::TextSpan{
+                    .text = etch::str_lit("Mono+Slug"),
+                    .color = etch::Color::rgb_hex(0x38BDF8),
+                    .background = etch::Color::rgba8(14, 116, 144, 64),
+                    .border_color = etch::Color::rgba8(56, 189, 248, 110),
+                    .font_size_px = 10.5f,
+                    .font_id = etch::kFontMono,
+                    .padding_x = 5.0f,
+                    .bg_radius = 4.0f,
+                },
+                etch::TextSpan{
+                    .text = etch::str_lit(" \xE4\xB8\xAD\xE6\x96\x87\xE2\x9C\x93 "),
+                    .color = etch::Color::rgb_hex(0x94A3B8),
+                },
+                etch::TextSpan{
+                    .text = etch::str_lit("[Jump -> #500k]"),
+                    .color = jump_hov ? etch::Color::rgb_hex(0x7DD3FC) : etch::Color::rgb_hex(0xF472B6),
+                    .font_size_px = 11.0f,
+                    .font_id = etch::kFontMono,
+                    .underline = true,
+                    .id = kSpanJumpMid,
+                },
+            }, {
+                .font_size_px = 11.5f,
+                .wrap = true,
+            });
 
             etch::text(etch::str_lit("Render-Graph Nodes (Click to Focus)"), {
                 .color = etch::Color::rgb_hex(0x94A3B8),
@@ -936,19 +979,24 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
                 const uint32_t pass_idx = row % 6u;
                 const float gpu_us = 18.0f + static_cast<float>((row * 37u) % 140u) * 0.45f;
                 const uint32_t prim_est = 920u + (row * 13u) % 480u;
-                char row_line[160] = {};
-                std::snprintf(
-                    row_line,
-                    sizeof(row_line),
-                    "#%07u   %-26s   %6.1f us   %4u prims   1-3 DC",
-                    row,
-                    kTracePassNames[pass_idx],
-                    gpu_us,
-                    prim_est);
-                const bool matched = has_filter && (std::strstr(row_line, app->filter_buf) != nullptr);
+                char row_id_buf[16] = {};
+                std::snprintf(row_id_buf, sizeof(row_id_buf), "#%07u ", row);
+                char metrics_buf[48] = {};
+                std::snprintf(metrics_buf, sizeof(metrics_buf), " %6.1f us  %4u prims ", gpu_us, prim_est);
+                const char* pass_name = kTracePassNames[pass_idx];
+                const bool matched = has_filter && (std::strstr(pass_name, app->filter_buf) != nullptr);
                 const etch::Color row_bg = matched
                     ? etch::Color::rgba8(14, 116, 144, 92)
                     : ((row & 1u) ? etch::Color::rgba8(30, 41, 59, 44) : etch::Color::transparent());
+                static constexpr etch::Color kPassTints[6] = {
+                    etch::Color::rgb_hex(0x38BDF8),
+                    etch::Color::rgb_hex(0x34D399),
+                    etch::Color::rgb_hex(0xF472B6),
+                    etch::Color::rgb_hex(0xFBBF24),
+                    etch::Color::rgb_hex(0xA78BFA),
+                    etch::Color::rgb_hex(0x60A5FA),
+                };
+                const etch::Color pt = kPassTints[pass_idx];
                 ETCH_BOX({
                     .axis = etch::Axis::Row,
                     .width = etch::Sizing::grow(),
@@ -960,9 +1008,37 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
                     .border_width = matched ? 1.0f : 0.0f,
                     .radius = etch::Corners::all(4.0f),
                 }) {
-                    etch::text(etch::str_cstr(row_line), {
-                        .color = matched ? etch::Color::rgb_hex(0xE0F2FE) : etch::Color::rgb_hex(0xCBD5E1),
-                        .font_size_px = 12.0f,
+                    etch::text_spans({
+                        etch::TextSpan{
+                            .text = etch::str_cstr(row_id_buf),
+                            .color = matched ? etch::Color::rgb_hex(0xE0F2FE) : etch::Color::rgb_hex(0x94A3B8),
+                            .font_size_px = 11.5f,
+                            .font_id = etch::kFontMono,
+                        },
+                        etch::TextSpan{
+                            .text = etch::str_cstr(pass_name),
+                            .color = pt,
+                            .background = etch::Color::rgba8(pt.r, pt.g, pt.b, 28),
+                            .border_color = etch::Color::rgba8(pt.r, pt.g, pt.b, 84),
+                            .font_size_px = 11.0f,
+                            .font_id = etch::kFontBold,
+                            .padding_x = 6.0f,
+                            .bg_radius = 4.0f,
+                        },
+                        etch::TextSpan{
+                            .text = etch::str_cstr(metrics_buf),
+                            .color = matched ? etch::Color::rgb_hex(0xE0F2FE) : etch::Color::rgb_hex(0xCBD5E1),
+                            .font_size_px = 11.5f,
+                            .font_id = etch::kFontMono,
+                        },
+                        etch::TextSpan{
+                            .text = etch::str_lit("1-3 DC \xC2\xB7 Slug \xE2\x9C\x93"),
+                            .color = etch::Color::rgb_hex(0x64748B),
+                            .font_size_px = 11.5f,
+                            .font_id = etch::kFontSans,
+                        },
+                    }, {
+                        .font_size_px = 11.5f,
                         .wrap = false,
                     });
                 }
@@ -1342,6 +1418,29 @@ int run_headless(const char* out_png_path) noexcept {
     }
     inject_editing("", 0, 0);
 
+    // [S7] Interactive Rich TextSpan click jump to #500k trace row
+    const uint32_t kSpanJumpMid = etch::id("studio_span_jump_mid");
+    const etch::Rect jump_rect = etch::element_bounds(kSpanJumpMid);
+    if (jump_rect.w <= 0.0f || jump_rect.h <= 0.0f) {
+        std::fprintf(stderr, "Headless Studio [S7a] failed: missing kSpanJumpMid bounds\n");
+        cleanup_release();
+        return 1;
+    }
+    click_point(etch::Vec2{ jump_rect.x + 0.5f * jump_rect.w, jump_rect.y + 0.5f * jump_rect.h });
+    step_headless_frame(&app, kW, kH, kDt);
+    if (app.jump_clicks != 1u ||
+        app.last_trace_slice.first_index < 499990u ||
+        app.last_trace_slice.first_index > 500010u)
+    {
+        std::fprintf(
+            stderr,
+            "Headless Studio [S7b] failed: clicks=%u first=%u\n",
+            app.jump_clicks,
+            app.last_trace_slice.first_index);
+        cleanup_release();
+        return 1;
+    }
+
     // [S6] Spring preset change + Dual-Kawase Popover + F12 HUD + PNG Export
     const uint32_t kBtnPresets = etch::id("studio_btn_presets");
     const etch::Rect presets_rect = etch::element_bounds(kBtnPresets);
@@ -1402,7 +1501,7 @@ int run_headless(const char* out_png_path) noexcept {
 
     const char* driver = SDL_GetGPUDeviceDriver(etch::gpu_device(ctx));
     std::printf(
-        "Headless Studio OK (%s) -> %s (asserts=6/6, prims=%u, draw_calls=%u, blur_pass=%u, slug_glyphs=%u, grid=%u, wire=%u, layout_us=%.0f, vrows=[%u..%u))\n",
+        "Headless Studio OK (%s) -> %s (asserts=7/7, prims=%u, draw_calls=%u, blur_pass=%u, slug_glyphs=%u, grid=%u, wire=%u, layout_us=%.0f, vrows=[%u..%u))\n",
         driver ? driver : "unknown",
         out_png_path,
         final_stats.prim_count,

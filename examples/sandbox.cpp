@@ -21,6 +21,7 @@ struct AppState {
     SDL_Window*           window = nullptr;
     SDL_GPUTexture*       osc_tex = nullptr;
     uint32_t              click_count = 0u;
+    uint32_t              rich_link_clicks = 0u;
     uint32_t              selected_preset = 0u;
     uint32_t              submit_count = 0u;
     bool                  toggle_on = false;
@@ -924,8 +925,52 @@ void build_sandbox_ui(AppState* app, const etch::FrameStats& prev_stats) noexcep
                         app->multi_res.cursor_byte);
                     text(line5, { .color = Color::rgb_hex(0x7DD3FC), .font_size_px = 12.5f, .wrap = false });
 
-                    text("UTF-8 Edit · Ctrl+A/C/X/V · 中文 IME 候选框追踪 · Tab", {
-                        .color = Color::rgb_hex(0x64748B),
+                    const uint32_t kRichLinkId = id("sandbox_rich_link");
+                    if (clicked(kRichLinkId)) {
+                        ++app->rich_link_clicks;
+                    }
+                    const bool rich_hov = hovered(kRichLinkId);
+                    if (rich_hov) {
+                        set_cursor(Cursor::Hand);
+                    }
+                    char link_lbl[48] = {};
+                    std::snprintf(link_lbl, sizeof(link_lbl), "Span Link (%u)", app->rich_link_clicks);
+                    text_spans({
+                        TextSpan{
+                            .text = str_lit("v1.1 "),
+                            .color = Color::rgb_hex(0xF8FAFC),
+                            .font_id = kFontBold,
+                        },
+                        TextSpan{
+                            .text = str_lit("Bold+Mono"),
+                            .color = Color::rgb_hex(0x38BDF8),
+                            .background = Color::rgba8(14, 116, 144, 68),
+                            .border_color = Color::rgba8(56, 189, 248, 120),
+                            .font_size_px = 11.0f,
+                            .font_id = kFontMono,
+                            .padding_x = 5.0f,
+                            .bg_radius = 4.0f,
+                        },
+                        TextSpan{
+                            .text = str_lit(" \xE4\xB8\xAD\xE6\x96\x87\xE2\x9C\x93 "),
+                            .color = Color::rgb_hex(0xCBD5E1),
+                        },
+                        TextSpan{
+                            .text = str_lit("v1.0"),
+                            .color = Color::rgb_hex(0x64748B),
+                            .font_size_px = 11.0f,
+                            .strikethrough = true,
+                        },
+                        TextSpan{
+                            .text = str_lit(" "),
+                        },
+                        TextSpan{
+                            .text = str_cstr(link_lbl),
+                            .color = rich_hov ? Color::rgb_hex(0x7DD3FC) : Color::rgb_hex(0x38BDF8),
+                            .underline = true,
+                            .id = kRichLinkId,
+                        },
+                    }, {
                         .font_size_px = 12.0f,
                         .wrap = false,
                     });
@@ -1372,6 +1417,7 @@ int run_headless(const char* out_png_path) noexcept {
 
     // 10b. Split Pane, Million-Row Virtual List, Infinite 2D Canvas + Wires + Node Drag Assertion.
     bool v10a_ok = false;
+    bool v11_ok = false;
     {
         etch::Context* vctx = etch::create_context(etch::ContextDesc{ .headless = true });
         if (!vctx) {
@@ -1509,14 +1555,164 @@ int run_headless(const char* out_png_path) noexcept {
                     canvas_ok ? 1 : 0, zoomed_cs.zoom, anchor_dx, anchor_dy, node_pos.x, node_pos.y,
                     grid_prims, wire_prims, vstats.draw_call_count);
             }
+            etch::FrameStats v11_stats = {};
+            const bool fonts_ok =
+                etch::is_font_loaded(vctx, etch::kFontSans) &&
+                etch::is_font_loaded(vctx, etch::kFontBold) &&
+                etch::is_font_loaded(vctx, etch::kFontMono) &&
+                !etch::is_font_loaded(vctx, 15u);
+
+#if defined(_WIN32)
+            const char* probe_font_a = "C:/Windows/Fonts/arial.ttf";
+            const char* probe_font_b = "C:/Windows/Fonts/consolab.ttf";
+#elif defined(__APPLE__)
+            const char* probe_font_a = "/System/Library/Fonts/Helvetica.ttc";
+            const char* probe_font_b = "/System/Library/Fonts/Menlo.ttc";
+#else
+            const char* probe_font_a = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf";
+            const char* probe_font_b = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf";
+#endif
+            const uint16_t slot7a = etch::load_font_file(vctx, probe_font_a, 7u);
+            const bool load7a_ok = (slot7a == 7u) && etch::is_font_loaded(vctx, 7u);
+            const uint16_t slot7b = etch::load_font_file(vctx, probe_font_b, 7u);
+            const bool reload7b_ok = (slot7b == 7u) && etch::is_font_loaded(vctx, 7u);
+
+            const uint32_t kV11Link = etch::id("v11_rich_link");
+            uint32_t v11_clicks = 0u;
+            bool show_blocker = false;
+            bool span_hov_seen = false;
+            const auto step_v11_frame = [&](etch::Vec2 ptr, bool down) noexcept {
+                etch::begin_frame(vctx, etch::FrameDesc{
+                    .viewport_w = kHeadlessW,
+                    .viewport_h = kHeadlessH,
+                    .dpi_scale = 1.0f,
+                    .dt_seconds = kStepDt,
+                    .pointer_pos = ptr,
+                    .pointer_down = down,
+                });
+                if (etch::clicked(kV11Link)) {
+                    ++v11_clicks;
+                }
+                if (etch::hovered(kV11Link)) {
+                    span_hov_seen = true;
+                }
+                etch::begin_box(etch::BoxDesc{
+                    .axis = etch::Axis::Col,
+                    .width = etch::Sizing::fixed(210.0f),
+                    .height = etch::Sizing::fit(),
+                    .padding = etch::Padding::all(12.0f),
+                    .background = etch::Color::rgb_hex(0x0F172A),
+                });
+                etch::text_spans({
+                    etch::TextSpan{
+                        .text = etch::str_lit("Slot7 "),
+                        .color = etch::Color::rgb_hex(0xF8FAFC),
+                        .font_size_px = 16.0f,
+                        .font_id = 7u,
+                    },
+                    etch::TextSpan{
+                        .text = etch::str_lit("MonoPill"),
+                        .color = etch::Color::rgb_hex(0x38BDF8),
+                        .background = etch::Color::rgba8(14, 116, 144, 80),
+                        .border_color = etch::Color::rgb_hex(0x38BDF8),
+                        .font_size_px = 12.0f,
+                        .font_id = etch::kFontMono,
+                        .padding_x = 6.0f,
+                        .bg_radius = 4.0f,
+                    },
+                    etch::TextSpan{
+                        .text = etch::str_lit(" \xE4\xB8\xAD\xE6\x96\x87 \xD8\xA7\xD9\x84\xD8\xB9\xD8\xB1\xD8\xA8\xD9\x8A\xD8\xA9 \xE2\x9C\x93 "),
+                        .color = etch::Color::rgb_hex(0xCBD5E1),
+                        .font_size_px = 14.0f,
+                        .strikethrough = true,
+                    },
+                    etch::TextSpan{
+                        .text = etch::str_lit("ActionLink"),
+                        .color = etch::Color::rgb_hex(0xF472B6),
+                        .font_size_px = 14.0f,
+                        .font_id = etch::kFontBold,
+                        .underline = true,
+                        .id = kV11Link,
+                    },
+                }, etch::RichTextDesc{ .font_size_px = 14.0f, .wrap = true });
+                etch::end_box();
+
+                if (show_blocker) {
+                    etch::begin_box(etch::BoxDesc{
+                        .id = etch::id("v11_blocker"),
+                        .width = etch::Sizing::fixed(300.0f),
+                        .height = etch::Sizing::fixed(300.0f),
+                        .background = etch::Color::rgba8(15, 23, 42, 180),
+                        .attach_to = etch::AttachTo::Root,
+                        .anchor_parent = etch::Anchor::TopLeft,
+                        .floating_offset = { 0.0f, 0.0f },
+                        .z_index = 20,
+                        .pointer_passthrough = false,
+                    });
+                    etch::end_box();
+                }
+                etch::end_frame(vctx);
+            };
+
+            step_v11_frame({-1.0f, -1.0f}, false);
+            step_v11_frame({-1.0f, -1.0f}, false);
+            const etch::Rect link_bounds = etch::element_bounds(kV11Link);
+            const etch::Vec2 link_pt = {
+                link_bounds.x + 0.5f * link_bounds.w,
+                link_bounds.y + 0.5f * link_bounds.h,
+            };
+            step_v11_frame(link_pt, false);
+            step_v11_frame(link_pt, true);
+            step_v11_frame(link_pt, false);
+            step_v11_frame(link_pt, false);
+
+            show_blocker = true;
+            step_v11_frame(link_pt, false);
+            step_v11_frame(link_pt, true);
+            step_v11_frame(link_pt, false);
+            step_v11_frame(link_pt, false);
+            const uint32_t clicks_while_blocked = v11_clicks;
+
+            show_blocker = false;
+            step_v11_frame(link_pt, false);
+            step_v11_frame(link_pt, true);
+            step_v11_frame(link_pt, false);
+            step_v11_frame(link_pt, false);
+            v11_stats = etch::frame_stats(vctx);
+
+            v11_ok =
+                fonts_ok &&
+                load7a_ok &&
+                reload7b_ok &&
+                (link_bounds.w > 20.0f && link_bounds.h > 10.0f) &&
+                span_hov_seen &&
+                (clicks_while_blocked == 1u) &&
+                (v11_clicks == 2u) &&
+                (v11_stats.prim_count >= 12u) &&
+                (v11_stats.draw_call_count == 1u);
+            if (!v11_ok) {
+                std::fprintf(
+                    stderr,
+                    "Headless assert [11] failed: fonts=%d load7a=%d reload7b=%d bounds=(%.1f,%.1f %.1fx%.1f) hov=%d blk_clicks=%u final_clicks=%u prims=%u dc=%u\n",
+                    fonts_ok ? 1 : 0,
+                    load7a_ok ? 1 : 0,
+                    reload7b_ok ? 1 : 0,
+                    link_bounds.x, link_bounds.y, link_bounds.w, link_bounds.h,
+                    span_hov_seen ? 1 : 0,
+                    clicks_while_blocked,
+                    v11_clicks,
+                    v11_stats.prim_count,
+                    v11_stats.draw_call_count);
+            }
+
             etch::destroy_context(vctx);
             etch::set_current_context(ctx);
         }
     }
 
-    const bool ok = png_ok && stats_ok && slug_ok && v10a_ok;
+    const bool ok = png_ok && stats_ok && slug_ok && v10a_ok && v11_ok;
     std::printf(
-        "Headless %s -> %s (asserts=10/10, prims=%u, draw_calls=%u, slug_glyphs=%u, slug_curves=%u, layout_ms=%.3f, gpu_submit_ms=%.3f, arena_used=%zuB, scroll_y=%.1f, focus=0x%08X, idle=%d)\n",
+        "Headless %s -> %s (asserts=11/11, prims=%u, draw_calls=%u, slug_glyphs=%u, slug_curves=%u, layout_ms=%.3f, gpu_submit_ms=%.3f, arena_used=%zuB, scroll_y=%.1f, focus=0x%08X, idle=%d)\n",
         ok ? "OK" : "FAILED",
         out_png_path,
         final_stats.prim_count,
@@ -1541,7 +1737,7 @@ int run_interactive() noexcept {
     }
 
     SDL_Window* window = SDL_CreateWindow(
-        "Etch v0.6 — Pure-GPU UI Engine",
+        "Etch v1.1 — Pure-GPU UI Engine",
         1280,
         800,
         SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);

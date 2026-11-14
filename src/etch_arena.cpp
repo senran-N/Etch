@@ -23,6 +23,7 @@ inline constexpr uint32_t kMaxSplitDepth = 16u;
 inline constexpr uint32_t kMaxCanvasDepth = 8u;
 inline constexpr uint32_t kHudHistorySamples = 64u;
 inline constexpr uint32_t kMaxFocusablePerFrame = 256u;
+inline constexpr uint32_t kMaxSpanHitsPerFrame = 256u;
 inline constexpr uint32_t kCursorCount = 9u;
 inline constexpr uint32_t kMaxTextOpsPerFrame = 32u;
 inline constexpr uint32_t kMaxPendingTextBytes = 1024u;
@@ -78,6 +79,8 @@ struct WidgetState {
     float    canvas_min_zoom = 0.15f;
     float    canvas_max_zoom = 8.0f;
     Vec2     drag_grab = {};
+    bool     is_text_span = false;
+    bool     span_hovered = false;
 };
 
 struct StateMap {
@@ -102,7 +105,7 @@ struct SlugBandEntryGpu {
 static_assert(sizeof(SlugBandEntryGpu) == 8);
 
 struct SlugGlyphEntry {
-    uint32_t key = 0; // glyph_id + 1u; 0 = empty
+    uint64_t key = 0; // Packed (slot_idx + 1, generation, glyph_id); 0 = empty
     float    min_x_em = 0.0f;
     float    min_y_em = 0.0f;
     float    max_x_em = 0.0f;
@@ -116,9 +119,34 @@ struct SlugGlyphEntry {
 struct ShapedGlyph {
     uint32_t glyph_id = 0;
     uint32_t cluster = 0;
-    float    x_advance_em = 0.0f;
+    uint16_t font_slot = 0;
+    uint16_t pad0 = 0;
+    float    x_advance_1px = 0.0f;
     float    x_offset_em = 0.0f;
     float    y_offset_em = 0.0f;
+};
+
+struct FontSlot {
+    stbtt_fontinfo font_info = {};
+    uint8_t*       font_file_data = nullptr;
+    size_t         font_file_size = 0;
+    int32_t        font_ascent = 0;
+    int32_t        font_descent = 0;
+    int32_t        font_line_gap = 0;
+    float          scale_1px = 0.0f;
+    float          ascent_em = 0.8f;
+    float          descent_em = 0.2f;
+    float          line_height_em = 1.2f;
+    hb_blob_t*     hb_blob = nullptr;
+    hb_face_t*     hb_face = nullptr;
+    hb_font_t*     hb_font = nullptr;
+    uint32_t       bullet_glyph_id = 0;
+    float          bullet_advance_em = 0.0f;
+    float          space_advance_em = 0.28f;
+    uint64_t       source_hash = 0;
+    uint32_t       metric_hash = 0;
+    uint8_t        generation = 0;
+    bool           loaded = false;
 };
 
 struct FontAtlas {
@@ -138,23 +166,13 @@ struct FontAtlas {
     SDL_GPUTexture*   gpu_tex = nullptr;
     bool              dirty = false;
 
-    stbtt_fontinfo    font_info = {};
-    uint8_t*          font_file_data = nullptr;
-    size_t            font_file_size = 0;
-    int32_t           font_ascent = 0;
-    int32_t           font_descent = 0;
-    int32_t           font_line_gap = 0;
+    FontSlot          slots[kMaxFontSlots] = {};
+    uint16_t          fallback_order[kMaxFontSlots] = {};
+    uint32_t          fallback_count = 0;
+    uint32_t          font_revision = 1;
     bool              font_valid = false;
 
-    hb_blob_t*        hb_blob = nullptr;
-    hb_face_t*        hb_face = nullptr;
-    hb_font_t*        hb_font = nullptr;
     hb_buffer_t*      hb_buf = nullptr;
-    ShapedGlyph*      shape_scratch = nullptr;
-    uint32_t          shape_scratch_cap = 0;
-    uint32_t          bullet_glyph_id = 0;
-    float             bullet_advance_em = 0.0f;
-    float             space_advance_em = 0.0f;
 };
 
 struct DrawBatch {
@@ -247,6 +265,44 @@ struct CanvasStackEntry {
 
 struct ImageExtra {
     ImageDesc desc = {};
+};
+
+struct RichSpanInternal {
+    uint32_t byte_start = 0;
+    uint32_t byte_end = 0;
+    Color    color = Color::white();
+    Color    background = {};
+    Color    border_color = {};
+    float    font_size_px = 14.0f;
+    uint16_t font_id = kFontSans;
+    bool     underline = false;
+    bool     strikethrough = false;
+    float    letter_spacing = 0.0f;
+    float    padding_x = 0.0f;
+    float    bg_radius = 4.0f;
+    uint32_t id = 0;
+};
+
+struct RichTextExtra {
+    RichSpanInternal* spans = nullptr;
+    uint32_t          span_count = 0;
+    const char*       full_utf8 = nullptr;
+    uint32_t          total_bytes = 0;
+    float             line_height_px = 0.0f;
+    float             max_ascent_px = 0.0f;
+    float             max_descent_px = 0.0f;
+    AlignX            align_x = AlignX::Left;
+    uint32_t          config_hash = 0;
+    uint32_t          clay_elem_id = 0;
+};
+
+struct SpanHitRegion {
+    uint32_t id = 0; // 0 marks a floating overlay blocker rect
+    uint32_t clay_elem_id = 0;
+    Rect     rect = {};
+    int16_t  z_index = 0;
+    Rect     clip_rect = {};
+    bool     has_clip = false;
 };
 
 struct ClipEntry {
@@ -410,6 +466,10 @@ struct Context {
     bool          caret_blink_on = true;
     uint32_t      caret_blink_cycles = 0;
 
+    uint32_t      applied_font_revision = 0;
+    SpanHitRegion span_hits[kMaxSpanHitsPerFrame] = {};
+    uint32_t      span_hit_count = 0;
+
     char*         clipboard_fallback = nullptr;
     uint32_t      clipboard_fallback_cap = 0;
 
@@ -428,6 +488,94 @@ constexpr uint32_t hash_u32(uint32_t x) noexcept {
     x *= 0x846CA68Bu;
     x ^= x >> 16;
     return x;
+}
+
+constexpr uint64_t hash_u64(uint64_t x) noexcept {
+    x ^= x >> 30;
+    x *= 0xBF58476D1CE4E5B9ULL;
+    x ^= x >> 27;
+    x *= 0x94D049BB133111EBULL;
+    x ^= x >> 31;
+    return x;
+}
+
+inline uint32_t fnv1a_32_step(uint32_t h, const void* data, size_t len) noexcept {
+    const uint8_t* p = static_cast<const uint8_t*>(data);
+    for (size_t i = 0; i < len; ++i) {
+        h ^= p[i];
+        h *= 16777619u;
+    }
+    return h;
+}
+
+inline uint64_t fnv1a_64(const void* data, size_t len) noexcept {
+    uint64_t h = 14695981039346656037ULL;
+    const uint8_t* p = static_cast<const uint8_t*>(data);
+    for (size_t i = 0; i < len; ++i) {
+        h ^= p[i];
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
+inline uint32_t next_utf8_codepoint(const char*& p, const char* end) noexcept {
+    if (p >= end) {
+        return 0u;
+    }
+    const uint8_t b0 = static_cast<uint8_t>(*p++);
+    if (b0 < 0x80u) {
+        return b0;
+    }
+    if ((b0 & 0xE0u) == 0xC0u) {
+        if (p < end) {
+            const uint8_t b1 = static_cast<uint8_t>(*p);
+            if ((b1 & 0xC0u) == 0x80u) {
+                ++p;
+                const uint32_t cp = (uint32_t(b0 & 0x1Fu) << 6) | uint32_t(b1 & 0x3Fu);
+                return (cp >= 0x80u) ? cp : 0xFFFDu;
+            }
+        }
+        return 0xFFFDu;
+    }
+    if ((b0 & 0xF0u) == 0xE0u) {
+        if ((end - p) >= 2) {
+            const uint8_t b1 = static_cast<uint8_t>(p[0]);
+            const uint8_t b2 = static_cast<uint8_t>(p[1]);
+            if ((b1 & 0xC0u) == 0x80u && (b2 & 0xC0u) == 0x80u) {
+                p += 2;
+                const uint32_t cp =
+                    (uint32_t(b0 & 0x0Fu) << 12) | (uint32_t(b1 & 0x3Fu) << 6) | uint32_t(b2 & 0x3Fu);
+                return (cp >= 0x800u && (cp < 0xD800u || cp > 0xDFFFu)) ? cp : 0xFFFDu;
+            }
+        }
+        return 0xFFFDu;
+    }
+    if ((b0 & 0xF8u) == 0xF0u) {
+        if ((end - p) >= 3) {
+            const uint8_t b1 = static_cast<uint8_t>(p[0]);
+            const uint8_t b2 = static_cast<uint8_t>(p[1]);
+            const uint8_t b3 = static_cast<uint8_t>(p[2]);
+            if ((b1 & 0xC0u) == 0x80u && (b2 & 0xC0u) == 0x80u && (b3 & 0xC0u) == 0x80u) {
+                p += 3;
+                const uint32_t cp = (uint32_t(b0 & 0x07u) << 18) | (uint32_t(b1 & 0x3Fu) << 12) |
+                                    (uint32_t(b2 & 0x3Fu) << 6) | uint32_t(b3 & 0x3Fu);
+                return (cp >= 0x10000u && cp <= 0x10FFFFu) ? cp : 0xFFFDu;
+            }
+        }
+        return 0xFFFDu;
+    }
+    return 0xFFFDu;
+}
+
+inline uint32_t count_utf8_cps(const char* beg, uint32_t len) noexcept {
+    const char* p = beg;
+    const char* end = beg + len;
+    uint32_t n = 0u;
+    while (p < end) {
+        (void)next_utf8_codepoint(p, end);
+        ++n;
+    }
+    return n;
 }
 
 bool state_map_init(StateMap* map, uint32_t capacity) noexcept {
@@ -533,6 +681,7 @@ void state_map_clear_flags(StateMap* map, bool clear_frame_edges, bool clear_pre
         if (clear_frame_edges) {
             slot.pressed_this_frame = false;
             slot.clicked_this_frame = false;
+            slot.span_hovered = false;
         }
         if (clear_pressed) {
             slot.pressed_down = false;

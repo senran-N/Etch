@@ -5,11 +5,12 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <initializer_list>
 #include <span>
 #include <type_traits>
 
 #define ETCH_VERSION_MAJOR 1
-#define ETCH_VERSION_MINOR 0
+#define ETCH_VERSION_MINOR 1
 #define ETCH_VERSION_PATCH 0
 
 #ifndef ETCH_ASSERT
@@ -937,12 +938,43 @@ struct BoxDesc {
     float backdrop_blur = 0.0f;
 };
 
+inline constexpr uint16_t kFontSans     = 0u;
+inline constexpr uint16_t kFontBold     = 1u;
+inline constexpr uint16_t kFontMono     = 2u;
+inline constexpr uint16_t kMaxFontSlots = 16u;
+inline constexpr uint16_t kInvalidFont  = 0xFFFFu;
+
 struct TextDesc {
     Color color = Color::white();
     float font_size_px = 16.0f;
-    uint16_t font_id = 0;
+    uint16_t font_id = kFontSans;
     float letter_spacing = 0.0f;
     bool wrap = true;
+};
+
+struct TextSpan {
+    Str      text = {};
+    Color    color = Color::white();
+    Color    background = {};        // Optional inline pill background
+    Color    border_color = {};      // Optional 1px border on inline pill
+    float    font_size_px = 0.0f;    // 0.0f = inherit RichTextDesc::font_size_px
+    uint16_t font_id = kInvalidFont; // kInvalidFont = inherit RichTextDesc::font_id
+    bool     underline = false;
+    bool     strikethrough = false;
+    float    letter_spacing = 0.0f;  // Extra tracking in logical px
+    float    padding_x = 0.0f;       // Horizontal pill padding at span start/end in logical px
+    float    bg_radius = 4.0f;       // Pill corner radius in logical px
+    uint32_t id = 0;                 // Optional semantic ID for hovered(id) / pressed(id) / clicked(id)
+};
+
+struct RichTextDesc {
+    Color    color = Color::white();
+    float    font_size_px = 14.0f;
+    uint16_t font_id = kFontSans;
+    float    line_height_px = 0.0f;  // 0.0f = auto from max span metrics
+    float    letter_spacing = 0.0f;
+    AlignX   align_x = AlignX::Left;
+    bool     wrap = true;
 };
 
 struct ImageDesc {
@@ -1124,6 +1156,20 @@ void set_current_context(Context* ctx) noexcept;
 Arena* frame_arena(Context* ctx) noexcept;
 SDL_GPUDevice* gpu_device(Context* ctx) noexcept;
 
+// Multi-font registry & automatic cluster-safe fallback chain
+uint16_t load_font_file(
+    Context* ctx,
+    const char* path,
+    uint16_t slot_hint = kInvalidFont,
+    int32_t face_index = 0) noexcept;
+uint16_t load_font_memory(
+    Context* ctx,
+    const void* data,
+    size_t size_bytes,
+    uint16_t slot_hint = kInvalidFont,
+    int32_t face_index = 0) noexcept;
+bool is_font_loaded(const Context* ctx, uint16_t font_id) noexcept;
+
 void process_event(Context* ctx, const SDL_Event& event) noexcept;
 
 // Event-driven 0% idle sleep / wakeup scheduler:
@@ -1159,6 +1205,10 @@ void begin_box(const BoxDesc& desc = {}) noexcept;
 void end_box() noexcept;
 void box(const BoxDesc& desc = {}) noexcept;
 void text(Str content, const TextDesc& desc = {}) noexcept;
+void text_spans(std::span<const TextSpan> spans, const RichTextDesc& desc = {}) noexcept;
+inline void text_spans(std::initializer_list<TextSpan> spans, const RichTextDesc& desc = {}) noexcept {
+    text_spans(std::span<const TextSpan>(spans.begin(), spans.size()), desc);
+}
 void image(const ImageDesc& desc) noexcept;
 TextInputResult text_input(const TextInputDesc& desc) noexcept;
 void set_text_selection(uint32_t element_id, uint32_t anchor_byte, uint32_t cursor_byte) noexcept;

@@ -49,21 +49,66 @@ bool ensure_array_cap(T** ptr, uint32_t* cap, uint32_t needed) noexcept {
     return true;
 }
 
-bool try_load_font_file(FontAtlas* atlas, const char* path) noexcept {
-    if (!atlas || !path || path[0] == '\0') {
-        return false;
+void destroy_font_slot(FontSlot* slot) noexcept {
+    if (slot->hb_font) hb_font_destroy(slot->hb_font);
+    if (slot->hb_face) hb_face_destroy(slot->hb_face);
+    if (slot->hb_blob) hb_blob_destroy(slot->hb_blob);
+    if (slot->font_file_data) SDL_free(slot->font_file_data);
+    *slot = {};
+}
+
+uint16_t resolve_font_slot_idx(const FontAtlas* atlas, uint16_t font_id) noexcept {
+    if (font_id < kMaxFontSlots && atlas->slots[font_id].loaded) {
+        return font_id;
     }
-    size_t sz = 0;
-    void* raw = SDL_LoadFile(path, &sz);
-    if (!raw || sz < 16u || sz > 0x7FFFFFFFu) {
-        if (raw) {
-            SDL_free(raw);
+    if (atlas->slots[kFontSans].loaded) {
+        return kFontSans;
+    }
+    for (uint16_t i = 0u; i < kMaxFontSlots; ++i) {
+        if (atlas->slots[i].loaded) {
+            return i;
         }
-        return false;
     }
+    return kInvalidFont;
+}
+
+uint16_t resolve_target_font_slot(const FontAtlas* atlas, uint16_t slot_hint) noexcept {
+    if (slot_hint < kMaxFontSlots) {
+        return slot_hint;
+    }
+    if (slot_hint == kInvalidFont) {
+        for (uint16_t i = 0u; i < kMaxFontSlots; ++i) {
+            if (!atlas->slots[i].loaded) {
+                return i;
+            }
+        }
+    }
+    return kInvalidFont;
+}
+
+void ensure_fallback_registered(FontAtlas* atlas, uint16_t slot_idx) noexcept {
+    for (uint32_t i = 0u; i < atlas->fallback_count; ++i) {
+        if (atlas->fallback_order[i] == slot_idx) {
+            return;
+        }
+    }
+    if (atlas->fallback_count < kMaxFontSlots) {
+        atlas->fallback_order[atlas->fallback_count++] = slot_idx;
+    }
+}
+
+bool init_font_slot_from_owned_bytes(
+    FontAtlas* atlas,
+    uint16_t slot_idx,
+    void* raw,
+    size_t sz,
+    uint64_t source_hash,
+    int32_t face_index) noexcept
+{
     const unsigned char* bytes = static_cast<const unsigned char*>(raw);
-    const int offset = stbtt_GetFontOffsetForIndex(bytes, 0);
-    if (offset < 0 || !stbtt_InitFont(&atlas->font_info, bytes, offset)) {
+    stbtt_fontinfo new_info = {};
+    const int offset = stbtt_GetFontOffsetForIndex(bytes, face_index);
+    if (offset < 0 || !stbtt_InitFont(&new_info, bytes, offset)) {
         SDL_free(raw);
         return false;
     }
@@ -74,7 +119,7 @@ bool try_load_font_file(FontAtlas* atlas, const char* path) noexcept {
         HB_MEMORY_MODE_READONLY,
         nullptr,
         nullptr);
-    hb_face_t* face = blob ? hb_face_create(blob, 0u) : nullptr;
+    hb_face_t* face = blob ? hb_face_create(blob, static_cast<unsigned int>(face_index)) : nullptr;
     hb_font_t* font = face ? hb_font_create(face) : nullptr;
     const unsigned int upem = face ? hb_face_get_upem(face) : 0u;
     if (!blob || !face || !font || upem == 0u) {
@@ -88,28 +133,100 @@ bool try_load_font_file(FontAtlas* atlas, const char* path) noexcept {
     hb_ot_font_set_funcs(font);
     hb_font_set_scale(font, static_cast<int>(upem), static_cast<int>(upem));
 
-    atlas->font_file_data = static_cast<uint8_t*>(raw);
-    atlas->font_file_size = sz;
-    stbtt_GetFontVMetrics(&atlas->font_info, &atlas->font_ascent, &atlas->font_descent, &atlas->font_line_gap);
-    atlas->hb_blob = blob;
-    atlas->hb_face = face;
-    atlas->hb_font = font;
-    atlas->font_valid = true;
+    FontSlot next = {};
+    next.font_info = new_info;
+    next.font_file_data = static_cast<uint8_t*>(raw);
+    next.font_file_size = sz;
+    stbtt_GetFontVMetrics(&next.font_info, &next.font_ascent, &next.font_descent, &next.font_line_gap);
+    next.scale_1px = stbtt_ScaleForPixelHeight(&next.font_info, 1.0f);
+    if (next.scale_1px <= 0.0f) {
+        next.scale_1px = 1.0f / static_cast<float>(upem);
+    }
+    next.ascent_em = static_cast<float>(next.font_ascent) * next.scale_1px;
+    next.descent_em = static_cast<float>(next.font_descent) * next.scale_1px;
+    next.line_height_em = static_cast<float>(next.font_ascent - next.font_descent + next.font_line_gap) * next.scale_1px;
+    next.hb_blob = blob;
+    next.hb_face = face;
+    next.hb_font = font;
+    next.source_hash = source_hash;
+    next.loaded = true;
 
     hb_codepoint_t gid = 0u;
     if (!hb_font_get_nominal_glyph(font, 0x2022u, &gid)) {
         hb_font_get_nominal_glyph(font, static_cast<hb_codepoint_t>('*'), &gid);
     }
-    atlas->bullet_glyph_id = gid;
-    atlas->bullet_advance_em = static_cast<float>(hb_font_get_glyph_h_advance(font, gid));
+    next.bullet_glyph_id = gid;
+    next.bullet_advance_em = static_cast<float>(hb_font_get_glyph_h_advance(font, gid)) * next.scale_1px;
 
     hb_codepoint_t sp_gid = 0u;
     if (hb_font_get_nominal_glyph(font, static_cast<hb_codepoint_t>(' '), &sp_gid)) {
-        atlas->space_advance_em = static_cast<float>(hb_font_get_glyph_h_advance(font, sp_gid));
+        next.space_advance_em = static_cast<float>(hb_font_get_glyph_h_advance(font, sp_gid)) * next.scale_1px;
     } else {
-        atlas->space_advance_em = static_cast<float>(upem) * 0.35f;
+        next.space_advance_em = static_cast<float>(upem) * 0.35f * next.scale_1px;
     }
+
+    FontSlot* dst = &atlas->slots[slot_idx];
+    const uint8_t prev_gen = dst->generation;
+    destroy_font_slot(dst);
+    if (prev_gen == 255u && atlas->slug_glyphs && atlas->slug_glyph_cap > 0u) {
+        // Rare 255th slot reload: flush glyph hash table so wrapped generation 1 cannot hit stale glyphs.
+        std::memset(atlas->slug_glyphs, 0, size_t(atlas->slug_glyph_cap) * sizeof(SlugGlyphEntry));
+        atlas->slug_glyph_count = 0u;
+    }
+    next.generation = (prev_gen == 255u) ? 1u : static_cast<uint8_t>(prev_gen + 1u);
+
+    uint32_t mh = 2166136261u;
+    mh = fnv1a_32_step(mh, &slot_idx, sizeof(slot_idx));
+    mh = fnv1a_32_step(mh, &next.generation, sizeof(next.generation));
+    mh = fnv1a_32_step(mh, &upem, sizeof(upem));
+    mh = fnv1a_32_step(mh, &next.font_ascent, sizeof(next.font_ascent));
+    mh = fnv1a_32_step(mh, &next.font_descent, sizeof(next.font_descent));
+    mh = fnv1a_32_step(mh, &next.font_line_gap, sizeof(next.font_line_gap));
+    mh = fnv1a_32_step(mh, &next.space_advance_em, sizeof(next.space_advance_em));
+    next.metric_hash = mh;
+
+    *dst = next;
+    ensure_fallback_registered(atlas, slot_idx);
+    ++atlas->font_revision;
+    atlas->font_valid = true;
     return true;
+}
+
+uint64_t hash_font_path(const char* path, int32_t face_index) noexcept {
+    const uint64_t h = fnv1a_64(path, std::strlen(path));
+    return h ^ (static_cast<uint64_t>(face_index) * 0x9E3779B97F4A7C15ULL);
+}
+
+bool try_load_font_file_into_slot(
+    FontAtlas* atlas,
+    uint16_t slot_idx,
+    const char* path,
+    int32_t face_index = 0) noexcept
+{
+    size_t sz = 0;
+    void* raw = SDL_LoadFile(path, &sz);
+    if (!raw || sz < 16u || sz > 0x7FFFFFFFu) {
+        if (raw) {
+            SDL_free(raw);
+        }
+        return false;
+    }
+    return init_font_slot_from_owned_bytes(
+        atlas,
+        slot_idx,
+        raw,
+        sz,
+        hash_font_path(path, face_index),
+        face_index);
+}
+
+bool font_has_source_hash(const FontAtlas* atlas, uint64_t source_hash) noexcept {
+    for (uint16_t i = 0u; i < kMaxFontSlots; ++i) {
+        if (atlas->slots[i].loaded && atlas->slots[i].source_hash == source_hash) {
+            return true;
+        }
+    }
+    return false;
 }
 
 bool font_atlas_init(FontAtlas* atlas, const char* preferred_font_path) noexcept {
@@ -134,25 +251,111 @@ bool font_atlas_init(FontAtlas* atlas, const char* preferred_font_path) noexcept
     std::memset(atlas->pixels, 255, size_t(kAtlasSize) * kAtlasSize * 4u);
     atlas->dirty = true;
 
-    const char* fallbacks[] = {
+    const char* sans_candidates[] = {
         preferred_font_path,
 #if defined(_WIN32)
-        "C:/Windows/Fonts/msyh.ttc",
         "C:/Windows/Fonts/segoeui.ttf",
+        "C:/Windows/Fonts/msyh.ttc",
         "C:/Windows/Fonts/arial.ttf",
 #elif defined(__APPLE__)
-        "/System/Library/Fonts/PingFang.ttc",
         "/System/Library/Fonts/Helvetica.ttc",
+        "/System/Library/Fonts/PingFang.ttc",
 #else
-        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
 #endif
     };
-    for (const char* path : fallbacks) {
-        if (path && try_load_font_file(atlas, path)) {
+    for (const char* path : sans_candidates) {
+        if (path && path[0] != '\0' && try_load_font_file_into_slot(atlas, kFontSans, path)) {
             break;
         }
     }
+
+    // Reserve extra slots after Bold/Mono while registering CJK/Symbol fallbacks right after Sans.
+    const char* bold_candidates[] = {
+#if defined(_WIN32)
+        "C:/Windows/Fonts/segoeuib.ttf",
+        "C:/Windows/Fonts/msyhbd.ttc",
+        "C:/Windows/Fonts/arialbd.ttf",
+#elif defined(__APPLE__)
+        "/System/Library/Fonts/HelveticaNeue.ttc",
+        "/System/Library/Fonts/PingFang.ttc",
+#else
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc",
+#endif
+    };
+    for (const char* path : bold_candidates) {
+        if (try_load_font_file_into_slot(atlas, kFontBold, path)) {
+            break;
+        }
+    }
+
+    const char* mono_candidates[] = {
+#if defined(_WIN32)
+        "C:/Windows/Fonts/consola.ttf",
+        "C:/Windows/Fonts/lucon.ttf",
+#elif defined(__APPLE__)
+        "/System/Library/Fonts/Menlo.ttc",
+        "/System/Library/Fonts/Monaco.ttf",
+#else
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
+#endif
+    };
+    for (const char* path : mono_candidates) {
+        if (try_load_font_file_into_slot(atlas, kFontMono, path)) {
+            break;
+        }
+    }
+
+    const char* system_fallbacks[] = {
+#if defined(_WIN32)
+        "C:/Windows/Fonts/msyh.ttc",
+        "C:/Windows/Fonts/seguisym.ttf",
+#elif defined(__APPLE__)
+        "/System/Library/Fonts/PingFang.ttc",
+        "/System/Library/Fonts/Apple Symbols.ttf",
+#else
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/noto/NotoSansSymbols-Regular.ttf",
+#endif
+    };
+    for (const char* path : system_fallbacks) {
+        const uint64_t sh = hash_font_path(path, 0);
+        if (font_has_source_hash(atlas, sh)) {
+            continue;
+        }
+        const uint16_t free_slot = resolve_target_font_slot(atlas, kInvalidFont);
+        if (free_slot == kInvalidFont) {
+            break;
+        }
+        try_load_font_file_into_slot(atlas, free_slot, path);
+    }
+
+    // Prioritize Sans -> CJK/Symbols -> Bold -> Mono when resolving missing glyphs.
+    uint16_t ordered[kMaxFontSlots] = {};
+    uint32_t oc = 0u;
+    if (atlas->slots[kFontSans].loaded) {
+        ordered[oc++] = kFontSans;
+    }
+    for (uint16_t s = 3u; s < kMaxFontSlots; ++s) {
+        if (atlas->slots[s].loaded) {
+            ordered[oc++] = s;
+        }
+    }
+    if (atlas->slots[kFontBold].loaded) {
+        ordered[oc++] = kFontBold;
+    }
+    if (atlas->slots[kFontMono].loaded) {
+        ordered[oc++] = kFontMono;
+    }
+    for (uint32_t i = 0u; i < oc; ++i) {
+        atlas->fallback_order[i] = ordered[i];
+    }
+    atlas->fallback_count = oc;
     return true;
 }
 
@@ -161,11 +364,9 @@ void font_atlas_destroy(FontAtlas* atlas) noexcept {
         return;
     }
     if (atlas->hb_buf) hb_buffer_destroy(atlas->hb_buf);
-    if (atlas->hb_font) hb_font_destroy(atlas->hb_font);
-    if (atlas->hb_face) hb_face_destroy(atlas->hb_face);
-    if (atlas->hb_blob) hb_blob_destroy(atlas->hb_blob);
-    if (atlas->font_file_data) SDL_free(atlas->font_file_data);
-    std::free(atlas->shape_scratch);
+    for (uint16_t i = 0u; i < kMaxFontSlots; ++i) {
+        destroy_font_slot(&atlas->slots[i]);
+    }
     std::free(atlas->pixels);
     std::free(atlas->slug_bands);
     std::free(atlas->slug_curves);
@@ -185,7 +386,7 @@ bool slug_glyph_rehash(FontAtlas* atlas) noexcept {
         if (e.key == 0u) {
             continue;
         }
-        uint32_t idx = hash_u32(e.key) & mask;
+        uint32_t idx = static_cast<uint32_t>(hash_u64(e.key)) & mask;
         while (next[idx].key != 0u) {
             idx = (idx + 1u) & mask;
         }
@@ -220,14 +421,19 @@ void sort_band_desc(SlugCurveSortItem* items, uint32_t count) noexcept {
     }
 }
 
-SlugGlyphEntry slug_get_glyph(FontAtlas* atlas, uint32_t glyph_id) noexcept {
-    if (!atlas || !atlas->font_valid || !atlas->slug_glyphs || atlas->slug_glyph_cap == 0u) {
+SlugGlyphEntry slug_get_glyph(FontAtlas* atlas, uint16_t slot_idx, uint32_t glyph_id) noexcept {
+    if (!atlas || !atlas->font_valid || !atlas->slug_glyphs || atlas->slug_glyph_cap == 0u ||
+        slot_idx >= kMaxFontSlots || !atlas->slots[slot_idx].loaded) {
         return {};
     }
 
-    const uint32_t key = glyph_id + 1u;
+    FontSlot& slot = atlas->slots[slot_idx];
+    const uint64_t key =
+        (static_cast<uint64_t>(slot_idx + 1u) << 40) |
+        (static_cast<uint64_t>(slot.generation) << 32) |
+        static_cast<uint64_t>(glyph_id);
     const uint32_t mask = atlas->slug_glyph_cap - 1u;
-    uint32_t idx = hash_u32(key) & mask;
+    uint32_t idx = static_cast<uint32_t>(hash_u64(key)) & mask;
     while (atlas->slug_glyphs[idx].key != 0u) {
         if (atlas->slug_glyphs[idx].key == key) {
             return atlas->slug_glyphs[idx];
@@ -237,12 +443,12 @@ SlugGlyphEntry slug_get_glyph(FontAtlas* atlas, uint32_t glyph_id) noexcept {
 
     SlugGlyphEntry entry = { .key = key };
     stbtt_vertex* verts = nullptr;
-    const int nverts = stbtt_GetGlyphShape(&atlas->font_info, static_cast<int>(glyph_id), &verts);
+    const int nverts = stbtt_GetGlyphShape(&slot.font_info, static_cast<int>(glyph_id), &verts);
     if (nverts <= 0 || !verts) {
-        if (verts) stbtt_FreeShape(&atlas->font_info, verts);
+        if (verts) stbtt_FreeShape(&slot.font_info, verts);
         if ((atlas->slug_glyph_count + 1u) * 4u >= atlas->slug_glyph_cap * 3u && slug_glyph_rehash(atlas)) {
             const uint32_t nmask = atlas->slug_glyph_cap - 1u;
-            idx = hash_u32(key) & nmask;
+            idx = static_cast<uint32_t>(hash_u64(key)) & nmask;
             while (atlas->slug_glyphs[idx].key != 0u) idx = (idx + 1u) & nmask;
         }
         atlas->slug_glyphs[idx] = entry;
@@ -326,7 +532,7 @@ SlugGlyphEntry slug_get_glyph(FontAtlas* atlas, uint32_t glyph_id) noexcept {
             cur_y = vy;
         }
     }
-    stbtt_FreeShape(&atlas->font_info, verts);
+    stbtt_FreeShape(&slot.font_info, verts);
 
     float min_x = 0.0f, min_y = 0.0f, max_x = 0.0f, max_y = 0.0f;
     if (raw_count > 0u) {
@@ -487,7 +693,7 @@ SlugGlyphEntry slug_get_glyph(FontAtlas* atlas, uint32_t glyph_id) noexcept {
 
     if ((atlas->slug_glyph_count + 1u) * 4u >= atlas->slug_glyph_cap * 3u && slug_glyph_rehash(atlas)) {
         const uint32_t nmask = atlas->slug_glyph_cap - 1u;
-        idx = hash_u32(key) & nmask;
+        idx = static_cast<uint32_t>(hash_u64(key)) & nmask;
         while (atlas->slug_glyphs[idx].key != 0u) {
             idx = (idx + 1u) & nmask;
         }
@@ -497,11 +703,86 @@ SlugGlyphEntry slug_get_glyph(FontAtlas* atlas, uint32_t glyph_id) noexcept {
     return entry;
 }
 
-std::span<const ShapedGlyph> shape_utf8_run(Context* ctx, const char* utf8, uint32_t byte_len) noexcept {
-    if (!ctx || !ctx->atlas.font_valid || !ctx->atlas.hb_font || !ctx->atlas.hb_buf || !utf8 || byte_len == 0u) {
+uint16_t pick_fallback_slot_for_cluster(
+    const FontAtlas* atlas,
+    uint16_t primary_slot,
+    const char* utf8,
+    uint32_t len) noexcept
+{
+    const char* p = utf8;
+    const char* end = utf8 + len;
+    uint32_t cps[16];
+    uint32_t cp_count = 0u;
+    while (p < end && cp_count < 16u) {
+        cps[cp_count++] = next_utf8_codepoint(p, end);
+    }
+    if (cp_count == 0u) {
+        return primary_slot;
+    }
+    hb_codepoint_t dummy = 0u;
+    for (uint32_t fi = 0u; fi < atlas->fallback_count; ++fi) {
+        const uint16_t s = atlas->fallback_order[fi];
+        if (s == primary_slot || !atlas->slots[s].loaded) {
+            continue;
+        }
+        bool covers_all = true;
+        for (uint32_t ci = 0u; ci < cp_count; ++ci) {
+            if (!hb_font_get_nominal_glyph(atlas->slots[s].hb_font, cps[ci], &dummy)) {
+                covers_all = false;
+                break;
+            }
+        }
+        if (covers_all) {
+            return s;
+        }
+    }
+    for (uint32_t fi = 0u; fi < atlas->fallback_count; ++fi) {
+        const uint16_t s = atlas->fallback_order[fi];
+        if (s == primary_slot || !atlas->slots[s].loaded) {
+            continue;
+        }
+        if (hb_font_get_nominal_glyph(atlas->slots[s].hb_font, cps[0], &dummy)) {
+            return s;
+        }
+    }
+    return primary_slot;
+}
+
+std::span<const ShapedGlyph> store_shaped_glyphs(
+    Context* ctx,
+    const ShapedGlyph* src,
+    uint32_t count) noexcept
+{
+    if (count == 0u) {
+        return {};
+    }
+    ShapedGlyph* out = ctx->frame_arena.alloc_uninit<ShapedGlyph>(count);
+    if (!out) {
+        return {};
+    }
+    std::memcpy(out, src, size_t(count) * sizeof(ShapedGlyph));
+    return std::span<const ShapedGlyph>(out, count);
+}
+
+std::span<const ShapedGlyph> shape_utf8_run(
+    Context* ctx,
+    uint16_t font_id,
+    const char* utf8,
+    uint32_t byte_len,
+    bool* out_is_rtl = nullptr) noexcept
+{
+    if (out_is_rtl) {
+        *out_is_rtl = false;
+    }
+    if (!ctx || !ctx->atlas.font_valid || !ctx->atlas.hb_buf || !utf8 || byte_len == 0u) {
+        return {};
+    }
+    const uint16_t primary_slot = resolve_font_slot_idx(&ctx->atlas, font_id);
+    if (primary_slot == kInvalidFont) {
         return {};
     }
 
+    const FontSlot& primary = ctx->atlas.slots[primary_slot];
     hb_buffer_t* buf = ctx->atlas.hb_buf;
     hb_buffer_clear_contents(buf);
     hb_buffer_set_cluster_level(buf, HB_BUFFER_CLUSTER_LEVEL_MONOTONE_GRAPHEMES);
@@ -513,7 +794,14 @@ std::span<const ShapedGlyph> shape_utf8_run(Context* ctx, const char* utf8, uint
         { HB_TAG('l', 'i', 'g', 'a'), 1u, 0u, static_cast<unsigned int>(-1) },
         { HB_TAG('c', 'a', 'l', 't'), 1u, 0u, static_cast<unsigned int>(-1) },
     };
-    hb_shape(ctx->atlas.hb_font, buf, kFeatures, 3u);
+    hb_shape(primary.hb_font, buf, kFeatures, 3u);
+
+    hb_segment_properties_t seg_props = {};
+    hb_buffer_get_segment_properties(buf, &seg_props);
+    const bool is_rtl = HB_DIRECTION_IS_BACKWARD(seg_props.direction);
+    if (out_is_rtl) {
+        *out_is_rtl = is_rtl;
+    }
 
     unsigned int count = 0u;
     const hb_glyph_info_t* infos = hb_buffer_get_glyph_infos(buf, &count);
@@ -522,26 +810,190 @@ std::span<const ShapedGlyph> shape_utf8_run(Context* ctx, const char* utf8, uint
         return {};
     }
 
-    ShapedGlyph* out = ctx->frame_arena.alloc_uninit<ShapedGlyph>(count);
-    if (!out) {
-        if (!ensure_array_cap(&ctx->atlas.shape_scratch, &ctx->atlas.shape_scratch_cap, count)) {
-            return {};
+    bool has_missing = false;
+    for (unsigned int i = 0u; i < count; ++i) {
+        if (infos[i].codepoint == 0u) {
+            has_missing = true;
+            break;
         }
-        out = ctx->atlas.shape_scratch;
     }
 
-    for (unsigned int i = 0u; i < count; ++i) {
-        out[i] = ShapedGlyph{
-            .glyph_id = infos[i].codepoint,
-            .cluster = infos[i].cluster,
-            .x_advance_em = static_cast<float>(pos[i].x_advance),
-            .x_offset_em = static_cast<float>(pos[i].x_offset),
-            .y_offset_em = static_cast<float>(pos[i].y_offset),
-        };
+    if (!has_missing || ctx->atlas.fallback_count <= 1u) {
+        ShapedGlyph* out = ctx->frame_arena.alloc_uninit<ShapedGlyph>(count);
+        if (!out) {
+            return {};
+        }
+        for (unsigned int i = 0u; i < count; ++i) {
+            out[i] = ShapedGlyph{
+                .glyph_id = infos[i].codepoint,
+                .cluster = infos[i].cluster,
+                .font_slot = primary_slot,
+                .x_advance_1px = static_cast<float>(pos[i].x_advance) * primary.scale_1px,
+                .x_offset_em = static_cast<float>(pos[i].x_offset),
+                .y_offset_em = static_cast<float>(pos[i].y_offset),
+            };
+        }
+        return std::span<const ShapedGlyph>(out, count);
     }
-    return std::span<const ShapedGlyph>(out, count);
+
+    // Extract cluster -> fallback-slot sub-runs before hb_shape overwrites ctx->atlas.hb_buf.
+    struct FontSubRun {
+        uint32_t byte_start;
+        uint32_t byte_end;
+        uint16_t slot_idx;
+    };
+    const size_t scratch_mark = ctx->frame_arena.mark();
+    constexpr uint32_t kStackSubCap = 64u;
+    FontSubRun stack_subs[kStackSubCap];
+    FontSubRun* subs = (count <= kStackSubCap)
+        ? stack_subs
+        : ctx->frame_arena.alloc_uninit<FontSubRun>(count);
+    if (!subs) {
+        return {};
+    }
+    uint32_t sub_count = 0u;
+
+    const auto logical_idx = [&](unsigned int step) noexcept -> unsigned int {
+        return is_rtl ? (count - 1u - step) : step;
+    };
+
+    unsigned int step = 0u;
+    while (step < count) {
+        const uint32_t c_start = infos[logical_idx(step)].cluster;
+        bool cluster_missing = false;
+        unsigned int step_end = step;
+        while (step_end < count && infos[logical_idx(step_end)].cluster == c_start) {
+            if (infos[logical_idx(step_end)].codepoint == 0u) {
+                cluster_missing = true;
+            }
+            ++step_end;
+        }
+        const uint32_t c_end = (step_end < count && infos[logical_idx(step_end)].cluster > c_start)
+            ? infos[logical_idx(step_end)].cluster
+            : byte_len;
+
+        const uint16_t chosen_slot = cluster_missing
+            ? pick_fallback_slot_for_cluster(&ctx->atlas, primary_slot, utf8 + c_start, c_end - c_start)
+            : primary_slot;
+
+        if (sub_count > 0u && subs[sub_count - 1u].slot_idx == chosen_slot && subs[sub_count - 1u].byte_end == c_start) {
+            subs[sub_count - 1u].byte_end = c_end;
+        } else {
+            subs[sub_count++] = FontSubRun{ c_start, c_end, chosen_slot };
+        }
+        step = step_end;
+    }
+
+    constexpr uint32_t kStackOutCap = 256u;
+    ShapedGlyph stack_out[kStackOutCap];
+    ShapedGlyph* collected = stack_out;
+    uint32_t out_cap = kStackOutCap;
+    uint32_t out_count = 0u;
+
+    for (uint32_t s_i = 0u; s_i < sub_count; ++s_i) {
+        const FontSubRun& sr = subs[is_rtl ? (sub_count - 1u - s_i) : s_i];
+        const FontSlot& slot = ctx->atlas.slots[sr.slot_idx];
+        hb_buffer_clear_contents(buf);
+        hb_buffer_set_cluster_level(buf, HB_BUFFER_CLUSTER_LEVEL_MONOTONE_GRAPHEMES);
+        hb_buffer_add_utf8(
+            buf,
+            utf8,
+            static_cast<int>(byte_len),
+            sr.byte_start,
+            static_cast<int>(sr.byte_end - sr.byte_start));
+        hb_buffer_set_segment_properties(buf, &seg_props);
+        hb_shape(slot.hb_font, buf, kFeatures, 3u);
+
+        unsigned int sub_gcount = 0u;
+        const hb_glyph_info_t* sub_infos = hb_buffer_get_glyph_infos(buf, &sub_gcount);
+        const hb_glyph_position_t* sub_pos = hb_buffer_get_glyph_positions(buf, &sub_gcount);
+        if (sub_gcount == 0u || !sub_infos || !sub_pos) {
+            continue;
+        }
+        if (out_count + sub_gcount > out_cap) {
+            uint32_t new_cap = out_cap * 2u;
+            while (new_cap < out_count + sub_gcount) {
+                new_cap *= 2u;
+            }
+            ShapedGlyph* grown = ctx->frame_arena.alloc_uninit<ShapedGlyph>(new_cap);
+            if (!grown) {
+                break;
+            }
+            std::memcpy(grown, collected, size_t(out_count) * sizeof(ShapedGlyph));
+            collected = grown;
+            out_cap = new_cap;
+        }
+        for (unsigned int j = 0u; j < sub_gcount; ++j) {
+            collected[out_count++] = ShapedGlyph{
+                .glyph_id = sub_infos[j].codepoint,
+                .cluster = sub_infos[j].cluster,
+                .font_slot = sr.slot_idx,
+                .x_advance_1px = static_cast<float>(sub_pos[j].x_advance) * slot.scale_1px,
+                .x_offset_em = static_cast<float>(sub_pos[j].x_offset),
+                .y_offset_em = static_cast<float>(sub_pos[j].y_offset),
+            };
+        }
+    }
+
+    if (collected == stack_out) {
+        ctx->frame_arena.rewind(scratch_mark);
+        return store_shaped_glyphs(ctx, stack_out, out_count);
+    }
+    return std::span<const ShapedGlyph>(collected, out_count);
 }
 
 } // namespace
+
+uint16_t load_font_file(
+    Context* ctx,
+    const char* path,
+    uint16_t slot_hint,
+    int32_t face_index) noexcept
+{
+    if (!ctx || !path || path[0] == '\0' || face_index < 0) {
+        return kInvalidFont;
+    }
+    const uint16_t target_slot = resolve_target_font_slot(&ctx->atlas, slot_hint);
+    if (target_slot == kInvalidFont) {
+        return kInvalidFont;
+    }
+    const bool loaded = try_load_font_file_into_slot(&ctx->atlas, target_slot, path, face_index);
+    if (loaded) {
+        ctx->redraw_budget = 2u;
+    }
+    return loaded ? target_slot : kInvalidFont;
+}
+
+uint16_t load_font_memory(
+    Context* ctx,
+    const void* data,
+    size_t size_bytes,
+    uint16_t slot_hint,
+    int32_t face_index) noexcept
+{
+    if (!ctx || !data || size_bytes < 16u || size_bytes > 0x7FFFFFFFu || face_index < 0) {
+        return kInvalidFont;
+    }
+    const uint16_t target_slot = resolve_target_font_slot(&ctx->atlas, slot_hint);
+    if (target_slot == kInvalidFont) {
+        return kInvalidFont;
+    }
+    void* copy = SDL_malloc(size_bytes);
+    if (!copy) {
+        return kInvalidFont;
+    }
+    std::memcpy(copy, data, size_bytes);
+    const uint64_t source_hash = fnv1a_64(data, size_bytes) ^
+        (static_cast<uint64_t>(face_index) * 0x9E3779B97F4A7C15ULL);
+    const bool loaded = init_font_slot_from_owned_bytes(&ctx->atlas, target_slot, copy, size_bytes, source_hash, face_index);
+    if (loaded) {
+        ctx->redraw_budget = 2u;
+    }
+    return loaded ? target_slot : kInvalidFont;
+}
+
+bool is_font_loaded(const Context* ctx, uint16_t font_id) noexcept {
+    return ctx && font_id < kMaxFontSlots && ctx->atlas.slots[font_id].loaded;
+}
 
 } // namespace etch

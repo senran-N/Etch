@@ -1714,7 +1714,8 @@ Clay__MeasureTextCacheItem *Clay__MeasureTextCached(Clay_String *text, Clay_Text
     float lineWidth = 0;
     float measuredWidth = 0;
     float measuredHeight = 0;
-    float spaceWidth = Clay__MeasureText(CLAY__INIT(Clay_StringSlice) { .length = 1, .chars = CLAY__SPACECHAR.chars, .baseChars = CLAY__SPACECHAR.chars }, config, context->measureTextUserData).width;
+    Clay_Dimensions spaceDims = Clay__MeasureText(CLAY__INIT(Clay_StringSlice) { .length = 1, .chars = CLAY__SPACECHAR.chars, .baseChars = CLAY__SPACECHAR.chars }, config, context->measureTextUserData);
+    float spaceWidth = spaceDims.width;
     Clay__MeasuredWord tempWord = { .next = -1 };
     Clay__MeasuredWord *previousWord = &tempWord;
     while (end < text->length) {
@@ -1734,11 +1735,19 @@ Clay__MeasureTextCacheItem *Clay__MeasureTextCached(Clay_String *text, Clay_Text
             Clay_Dimensions dimensions = CLAY__DEFAULT_STRUCT;
             if (length > 0) {
                 dimensions = Clay__MeasureText(CLAY__INIT(Clay_StringSlice) {.length = length, .chars = &text->chars[start], .baseChars = text->chars}, config, context->measureTextUserData);
+                measuredHeight = CLAY__MAX(measuredHeight, dimensions.height);
             }
             measured->minWidth = CLAY__MAX(dimensions.width, measured->minWidth);
-            measuredHeight = CLAY__MAX(measuredHeight, dimensions.height);
             if (current == ' ') {
-                dimensions.width += spaceWidth;
+                float curSpaceWidth = spaceWidth;
+                if (config->userData != CLAY__NULL) {
+                    Clay_Dimensions curSpaceDims = Clay__MeasureText(CLAY__INIT(Clay_StringSlice) { .length = 1, .chars = &text->chars[end], .baseChars = text->chars }, config, context->measureTextUserData);
+                    curSpaceWidth = curSpaceDims.width;
+                    measuredHeight = CLAY__MAX(measuredHeight, curSpaceDims.height);
+                } else {
+                    measuredHeight = CLAY__MAX(measuredHeight, spaceDims.height);
+                }
+                dimensions.width += curSpaceWidth;
                 previousWord = Clay__AddMeasuredWord(CLAY__INIT(Clay__MeasuredWord) { .startOffset = start, .length = length + 1, .width = dimensions.width, .next = -1 }, previousWord);
                 lineWidth += dimensions.width;
             }
@@ -2613,8 +2622,13 @@ void Clay__CalculateFinalLayout(float deltaTime, bool useStoredBoundingBoxes, bo
             // measuredWord->length == 0 means a newline character
             else if (measuredWord->length == 0 || lineWidth + measuredWord->width > containerElement->dimensions.width) {
                 // Wrapped text lines list has overflowed, just render out the line
-                bool finalCharIsSpace = textElementData->text.chars[CLAY__MAX(lineStartOffset + lineLengthChars - 1, 0)] == ' ';
-                Clay__WrappedTextLineArray_Add(&context->wrappedTextLines, CLAY__INIT(Clay__WrappedTextLine) { { lineWidth + (finalCharIsSpace ? -spaceWidth : 0), lineHeight }, { .length = lineLengthChars + (finalCharIsSpace ? -1 : 0), .chars = &textElementData->text.chars[lineStartOffset] } });
+                int32_t lastCharIdx = CLAY__MAX(lineStartOffset + lineLengthChars - 1, 0);
+                bool finalCharIsSpace = (lineLengthChars > 0) && (textElementData->text.chars[lastCharIdx] == ' ');
+                float trailingSpaceWidth = spaceWidth;
+                if (finalCharIsSpace && containerElement->textConfig.userData != CLAY__NULL) {
+                    trailingSpaceWidth = Clay__MeasureText(CLAY__INIT(Clay_StringSlice) { .length = 1, .chars = &textElementData->text.chars[lastCharIdx], .baseChars = textElementData->text.chars }, &containerElement->textConfig, context->measureTextUserData).width;
+                }
+                Clay__WrappedTextLineArray_Add(&context->wrappedTextLines, CLAY__INIT(Clay__WrappedTextLine) { { lineWidth + (finalCharIsSpace ? -trailingSpaceWidth : 0), lineHeight }, { .length = lineLengthChars + (finalCharIsSpace ? -1 : 0), .chars = &textElementData->text.chars[lineStartOffset] } });
                 textElementData->wrappedLines.length++;
                 if (lineLengthChars == 0 || measuredWord->length == 0) {
                     wordIndex = measuredWord->next;
