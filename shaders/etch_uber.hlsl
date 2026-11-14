@@ -9,12 +9,14 @@
 #define ETCH_PRIM_BLUR_GLASS  5u
 #define ETCH_PRIM_CANVAS_GRID 6u
 #define ETCH_PRIM_BEZIER_WIRE 7u
+#define ETCH_PRIM_RING_ARC    8u
 
 #define ETCH_FLAG_LINEAR_GRAD   (1u << 0)
 #define ETCH_FLAG_RADIAL_GRAD   (1u << 1)
 #define ETCH_FLAG_ROUNDED_CLIP  (1u << 2)
 #define ETCH_FLAG_PREMULTIPLIED (1u << 3)
 #define ETCH_FLAG_STEM_DARKEN   (1u << 4)
+#define ETCH_FLAG_ROUND_CAP     (1u << 5)
 
 #define ETCH_GLOBAL_MANUAL_SRGB (1u << 31)
 
@@ -178,9 +180,9 @@ VSOut vs_main(uint vertex_id : SV_VertexID, uint instance_id : SV_InstanceID)
     float2 r_br_bl   = unpack_f16x2_custom(p.payload.w);
 
     float pad = 1.0f;
-    if (kind == ETCH_PRIM_GLYPH || kind == ETCH_PRIM_CANVAS_GRID || kind == ETCH_PRIM_BEZIER_WIRE)
+    if (kind == ETCH_PRIM_GLYPH || kind == ETCH_PRIM_CANVAS_GRID || kind == ETCH_PRIM_BEZIER_WIRE || kind == ETCH_PRIM_RING_ARC)
     {
-        // Keep glyph quad inside texel bounds; CanvasGrid & BezierWire already include AA/glow bounds.
+        // Keep glyph quad inside texel bounds; CanvasGrid, BezierWire & RingArc already include AA/glow bounds.
         pad = 0.0f;
     }
     else if (kind == ETCH_PRIM_SHADOW)
@@ -231,6 +233,11 @@ VSOut vs_main(uint vertex_id : SV_VertexID, uint instance_id : SV_InstanceID)
         uv_rect = float4(unpack_unorm16x2(p.payload.x), unpack_unorm16x2(p.payload.y));
         r_tl_tr = unpack_unorm16x2(p.payload.z);
         r_br_bl = float2(0.0f, 0.0f);
+        col1    = unpack_rgba8_srgb_to_linear(p.payload.w);
+    }
+    else if (kind == ETCH_PRIM_RING_ARC)
+    {
+        uv_rect = float4(asfloat(p.payload.x), asfloat(p.payload.y), r_tl_tr.x, r_tl_tr.y);
         col1    = unpack_rgba8_srgb_to_linear(p.payload.w);
     }
     else if ((flags & (ETCH_FLAG_LINEAR_GRAD | ETCH_FLAG_RADIAL_GRAD)) != 0u)
@@ -681,6 +688,88 @@ float4 ps_main(VSOut input) : SV_Target0
             glow_pm        = float4(input.border_color.rgb, 1.0f) * (input.border_color.a * glow_cov);
         }
         out_pm = core_pm + glow_pm * (1.0f - core_pm.a);
+    }
+    else if (kind == ETCH_PRIM_RING_ARC)
+    {
+        float start_rad = input.uv_rect.x;
+        float sweep_rad = input.uv_rect.y;
+        float abs_sweep = abs(sweep_rad);
+        float radius    = max(input.uv_rect.z, 0.5f);
+        float half_w    = max(input.uv_rect.w, 0.5f);
+        float glow_r    = input.grad_params.w;
+
+        if (abs_sweep >= 1e-4f || (flags & ETCH_FLAG_ROUND_CAP) != 0u)
+        {
+            float  mid = start_rad + 0.5f * sweep_rad;
+            float2 u   = float2(cos(mid), sin(mid));
+            float2 v   = float2(-u.y, u.x);
+            float  p_u = dot(p_rel, u);
+            float  p_v = dot(p_rel, v);
+
+            float d = 0.0f;
+            if (abs_sweep >= 6.2830f)
+            {
+                d = abs(length(p_rel) - radius) - half_w;
+            }
+            else if (abs_sweep < 1e-4f)
+            {
+                d = length(p_rel - u * radius) - half_w;
+            }
+            else
+            {
+                float  alpha = 0.5f * abs_sweep;
+                float2 q     = float2(abs(p_v), p_u);
+                float2 sc    = float2(sin(alpha), cos(alpha));
+                if (sc.y * q.x <= sc.x * q.y)
+                {
+                    d = abs(length(q) - radius) - half_w;
+                }
+                else if ((flags & ETCH_FLAG_ROUND_CAP) != 0u)
+                {
+                    d = length(q - sc * radius) - half_w;
+                }
+                else
+                {
+                    float proj = clamp(dot(q, sc), max(radius - half_w, 0.0f), radius + half_w);
+                    d = length(q - sc * proj);
+                }
+            }
+
+            float grad_t = 0.0f;
+            if (abs_sweep >= 1e-4f)
+            {
+                if (abs_sweep >= 6.2830f)
+                {
+                    float2 u0       = float2(cos(start_rad), sin(start_rad));
+                    float2 v0       = float2(-u0.y, u0.x);
+                    float  a0       = (length(p_rel) > 1e-4f) ? atan2(dot(p_rel, v0), dot(p_rel, u0)) : 0.0f;
+                    float  signed_a = (sweep_rad >= 0.0f) ? a0 : -a0;
+                    if (signed_a < 0.0f)
+                    {
+                        signed_a += 6.28318531f;
+                    }
+                    grad_t = saturate(signed_a / abs_sweep);
+                }
+                else
+                {
+                    float ang = (abs(p_u) + abs(p_v) > 1e-4f) ? atan2(p_v, p_u) : 0.0f;
+                    grad_t = saturate(0.5f + ang / sweep_rad);
+                }
+            }
+
+            float  core_cov = saturate(0.5f - d);
+            float4 arc_col  = lerp(input.color0, input.color1, grad_t);
+            float4 core_pm  = float4(arc_col.rgb, 1.0f) * (arc_col.a * core_cov);
+
+            float4 glow_pm = float4(0.0f, 0.0f, 0.0f, 0.0f);
+            if (glow_r > 0.25f && input.border_color.a > 0.0f)
+            {
+                float gd       = max(d, 0.0f);
+                float glow_cov = exp(-(gd * gd) / max(0.35f * glow_r * glow_r, 1.0f));
+                glow_pm        = float4(input.border_color.rgb, 1.0f) * (input.border_color.a * glow_cov);
+            }
+            out_pm = core_pm + glow_pm * (1.0f - core_pm.a);
+        }
     }
 
     out_pm *= clip_cov;

@@ -511,6 +511,8 @@ typedef struct Clay_FloatingElementConfig {
     // CLAY_CLIP_TO_NONE (default) - The floating element does not inherit clipping.
     // CLAY_CLIP_TO_ATTACHED_PARENT - The floating element is clipped to the same clipping rectangle as the element it's attached to.
     Clay_FloatingClipToElement clipTo;
+    // When true, clamps the floating container within the viewport with a small margin.
+    bool clampToViewport;
 } Clay_FloatingElementConfig;
 
 CLAY__WRAPPER_STRUCT(Clay_FloatingElementConfig);
@@ -2814,6 +2816,13 @@ void Clay__CalculateFinalLayout(float deltaTime, bool useStoredBoundingBoxes, bo
                     });
                 }
             }
+        }
+        if (rootElement->config.floating.attachTo != CLAY_ATTACH_TO_NONE && rootElement->config.floating.clampToViewport) {
+            const float margin = 6.0f;
+            const float maxX = CLAY__MAX(margin, context->layoutDimensions.width - rootElement->dimensions.width - margin);
+            const float maxY = CLAY__MAX(margin, context->layoutDimensions.height - rootElement->dimensions.height - margin);
+            rootPosition.x = CLAY__MIN(CLAY__MAX(rootPosition.x, margin), maxX);
+            rootPosition.y = CLAY__MIN(CLAY__MAX(rootPosition.y, margin), maxY);
         }
         Clay__LayoutElementTreeNodeArray_Add(&dfsBuffer, CLAY__INIT(Clay__LayoutElementTreeNode) { .layoutElement = rootElement, .position = rootPosition, .nextChildOffset = { .x = (float)rootElement->config.layout.padding.left, .y = (float)rootElement->config.layout.padding.top } });
 

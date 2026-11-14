@@ -2499,6 +2499,486 @@ void emit_text_input_command(
     }
 }
 
+constexpr uint16_t sdl_mod_to_etch(uint16_t sdl_mod) noexcept {
+    uint16_t out = Mod_None;
+    if ((sdl_mod & SDL_KMOD_SHIFT) != 0u) out = static_cast<uint16_t>(out | Mod_Shift);
+    if ((sdl_mod & SDL_KMOD_CTRL)  != 0u) out = static_cast<uint16_t>(out | Mod_Ctrl);
+    if ((sdl_mod & SDL_KMOD_ALT)   != 0u) out = static_cast<uint16_t>(out | Mod_Alt);
+    if ((sdl_mod & SDL_KMOD_GUI)   != 0u) out = static_cast<uint16_t>(out | Mod_Super);
+    return out;
+}
+
+constexpr uint16_t etch_mod_to_sdl(uint16_t emod) noexcept {
+    uint16_t out = 0u;
+    if ((emod & Mod_Shift) != 0u) out = static_cast<uint16_t>(out | SDL_KMOD_SHIFT);
+    if ((emod & Mod_Ctrl)  != 0u) out = static_cast<uint16_t>(out | SDL_KMOD_CTRL);
+    if ((emod & Mod_Alt)   != 0u) out = static_cast<uint16_t>(out | SDL_KMOD_ALT);
+    if ((emod & Mod_Super) != 0u) out = static_cast<uint16_t>(out | SDL_KMOD_GUI);
+    return out;
+}
+
+WidgetState* find_topmost_user_element(
+    Context* ctx,
+    Clay_ElementIdArray over,
+    uint32_t hovered_span_id) noexcept
+{
+    if (hovered_span_id != 0u) {
+        if (WidgetState* sws = state_map_find(&ctx->states, hovered_span_id)) {
+            if (sws->is_user_element) {
+                return sws;
+            }
+        }
+    }
+    for (int32_t i = over.length - 1; i >= 0; --i) {
+        WidgetState* ws = state_map_find(&ctx->states, over.internalArray[i].id);
+        if (ws && ws->is_user_element) {
+            return ws;
+        }
+    }
+    return nullptr;
+}
+
+bool is_single_nonbreak_utf8_codepoint(Str ins) noexcept {
+    if (!ins.chars || ins.length == 0u || ins.length > 4u) {
+        return false;
+    }
+    const char* p = ins.chars;
+    const char* end = ins.chars + ins.length;
+    const uint32_t cp = next_utf8_codepoint(p, end);
+    if (p != end) {
+        return false;
+    }
+    return cp != ' ' && cp != '\n' && cp != '\t';
+}
+
+void undo_reset_slot(TextUndoSlot* slot) noexcept {
+    slot->head = 0u;
+    slot->count = 0u;
+    slot->cur = 0u;
+    slot->write_pos = 0u;
+    slot->bytes_used = 0u;
+    slot->last_coalesce_sec = -10.0f;
+    slot->last_op_group = 0u;
+}
+
+TextUndoSlot* undo_acquire_slot(Context* ctx, uint32_t widget_id, uint32_t frame_index) noexcept {
+    TextUndoSlot* lru = &ctx->undo_pool[0];
+    for (uint32_t i = 0u; i < kTextUndoSlots; ++i) {
+        TextUndoSlot* s = &ctx->undo_pool[i];
+        if (s->widget_id == widget_id) {
+            s->last_used_frame = frame_index;
+            return s;
+        }
+        if (s->widget_id == 0u) {
+            s->widget_id = widget_id;
+            s->last_used_frame = frame_index;
+            undo_reset_slot(s);
+            return s;
+        }
+        if (s->last_used_frame < lru->last_used_frame) {
+            lru = s;
+        }
+    }
+    lru->widget_id = widget_id;
+    lru->last_used_frame = frame_index;
+    undo_reset_slot(lru);
+    return lru;
+}
+
+void undo_pop_tail(TextUndoSlot* slot) noexcept {
+    const uint32_t tail_idx = (slot->head + slot->count - 1u) % kTextUndoMaxEntries;
+    const TextUndoRecord& tail = slot->entries[tail_idx];
+    slot->write_pos = tail.offset;
+    slot->bytes_used = static_cast<uint16_t>(slot->bytes_used - tail.length);
+    --slot->count;
+}
+
+void undo_push_snapshot(
+    TextUndoSlot* slot,
+    const char* buf,
+    uint32_t len,
+    uint32_t cursor,
+    uint32_t anchor,
+    float elapsed_sec,
+    uint8_t op_group) noexcept
+{
+    if (len > kTextUndoByteCap) {
+        undo_reset_slot(slot);
+        return;
+    }
+    while (slot->count > 0u && slot->count > slot->cur + 1u) {
+        undo_pop_tail(slot);
+    }
+    const float dt = elapsed_sec - slot->last_coalesce_sec;
+    if (op_group != 0u && op_group == slot->last_op_group &&
+        slot->count >= 2u && dt > 0.0f && dt <= 0.30f)
+    {
+        undo_pop_tail(slot);
+    }
+    while (slot->count > 0u &&
+           (slot->count >= kTextUndoMaxEntries || uint32_t(slot->bytes_used) + len > kTextUndoByteCap))
+    {
+        const TextUndoRecord& oldest = slot->entries[slot->head];
+        slot->bytes_used = static_cast<uint16_t>(slot->bytes_used - oldest.length);
+        slot->head = (slot->head + 1u) % kTextUndoMaxEntries;
+        --slot->count;
+    }
+    if (slot->count == 0u) {
+        slot->head = 0u;
+        slot->write_pos = 0u;
+        slot->bytes_used = 0u;
+    }
+    const uint32_t hash = (len > 0u && buf) ? fnv1a_32_step(2166136261u, buf, len) : 2166136261u;
+    const uint16_t start_off = slot->write_pos;
+    if (len > 0u && buf) {
+        const uint32_t first = kTextUndoByteCap - start_off;
+        if (len <= first) {
+            std::memcpy(slot->bytes + start_off, buf, len);
+        } else {
+            std::memcpy(slot->bytes + start_off, buf, first);
+            std::memcpy(slot->bytes, buf + first, len - first);
+        }
+    }
+    const uint32_t ins_idx = (slot->head + slot->count) % kTextUndoMaxEntries;
+    slot->entries[ins_idx] = TextUndoRecord{
+        .offset = start_off,
+        .length = static_cast<uint16_t>(len),
+        .cursor = cursor,
+        .anchor = anchor,
+        .hash = hash,
+    };
+    slot->write_pos = static_cast<uint16_t>((uint32_t(start_off) + len) % kTextUndoByteCap);
+    slot->bytes_used = static_cast<uint16_t>(slot->bytes_used + len);
+    slot->cur = slot->count;
+    ++slot->count;
+    slot->last_coalesce_sec = elapsed_sec;
+    slot->last_op_group = op_group;
+}
+
+bool undo_restore(
+    TextUndoSlot* slot,
+    uint32_t target_cur,
+    char* buf,
+    uint32_t cap,
+    uint32_t* io_len,
+    uint32_t* io_cursor,
+    uint32_t* io_anchor) noexcept
+{
+    if (!slot || !buf || cap == 0u || target_cur >= slot->count) {
+        return false;
+    }
+    const TextUndoRecord& rec = slot->entries[(slot->head + target_cur) % kTextUndoMaxEntries];
+    const uint32_t max_copy = cap - 1u;
+    const uint32_t to_copy = (rec.length <= max_copy) ? rec.length : max_copy;
+    if (to_copy > 0u) {
+        const uint32_t first = kTextUndoByteCap - rec.offset;
+        if (to_copy <= first) {
+            std::memcpy(buf, slot->bytes + rec.offset, to_copy);
+        } else {
+            std::memcpy(buf, slot->bytes + rec.offset, first);
+            std::memcpy(buf + first, slot->bytes, to_copy - first);
+        }
+    }
+    uint32_t clamped_len = to_copy;
+    if (clamped_len > 0u && to_copy < rec.length) {
+        const uint32_t lead = utf8_prev_boundary(buf, to_copy, to_copy);
+        const uint8_t lb = static_cast<uint8_t>(buf[lead]);
+        const uint32_t cp_bytes = (lb < 0x80u) ? 1u
+            : ((lb & 0xE0u) == 0xC0u) ? 2u
+            : ((lb & 0xF0u) == 0xE0u) ? 3u
+            : (((lb & 0xF8u) == 0xF0u) ? 4u : 1u);
+        if (lead + cp_bytes > to_copy) {
+            clamped_len = lead;
+        }
+    }
+    buf[clamped_len] = '\0';
+    *io_len = clamped_len;
+    *io_cursor = utf8_clamp_boundary(buf, clamped_len, rec.cursor);
+    *io_anchor = utf8_clamp_boundary(buf, clamped_len, rec.anchor);
+    slot->cur = target_cur;
+    slot->last_op_group = 0u;
+    return true;
+}
+
+void emit_vector_icon_quad(
+    Context* ctx,
+    uint16_t icon_id,
+    Rect target_px,
+    Color color,
+    const ClipEntry& clip) noexcept
+{
+    if (icon_id >= kMaxVectorIcons || color.a == 0u || target_px.w <= 0.0f || target_px.h <= 0.0f) {
+        return;
+    }
+    const VectorIconEntry& ic = ctx->atlas.icons[icon_id];
+    if (!ic.loaded || !ic.has_outline || ic.view_size.x <= 0.0f || ic.view_size.y <= 0.0f) {
+        return;
+    }
+    const float sx = target_px.w / ic.view_size.x;
+    const float sy = target_px.h / ic.view_size.y;
+    const float s = (sx < sy) ? sx : sy;
+    const float w = ic.view_size.x * s;
+    const float h = ic.view_size.y * s;
+    const Rect quad = {
+        .x = target_px.x + 0.5f * (target_px.w - w),
+        .y = target_px.y + 0.5f * (target_px.h - h),
+        .w = w,
+        .h = h,
+    };
+    push_prim(
+        ctx,
+        Prim::make_slug_glyph(
+            quad,
+            clip.rect,
+            color,
+            ic.band_offset,
+            ic.num_hbands,
+            ic.num_vbands,
+            clip.radius,
+            PrimFlag_None));
+}
+
+DrawCmdNode* append_open_box_draw_cmd(Context* ctx, bool foreground) noexcept {
+    if (!ctx || !ctx->in_frame || !ctx->clay_ctx) {
+        return nullptr;
+    }
+    Clay_SetCurrentContext(ctx->clay_ctx);
+    if (ctx->clay_ctx->openLayoutElementStack.length < 2) {
+        return nullptr;
+    }
+    Clay_LayoutElement* open_elem = Clay__GetOpenLayoutElement();
+    if (!open_elem || open_elem->isTextElement) {
+        return nullptr;
+    }
+    BoxExtra* extra = static_cast<BoxExtra*>(open_elem->config.userData);
+    if (!extra) {
+        extra = ctx->frame_arena.alloc<BoxExtra>();
+        if (!extra) {
+            return nullptr;
+        }
+        extra->kind = CustomCmdKind::Box;
+        open_elem->config.userData = extra;
+    }
+    if (!foreground) {
+        if (open_elem->config.custom.customData == nullptr) {
+            open_elem->config.custom.customData = extra;
+        }
+    } else {
+        const Clay_BorderWidth& bw = open_elem->config.border.width;
+        if (bw.left == 0u && bw.right == 0u && bw.top == 0u && bw.bottom == 0u && bw.betweenChildren == 0u) {
+            open_elem->config.border.color = Clay_Color{255.0f, 255.0f, 255.0f, 1.0f};
+            open_elem->config.border.width = Clay_BorderWidth{1u, 1u, 1u, 1u, 0u};
+        }
+    }
+    DrawCmdNode* node = ctx->frame_arena.alloc<DrawCmdNode>();
+    if (!node) {
+        return nullptr;
+    }
+    *node = DrawCmdNode{};
+    node->world_scale = current_world_scale(ctx);
+    if (!foreground) {
+        if (!extra->draw_head) {
+            extra->draw_head = node;
+            extra->draw_tail = node;
+        } else {
+            extra->draw_tail->next = node;
+            extra->draw_tail = node;
+        }
+    } else {
+        if (!extra->fg_draw_head) {
+            extra->fg_draw_head = node;
+            extra->fg_draw_tail = node;
+        } else {
+            extra->fg_draw_tail->next = node;
+            extra->fg_draw_tail = node;
+        }
+    }
+    return node;
+}
+
+void emit_draw_list_command(
+    Context* ctx,
+    const DrawCmdNode* head,
+    Rect box_px,
+    const ClipEntry& clip,
+    float dpi) noexcept
+{
+    const Vec2 origin = { box_px.x, box_px.y };
+    for (const DrawCmdNode* node = head; node != nullptr; node = node->next) {
+        const float scale = node->world_scale * dpi;
+        switch (node->kind) {
+            case DrawCmdKind::Rect: {
+                const RectDrawDesc& rd = node->rect;
+                const Rect r_px = {
+                    .x = origin.x + rd.rect.x * scale,
+                    .y = origin.y + rd.rect.y * scale,
+                    .w = rd.rect.w * scale,
+                    .h = rd.rect.h * scale,
+                };
+                const Corners rad_px = scale_corners(rd.radius, scale);
+                const float bw_px = rd.border_width * scale;
+                const bool has_grad = (rd.fill_end.a > 0u) || rd.radial_gradient;
+                if (has_grad) {
+                    push_prim(
+                        ctx,
+                        Prim::make_gradient_rect(
+                            r_px,
+                            clip.rect,
+                            rd.fill,
+                            rd.fill_end,
+                            rd.gradient_dir,
+                            rad_px,
+                            rd.border_color,
+                            bw_px,
+                            clip.radius,
+                            rd.radial_gradient));
+                } else if (rd.fill.a > 0u || (bw_px > 0.0f && rd.border_color.a > 0u)) {
+                    push_prim(
+                        ctx,
+                        Prim::make_rect(
+                            r_px,
+                            clip.rect,
+                            rd.fill,
+                            rad_px,
+                            rd.border_color,
+                            bw_px,
+                            1.0f,
+                            clip.radius));
+                }
+                break;
+            }
+            case DrawCmdKind::Line: {
+                const LineDesc& ld = node->line;
+                const Vec2 a = origin + ld.from * scale;
+                const Vec2 b = origin + ld.to * scale;
+                const Vec2 mid = (a + b) * 0.5f;
+                const float hw = 0.5f * ((ld.thickness * scale > 0.75f) ? (ld.thickness * scale) : 0.75f);
+                const Color c_end = (ld.color_end.a > 0u) ? ld.color_end : ld.color;
+                push_prim(
+                    ctx,
+                    Prim::make_bezier_wire(
+                        a, mid, b, clip.rect, ld.color, c_end, hw, ld.glow_color, ld.glow_px * scale, clip.radius));
+                break;
+            }
+            case DrawCmdKind::Polyline: {
+                if (!node->poly_points || node->poly_count < 2u || node->poly_color.a == 0u) {
+                    break;
+                }
+                const float hw = 0.5f * ((node->poly_thickness * scale > 0.75f) ? (node->poly_thickness * scale) : 0.75f);
+                const float glow = node->poly_glow_px * scale;
+                const uint32_t segs = (node->poly_closed && node->poly_count >= 3u)
+                    ? node->poly_count
+                    : (node->poly_count - 1u);
+                for (uint32_t i = 0u; i < segs; ++i) {
+                    const Vec2 a = origin + node->poly_points[i] * scale;
+                    const Vec2 b = origin + node->poly_points[(i + 1u) % node->poly_count] * scale;
+                    const Vec2 mid = (a + b) * 0.5f;
+                    push_prim(
+                        ctx,
+                        Prim::make_bezier_wire(
+                            a, mid, b, clip.rect, node->poly_color, node->poly_color, hw, node->poly_glow_color, glow, clip.radius));
+                }
+                break;
+            }
+            case DrawCmdKind::Bezier: {
+                const BezierDesc& bz = node->bezier;
+                const float hw = 0.5f * ((bz.thickness * scale > 0.75f) ? (bz.thickness * scale) : 0.75f);
+                const float glow = bz.glow_px * scale;
+                const Color c_end = (bz.color_end.a > 0u) ? bz.color_end : bz.color_start;
+                const Vec2 p0 = origin + bz.p0 * scale;
+                const Vec2 p1 = origin + bz.p1 * scale;
+                const Vec2 p2 = origin + bz.p2 * scale;
+                if (!bz.cubic) {
+                    push_prim(
+                        ctx,
+                        Prim::make_bezier_wire(
+                            p0, p1, p2, clip.rect, bz.color_start, c_end, hw, bz.glow_color, glow, clip.radius));
+                } else {
+                    const Vec2 p3 = origin + bz.p3 * scale;
+                    const auto eval_c = [&](float t) noexcept -> Vec2 {
+                        const float u = 1.0f - t;
+                        return p0 * (u * u * u) + p1 * (3.0f * u * u * t) + p2 * (3.0f * u * t * t) + p3 * (t * t * t);
+                    };
+                    const auto eval_d = [&](float t) noexcept -> Vec2 {
+                        const float u = 1.0f - t;
+                        return ((p1 - p0) * (u * u) + (p2 - p1) * (2.0f * u * t) + (p3 - p2) * (t * t)) * 3.0f;
+                    };
+                    constexpr float dt = 0.25f;
+                    for (uint32_t i = 0u; i < 4u; ++i) {
+                        const float t0 = static_cast<float>(i) * dt;
+                        const float t1 = static_cast<float>(i + 1u) * dt;
+                        const Vec2 a = eval_c(t0);
+                        const Vec2 d = eval_c(t1);
+                        const Vec2 b_ctrl = a + eval_d(t0) * (dt / 3.0f);
+                        const Vec2 c_ctrl = d - eval_d(t1) * (dt / 3.0f);
+                        const Vec2 q_ctrl = (b_ctrl + c_ctrl) * 0.75f - (a + d) * 0.25f;
+                        const Color cs = Color::lerp(bz.color_start, c_end, t0);
+                        const Color ce = Color::lerp(bz.color_start, c_end, t1);
+                        push_prim(
+                            ctx,
+                            Prim::make_bezier_wire(
+                                a, q_ctrl, d, clip.rect, cs, ce, hw, bz.glow_color, glow, clip.radius));
+                    }
+                }
+                break;
+            }
+            case DrawCmdKind::Ring: {
+                const RingDesc& rn = node->ring;
+                const Vec2 center_px = origin + rn.center * scale;
+                const float r_px = (rn.radius > 0.5f) ? (rn.radius * scale) : (0.5f * scale);
+                const float half_t_px = 0.5f * ((rn.thickness > 0.75f) ? (rn.thickness * scale) : (0.75f * scale));
+                if (rn.track_color.a > 0u) {
+                    push_prim(
+                        ctx,
+                        Prim::make_ring_arc(
+                            center_px,
+                            r_px,
+                            half_t_px,
+                            0.0f,
+                            6.28318531f,
+                            clip.rect,
+                            rn.track_color,
+                            rn.track_color,
+                            false,
+                            Color{},
+                            0.0f,
+                            clip.radius));
+                }
+                const Color col_end = (rn.color_end.a > 0u) ? rn.color_end : rn.color;
+                if (rn.color.a > 0u || col_end.a > 0u) {
+                    push_prim(
+                        ctx,
+                        Prim::make_ring_arc(
+                            center_px,
+                            r_px,
+                            half_t_px,
+                            rn.start_angle_rad,
+                            rn.sweep_angle_rad,
+                            clip.rect,
+                            rn.color,
+                            col_end,
+                            rn.round_caps,
+                            rn.glow_color,
+                            rn.glow_px * scale,
+                            clip.radius));
+                }
+                break;
+            }
+            case DrawCmdKind::Icon: {
+                const IconDrawDesc& ic = node->icon;
+                const Rect target_px = {
+                    .x = origin.x + ic.rect.x * scale,
+                    .y = origin.y + ic.rect.y * scale,
+                    .w = ic.rect.w * scale,
+                    .h = ic.rect.h * scale,
+                };
+                emit_vector_icon_quad(ctx, ic.icon_id, target_px, ic.color, clip);
+                break;
+            }
+        }
+    }
+}
+
 } // namespace
 
 bool needs_redraw(const Context* ctx) noexcept {
@@ -2578,10 +3058,15 @@ void process_event(Context* ctx, const SDL_Event& event) noexcept {
                     ctx->caret_blink_cycles = 0u;
                 }
                 request_redraw(ctx);
-            } else if (event.button.button == SDL_BUTTON_MIDDLE || event.button.button == SDL_BUTTON_RIGHT) {
+            } else if (event.button.button == SDL_BUTTON_MIDDLE) {
                 ctx->event_pointer_pos = window_to_logical_pos(ctx, event.button.x, event.button.y);
                 ctx->has_event_pointer = true;
-                ctx->event_pan_button_down = (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN);
+                ctx->event_middle_down = (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN);
+                request_redraw(ctx);
+            } else if (event.button.button == SDL_BUTTON_RIGHT) {
+                ctx->event_pointer_pos = window_to_logical_pos(ctx, event.button.x, event.button.y);
+                ctx->has_event_pointer = true;
+                ctx->event_right_down = (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN);
                 request_redraw(ctx);
             }
             break;
@@ -2639,6 +3124,7 @@ void process_event(Context* ctx, const SDL_Event& event) noexcept {
             break;
         }
         case SDL_EVENT_KEY_DOWN:
+            ctx->event_key_mods = sdl_mod_to_etch(event.key.mod);
             if (event.key.key == SDLK_F12 && !event.key.repeat) {
                 ctx->debug_hud_open = !ctx->debug_hud_open;
                 request_redraw(ctx);
@@ -2652,11 +3138,19 @@ void process_event(Context* ctx, const SDL_Event& event) noexcept {
             if (event.key.key == SDLK_SPACE) {
                 ctx->space_down = true;
             }
+            if (ctx->pending_key_count < kMaxKeyEventsPerFrame) {
+                ctx->pending_keys[ctx->pending_key_count++] = KeyEventEntry{
+                    .key = static_cast<uint32_t>(event.key.key),
+                    .mods = ctx->event_key_mods,
+                    .repeat = event.key.repeat,
+                };
+            }
             ctx->caret_blink_on = true;
             ctx->caret_blink_cycles = 0u;
             if (ctx->ime_comp_len > 0u) {
                 if (event.key.key == SDLK_ESCAPE) {
                     clear_ime_composition(ctx);
+                    ctx->pending_escape_consumed_by_ime = true;
                     if (!ctx->headless && ctx->window) {
                         SDL_ClearComposition(ctx->window);
                     }
@@ -2678,10 +3172,16 @@ void process_event(Context* ctx, const SDL_Event& event) noexcept {
             request_redraw(ctx);
             break;
         case SDL_EVENT_KEY_UP:
+            ctx->event_key_mods = sdl_mod_to_etch(event.key.mod);
             if (event.key.key == SDLK_SPACE) {
                 ctx->space_down = false;
             }
             request_redraw(ctx);
+            break;
+        case SDL_EVENT_DROP_FILE:
+            if (event.drop.data && event.drop.data[0] != '\0') {
+                inject_drop_file(ctx, str_cstr(event.drop.data));
+            }
             break;
         case SDL_EVENT_WINDOW_MOUSE_LEAVE:
             if (!ctx->mouse_captured) {
@@ -2692,7 +3192,11 @@ void process_event(Context* ctx, const SDL_Event& event) noexcept {
             break;
         case SDL_EVENT_WINDOW_FOCUS_LOST:
             ctx->event_pointer_down = false;
-            ctx->event_pan_button_down = false;
+            ctx->event_middle_down = false;
+            ctx->event_right_down = false;
+            ctx->event_key_mods = 0u;
+            ctx->right_active_id = 0u;
+            ctx->right_drag_exceeded = false;
             ctx->pan_canvas_id = 0u;
             ctx->space_down = false;
             ctx->active_id = 0u;
@@ -2746,6 +3250,54 @@ void begin_frame(Context* ctx, const FrameDesc& desc) noexcept {
     }
     ctx->pending_text_op_count = 0u;
     ctx->pending_text_utf8_len = 0u;
+
+    uint16_t kmods = static_cast<uint16_t>(desc.key_mods | ctx->event_key_mods);
+    if (!ctx->headless) {
+        kmods = static_cast<uint16_t>(kmods | sdl_mod_to_etch(SDL_GetModState()));
+    }
+    ctx->frame_key_mods = kmods;
+    ctx->frame_escape_consumed_by_ime = ctx->pending_escape_consumed_by_ime;
+    ctx->pending_escape_consumed_by_ime = false;
+
+    ctx->frame_key_count = ctx->pending_key_count;
+    if (ctx->frame_key_count > 0u) {
+        std::memcpy(ctx->frame_keys, ctx->pending_keys, size_t(ctx->frame_key_count) * sizeof(KeyEventEntry));
+    }
+    ctx->pending_key_count = 0u;
+
+    if (desc.key_pressed_code != 0u) {
+        if (ctx->frame_key_count < kMaxKeyEventsPerFrame) {
+            ctx->frame_keys[ctx->frame_key_count++] = KeyEventEntry{
+                .key = desc.key_pressed_code,
+                .mods = ctx->frame_key_mods,
+                .repeat = false,
+            };
+        }
+        if (ctx->ime_comp_len == 0u) {
+            if (desc.key_pressed_code == SDLK_TAB) {
+                ctx->pending_tab_delta += ((ctx->frame_key_mods & Mod_Shift) != 0u) ? -1 : 1;
+            } else if (ctx->frame_text_op_count < kMaxTextOpsPerFrame) {
+                ctx->frame_text_ops[ctx->frame_text_op_count++] = PendingTextOp{
+                    .kind = TextEditOpKind::KeyPress,
+                    .mod = etch_mod_to_sdl(ctx->frame_key_mods),
+                    .key = static_cast<SDL_Keycode>(desc.key_pressed_code),
+                };
+            }
+        }
+    }
+
+    ctx->frame_drop_count = ctx->pending_drop_count;
+    if (ctx->pending_drop_bytes > 0u) {
+        std::memcpy(ctx->frame_drop_buf, ctx->pending_drop_buf, ctx->pending_drop_bytes);
+        for (uint32_t i = 0u; i < ctx->frame_drop_count; ++i) {
+            ctx->frame_drops[i] = Str{
+                ctx->frame_drop_buf + ctx->pending_drop_offsets[i],
+                ctx->pending_drop_lengths[i],
+            };
+        }
+    }
+    ctx->pending_drop_count = 0u;
+    ctx->pending_drop_bytes = 0u;
 
     ctx->prev_focus_count = ctx->focus_count;
     if (ctx->prev_focus_count > 0u) {
@@ -2806,15 +3358,37 @@ void begin_frame(Context* ctx, const FrameDesc& desc) noexcept {
         pointer_pos = ctx->event_pointer_pos;
     }
     ctx->pointer_pos = pointer_pos;
+    if (ctx->prev_pointer_pos.x >= 0.0f && ctx->prev_pointer_pos.y >= 0.0f &&
+        pointer_pos.x >= 0.0f && pointer_pos.y >= 0.0f)
+    {
+        ctx->pointer_delta = Vec2{ pointer_pos.x - ctx->prev_pointer_pos.x, pointer_pos.y - ctx->prev_pointer_pos.y };
+    } else {
+        ctx->pointer_delta = Vec2{ 0.0f, 0.0f };
+    }
 
     const bool pointer_down = desc.pointer_down || ctx->event_pointer_down;
     const bool pressed_this_frame = pointer_down && !ctx->prev_pointer_down;
     const bool released_this_frame = !pointer_down && ctx->prev_pointer_down;
     ctx->prev_pointer_down = pointer_down;
+    ctx->left_pressed_this_frame = pressed_this_frame;
+    if (pressed_this_frame) {
+        if (desc.pointer_clicks > 0u) {
+            ctx->last_mouse_clicks = desc.pointer_clicks;
+        } else if (!ctx->event_pointer_down) {
+            ctx->last_mouse_clicks = 1u;
+        }
+    }
 
-    const bool pan_button_down = ctx->event_pan_button_down;
-    const bool pan_pressed_this_frame = pan_button_down && !ctx->prev_pan_button_down;
-    ctx->prev_pan_button_down = pan_button_down;
+    const bool middle_down = ctx->event_middle_down;
+    const bool middle_pressed_this_frame = middle_down && !ctx->prev_pan_button_down;
+    ctx->prev_pan_button_down = middle_down;
+
+    const bool right_down = desc.right_pointer_down || ctx->event_right_down;
+    const bool right_pressed_this_frame = right_down && !ctx->prev_right_down;
+    const bool right_released_this_frame = !right_down && ctx->prev_right_down;
+    ctx->prev_right_down = right_down;
+    ctx->right_pressed_this_frame = right_pressed_this_frame;
+    ctx->right_clicked_any_this_frame = false;
 
     const Vec2 scroll = (desc.scroll_delta.x != 0.0f || desc.scroll_delta.y != 0.0f)
         ? desc.scroll_delta
@@ -2835,7 +3409,7 @@ void begin_frame(Context* ctx, const FrameDesc& desc) noexcept {
     }
     bool pan_started_this_frame = false;
 
-    if (pan_pressed_this_frame) {
+    if (middle_pressed_this_frame) {
         if (WidgetState* cws = resolve_canvas_owner(ctx, over)) {
             ctx->pan_canvas_id = cws->key;
             pan_started_this_frame = true;
@@ -2843,7 +3417,56 @@ void begin_frame(Context* ctx, const FrameDesc& desc) noexcept {
         }
     }
 
+    if (right_pressed_this_frame) {
+        ctx->right_press_origin = pointer_pos;
+        ctx->right_drag_exceeded = false;
+        ctx->right_active_id = 0u;
+        if (WidgetState* rws = find_topmost_user_element(ctx, over, hovered_span_id)) {
+            ctx->right_active_id = rws->key;
+        }
+    }
+    if (right_down && !ctx->right_drag_exceeded &&
+        ctx->right_press_origin.x >= 0.0f && pointer_pos.x >= 0.0f)
+    {
+        const float dx = pointer_pos.x - ctx->right_press_origin.x;
+        const float dy = pointer_pos.y - ctx->right_press_origin.y;
+        if (dx * dx + dy * dy > 16.0f) {
+            ctx->right_drag_exceeded = true;
+            if (ctx->pan_canvas_id == 0u) {
+                if (WidgetState* cws = resolve_canvas_owner(ctx, over)) {
+                    ctx->pan_canvas_id = cws->key;
+                    pan_started_this_frame = true;
+                    request_redraw(ctx);
+                }
+            }
+        }
+    } else if (right_released_this_frame) {
+        bool drag_exceeded = ctx->right_drag_exceeded;
+        if (!drag_exceeded && ctx->right_press_origin.x >= 0.0f && pointer_pos.x >= 0.0f) {
+            const float dx = pointer_pos.x - ctx->right_press_origin.x;
+            const float dy = pointer_pos.y - ctx->right_press_origin.y;
+            drag_exceeded = (dx * dx + dy * dy > 16.0f);
+        }
+        if (!drag_exceeded) {
+            ctx->right_clicked_any_this_frame = true;
+            if (ctx->right_active_id != 0u) {
+                if (WidgetState* ws = state_map_find(&ctx->states, ctx->right_active_id)) {
+                    const bool over_right = ws->is_text_span
+                        ? ws->span_hovered
+                        : Clay_PointerOver(make_clay_id(ctx->right_active_id));
+                    if (ws->is_user_element && over_right) {
+                        ws->right_clicked_this_frame = true;
+                    }
+                }
+            }
+        }
+        ctx->right_active_id = 0u;
+        ctx->right_drag_exceeded = false;
+    }
+
     if (pressed_this_frame) {
+        ctx->left_press_origin = pointer_pos;
+        ctx->left_max_drag_dist_sq = 0.0f;
         state_map_clear_flags(&ctx->states, false, true);
         WidgetState* space_pan_canvas = (ctx->space_down && ctx->focus_id == 0u) ? resolve_canvas_owner(ctx, over) : nullptr;
         if (space_pan_canvas) {
@@ -2882,6 +3505,9 @@ void begin_frame(Context* ctx, const FrameDesc& desc) noexcept {
                             top_hit = hovered_span_id;
                             sws->pressed_down = true;
                             sws->pressed_this_frame = true;
+                            if (ctx->last_mouse_clicks >= 2u) {
+                                sws->double_clicked_this_frame = true;
+                            }
                         }
                     }
                 }
@@ -2893,6 +3519,9 @@ void begin_frame(Context* ctx, const FrameDesc& desc) noexcept {
                             top_hit = oid;
                             ws->pressed_down = true;
                             ws->pressed_this_frame = true;
+                            if (ctx->last_mouse_clicks >= 2u) {
+                                ws->double_clicked_this_frame = true;
+                            }
                             if (ws->is_canvas && ws->canvas_interactive && ctx->pan_canvas_id == 0u) {
                                 ctx->pan_canvas_id = oid;
                                 pan_started_this_frame = true;
@@ -2913,6 +3542,14 @@ void begin_frame(Context* ctx, const FrameDesc& desc) noexcept {
     }
 
     if (pointer_down && ctx->active_id != 0u) {
+        if (ctx->left_press_origin.x >= 0.0f && pointer_pos.x >= 0.0f) {
+            const float dx = pointer_pos.x - ctx->left_press_origin.x;
+            const float dy = pointer_pos.y - ctx->left_press_origin.y;
+            const float d2 = dx * dx + dy * dy;
+            if (d2 > ctx->left_max_drag_dist_sq) {
+                ctx->left_max_drag_dist_sq = d2;
+            }
+        }
         if (!ctx->headless && ctx->window && !ctx->mouse_captured) {
             if (SDL_CaptureMouse(true)) {
                 ctx->mouse_captured = true;
@@ -2939,9 +3576,11 @@ void begin_frame(Context* ctx, const FrameDesc& desc) noexcept {
         }
         state_map_clear_flags(&ctx->states, false, true);
         ctx->active_id = 0u;
+        ctx->left_max_drag_dist_sq = 0.0f;
     }
 
-    if (ctx->pan_canvas_id != 0u && (pointer_down || pan_button_down)) {
+    const bool pan_held = pointer_down || middle_down || (right_down && ctx->right_drag_exceeded);
+    if (ctx->pan_canvas_id != 0u && pan_held) {
         if (!ctx->headless && ctx->window && !ctx->mouse_captured) {
             if (SDL_CaptureMouse(true)) {
                 ctx->mouse_captured = true;
@@ -3155,6 +3794,7 @@ void begin_box(const BoxDesc& desc_in) noexcept {
             box_ws->is_focusable = desc.focusable;
             box_ws->is_scroll_x = desc.scroll_x;
             box_ws->is_scroll_y = desc.scroll_y;
+            box_ws->is_text_input_writable = false;
             box_ws->owner_canvas_id = (ctx->canvas_depth > 0u)
                 ? ctx->canvas_stack[ctx->canvas_depth - 1u].id
                 : 0u;
@@ -3225,6 +3865,7 @@ void begin_box(const BoxDesc& desc_in) noexcept {
         decl.floating.clipTo = desc.clip_to_parent
             ? CLAY_CLIP_TO_ATTACHED_PARENT
             : CLAY_CLIP_TO_NONE;
+        decl.floating.clampToViewport = desc.clamp_to_viewport;
     }
     if (any_clip) {
         decl.clip.horizontal = desc.clip_children || desc.scroll_x;
@@ -3494,6 +4135,123 @@ void image(const ImageDesc& desc_in) noexcept {
     Clay__CloseElement();
 }
 
+void icon(const IconDesc& desc_in) noexcept {
+    Context* ctx = current_context();
+    if (!ctx || !ctx->in_frame) {
+        return;
+    }
+    const float wscale = current_world_scale(ctx);
+    IconDesc desc = desc_in;
+    const float layout_sz = ((desc.size_px > 0.0f) ? desc.size_px : 16.0f) * wscale;
+
+    if (desc.id != 0u) {
+        if (WidgetState* ws = state_map_get_or_insert(&ctx->states, desc.id, ctx->frame_index)) {
+            ws->is_user_element = true;
+            ws->is_text_input_writable = false;
+            ws->owner_canvas_id = (ctx->canvas_depth > 0u)
+                ? ctx->canvas_stack[ctx->canvas_depth - 1u].id
+                : 0u;
+        }
+        Clay__OpenElementWithId(make_clay_id(desc.id));
+    } else {
+        Clay__OpenElement();
+    }
+
+    BoxExtra* extra = ctx->frame_arena.alloc<BoxExtra>();
+    Clay_ElementDeclaration decl = {};
+    decl.layout.sizing.width = CLAY_SIZING_FIXED(layout_sz);
+    decl.layout.sizing.height = CLAY_SIZING_FIXED(layout_sz);
+    if (extra) {
+        extra->kind = CustomCmdKind::Icon;
+        extra->icon_desc = desc;
+        decl.custom.customData = extra;
+        decl.userData = extra;
+    }
+    Clay__ConfigureOpenElement(decl);
+    Clay__CloseElement();
+}
+
+void draw_rect(const RectDrawDesc& desc) noexcept {
+    if (desc.rect.w <= 0.0f || desc.rect.h <= 0.0f) {
+        return;
+    }
+    Context* ctx = current_context();
+    if (DrawCmdNode* node = append_open_box_draw_cmd(ctx, desc.foreground)) {
+        node->kind = DrawCmdKind::Rect;
+        node->rect = desc;
+    }
+}
+
+void draw_line(const LineDesc& desc) noexcept {
+    if (desc.color.a == 0u && desc.color_end.a == 0u && desc.glow_color.a == 0u) {
+        return;
+    }
+    Context* ctx = current_context();
+    if (DrawCmdNode* node = append_open_box_draw_cmd(ctx, desc.foreground)) {
+        node->kind = DrawCmdKind::Line;
+        node->line = desc;
+    }
+}
+
+void draw_polyline(const PolylineDesc& desc) noexcept {
+    const size_t n = desc.points.size();
+    if (n < 2u || desc.color.a == 0u) {
+        return;
+    }
+    Context* ctx = current_context();
+    if (!ctx || n > (ctx->frame_arena.remaining() / sizeof(Vec2))) {
+        return;
+    }
+    Vec2* copy = ctx->frame_arena.alloc_uninit<Vec2>(n);
+    if (!copy) {
+        return;
+    }
+    std::memcpy(copy, desc.points.data(), n * sizeof(Vec2));
+    if (DrawCmdNode* node = append_open_box_draw_cmd(ctx, desc.foreground)) {
+        node->kind = DrawCmdKind::Polyline;
+        node->poly_points = copy;
+        node->poly_count = static_cast<uint32_t>(n);
+        node->poly_closed = desc.closed;
+        node->poly_color = desc.color;
+        node->poly_thickness = desc.thickness;
+        node->poly_glow_color = desc.glow_color;
+        node->poly_glow_px = desc.glow_px;
+    }
+}
+
+void draw_bezier(const BezierDesc& desc) noexcept {
+    if (desc.color_start.a == 0u && desc.color_end.a == 0u && desc.glow_color.a == 0u) {
+        return;
+    }
+    Context* ctx = current_context();
+    if (DrawCmdNode* node = append_open_box_draw_cmd(ctx, desc.foreground)) {
+        node->kind = DrawCmdKind::Bezier;
+        node->bezier = desc;
+    }
+}
+
+void draw_ring(const RingDesc& desc) noexcept {
+    if (desc.radius <= 0.0f) {
+        return;
+    }
+    Context* ctx = current_context();
+    if (DrawCmdNode* node = append_open_box_draw_cmd(ctx, desc.foreground)) {
+        node->kind = DrawCmdKind::Ring;
+        node->ring = desc;
+    }
+}
+
+void draw_icon(const IconDrawDesc& desc) noexcept {
+    if (desc.icon_id >= kMaxVectorIcons || desc.color.a == 0u || desc.rect.w <= 0.0f || desc.rect.h <= 0.0f) {
+        return;
+    }
+    Context* ctx = current_context();
+    if (DrawCmdNode* node = append_open_box_draw_cmd(ctx, desc.foreground)) {
+        node->kind = DrawCmdKind::Icon;
+        node->icon = desc;
+    }
+}
+
 bool set_clipboard_text(const char* utf8_text) noexcept {
     const char* src = utf8_text ? utf8_text : "";
     Context* ctx = current_context();
@@ -3600,6 +4358,9 @@ TextInputResult text_input(const TextInputDesc& desc) noexcept {
     const uint32_t cap = desc.capacity;
     uint32_t len = 0u;
     const bool writable = (buf != nullptr && cap > 1u && !desc.read_only);
+    if (ws) {
+        ws->is_text_input_writable = writable;
+    }
     if (buf && cap > 0u) {
         while (len + 1u < cap && buf[len] != '\0') {
             ++len;
@@ -3618,6 +4379,25 @@ TextInputResult text_input(const TextInputDesc& desc) noexcept {
         }
         cursor = utf8_clamp_boundary(buf, len, ws->edit_cursor);
         anchor = utf8_clamp_boundary(buf, len, ws->edit_sel_anchor);
+    }
+
+    TextUndoSlot* undo_slot = nullptr;
+    if (writable && desc.id != 0u) {
+        undo_slot = undo_acquire_slot(ctx, desc.id, ctx->frame_index);
+        if (len <= kTextUndoByteCap) {
+            const uint32_t cur_hash = (len > 0u) ? fnv1a_32_step(2166136261u, buf, len) : 2166136261u;
+            if (undo_slot->count == 0u) {
+                undo_push_snapshot(undo_slot, buf, len, cursor, anchor, ctx->elapsed_seconds, 0u);
+            } else {
+                const TextUndoRecord& cur_rec = undo_slot->entries[(undo_slot->head + undo_slot->cur) % kTextUndoMaxEntries];
+                if (cur_rec.length != len || cur_rec.hash != cur_hash) {
+                    undo_reset_slot(undo_slot);
+                    undo_push_snapshot(undo_slot, buf, len, cursor, anchor, ctx->elapsed_seconds, 0u);
+                }
+            }
+        } else {
+            undo_reset_slot(undo_slot);
+        }
     }
 
     const bool is_focused = (desc.id != 0u && ctx->focus_id == desc.id);
@@ -3655,7 +4435,7 @@ TextInputResult text_input(const TextInputDesc& desc) noexcept {
             } else if (ctx->last_mouse_clicks == 2u) {
                 utf8_word_bounds_at(buf, len, hit_byte, &anchor, &cursor);
             } else {
-                const bool shift_held = (!ctx->headless) && ((SDL_GetModState() & SDL_KMOD_SHIFT) != 0u);
+                const bool shift_held = (ctx->frame_key_mods & Mod_Shift) != 0u;
                 if (!shift_held) {
                     anchor = hit_byte;
                 }
@@ -3672,6 +4452,21 @@ TextInputResult text_input(const TextInputDesc& desc) noexcept {
     bool changed = false;
     bool submitted = false;
     if (is_focused) {
+        if (undo_slot && undo_slot->count > 0u) {
+            TextUndoRecord& cur_rec = undo_slot->entries[(undo_slot->head + undo_slot->cur) % kTextUndoMaxEntries];
+            cur_rec.cursor = cursor;
+            cur_rec.anchor = anchor;
+        }
+        const auto record_edit = [&](uint8_t op_group) noexcept {
+            changed = true;
+            if (undo_slot) {
+                if (len <= kTextUndoByteCap) {
+                    undo_push_snapshot(undo_slot, buf, len, cursor, anchor, ctx->elapsed_seconds, op_group);
+                } else {
+                    undo_reset_slot(undo_slot);
+                }
+            }
+        };
         for (uint32_t oi = 0u; oi < ctx->frame_text_op_count; ++oi) {
             const PendingTextOp& op = ctx->frame_text_ops[oi];
             const uint32_t sel_min = (cursor < anchor) ? cursor : anchor;
@@ -3683,11 +4478,12 @@ TextInputResult text_input(const TextInputDesc& desc) noexcept {
                     const Str ins = { ctx->frame_text_utf8 + op.text_offset, op.text_len };
                     const uint32_t prev_len = len;
                     const uint32_t new_pos = insert_utf8_filtered(buf, cap, &len, anchor, cursor, ins, desc.multiline);
-                    if (has_sel || len != prev_len) {
-                        changed = true;
-                    }
                     cursor = new_pos;
                     anchor = new_pos;
+                    if (has_sel || len != prev_len) {
+                        const uint8_t grp = (!has_sel && is_single_nonbreak_utf8_codepoint(ins)) ? 1u : 0u;
+                        record_edit(grp);
+                    }
                     if (ws) {
                         ws->edit_preferred_x = -1.0f;
                     }
@@ -3713,6 +4509,37 @@ TextInputResult text_input(const TextInputDesc& desc) noexcept {
                     }
                     continue;
                 }
+                if (op.key == SDLK_Z) {
+                    if (writable && undo_slot && undo_slot->count > 0u) {
+                        if (!shift && undo_slot->cur > 0u) {
+                            if (undo_restore(undo_slot, undo_slot->cur - 1u, buf, cap, &len, &cursor, &anchor)) {
+                                changed = true;
+                                if (ws) {
+                                    ws->edit_preferred_x = -1.0f;
+                                }
+                            }
+                        } else if (shift && (undo_slot->cur + 1u) < undo_slot->count) {
+                            if (undo_restore(undo_slot, undo_slot->cur + 1u, buf, cap, &len, &cursor, &anchor)) {
+                                changed = true;
+                                if (ws) {
+                                    ws->edit_preferred_x = -1.0f;
+                                }
+                            }
+                        }
+                    }
+                    continue;
+                }
+                if (op.key == SDLK_Y && !shift) {
+                    if (writable && undo_slot && (undo_slot->cur + 1u) < undo_slot->count) {
+                        if (undo_restore(undo_slot, undo_slot->cur + 1u, buf, cap, &len, &cursor, &anchor)) {
+                            changed = true;
+                            if (ws) {
+                                ws->edit_preferred_x = -1.0f;
+                            }
+                        }
+                    }
+                    continue;
+                }
                 if (op.key == SDLK_C || op.key == SDLK_X) {
                     if (!desc.password && has_sel && buf) {
                         const uint32_t s_len = sel_max - sel_min;
@@ -3724,7 +4551,7 @@ TextInputResult text_input(const TextInputDesc& desc) noexcept {
                     if (op.key == SDLK_X && writable && has_sel) {
                         cursor = erase_text_range(buf, &len, anchor, cursor);
                         anchor = cursor;
-                        changed = true;
+                        record_edit(0u);
                         if (ws) {
                             ws->edit_preferred_x = -1.0f;
                         }
@@ -3738,11 +4565,11 @@ TextInputResult text_input(const TextInputDesc& desc) noexcept {
                             const uint32_t prev_len = len;
                             const uint32_t new_pos = insert_utf8_filtered(
                                 buf, cap, &len, anchor, cursor, clip, desc.multiline);
-                            if (has_sel || len != prev_len) {
-                                changed = true;
-                            }
                             cursor = new_pos;
                             anchor = new_pos;
+                            if (has_sel || len != prev_len) {
+                                record_edit(0u);
+                            }
                             if (ws) {
                                 ws->edit_preferred_x = -1.0f;
                             }
@@ -3835,7 +4662,7 @@ TextInputResult text_input(const TextInputDesc& desc) noexcept {
                         if (has_sel) {
                             cursor = erase_text_range(buf, &len, anchor, cursor);
                             anchor = cursor;
-                            changed = true;
+                            record_edit(0u);
                         } else if (cursor > 0u) {
                             const uint32_t del_from = word_mod
                                 ? utf8_word_left(buf, len, cursor)
@@ -3843,7 +4670,7 @@ TextInputResult text_input(const TextInputDesc& desc) noexcept {
                             if (del_from < cursor) {
                                 cursor = erase_text_range(buf, &len, del_from, cursor);
                                 anchor = cursor;
-                                changed = true;
+                                record_edit(word_mod ? 0u : 2u);
                             }
                         }
                         if (ws) {
@@ -3856,7 +4683,7 @@ TextInputResult text_input(const TextInputDesc& desc) noexcept {
                         if (has_sel) {
                             cursor = erase_text_range(buf, &len, anchor, cursor);
                             anchor = cursor;
-                            changed = true;
+                            record_edit(0u);
                         } else if (cursor < len) {
                             const uint32_t del_to = word_mod
                                 ? utf8_word_right(buf, len, cursor)
@@ -3864,7 +4691,7 @@ TextInputResult text_input(const TextInputDesc& desc) noexcept {
                             if (del_to > cursor) {
                                 cursor = erase_text_range(buf, &len, cursor, del_to);
                                 anchor = cursor;
-                                changed = true;
+                                record_edit(word_mod ? 0u : 2u);
                             }
                         }
                         if (ws) {
@@ -3879,11 +4706,11 @@ TextInputResult text_input(const TextInputDesc& desc) noexcept {
                             const uint32_t prev_len = len;
                             const uint32_t new_pos = insert_utf8_filtered(
                                 buf, cap, &len, anchor, cursor, str_lit("\n"), true);
-                            if (has_sel || len != prev_len) {
-                                changed = true;
-                            }
                             cursor = new_pos;
                             anchor = new_pos;
+                            if (has_sel || len != prev_len) {
+                                record_edit(0u);
+                            }
                             if (ws) {
                                 ws->edit_preferred_x = -1.0f;
                             }
@@ -4093,6 +4920,175 @@ Rect element_bounds(uint32_t element_id) noexcept {
         ed.boundingBox.width,
         ed.boundingBox.height,
     };
+}
+
+uint16_t key_mods() noexcept {
+    const Context* ctx = current_context();
+    return ctx ? ctx->frame_key_mods : Mod_None;
+}
+
+bool key_pressed(uint32_t keycode, bool include_repeat) noexcept {
+    const Context* ctx = current_context();
+    if (!ctx || keycode == 0u) {
+        return false;
+    }
+    for (uint32_t i = 0u; i < ctx->frame_key_count; ++i) {
+        const KeyEventEntry& ev = ctx->frame_keys[i];
+        if (ev.key == keycode && (include_repeat || !ev.repeat)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool shortcut(uint16_t required_mods, uint32_t keycode, bool allow_when_typing) noexcept {
+    Context* ctx = current_context();
+    if (!ctx || keycode == 0u) {
+        return false;
+    }
+    if (!allow_when_typing) {
+        if (ctx->ime_comp_len > 0u) {
+            return false;
+        }
+        if (ctx->focus_id != 0u) {
+            const WidgetState* fws = state_map_find(&ctx->states, ctx->focus_id);
+            if (fws && fws->is_text_input_writable && (fws->last_seen_frame + 1u >= ctx->frame_index)) {
+                return false;
+            }
+        }
+    }
+    constexpr uint16_t kModMask = static_cast<uint16_t>(Mod_Shift | Mod_Ctrl | Mod_Alt | Mod_Super);
+    for (uint32_t i = 0u; i < ctx->frame_key_count; ++i) {
+        const KeyEventEntry& ev = ctx->frame_keys[i];
+        if (!ev.repeat && ev.key == keycode && (ev.mods & kModMask) == required_mods) {
+            return true;
+        }
+    }
+    return false;
+}
+
+Vec2 pointer_pos() noexcept {
+    const Context* ctx = current_context();
+    return ctx ? ctx->pointer_pos : Vec2{-1.0f, -1.0f};
+}
+
+Vec2 pointer_delta() noexcept {
+    const Context* ctx = current_context();
+    return ctx ? ctx->pointer_delta : Vec2{0.0f, 0.0f};
+}
+
+bool right_clicked(uint32_t element_id) noexcept {
+    Context* ctx = current_context();
+    if (!ctx || element_id == 0u) {
+        return false;
+    }
+    const WidgetState* ws = state_map_find(&ctx->states, element_id);
+    return ws != nullptr && ws->right_clicked_this_frame;
+}
+
+bool right_clicked_anywhere() noexcept {
+    const Context* ctx = current_context();
+    return ctx != nullptr && ctx->right_clicked_any_this_frame;
+}
+
+bool double_clicked(uint32_t element_id) noexcept {
+    Context* ctx = current_context();
+    if (!ctx || element_id == 0u) {
+        return false;
+    }
+    const WidgetState* ws = state_map_find(&ctx->states, element_id);
+    return ws != nullptr && ws->double_clicked_this_frame;
+}
+
+bool dragging(uint32_t element_id, float threshold_px) noexcept {
+    Context* ctx = current_context();
+    if (!ctx || element_id == 0u || ctx->active_id != element_id) {
+        return false;
+    }
+    const WidgetState* ws = state_map_find(&ctx->states, element_id);
+    if (!ws || !ws->pressed_down) {
+        return false;
+    }
+    const float th = (threshold_px > 0.0f) ? threshold_px : 0.0f;
+    return ctx->left_max_drag_dist_sq >= (th * th);
+}
+
+bool should_close_popover(uint32_t popover_id, uint32_t trigger_id) noexcept {
+    Context* ctx = current_context();
+    if (!ctx || !ctx->clay_ctx || popover_id == 0u || ctx->frame_index <= 1u) {
+        return false;
+    }
+    const WidgetState* pop_ws = state_map_find(&ctx->states, popover_id);
+    if (!pop_ws) {
+        return false;
+    }
+    const bool seen_prev_frame =
+        (pop_ws->last_seen_frame == (ctx->frame_index - 1u)) ||
+        (pop_ws->last_seen_frame == ctx->frame_index && pop_ws->prev_seen_frame == (ctx->frame_index - 1u));
+    if (!seen_prev_frame) {
+        return false;
+    }
+    if (!ctx->frame_escape_consumed_by_ime && key_pressed(SDLK_ESCAPE, false)) {
+        return true;
+    }
+    if (!ctx->left_pressed_this_frame && !ctx->right_pressed_this_frame) {
+        return false;
+    }
+    Clay_SetCurrentContext(ctx->clay_ctx);
+    const auto is_over_elem = [&](uint32_t id, const WidgetState* ws) noexcept -> bool {
+        if (id == 0u) {
+            return false;
+        }
+        if (Clay_PointerOver(make_clay_id(id))) {
+            return true;
+        }
+        if (ws && (ws->last_seen_frame + 1u >= ctx->frame_index) &&
+            ws->last_box_logical.w > 0.0f && ws->last_box_logical.h > 0.0f &&
+            ws->last_box_logical.contains(ctx->pointer_pos))
+        {
+            return true;
+        }
+        return false;
+    };
+    if (is_over_elem(popover_id, pop_ws)) {
+        return false;
+    }
+    if (trigger_id != 0u) {
+        const WidgetState* trig_ws = state_map_find(&ctx->states, trigger_id);
+        if (is_over_elem(trigger_id, trig_ws)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::span<const Str> dropped_files() noexcept {
+    const Context* ctx = current_context();
+    if (!ctx || ctx->frame_drop_count == 0u) {
+        return {};
+    }
+    return std::span<const Str>(ctx->frame_drops, ctx->frame_drop_count);
+}
+
+void inject_drop_file(Context* ctx, Str utf8_path) noexcept {
+    if (!ctx || !utf8_path.chars || utf8_path.length == 0u) {
+        return;
+    }
+    if (ctx->pending_drop_count >= kMaxDroppedFiles) {
+        return;
+    }
+    if (utf8_path.length >= kMaxDroppedPathBytes - ctx->pending_drop_bytes) {
+        return;
+    }
+    const uint32_t off = ctx->pending_drop_bytes;
+    const uint32_t len = utf8_path.length;
+    std::memcpy(ctx->pending_drop_buf + off, utf8_path.chars, len);
+    ctx->pending_drop_buf[off + len] = '\0';
+    ctx->pending_drop_offsets[ctx->pending_drop_count] = static_cast<uint16_t>(off);
+    ctx->pending_drop_lengths[ctx->pending_drop_count] = static_cast<uint16_t>(len);
+    ++ctx->pending_drop_count;
+    ctx->pending_drop_bytes = off + len + 1u;
+    request_redraw(ctx);
 }
 
 float spring(uint32_t anim_id, float target, SpringSpec spec) noexcept {
@@ -4946,6 +5942,8 @@ void end_frame(Context* ctx_arg) noexcept {
                         emit_text_input_command(ctx, extra->text_input, cmd->boundingBox, box_px, cur_clip, dpi);
                     } else if (extra->kind == CustomCmdKind::CanvasWire && extra->canvas_wire) {
                         emit_canvas_wire_command(ctx, extra->canvas_wire, cmd->boundingBox, cur_clip, dpi);
+                    } else if (extra->kind == CustomCmdKind::Icon) {
+                        emit_vector_icon_quad(ctx, extra->icon_desc.icon_id, box_px, extra->icon_desc.color, cur_clip);
                     } else {
                         if (extra->desc.attach_to != AttachTo::None && !extra->desc.pointer_passthrough) {
                             const uint32_t slot = (ctx->span_hit_count < kMaxSpanHitsPerFrame)
@@ -4971,6 +5969,26 @@ void end_frame(Context* ctx_arg) noexcept {
                             };
                         }
                         emit_box_background_and_shadow(ctx, extra, box_px, cur_clip, dpi);
+                        if (extra->draw_head) {
+                            ClipEntry draw_clip = cur_clip;
+                            const bool box_clips =
+                                extra->desc.clip_children || extra->desc.scroll_x || extra->desc.scroll_y || extra->is_canvas;
+                            if (box_clips) {
+                                const Rect clipped_rect = rect_intersect(cur_clip.rect, box_px);
+                                const Corners& c = extra->desc.radius;
+                                float cr = min4f(c.tl, c.tr, c.br, c.bl) * dpi;
+                                if (cr <= 0.0f &&
+                                    clipped_rect.x == cur_clip.rect.x &&
+                                    clipped_rect.y == cur_clip.rect.y &&
+                                    clipped_rect.w == cur_clip.rect.w &&
+                                    clipped_rect.h == cur_clip.rect.h)
+                                {
+                                    cr = cur_clip.radius;
+                                }
+                                draw_clip = ClipEntry{ .rect = clipped_rect, .radius = cr };
+                            }
+                            emit_draw_list_command(ctx, extra->draw_head, box_px, draw_clip, dpi);
+                        }
                     }
                 }
                 break;
@@ -5063,6 +6081,9 @@ void end_frame(Context* ctx_arg) noexcept {
                 const BoxExtra* extra = static_cast<const BoxExtra*>(cmd->userData);
                 if (!extra) {
                     break;
+                }
+                if (extra->fg_draw_head) {
+                    emit_draw_list_command(ctx, extra->fg_draw_head, box_px, cur_clip, dpi);
                 }
                 const BoxDesc& d = extra->desc;
                 const bool is_scroll = d.scroll_x || d.scroll_y || extra->is_virtual_list;
@@ -5176,6 +6197,7 @@ void end_frame(Context* ctx_arg) noexcept {
     }
 
     ctx->frame_text_op_count = 0u;
+    ctx->frame_key_count = 0u;
     ctx->last_mouse_clicks = 1u;
 
     if (ctx->ime_focused_id == 0u && ctx->ime_comp_len > 0u) {
@@ -5261,7 +6283,7 @@ void end_frame(Context* ctx_arg) noexcept {
             if (ws.key == 0u || ws.last_seen_frame != ctx->frame_index) {
                 continue;
             }
-            if (ws.split_initialized || ws.is_canvas || ws.is_canvas_node || ws.is_virtual_list) {
+            if (ws.is_user_element || ws.split_initialized || ws.is_canvas || ws.is_canvas_node || ws.is_virtual_list) {
                 const Clay_ElementData ed = Clay_GetElementData(make_clay_id(ws.key));
                 if (ed.found) {
                     ws.last_box_logical = Rect{
@@ -5308,7 +6330,8 @@ void end_frame(Context* ctx_arg) noexcept {
                 wc = Color::rgba8(251, 191, 36, 145);
             } else if (kind == static_cast<uint32_t>(PrimKind::Texture) || kind == static_cast<uint32_t>(PrimKind::BlurGlass)) {
                 wc = Color::rgba8(244, 114, 182, 180);
-            } else if (kind == static_cast<uint32_t>(PrimKind::BezierWire)) {
+            } else if (kind == static_cast<uint32_t>(PrimKind::BezierWire) ||
+                       kind == static_cast<uint32_t>(PrimKind::RingArc)) {
                 wc = Color::rgba8(52, 211, 153, 185);
             } else if (kind == static_cast<uint32_t>(PrimKind::CanvasGrid)) {
                 wc = Color::rgba8(148, 163, 184, 110);
@@ -5370,7 +6393,7 @@ void end_frame(Context* ctx_arg) noexcept {
 
         emit_direct_text_px(
             ctx,
-            "ETCH 1.1 INSPECTOR   [F12]",
+            "ETCH 1.2 INSPECTOR   [F12]",
             hud_x + 12.0f,
             hud_y + 10.0f,
             12.0f,

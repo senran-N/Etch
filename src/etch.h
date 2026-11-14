@@ -10,7 +10,7 @@
 #include <type_traits>
 
 #define ETCH_VERSION_MAJOR 1
-#define ETCH_VERSION_MINOR 1
+#define ETCH_VERSION_MINOR 2
 #define ETCH_VERSION_PATCH 0
 
 #ifndef ETCH_ASSERT
@@ -425,6 +425,7 @@ enum class PrimKind : uint8_t {
     BlurGlass = 5,
     CanvasGrid = 6,
     BezierWire = 7,
+    RingArc = 8,
 };
 
 enum PrimFlags : uint8_t {
@@ -434,6 +435,7 @@ enum PrimFlags : uint8_t {
     PrimFlag_RoundedClip = 1 << 2,
     PrimFlag_Premultiplied = 1 << 3,
     PrimFlag_StemDarken = 1 << 4,
+    PrimFlag_RoundCap = 1 << 5,
 };
 
 #ifdef _MSC_VER
@@ -752,6 +754,45 @@ struct alignas(16) Prim {
             },
         };
     }
+
+    static constexpr Prim make_ring_arc(
+        Vec2 center_px,
+        float radius_px,
+        float half_thickness_px,
+        float start_angle_rad,
+        float sweep_angle_rad,
+        Rect clip_rect,
+        Color color_start,
+        Color color_end,
+        bool round_caps = true,
+        Color glow_color = {},
+        float glow_px = 0.0f,
+        float clip_radius = 0.0f) noexcept
+    {
+        const float r = (radius_px > 0.5f) ? radius_px : 0.5f;
+        const float ht = (half_thickness_px > 0.5f) ? half_thickness_px : 0.5f;
+        const float gw = (glow_px > 0.0f) ? glow_px : 0.0f;
+        const float ext = r + ht + gw + 2.0f;
+        const uint8_t flags = static_cast<uint8_t>(
+            (round_caps ? PrimFlag_RoundCap : PrimFlag_None) |
+            ((clip_radius > 0.0f) ? PrimFlag_RoundedClip : PrimFlag_None));
+        return Prim{
+            .bounds = {center_px.x - ext, center_px.y - ext, 2.0f * ext, 2.0f * ext},
+            .clip = {clip_rect.x, clip_rect.y, clip_rect.x + clip_rect.w, clip_rect.y + clip_rect.h},
+            .payload = {
+                std::bit_cast<uint32_t>(start_angle_rad),
+                std::bit_cast<uint32_t>(sweep_angle_rad),
+                pack_f16x2(r, ht),
+                color_end.pack_rgba8(),
+            },
+            .style = {
+                pack_header(PrimKind::RingArc, flags, 0u, clip_radius),
+                color_start.pack_rgba8(),
+                glow_color.pack_rgba8(),
+                pack_f16x2(ht, gw),
+            },
+        };
+    }
 };
 
 static_assert(sizeof(Prim) == 64);
@@ -796,6 +837,19 @@ struct ContextDesc {
     bool headless = false;
 };
 
+enum KeyMod : uint16_t {
+    Mod_None    = 0u,
+    Mod_Shift   = 1u << 0,
+    Mod_Ctrl    = 1u << 1,
+    Mod_Alt     = 1u << 2,
+    Mod_Super   = 1u << 3,
+#if defined(__APPLE__)
+    Mod_Primary = Mod_Super,
+#else
+    Mod_Primary = Mod_Ctrl,
+#endif
+};
+
 struct FrameDesc {
     uint32_t viewport_w = 1280;
     uint32_t viewport_h = 720;
@@ -804,6 +858,10 @@ struct FrameDesc {
     Vec2 pointer_pos = {-1.0f, -1.0f};
     bool pointer_down = false;
     Vec2 scroll_delta = {};
+    bool right_pointer_down = false;
+    uint8_t pointer_clicks = 0;      // 0 = use event clicks (1); 2 = double-click
+    uint16_t key_mods = Mod_None;
+    uint32_t key_pressed_code = 0;   // Optional single-frame SDL_Keycode injection
 };
 
 struct FrameStats {
@@ -936,13 +994,16 @@ struct BoxDesc {
     bool pointer_passthrough = false;
     bool clip_to_parent = false;
     float backdrop_blur = 0.0f;
+    bool clamp_to_viewport = false;
 };
 
-inline constexpr uint16_t kFontSans     = 0u;
-inline constexpr uint16_t kFontBold     = 1u;
-inline constexpr uint16_t kFontMono     = 2u;
-inline constexpr uint16_t kMaxFontSlots = 16u;
-inline constexpr uint16_t kInvalidFont  = 0xFFFFu;
+inline constexpr uint16_t kFontSans       = 0u;
+inline constexpr uint16_t kFontBold       = 1u;
+inline constexpr uint16_t kFontMono       = 2u;
+inline constexpr uint16_t kMaxFontSlots   = 16u;
+inline constexpr uint16_t kInvalidFont    = 0xFFFFu;
+inline constexpr uint16_t kMaxVectorIcons = 256u;
+inline constexpr uint16_t kInvalidIcon    = 0xFFFFu;
 
 struct TextDesc {
     Color color = Color::white();
@@ -988,6 +1049,82 @@ struct ImageDesc {
     Color tint = Color::white();
     Color border_color = {};
     float border_width = 0.0f;
+};
+
+struct IconDesc {
+    uint32_t id = 0;
+    uint16_t icon_id = kInvalidIcon;
+    float size_px = 16.0f;
+    Color color = Color::white();
+};
+
+struct RectDrawDesc {
+    Rect    rect = {};
+    Color   fill = {};
+    Color   fill_end = {};
+    Vec2    gradient_dir = {0.0f, 1.0f};
+    bool    radial_gradient = false;
+    Corners radius = {};
+    Color   border_color = {};
+    float   border_width = 0.0f;
+    bool    foreground = false;
+};
+
+struct LineDesc {
+    Vec2  from = {};
+    Vec2  to = {};
+    Color color = Color::white();
+    Color color_end = {};        // 0 alpha = solid `color`
+    float thickness = 1.5f;
+    Color glow_color = {};
+    float glow_px = 0.0f;
+    bool  foreground = false;
+};
+
+struct PolylineDesc {
+    std::span<const Vec2> points = {};
+    Color color = Color::white();
+    float thickness = 1.5f;
+    Color glow_color = {};
+    float glow_px = 0.0f;
+    bool  closed = false;
+    bool  foreground = false;
+};
+
+struct BezierDesc {
+    Vec2  p0 = {};
+    Vec2  p1 = {};               // Quadratic control point (or first cubic control point)
+    Vec2  p2 = {};               // Quadratic end point (or second cubic control point)
+    Vec2  p3 = {};               // Cubic end point when `cubic == true`
+    bool  cubic = false;
+    Color color_start = Color::white();
+    Color color_end = {};        // 0 alpha = solid `color_start`
+    float thickness = 1.75f;
+    Color glow_color = {};
+    float glow_px = 0.0f;
+    bool  foreground = false;
+};
+
+struct RingDesc {
+    Vec2  center = {};
+    float radius = 16.0f;
+    float thickness = 3.0f;
+    float start_angle_rad = -1.57079633f; // Default -PI/2 (12 o'clock)
+    float sweep_angle_rad = 6.28318531f;  // Positive clockwise in Y-down coordinates
+    Color color = Color::white();
+    Color color_end = {};                 // 0 alpha = solid `color`
+    Color track_color = {};               // Optional full-circle background ring if a > 0
+    Color glow_color = {};
+    float glow_px = 0.0f;
+    bool  round_caps = true;
+    bool  foreground = false;
+};
+
+struct IconDrawDesc {
+    uint16_t icon_id = kInvalidIcon;
+    Rect     rect = {};
+    Color    color = Color::white();
+    bool     foreground = false;
 };
 
 struct TextInputDesc {
@@ -1170,6 +1307,14 @@ uint16_t load_font_memory(
     int32_t face_index = 0) noexcept;
 bool is_font_loaded(const Context* ctx, uint16_t font_id) noexcept;
 
+// Zero-atlas SVG path -> Slug vector icon compiler
+uint16_t register_svg_icon(
+    Context* ctx,
+    Str svg_path_d,
+    Vec4 view_box = {0.0f, 0.0f, 24.0f, 24.0f},
+    uint16_t slot_hint = kInvalidIcon) noexcept;
+bool is_icon_loaded(const Context* ctx, uint16_t icon_id) noexcept;
+
 void process_event(Context* ctx, const SDL_Event& event) noexcept;
 
 // Event-driven 0% idle sleep / wakeup scheduler:
@@ -1210,6 +1355,16 @@ inline void text_spans(std::initializer_list<TextSpan> spans, const RichTextDesc
     text_spans(std::span<const TextSpan>(spans.begin(), spans.size()), desc);
 }
 void image(const ImageDesc& desc) noexcept;
+void icon(const IconDesc& desc) noexcept;
+
+// Box-local immediate 2D vector drawing (coordinates relative to the currently open begin_box)
+void draw_rect(const RectDrawDesc& desc) noexcept;
+void draw_line(const LineDesc& desc) noexcept;
+void draw_polyline(const PolylineDesc& desc) noexcept;
+void draw_bezier(const BezierDesc& desc) noexcept;
+void draw_ring(const RingDesc& desc) noexcept;
+void draw_icon(const IconDrawDesc& desc) noexcept;
+
 TextInputResult text_input(const TextInputDesc& desc) noexcept;
 void set_text_selection(uint32_t element_id, uint32_t anchor_byte, uint32_t cursor_byte) noexcept;
 Rect ime_cursor_rect(const Context* ctx = nullptr) noexcept;
@@ -1228,6 +1383,22 @@ uint32_t focused_id() noexcept;
 void request_focus(uint32_t element_id) noexcept;
 void set_cursor(Cursor cursor) noexcept;
 Rect element_bounds(uint32_t element_id) noexcept;
+
+// Pro desktop input, shortcuts, popover dismissal & file drops
+uint16_t key_mods() noexcept;
+bool key_pressed(uint32_t keycode, bool include_repeat = false) noexcept;
+bool shortcut(uint16_t required_mods, uint32_t keycode, bool allow_when_typing = false) noexcept;
+
+Vec2 pointer_pos() noexcept;
+Vec2 pointer_delta() noexcept;
+bool right_clicked(uint32_t element_id) noexcept;
+bool right_clicked_anywhere() noexcept;
+bool double_clicked(uint32_t element_id) noexcept;
+bool dragging(uint32_t element_id, float threshold_px = 3.0f) noexcept;
+bool should_close_popover(uint32_t popover_id, uint32_t trigger_id = 0) noexcept;
+
+std::span<const Str> dropped_files() noexcept;
+void inject_drop_file(Context* ctx, Str utf8_path) noexcept;
 
 // Analytic damped spring animator & inertial scroll container control
 float spring(uint32_t anim_id, float target, SpringSpec spec = {}) noexcept;

@@ -28,15 +28,25 @@ inline constexpr uint32_t kCursorCount = 9u;
 inline constexpr uint32_t kMaxTextOpsPerFrame = 32u;
 inline constexpr uint32_t kMaxPendingTextBytes = 1024u;
 inline constexpr uint32_t kMaxImeCompBytes = 256u;
+inline constexpr uint32_t kMaxKeyEventsPerFrame = 32u;
+inline constexpr uint32_t kMaxDroppedFiles = 16u;
+inline constexpr uint32_t kMaxDroppedPathBytes = 2048u;
+inline constexpr uint32_t kTextUndoSlots = 8u;
+inline constexpr uint32_t kTextUndoMaxEntries = 32u;
+inline constexpr uint32_t kTextUndoByteCap = 8192u;
 
 struct WidgetState {
     uint32_t key = 0; // 0 marks an empty hash slot
     uint32_t last_seen_frame = 0;
+    uint32_t prev_seen_frame = 0;
     bool     is_user_element = false;
     bool     is_focusable = false;
     bool     pressed_down = false;
     bool     pressed_this_frame = false;
     bool     clicked_this_frame = false;
+    bool     right_clicked_this_frame = false;
+    bool     double_clicked_this_frame = false;
+    bool     is_text_input_writable = false;
     bool     spring_initialized = false;
     float    spring_pos = 0.0f;
     float    spring_vel = 0.0f;
@@ -149,6 +159,15 @@ struct FontSlot {
     bool           loaded = false;
 };
 
+struct VectorIconEntry {
+    uint32_t band_offset = 0;
+    uint16_t num_hbands = 0;
+    uint16_t num_vbands = 0;
+    Vec2     view_size = {24.0f, 24.0f};
+    bool     loaded = false;
+    bool     has_outline = false;
+};
+
 struct FontAtlas {
     SlugGlyphEntry*   slug_glyphs = nullptr; // Open-addressed table (power-of-2 capacity)
     uint32_t          slug_glyph_cap = 0;
@@ -171,6 +190,8 @@ struct FontAtlas {
     uint32_t          fallback_count = 0;
     uint32_t          font_revision = 1;
     bool              font_valid = false;
+
+    VectorIconEntry   icons[kMaxVectorIcons] = {};
 
     hb_buffer_t*      hb_buf = nullptr;
 };
@@ -209,6 +230,34 @@ enum class CustomCmdKind : uint8_t {
     TextInput = 1,
     CanvasGrid = 2,
     CanvasWire = 3,
+    Icon = 4,
+};
+
+enum class DrawCmdKind : uint8_t {
+    Rect = 0,
+    Line = 1,
+    Polyline = 2,
+    Bezier = 3,
+    Ring = 4,
+    Icon = 5,
+};
+
+struct DrawCmdNode {
+    DrawCmdNode*  next = nullptr;
+    DrawCmdKind   kind = DrawCmdKind::Rect;
+    float         world_scale = 1.0f;
+    RectDrawDesc  rect = {};
+    LineDesc      line = {};
+    const Vec2*   poly_points = nullptr;
+    uint32_t      poly_count = 0;
+    bool          poly_closed = false;
+    Color         poly_color = {};
+    float         poly_thickness = 1.5f;
+    Color         poly_glow_color = {};
+    float         poly_glow_px = 0.0f;
+    BezierDesc    bezier = {};
+    RingDesc      ring = {};
+    IconDrawDesc  icon = {};
 };
 
 struct CanvasGridExtra {
@@ -239,6 +288,11 @@ struct BoxExtra {
     TextInputExtra*  text_input = nullptr;
     CanvasGridExtra* canvas_grid = nullptr;
     CanvasWireExtra* canvas_wire = nullptr;
+    IconDesc         icon_desc = {};
+    DrawCmdNode*     draw_head = nullptr;
+    DrawCmdNode*     draw_tail = nullptr;
+    DrawCmdNode*     fg_draw_head = nullptr;
+    DrawCmdNode*     fg_draw_tail = nullptr;
     bool             is_virtual_list = false;
     bool             is_canvas = false;
 };
@@ -326,6 +380,34 @@ struct BlurSplit {
     Rect     union_bounds = {};
 };
 
+struct KeyEventEntry {
+    uint32_t key = 0;
+    uint16_t mods = 0;
+    bool     repeat = false;
+};
+
+struct TextUndoRecord {
+    uint16_t offset = 0;
+    uint16_t length = 0;
+    uint32_t cursor = 0;
+    uint32_t anchor = 0;
+    uint32_t hash = 0;
+};
+
+struct TextUndoSlot {
+    uint32_t       widget_id = 0;
+    uint32_t       last_used_frame = 0;
+    TextUndoRecord entries[kTextUndoMaxEntries] = {};
+    uint32_t       head = 0;
+    uint32_t       count = 0;
+    uint32_t       cur = 0;
+    uint16_t       write_pos = 0;
+    uint16_t       bytes_used = 0;
+    float          last_coalesce_sec = -10.0f;
+    uint8_t        last_op_group = 0; // 0 = none/discrete, 1 = char burst, 2 = delete burst
+    char           bytes[kTextUndoByteCap] = {};
+};
+
 inline SDL_GPUTexture* blur_tex_sentinel() noexcept {
     static uint8_t s_blur_tex_tag = 0;
     return reinterpret_cast<SDL_GPUTexture*>(&s_blur_tex_tag);
@@ -399,11 +481,14 @@ struct Context {
     Vec2       event_pointer_pos = {-1.0f, -1.0f};
     bool       has_event_pointer = false;
     bool       event_pointer_down = false;
-    bool       event_pan_button_down = false;
+    bool       event_right_down = false;
+    bool       event_middle_down = false;
     Vec2       event_scroll_delta = {};
     bool       prev_pointer_down = false;
+    bool       prev_right_down = false;
     bool       prev_pan_button_down = false;
     Vec2       prev_pointer_pos = {-1.0f, -1.0f};
+    Vec2       pointer_delta = {};
     bool       space_down = false;
 
     uint32_t    active_id = 0;
@@ -411,6 +496,14 @@ struct Context {
     uint32_t    pan_canvas_id = 0;
     bool        mouse_captured = false;
     Vec2        pointer_pos = {-1.0f, -1.0f};
+    bool        left_pressed_this_frame = false;
+    Vec2        left_press_origin = {-1.0f, -1.0f};
+    float       left_max_drag_dist_sq = 0.0f;
+    bool        right_pressed_this_frame = false;
+    bool        right_clicked_any_this_frame = false;
+    bool        right_drag_exceeded = false;
+    uint32_t    right_active_id = 0;
+    Vec2        right_press_origin = {-1.0f, -1.0f};
     float       scrollbar_drag_grab_offset = 0.0f;
     uint32_t    focus_order[kMaxFocusablePerFrame] = {};
     uint32_t    focus_count = 0;
@@ -440,6 +533,26 @@ struct Context {
     uint32_t    hud_hist_count = 0;
 
     uint8_t       last_mouse_clicks = 1u;
+    KeyEventEntry pending_keys[kMaxKeyEventsPerFrame] = {};
+    uint32_t      pending_key_count = 0;
+    KeyEventEntry frame_keys[kMaxKeyEventsPerFrame] = {};
+    uint32_t      frame_key_count = 0;
+    uint16_t      event_key_mods = 0;
+    uint16_t      frame_key_mods = 0;
+    bool          pending_escape_consumed_by_ime = false;
+    bool          frame_escape_consumed_by_ime = false;
+
+    uint16_t      pending_drop_offsets[kMaxDroppedFiles] = {};
+    uint16_t      pending_drop_lengths[kMaxDroppedFiles] = {};
+    uint32_t      pending_drop_count = 0;
+    char          pending_drop_buf[kMaxDroppedPathBytes] = {};
+    uint32_t      pending_drop_bytes = 0;
+    Str           frame_drops[kMaxDroppedFiles] = {};
+    uint32_t      frame_drop_count = 0;
+    char          frame_drop_buf[kMaxDroppedPathBytes] = {};
+
+    TextUndoSlot  undo_pool[kTextUndoSlots] = {};
+
     PendingTextOp pending_text_ops[kMaxTextOpsPerFrame] = {};
     uint32_t      pending_text_op_count = 0;
     char          pending_text_utf8[kMaxPendingTextBytes] = {};
@@ -657,13 +770,17 @@ WidgetState* state_map_get_or_insert(StateMap* map, uint32_t key, uint32_t frame
     for (;;) {
         WidgetState& slot = map->entries[idx];
         if (slot.key == key) {
-            slot.last_seen_frame = frame_index;
+            if (slot.last_seen_frame != frame_index) {
+                slot.prev_seen_frame = slot.last_seen_frame;
+                slot.last_seen_frame = frame_index;
+            }
             return &slot;
         }
         if (slot.key == 0u) {
             slot = WidgetState{
                 .key = key,
                 .last_seen_frame = frame_index,
+                .prev_seen_frame = 0u,
             };
             ++map->count;
             return &slot;
@@ -681,6 +798,8 @@ void state_map_clear_flags(StateMap* map, bool clear_frame_edges, bool clear_pre
         if (clear_frame_edges) {
             slot.pressed_this_frame = false;
             slot.clicked_this_frame = false;
+            slot.right_clicked_this_frame = false;
+            slot.double_clicked_this_frame = false;
             slot.span_hovered = false;
         }
         if (clear_pressed) {

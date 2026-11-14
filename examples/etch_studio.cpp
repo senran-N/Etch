@@ -1,6 +1,7 @@
-// Etch Studio 1.0 — Pure-GPU Render-Graph & 1M Telemetry Workbench.
-// Showcases all 12 built-in Etch 1.0 primitives in Orthodox C++20 with zero
-// per-frame heap allocations, 1-3 draw-call batching, and "--headless" validation.
+// Etch Studio 1.2 — Pure-GPU Render-Graph & 1M Telemetry Workbench.
+// Showcases Etch 1.2 primitives (including RingArc & SVG Slug icons) in
+// Orthodox C++20 with zero per-frame heap allocations, 1-3 draw-call batching,
+// and "--headless" validation.
 
 #include "etch.h"
 
@@ -20,6 +21,7 @@ inline constexpr uint32_t kTraceRowCount = 1000000u;
 inline constexpr float kTraceRowHeight = 26.0f;
 inline constexpr float kDividerPx = 6.0f;
 inline constexpr float kNodePortOffsetY = 44.0f;
+inline constexpr float kTau = 6.28318530717958647692f;
 
 struct GraphNode {
     const char* title;
@@ -79,15 +81,90 @@ struct StudioApp {
     uint32_t uploaded_preset = UINT32_MAX;
     bool wire_glow_enabled = true;
     bool preset_popover_open = false;
+    bool ctx_menu_open = false;
+    etch::Vec2 ctx_menu_pos = {0.0f, 0.0f};
+    bool cmd_palette_open = false;
     bool running = true;
+
+    uint16_t ico_bloom = etch::kInvalidIcon;
+    uint16_t ico_expose = etch::kInvalidIcon;
+    uint16_t ico_node = etch::kInvalidIcon;
+    uint16_t ico_menu = etch::kInvalidIcon;
+    uint16_t ico_search = etch::kInvalidIcon;
 
     char filter_buf[256] = "Kawase";
     etch::TextInputResult filter_res = {};
+    char cmd_filter_buf[128] = "";
+    etch::TextInputResult cmd_filter_res = {};
     etch::VirtualListSlice last_trace_slice = {};
 };
 
 constexpr float clamp_f(float x, float lo, float hi) noexcept {
     return (x < lo) ? lo : ((x > hi) ? hi : x);
+}
+
+inline char ascii_lower(char ch) noexcept {
+    return (ch >= 'A' && ch <= 'Z') ? static_cast<char>(ch + ('a' - 'A')) : ch;
+}
+
+inline bool contains_ascii_ci(const char* haystack, const char* needle) noexcept {
+    if (!needle || needle[0] == '\0') {
+        return true;
+    }
+    if (!haystack) {
+        return false;
+    }
+    for (size_t i = 0; haystack[i] != '\0'; ++i) {
+        size_t j = 0;
+        while (needle[j] != '\0' && haystack[i + j] != '\0' &&
+               ascii_lower(haystack[i + j]) == ascii_lower(needle[j]))
+        {
+            ++j;
+        }
+        if (needle[j] == '\0') {
+            return true;
+        }
+    }
+    return false;
+}
+
+void init_studio_icons(StudioApp* app) noexcept {
+    if (!app || !app->ctx) {
+        return;
+    }
+    const etch::Vec4 vb = {0.0f, 0.0f, 24.0f, 24.0f};
+    app->ico_bloom = etch::register_svg_icon(
+        app->ctx,
+        etch::str_lit(
+            "M 12 1.5 L 14.2 8.2 L 20.5 3.5 L 15.8 9.8 L 22.5 12 L 15.8 14.2 L 20.5 20.5 L 14.2 15.8 "
+            "L 12 22.5 L 9.8 15.8 L 3.5 20.5 L 8.2 14.2 L 1.5 12 L 8.2 9.8 L 3.5 3.5 L 9.8 8.2 Z"),
+        vb);
+    app->ico_expose = etch::register_svg_icon(
+        app->ctx,
+        etch::str_lit(
+            "M 12 2 A 10 10 0 1 1 12 22 A 10 10 0 1 1 12 2 Z "
+            "M 12 6.8 A 5.2 5.2 0 1 0 12 17.2 A 5.2 5.2 0 1 0 12 6.8 Z"),
+        vb);
+    app->ico_node = etch::register_svg_icon(
+        app->ctx,
+        etch::str_lit(
+            "M 12 2 L 20.6 7 L 20.6 17 L 12 22 L 3.4 17 L 3.4 7 Z "
+            "M 12 7 L 7.6 12 L 12 17 L 16.4 12 Z"),
+        vb);
+    app->ico_menu = etch::register_svg_icon(
+        app->ctx,
+        etch::str_lit(
+            "M 3 5 L 21 5 L 21 7.6 L 3 7.6 Z "
+            "M 3 10.7 L 21 10.7 L 21 13.3 L 3 13.3 Z "
+            "M 3 16.4 L 21 16.4 L 21 19 L 3 19 Z"),
+        vb);
+    app->ico_search = etch::register_svg_icon(
+        app->ctx,
+        etch::str_lit(
+            "M 10.5 3 A 7.5 7.5 0 1 1 10.5 18 A 7.5 7.5 0 1 1 10.5 3 Z "
+            "M 10.5 5.6 A 4.9 4.9 0 1 0 10.5 15.4 A 4.9 4.9 0 1 0 10.5 5.6 Z "
+            "M 16.2 14.8 L 21.4 20.0 L 20.0 21.4 L 14.8 16.2 Z"),
+        vb);
 }
 
 inline uint8_t to_srgb_u8(float linear_val) noexcept {
@@ -283,6 +360,7 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
     }
 
     const uint32_t kBtnPresets = etch::id("studio_btn_presets");
+    const uint32_t kBtnPalette = etch::id("studio_btn_palette");
     const uint32_t kBtnResetView = etch::id("studio_btn_reset_view");
     const uint32_t kBtnHud = etch::id("studio_btn_hud");
     const uint32_t kBtnClearFilter = etch::id("studio_btn_clear_filter");
@@ -290,6 +368,9 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
     const uint32_t kBtnBloomUp = etch::id("studio_btn_bloom_up");
     const uint32_t kBtnExpDown = etch::id("studio_btn_exp_down");
     const uint32_t kBtnExpUp = etch::id("studio_btn_exp_up");
+    const uint32_t kDialBloom = etch::id("studio_dial_bloom");
+    const uint32_t kDialExp = etch::id("studio_dial_exp");
+    const uint32_t kCurvePlot = etch::id("studio_curve_plot");
     const uint32_t kBtnWireGlow = etch::id("studio_btn_wire_glow");
     const uint32_t kBtnRow0 = etch::id("studio_btn_row0");
     const uint32_t kBtnRow500k = etch::id("studio_btn_row500k");
@@ -300,9 +381,66 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
     const uint32_t kCanvas = etch::id("studio_canvas");
     const uint32_t kTraceList = etch::id("studio_trace_list");
     const uint32_t kFilterInput = etch::id("studio_filter");
+    const uint32_t kPresetPopover = etch::id("studio_preset_popover");
+    const uint32_t kCtxMenu = etch::id("studio_ctx_menu");
+    const uint32_t kCmdPalette = etch::id("studio_cmd_palette");
+    const uint32_t kCmdInput = etch::id("studio_cmd_input");
+
+    bool presets_toggled_now = false;
+    bool palette_toggled_now = false;
+    bool ctx_opened_now = false;
 
     if (etch::clicked(kBtnPresets)) {
         app->preset_popover_open = !app->preset_popover_open;
+        presets_toggled_now = true;
+        if (app->preset_popover_open) {
+            app->ctx_menu_open = false;
+            app->cmd_palette_open = false;
+        }
+    }
+    if (etch::shortcut(etch::Mod_Primary, SDLK_K, true) || etch::clicked(kBtnPalette)) {
+        app->cmd_palette_open = !app->cmd_palette_open;
+        palette_toggled_now = true;
+        if (app->cmd_palette_open) {
+            app->preset_popover_open = false;
+            app->ctx_menu_open = false;
+        }
+    }
+    if (etch::right_clicked(kCanvas)) {
+        app->ctx_menu_open = true;
+        app->ctx_menu_pos = etch::pointer_pos();
+        ctx_opened_now = true;
+        app->preset_popover_open = false;
+        app->cmd_palette_open = false;
+    }
+
+    if (app->preset_popover_open && !presets_toggled_now &&
+        etch::should_close_popover(kPresetPopover, kBtnPresets))
+    {
+        app->preset_popover_open = false;
+    }
+    if (app->ctx_menu_open && !ctx_opened_now &&
+        etch::should_close_popover(kCtxMenu))
+    {
+        app->ctx_menu_open = false;
+    }
+    if (app->cmd_palette_open && !palette_toggled_now &&
+        etch::should_close_popover(kCmdPalette, kBtnPalette))
+    {
+        app->cmd_palette_open = false;
+    }
+
+    if (etch::dragging(kDialBloom, 2.0f)) {
+        app->target_bloom = clamp_f(app->target_bloom + etch::pointer_delta().x * 0.008f, 0.10f, 1.20f);
+    }
+    if (etch::double_clicked(kDialBloom)) {
+        app->target_bloom = kPresets[app->selected_preset].bloom;
+    }
+    if (etch::dragging(kDialExp, 2.0f)) {
+        app->target_exposure = clamp_f(app->target_exposure + etch::pointer_delta().x * 0.010f, 0.50f, 2.00f);
+    }
+    if (etch::double_clicked(kDialExp)) {
+        app->target_exposure = kPresets[app->selected_preset].exposure;
     }
     if (etch::clicked(kBtnResetView)) {
         etch::set_canvas_view(kCanvas, etch::Vec2{36.0f, 28.0f}, 1.0f);
@@ -370,20 +508,30 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
             .radius = etch::Corners::all(10.0f),
         }) {
             ETCH_BOX({
+                .axis = etch::Axis::Row,
                 .padding = etch::Padding::xy(9.0f, 4.0f),
+                .gap = 6.0f,
+                .align_y = etch::AlignY::Center,
                 .background = etch::Color::rgb_hex(0x0EA5E9),
                 .background_end = etch::Color::rgb_hex(0x6366F1),
                 .gradient_dir = {1.0f, 0.0f},
                 .radius = etch::Corners::all(6.0f),
             }) {
-                etch::text(etch::str_lit("ETCH 1.0"), {
+                if (app->ico_node != etch::kInvalidIcon) {
+                    etch::icon(etch::IconDesc{
+                        .icon_id = app->ico_node,
+                        .size_px = 13.0f,
+                        .color = etch::Color::white(),
+                    });
+                }
+                etch::text(etch::str_lit("ETCH 1.2"), {
                     .color = etch::Color::white(),
                     .font_size_px = 12.0f,
                     .wrap = false,
                 });
             }
 
-            etch::text(etch::str_lit("Etch Studio — GPU Render-Graph & 1M Trace Workbench"), {
+            etch::text(etch::str_lit("Etch Studio 1.2 — GPU Render-Graph & 1M Trace Workbench"), {
                 .color = etch::Color::rgb_hex(0xE2E8F0),
                 .font_size_px = 14.0f,
                 .wrap = false,
@@ -402,6 +550,12 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
                 "Reset View",
                 etch::Color::rgb_hex(0x172033),
                 etch::Color::rgba8(148, 163, 184, 52));
+
+            draw_button(
+                kBtnPalette,
+                "Cmd Palette [Ctrl+K]",
+                app->cmd_palette_open ? etch::Color::rgb_hex(0x0F766E) : etch::Color::rgb_hex(0x172033),
+                etch::Color::rgba8(45, 212, 191, 88));
 
             ETCH_BOX({ .width = etch::Sizing::grow() }) {}
 
@@ -582,6 +736,180 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
                     }) {}
                 }
 
+                // Interactive RingArc rotary dials (Drag to tune, Double-click to reset)
+                ETCH_BOX({
+                    .axis = etch::Axis::Row,
+                    .width = etch::Sizing::grow(),
+                    .height = etch::Sizing::fit(),
+                    .gap = 8.0f,
+                    .align_y = etch::AlignY::Center,
+                }) {
+                    const auto draw_dial = [&](
+                        uint32_t dial_id,
+                        float norm_val,
+                        uint16_t icon_id,
+                        etch::Color c0,
+                        etch::Color c1,
+                        const char* label_title,
+                        const char* label_sub) noexcept
+                    {
+                        if (etch::hovered(dial_id)) {
+                            etch::set_cursor(etch::Cursor::Hand);
+                        }
+                        ETCH_BOX({
+                            .axis = etch::Axis::Row,
+                            .width = etch::Sizing::grow(),
+                            .height = etch::Sizing::fit(),
+                            .padding = etch::Padding::xy(6.0f, 4.0f),
+                            .gap = 6.0f,
+                            .align_y = etch::AlignY::Center,
+                            .background = etch::Color::rgb_hex(0x0E1525),
+                            .border_color = etch::hovered(dial_id)
+                                ? etch::Color::rgba8(56, 189, 248, 150)
+                                : etch::Color::rgba8(148, 163, 184, 34),
+                            .border_width = 1.0f,
+                            .radius = etch::Corners::all(7.0f),
+                        }) {
+                            ETCH_BOX({
+                                .id = dial_id,
+                                .width = etch::Sizing::fixed(38.0f),
+                                .height = etch::Sizing::fixed(38.0f),
+                            }) {
+                                const float start_a = 0.375f * kTau;
+                                const float full_sweep = 0.75f * kTau;
+                                const float active_sweep = clamp_f(norm_val, 0.04f, 1.0f) * full_sweep;
+                                etch::draw_ring(etch::RingDesc{
+                                    .center = {19.0f, 19.0f},
+                                    .radius = 14.5f,
+                                    .thickness = 3.2f,
+                                    .start_angle_rad = start_a,
+                                    .sweep_angle_rad = full_sweep,
+                                    .color = etch::Color::rgba8(51, 65, 85, 160),
+                                    .round_caps = true,
+                                });
+                                etch::draw_ring(etch::RingDesc{
+                                    .center = {19.0f, 19.0f},
+                                    .radius = 14.5f,
+                                    .thickness = 3.2f,
+                                    .start_angle_rad = start_a,
+                                    .sweep_angle_rad = active_sweep,
+                                    .color = c0,
+                                    .color_end = c1,
+                                    .glow_color = c0,
+                                    .glow_px = 3.0f,
+                                    .round_caps = true,
+                                });
+                                if (icon_id != etch::kInvalidIcon) {
+                                    etch::draw_icon(etch::IconDrawDesc{
+                                        .icon_id = icon_id,
+                                        .rect = {13.0f, 13.0f, 12.0f, 12.0f},
+                                        .color = c0,
+                                    });
+                                }
+                            }
+                            ETCH_BOX({
+                                .axis = etch::Axis::Col,
+                                .gap = 1.0f,
+                            }) {
+                                etch::text(etch::str_cstr(label_title), {
+                                    .color = etch::Color::rgb_hex(0xE2E8F0),
+                                    .font_size_px = 11.0f,
+                                    .wrap = false,
+                                });
+                                etch::text(etch::str_cstr(label_sub), {
+                                    .color = etch::Color::rgb_hex(0x64748B),
+                                    .font_size_px = 9.5f,
+                                    .wrap = false,
+                                });
+                            }
+                        }
+                    };
+                    draw_dial(
+                        kDialBloom,
+                        clamp_f((anim_bloom - 0.10f) / 1.10f, 0.0f, 1.0f),
+                        app->ico_bloom,
+                        etch::Color::rgb_hex(0x38BDF8),
+                        etch::Color::rgb_hex(0xF472B6),
+                        "Bloom",
+                        "Drag / 2x");
+                    draw_dial(
+                        kDialExp,
+                        clamp_f((anim_exposure - 0.50f) / 1.50f, 0.0f, 1.0f),
+                        app->ico_expose,
+                        etch::Color::rgb_hex(0xFBBF24),
+                        etch::Color::rgb_hex(0x34D399),
+                        "Expose",
+                        "Drag / 2x");
+                }
+
+                // Live HDR ACES Tone-Curve & Bloom Knee Plot (box-local 2D draw API)
+                ETCH_BOX({
+                    .id = kCurvePlot,
+                    .width = etch::Sizing::grow(),
+                    .height = etch::Sizing::fixed(52.0f),
+                    .background = etch::Color::rgb_hex(0x0B101B),
+                    .border_color = etch::Color::rgba8(148, 163, 184, 38),
+                    .border_width = 1.0f,
+                    .radius = etch::Corners::all(6.0f),
+                    .clip_children = true,
+                }) {
+                    const etch::Rect plot_bounds = etch::element_bounds(kCurvePlot);
+                    const float pw = (plot_bounds.w > 40.0f) ? plot_bounds.w : 260.0f;
+                    const float ph = (plot_bounds.h > 20.0f) ? plot_bounds.h : 52.0f;
+                    const float pad_x = 8.0f;
+                    const float pad_y = 6.0f;
+                    const float inner_w = pw - 2.0f * pad_x;
+                    const float inner_h = ph - 2.0f * pad_y;
+                    etch::draw_line(etch::LineDesc{
+                        .from = {pad_x, pad_y + 0.5f * inner_h},
+                        .to = {pw - pad_x, pad_y + 0.5f * inner_h},
+                        .color = etch::Color::rgba8(148, 163, 184, 34),
+                        .thickness = 1.0f,
+                    });
+                    etch::draw_line(etch::LineDesc{
+                        .from = {pad_x, ph - pad_y},
+                        .to = {pw - pad_x, pad_y},
+                        .color = etch::Color::rgba8(148, 163, 184, 42),
+                        .thickness = 1.0f,
+                    });
+
+                    etch::Vec2 pts[17] = {};
+                    for (uint32_t s = 0u; s < 17u; ++s) {
+                        const float t = static_cast<float>(s) / 16.0f;
+                        const float yv = aces_tonemap(t * anim_exposure * 1.6f);
+                        pts[s] = { pad_x + t * inner_w, (ph - pad_y) - yv * inner_h };
+                    }
+                    etch::draw_polyline(etch::PolylineDesc{
+                        .points = std::span<const etch::Vec2>(pts, 17),
+                        .color = etch::Color::rgb_hex(0x38BDF8),
+                        .thickness = 1.8f,
+                        .glow_color = etch::Color::rgba8(56, 189, 248, 140),
+                        .glow_px = 2.0f,
+                    });
+
+                    const float knee = clamp_f(anim_bloom * 0.72f, 0.08f, 0.92f);
+                    const etch::Vec2 b0 = {pad_x, ph - pad_y};
+                    const etch::Vec2 b1 = {pad_x + 0.35f * inner_w, (ph - pad_y) - knee * 0.30f * inner_h};
+                    const etch::Vec2 b2 = {pad_x + 0.65f * inner_w, pad_y + (1.0f - knee) * 0.45f * inner_h};
+                    const etch::Vec2 b3 = {pw - pad_x, pad_y + 2.0f};
+                    etch::draw_bezier(etch::BezierDesc{
+                        .p0 = b0,
+                        .p1 = b1,
+                        .p2 = b2,
+                        .p3 = b3,
+                        .cubic = true,
+                        .color_start = etch::Color::rgb_hex(0xF472B6),
+                        .color_end = etch::Color::rgb_hex(0xFBBF24),
+                        .thickness = 1.6f,
+                    });
+                    etch::draw_ring(etch::RingDesc{
+                        .center = pts[8],
+                        .radius = 3.0f,
+                        .thickness = 1.5f,
+                        .color = etch::Color::rgb_hex(0x34D399),
+                    });
+                }
+
                 draw_button(
                     kBtnWireGlow,
                     app->wire_glow_enabled ? "Wire Glow: Neon" : "Wire Glow: Flat",
@@ -599,7 +927,7 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
             }
             etch::text_spans({
                 etch::TextSpan{
-                    .text = etch::str_lit("v1.1 "),
+                    .text = etch::str_lit("v1.2 "),
                     .color = etch::Color::rgb_hex(0xF8FAFC),
                     .font_id = etch::kFontBold,
                 },
@@ -829,12 +1157,20 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
                 .background = etch::Color::lerp(etch::Color::rgb_hex(0x182238), node.accent, 0.22f),
                 .radius = {10.0f, 10.0f, 0.0f, 0.0f},
             }) {
-                ETCH_BOX({
-                    .width = etch::Sizing::fixed(8.0f),
-                    .height = etch::Sizing::fixed(8.0f),
-                    .background = node.accent,
-                    .radius = etch::Corners::all(4.0f),
-                }) {}
+                if (app->ico_node != etch::kInvalidIcon) {
+                    etch::icon(etch::IconDesc{
+                        .icon_id = app->ico_node,
+                        .size_px = 12.0f,
+                        .color = node.accent,
+                    });
+                } else {
+                    ETCH_BOX({
+                        .width = etch::Sizing::fixed(8.0f),
+                        .height = etch::Sizing::fixed(8.0f),
+                        .background = node.accent,
+                        .radius = etch::Corners::all(4.0f),
+                    }) {}
+                }
                 etch::text(etch::str_cstr(node.title), {
                     .color = etch::Color::rgb_hex(0xF8FAFC),
                     .font_size_px = 12.5f,
@@ -1053,7 +1389,7 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
     // Floating Dual-Kawase Frosted-Glass Preset Popover (NO clip_children on floating element)
     if (app->preset_popover_open) {
         ETCH_BOX({
-            .id = etch::id("studio_preset_popover"),
+            .id = kPresetPopover,
             .axis = etch::Axis::Col,
             .width = etch::Sizing::fixed(264.0f),
             .height = etch::Sizing::fit(),
@@ -1073,6 +1409,7 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
             .floating_offset = {0.0f, 6.0f},
             .z_index = 40,
             .backdrop_blur = 14.0f,
+            .clamp_to_viewport = true,
         }) {
             etch::text(etch::str_lit("Dual-Kawase Shader Presets"), {
                 .color = etch::Color::rgb_hex(0xF8FAFC),
@@ -1116,6 +1453,173 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
             }
         }
     }
+
+    // Floating Right-Click Canvas Context Menu (Frame-0 clamp_to_viewport)
+    if (app->ctx_menu_open) {
+        ETCH_BOX({
+            .id = kCtxMenu,
+            .axis = etch::Axis::Col,
+            .width = etch::Sizing::fixed(210.0f),
+            .height = etch::Sizing::fit(),
+            .padding = etch::Padding::all(8.0f),
+            .gap = 4.0f,
+            .background = etch::Color::rgba8(15, 23, 42, 186),
+            .border_color = etch::Color::rgba8(56, 189, 248, 130),
+            .border_width = 1.0f,
+            .radius = etch::Corners::all(9.0f),
+            .shadow_color = etch::Color::rgba8(0, 0, 0, 160),
+            .shadow_blur = 18.0f,
+            .shadow_offset = {0.0f, 8.0f},
+            .attach_to = etch::AttachTo::Root,
+            .anchor_element = etch::Anchor::TopLeft,
+            .anchor_parent = etch::Anchor::TopLeft,
+            .floating_offset = app->ctx_menu_pos,
+            .z_index = 45,
+            .backdrop_blur = 14.0f,
+            .clamp_to_viewport = true,
+        }) {
+            ETCH_BOX({
+                .axis = etch::Axis::Row,
+                .padding = etch::Padding::xy(6.0f, 2.0f),
+                .gap = 6.0f,
+                .align_y = etch::AlignY::Center,
+            }) {
+                if (app->ico_menu != etch::kInvalidIcon) {
+                    etch::icon(etch::IconDesc{
+                        .icon_id = app->ico_menu,
+                        .size_px = 12.0f,
+                        .color = etch::Color::rgb_hex(0x38BDF8),
+                    });
+                }
+                etch::text(etch::str_lit("Canvas Actions"), {
+                    .color = etch::Color::rgb_hex(0x94A3B8),
+                    .font_size_px = 11.0f,
+                    .wrap = false,
+                });
+            }
+            static constexpr const char* kCtxLabels[3] = {
+                "Reset Canvas View",
+                "Toggle Neon Wire Glow",
+                "Jump Trace -> #500k",
+            };
+            for (uint32_t m = 0u; m < 3u; ++m) {
+                const uint32_t mid = etch::id_index(etch::id("studio_ctx_item"), m);
+                if (etch::clicked(mid)) {
+                    if (m == 0u) {
+                        etch::set_canvas_view(kCanvas, etch::Vec2{36.0f, 28.0f}, 1.0f);
+                    } else if (m == 1u) {
+                        app->wire_glow_enabled = !app->wire_glow_enabled;
+                    } else {
+                        etch::virtual_list_scroll_to_row(kTraceList, 500000u, kTraceRowHeight, etch::AlignY::Top);
+                    }
+                    app->ctx_menu_open = false;
+                }
+                const bool mhov = etch::hovered(mid);
+                ETCH_BOX({
+                    .id = mid,
+                    .width = etch::Sizing::grow(),
+                    .padding = etch::Padding::xy(9.0f, 6.0f),
+                    .background = mhov ? etch::Color::rgba8(56, 189, 248, 56) : etch::Color::rgba8(15, 23, 42, 70),
+                    .radius = etch::Corners::all(6.0f),
+                }) {
+                    etch::text(etch::str_cstr(kCtxLabels[m]), {
+                        .color = etch::Color::rgb_hex(0xF1F5F9),
+                        .font_size_px = 12.0f,
+                        .wrap = false,
+                    });
+                }
+            }
+        }
+    }
+
+    // Floating Ctrl+K Command Palette Overlay (Search with Undo/Redo + Frosted Glass)
+    if (app->cmd_palette_open) {
+        ETCH_BOX({
+            .id = kCmdPalette,
+            .axis = etch::Axis::Col,
+            .width = etch::Sizing::fixed(420.0f),
+            .height = etch::Sizing::fit(),
+            .padding = etch::Padding::all(12.0f),
+            .gap = 8.0f,
+            .background = etch::Color::rgba8(15, 23, 42, 198),
+            .border_color = etch::Color::rgba8(45, 212, 191, 155),
+            .border_width = 1.2f,
+            .radius = etch::Corners::all(11.0f),
+            .shadow_color = etch::Color::rgba8(0, 0, 0, 175),
+            .shadow_blur = 24.0f,
+            .shadow_offset = {0.0f, 10.0f},
+            .attach_to = etch::AttachTo::Root,
+            .anchor_element = etch::Anchor::TopCenter,
+            .anchor_parent = etch::Anchor::TopCenter,
+            .floating_offset = {0.0f, 84.0f},
+            .z_index = 55,
+            .backdrop_blur = 16.0f,
+            .clamp_to_viewport = true,
+        }) {
+            ETCH_BOX({
+                .axis = etch::Axis::Row,
+                .width = etch::Sizing::grow(),
+                .gap = 8.0f,
+                .align_y = etch::AlignY::Center,
+            }) {
+                if (app->ico_search != etch::kInvalidIcon) {
+                    etch::icon(etch::IconDesc{
+                        .icon_id = app->ico_search,
+                        .size_px = 14.0f,
+                        .color = etch::Color::rgb_hex(0x2DD4BF),
+                    });
+                }
+                app->cmd_filter_res = etch::text_input(etch::TextInputDesc{
+                    .id = kCmdInput,
+                    .buffer = app->cmd_filter_buf,
+                    .capacity = sizeof(app->cmd_filter_buf),
+                    .placeholder = etch::str_lit("Search commands (supports Ctrl+Z / Ctrl+Y)..."),
+                    .width = etch::Sizing::grow(),
+                    .height = etch::Sizing::fixed(34.0f),
+                    .padding = etch::Padding::xy(10.0f, 7.0f),
+                    .font_size_px = 13.0f,
+                });
+            }
+            static constexpr const char* kPaletteCmds[4] = {
+                "Preset: Cyberpunk Bloom",
+                "Preset: Solar Cinema",
+                "Preset: Ice Lab",
+                "Toggle Neon Wire Glow",
+            };
+            for (uint32_t c = 0u; c < 4u; ++c) {
+                if (!contains_ascii_ci(kPaletteCmds[c], app->cmd_filter_buf)) {
+                    continue;
+                }
+                const uint32_t cid = etch::id_index(etch::id("studio_palette_cmd"), c);
+                if (etch::clicked(cid)) {
+                    if (c < 3u) {
+                        app->selected_preset = c;
+                        app->target_bloom = kPresets[c].bloom;
+                        app->target_exposure = kPresets[c].exposure;
+                    } else {
+                        app->wire_glow_enabled = !app->wire_glow_enabled;
+                    }
+                    app->cmd_palette_open = false;
+                }
+                const bool chov = etch::hovered(cid);
+                ETCH_BOX({
+                    .id = cid,
+                    .width = etch::Sizing::grow(),
+                    .padding = etch::Padding::xy(10.0f, 6.0f),
+                    .background = chov ? etch::Color::rgba8(45, 212, 191, 56) : etch::Color::rgba8(15, 23, 42, 85),
+                    .border_color = chov ? etch::Color::rgba8(45, 212, 191, 130) : etch::Color::rgba8(148, 163, 184, 28),
+                    .border_width = 1.0f,
+                    .radius = etch::Corners::all(6.0f),
+                }) {
+                    etch::text(etch::str_cstr(kPaletteCmds[c]), {
+                        .color = etch::Color::rgb_hex(0xF8FAFC),
+                        .font_size_px = 12.5f,
+                        .wrap = false,
+                    });
+                }
+            }
+        }
+    }
 }
 
 void step_headless_frame(
@@ -1124,7 +1628,11 @@ void step_headless_frame(
     uint32_t h,
     float dt_seconds,
     etch::Vec2 pointer_pos = {-1.0f, -1.0f},
-    bool pointer_down = false) noexcept
+    bool pointer_down = false,
+    bool right_down = false,
+    uint8_t pointer_clicks = 0u,
+    uint16_t key_mods = etch::Mod_None,
+    uint32_t key_pressed_code = 0u) noexcept
 {
     const etch::FrameStats prev = etch::frame_stats(app->ctx);
     etch::begin_frame(app->ctx, etch::FrameDesc{
@@ -1134,6 +1642,10 @@ void step_headless_frame(
         .dt_seconds = dt_seconds,
         .pointer_pos = pointer_pos,
         .pointer_down = pointer_down,
+        .right_pointer_down = right_down,
+        .pointer_clicks = pointer_clicks,
+        .key_mods = key_mods,
+        .key_pressed_code = key_pressed_code,
     });
     build_studio_ui(app, prev);
     etch::end_frame(app->ctx);
@@ -1206,6 +1718,7 @@ int run_headless(const char* out_png_path) noexcept {
     }
 
     StudioApp app = { .ctx = ctx };
+    init_studio_icons(&app);
     constexpr uint32_t kW = 1440u;
     constexpr uint32_t kH = 900u;
     constexpr float kDt = 1.0f / 60.0f;
@@ -1441,6 +1954,122 @@ int run_headless(const char* out_png_path) noexcept {
         return 1;
     }
 
+    // [S8] v1.2 Vector Icons, RingArc Dial Drag & 2x Reset, Clamped Context Menu, Ctrl+K Command Palette & Undo/Redo
+    if (!etch::is_icon_loaded(ctx, app.ico_bloom) ||
+        !etch::is_icon_loaded(ctx, app.ico_expose) ||
+        !etch::is_icon_loaded(ctx, app.ico_node) ||
+        !etch::is_icon_loaded(ctx, app.ico_menu) ||
+        !etch::is_icon_loaded(ctx, app.ico_search))
+    {
+        std::fprintf(stderr, "Headless Studio [S8a] failed: SVG studio icons not loaded\n");
+        cleanup_release();
+        return 1;
+    }
+    uint32_t ring_arc_count = 0u;
+    for (const etch::Prim& p : etch::frame_prims(ctx)) {
+        if (static_cast<uint8_t>(p.style.x & 0xFu) == static_cast<uint8_t>(etch::PrimKind::RingArc)) {
+            ++ring_arc_count;
+        }
+    }
+    if (ring_arc_count == 0u) {
+        std::fprintf(stderr, "Headless Studio [S8a] failed: expected RingArc prims > 0\n");
+        cleanup_release();
+        return 1;
+    }
+
+    const etch::Rect dial_r = etch::element_bounds(etch::id("studio_dial_bloom"));
+    if (dial_r.w <= 0.0f || dial_r.h <= 0.0f) {
+        std::fprintf(stderr, "Headless Studio [S8b] failed: missing studio_dial_bloom bounds\n");
+        cleanup_release();
+        return 1;
+    }
+    const float bloom_before = app.target_bloom;
+    const etch::Vec2 dial_center = { dial_r.x + 0.5f * dial_r.w, dial_r.y + 0.5f * dial_r.h };
+    const etch::Vec2 dial_drag_end = { dial_center.x + 45.0f, dial_center.y };
+    step_headless_frame(&app, kW, kH, kDt, dial_center, true);
+    step_headless_frame(&app, kW, kH, kDt, dial_drag_end, true);
+    step_headless_frame(&app, kW, kH, kDt, dial_drag_end, false);
+    if (app.target_bloom <= bloom_before + 0.20f) {
+        std::fprintf(stderr, "Headless Studio [S8b] failed: dial drag bloom %.3f -> %.3f\n", bloom_before, app.target_bloom);
+        cleanup_release();
+        return 1;
+    }
+    step_headless_frame(&app, kW, kH, kDt, dial_center, true, false, 2u);
+    step_headless_frame(&app, kW, kH, kDt, dial_center, false);
+    if (std::fabs(app.target_bloom - kPresets[app.selected_preset].bloom) > 1e-4f) {
+        std::fprintf(stderr, "Headless Studio [S8b] failed: dial double-click reset bloom=%.3f\n", app.target_bloom);
+        cleanup_release();
+        return 1;
+    }
+
+    const etch::Vec2 rc_pt = { canvas_vp.x + canvas_vp.w - 24.0f, canvas_vp.y + 48.0f };
+    step_headless_frame(&app, kW, kH, kDt, rc_pt, false, true);
+    step_headless_frame(&app, kW, kH, kDt, rc_pt, false, false);
+    const etch::Rect ctx_menu_r = etch::element_bounds(etch::id("studio_ctx_menu"));
+    if (!app.ctx_menu_open || ctx_menu_r.w <= 0.0f || (ctx_menu_r.x + ctx_menu_r.w) > static_cast<float>(kW)) {
+        std::fprintf(
+            stderr,
+            "Headless Studio [S8c] failed: ctx_open=%d rect=(%.1f,%.1f %.1fx%.1f)\n",
+            app.ctx_menu_open ? 1 : 0,
+            ctx_menu_r.x,
+            ctx_menu_r.y,
+            ctx_menu_r.w,
+            ctx_menu_r.h);
+        cleanup_release();
+        return 1;
+    }
+    click_point(etch::Vec2{ 20.0f, 20.0f });
+    step_headless_frame(&app, kW, kH, kDt);
+    if (app.ctx_menu_open) {
+        std::fprintf(stderr, "Headless Studio [S8c] failed: outside click did not close ctx menu\n");
+        cleanup_release();
+        return 1;
+    }
+
+    step_headless_frame(&app, kW, kH, kDt, etch::Vec2{-1.0f, -1.0f}, false, false, 0u, etch::Mod_Primary, SDLK_K);
+    const etch::Rect cmd_in_r = etch::element_bounds(etch::id("studio_cmd_input"));
+    if (!app.cmd_palette_open || cmd_in_r.w <= 0.0f || cmd_in_r.h <= 0.0f) {
+        std::fprintf(stderr, "Headless Studio [S8d] failed: Ctrl+K palette did not open\n");
+        cleanup_release();
+        return 1;
+    }
+    click_point(etch::Vec2{ cmd_in_r.x + 0.5f * cmd_in_r.w, cmd_in_r.y + 0.5f * cmd_in_r.h });
+    inject_text("Glow");
+    step_headless_frame(&app, kW, kH, kDt);
+    step_headless_frame(&app, kW, kH, 0.8f);
+    inject_text("!");
+    step_headless_frame(&app, kW, kH, kDt);
+    if (!app.cmd_palette_open || std::strcmp(app.cmd_filter_buf, "Glow!") != 0) {
+        std::fprintf(stderr, "Headless Studio [S8d] failed: cmd input='%s'\n", app.cmd_filter_buf);
+        cleanup_release();
+        return 1;
+    }
+    inject_key(SDLK_Z, SDL_KMOD_CTRL);
+    step_headless_frame(&app, kW, kH, kDt);
+    if (std::strcmp(app.cmd_filter_buf, "Glow") != 0) {
+        std::fprintf(stderr, "Headless Studio [S8d] failed: Ctrl+Z undo got '%s'\n", app.cmd_filter_buf);
+        cleanup_release();
+        return 1;
+    }
+    inject_key(SDLK_Y, SDL_KMOD_CTRL);
+    step_headless_frame(&app, kW, kH, kDt);
+    if (std::strcmp(app.cmd_filter_buf, "Glow!") != 0) {
+        std::fprintf(stderr, "Headless Studio [S8d] failed: Ctrl+Y redo got '%s'\n", app.cmd_filter_buf);
+        cleanup_release();
+        return 1;
+    }
+    app.cmd_filter_buf[0] = '\0';
+    inject_key(SDLK_ESCAPE);
+    step_headless_frame(&app, kW, kH, kDt);
+    if (app.cmd_palette_open) {
+        std::fprintf(stderr, "Headless Studio [S8d] failed: Escape did not close Ctrl+K palette\n");
+        cleanup_release();
+        return 1;
+    }
+    for (int f = 0; f < 40 && etch::needs_redraw(ctx); ++f) {
+        step_headless_frame(&app, kW, kH, kDt);
+    }
+
     // [S6] Spring preset change + Dual-Kawase Popover + F12 HUD + PNG Export
     const uint32_t kBtnPresets = etch::id("studio_btn_presets");
     const etch::Rect presets_rect = etch::element_bounds(kBtnPresets);
@@ -1501,7 +2130,7 @@ int run_headless(const char* out_png_path) noexcept {
 
     const char* driver = SDL_GetGPUDeviceDriver(etch::gpu_device(ctx));
     std::printf(
-        "Headless Studio OK (%s) -> %s (asserts=7/7, prims=%u, draw_calls=%u, blur_pass=%u, slug_glyphs=%u, grid=%u, wire=%u, layout_us=%.0f, vrows=[%u..%u))\n",
+        "Headless Studio OK (%s) -> %s (asserts=8/8, prims=%u, draw_calls=%u, blur_pass=%u, slug_glyphs=%u, grid=%u, wire=%u, layout_us=%.0f, vrows=[%u..%u))\n",
         driver ? driver : "unknown",
         out_png_path,
         final_stats.prim_count,
@@ -1525,7 +2154,7 @@ int run_interactive() noexcept {
     }
 
     SDL_Window* window = SDL_CreateWindow(
-        "Etch Studio 1.0 — GPU Render-Graph & 1M Trace Workbench",
+        "Etch Studio 1.2 — GPU Render-Graph & 1M Trace Workbench",
         1440,
         900,
         SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
@@ -1550,6 +2179,7 @@ int run_interactive() noexcept {
         .window = window,
         .running = true,
     };
+    init_studio_icons(&app);
 
     SDL_AddEventWatch(window_event_watch, &app);
     render_window_frame(&app, 0.0f);
@@ -1563,7 +2193,13 @@ int run_interactive() noexcept {
                 if (ev.type == SDL_EVENT_QUIT) {
                     app.running = false;
                 } else if (ev.type == SDL_EVENT_KEY_DOWN && ev.key.key == SDLK_ESCAPE) {
-                    if (app.preset_popover_open) {
+                    if (app.cmd_palette_open) {
+                        app.cmd_palette_open = false;
+                        etch::request_redraw(ctx);
+                    } else if (app.ctx_menu_open) {
+                        app.ctx_menu_open = false;
+                        etch::request_redraw(ctx);
+                    } else if (app.preset_popover_open) {
                         app.preset_popover_open = false;
                         etch::request_redraw(ctx);
                     } else if (app.pending_wire_src != UINT32_MAX) {

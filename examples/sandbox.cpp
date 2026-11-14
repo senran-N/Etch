@@ -20,6 +20,9 @@ struct AppState {
     etch::Context*        ctx = nullptr;
     SDL_Window*           window = nullptr;
     SDL_GPUTexture*       osc_tex = nullptr;
+    uint16_t              ico_spark = etch::kInvalidIcon;
+    uint16_t              ico_arc_bolt = etch::kInvalidIcon;
+    uint16_t              ico_gear = etch::kInvalidIcon;
     uint32_t              click_count = 0u;
     uint32_t              rich_link_clicks = 0u;
     uint32_t              selected_preset = 0u;
@@ -33,6 +36,24 @@ struct AppState {
     etch::TextInputResult multi_res = {};
     bool                  running = true;
 };
+
+void init_sandbox_icons(AppState* app) noexcept {
+    if (!app || !app->ctx) {
+        return;
+    }
+    app->ico_spark = etch::register_svg_icon(
+        app->ctx,
+        etch::str_lit("M13 2L4.5 13.5H11L9.5 22L19.5 10.5H13Z"),
+        {0.0f, 0.0f, 24.0f, 24.0f});
+    app->ico_arc_bolt = etch::register_svg_icon(
+        app->ctx,
+        etch::str_lit("M4 16A8 8 0 1 1 20 16H17A5 5 0 1 0 7 16Z M12 8L15 15L9 15Z"),
+        {0.0f, 0.0f, 24.0f, 24.0f});
+    app->ico_gear = etch::register_svg_icon(
+        app->ctx,
+        etch::str_lit("M12 2A10 10 0 1 1 2 12A10 10 0 0 1 12 2Z M12 6A6 6 0 1 0 18 12A6 6 0 0 0 12 6Z"),
+        {0.0f, 0.0f, 24.0f, 24.0f});
+}
 
 constexpr float clamp_f(float x, float lo, float hi) noexcept {
     return (x < lo) ? lo : ((x > hi) ? hi : x);
@@ -254,6 +275,9 @@ void build_sandbox_ui(AppState* app, const etch::FrameStats& prev_stats) noexcep
     }
     if (clicked(btn_popover_id)) {
         app->popover_open = !app->popover_open;
+    }
+    if (app->popover_open && should_close_popover(id("popover_menu"), btn_popover_id)) {
+        app->popover_open = false;
     }
 
     const SpringSpec preset_spec = (app->selected_preset == 1u)
@@ -617,6 +641,7 @@ void build_sandbox_ui(AppState* app, const etch::FrameStats& prev_stats) noexcep
                                         .floating_offset = {-16.0f, 8.0f},
                                         .z_index = 50,
                                         .backdrop_blur = 20.0f,
+                                        .clamp_to_viewport = true,
                                     }) {
                                         text("Floating Z=50 Layer (Passthrough Guarded)", {
                                             .color = Color::rgb_hex(0x7DD3FC),
@@ -974,6 +999,99 @@ void build_sandbox_ui(AppState* app, const etch::FrameStats& prev_stats) noexcep
                         .font_size_px = 12.0f,
                         .wrap = false,
                     });
+
+                    // v1.2 Vector Showcase: SVG Slug icons, analytic RingArc gauges, Polyline + Cubic Bezier
+                    ETCH_BOX({
+                        .id = id("v12_showcase"),
+                        .axis = Axis::Row,
+                        .width = Sizing::grow(),
+                        .height = Sizing::fixed(58.0f),
+                        .padding = Padding::xy(10.0f, 6.0f),
+                        .gap = 10.0f,
+                        .align_y = AlignY::Center,
+                        .background = sub_surface,
+                        .border_color = Color::rgba8(56, 189, 248, 70),
+                        .border_width = 1.0f,
+                        .radius = Corners::all(10.0f),
+                    }) {
+                        ETCH_BOX({
+                            .axis = Axis::Row,
+                            .gap = 6.0f,
+                            .align_y = AlignY::Center,
+                        }) {
+                            if (is_icon_loaded(app->ctx, app->ico_spark)) {
+                                icon({ .icon_id = app->ico_spark, .size_px = 18.0f, .color = Color::rgb_hex(0xFBBF24) });
+                            }
+                            if (is_icon_loaded(app->ctx, app->ico_arc_bolt)) {
+                                icon({ .icon_id = app->ico_arc_bolt, .size_px = 18.0f, .color = Color::rgb_hex(0x38BDF8) });
+                            }
+                            if (is_icon_loaded(app->ctx, app->ico_gear)) {
+                                icon({ .icon_id = app->ico_gear, .size_px = 18.0f, .color = Color::rgb_hex(0xA78BFA) });
+                            }
+                        }
+
+                        ETCH_BOX({
+                            .id = id("v12_ring_box"),
+                            .width = Sizing::fixed(102.0f),
+                            .height = Sizing::fixed(44.0f),
+                        }) {
+                            draw_ring({
+                                .center = { 22.0f, 22.0f },
+                                .radius = 16.0f,
+                                .thickness = 4.5f,
+                                .start_angle_rad = -1.57079633f,
+                                .sweep_angle_rad = 4.65f,
+                                .color = Color::rgb_hex(0x38BDF8),
+                                .color_end = Color::rgb_hex(0xA855F7),
+                                .track_color = Color::rgba8(148, 163, 184, 48),
+                                .glow_color = Color::rgba8(56, 189, 248, 110),
+                                .glow_px = 4.0f,
+                                .round_caps = true,
+                            });
+                            draw_ring({
+                                .center = { 74.0f, 22.0f },
+                                .radius = 16.0f,
+                                .thickness = 4.5f,
+                                .start_angle_rad = -1.57079633f,
+                                .sweep_angle_rad = 3.55f,
+                                .color = Color::rgb_hex(0x34D399),
+                                .color_end = Color::rgb_hex(0xFBBF24),
+                                .track_color = Color::rgba8(148, 163, 184, 48),
+                                .glow_color = Color::rgba8(52, 211, 153, 95),
+                                .glow_px = 3.5f,
+                                .round_caps = true,
+                            });
+                        }
+
+                        ETCH_BOX({
+                            .id = id("v12_plot_box"),
+                            .width = Sizing::grow(),
+                            .height = Sizing::fixed(44.0f),
+                            .background = Color::rgba8(15, 23, 42, 160),
+                            .radius = Corners::all(6.0f),
+                        }) {
+                            static constexpr Vec2 kSparkPts[5] = {
+                                { 8.0f, 32.0f }, { 36.0f, 20.0f }, { 64.0f, 26.0f }, { 96.0f, 12.0f }, { 128.0f, 16.0f },
+                            };
+                            draw_polyline({
+                                .points = kSparkPts,
+                                .color = Color::rgba8(148, 163, 184, 150),
+                                .thickness = 1.4f,
+                            });
+                            draw_bezier({
+                                .p0 = { 8.0f, 34.0f },
+                                .p1 = { 46.0f, 4.0f },
+                                .p2 = { 88.0f, 40.0f },
+                                .p3 = { 128.0f, 10.0f },
+                                .cubic = true,
+                                .color_start = Color::rgb_hex(0x38BDF8),
+                                .color_end = Color::rgb_hex(0xF472B6),
+                                .thickness = 2.0f,
+                                .glow_color = Color::rgba8(56, 189, 248, 90),
+                                .glow_px = 3.0f,
+                            });
+                        }
+                    }
                 }
             }
         }
@@ -1074,6 +1192,7 @@ int run_headless(const char* out_png_path) noexcept {
         .ctx = ctx,
         .osc_tex = osc_tex,
     };
+    init_sandbox_icons(&app);
     constexpr uint32_t kHeadlessW = 1280u;
     constexpr uint32_t kHeadlessH = 800u;
     constexpr float kStepDt = 1.0f / 60.0f;
@@ -1710,9 +1829,290 @@ int run_headless(const char* out_png_path) noexcept {
         }
     }
 
-    const bool ok = png_ok && stats_ok && slug_ok && v10a_ok && v11_ok;
+    // 12. v1.2 Vector Icons, RingArc, Box-Local Draw API, Viewport Popover Clamping, Pro Input, Drop & UTF-8 Undo/Redo Assertion.
+    bool v12_ok = false;
+    {
+        etch::Context* v12ctx = etch::create_context(etch::ContextDesc{ .headless = true });
+        if (!v12ctx) {
+            std::fprintf(stderr, "Headless assert [12] failed: create_context failed\n");
+        } else {
+            const uint16_t ico_arc = etch::register_svg_icon(
+                v12ctx,
+                etch::str_lit("M4 16A8 8 0 1 1 20 16Z"),
+                {0.0f, 0.0f, 24.0f, 24.0f});
+            const uint16_t ico_donut = etch::register_svg_icon(
+                v12ctx,
+                etch::str_lit("M12 2A10 10 0 1 1 2 12A10 10 0 0 1 12 2Z M12 6A6 6 0 1 0 18 12A6 6 0 0 0 12 6Z"),
+                {0.0f, 0.0f, 24.0f, 24.0f});
+            const bool icons_ok =
+                etch::is_icon_loaded(v12ctx, ico_arc) &&
+                etch::is_icon_loaded(v12ctx, ico_donut) &&
+                !etch::is_icon_loaded(v12ctx, 200u);
+
+            const uint32_t kBtnId = etch::id("v12_btn");
+            const uint32_t kTiId  = etch::id("v12_ti");
+            const uint32_t kPopId = etch::id("v12_pop");
+            char u_buf[128] = "Hello";
+            etch::TextInputResult ti_res = {};
+            bool pop_open = false;
+            uint32_t shortcut_gated = 0u;
+            uint32_t shortcut_forced = 0u;
+            uint32_t btn_right_clicks = 0u;
+            uint32_t any_right_clicks = 0u;
+            uint32_t btn_dbl_clicks = 0u;
+            bool drop_seen = false;
+            bool drop_cleared = false;
+
+            const auto step_v12 = [&](
+                etch::Vec2 ptr,
+                bool left_down,
+                bool right_down = false,
+                uint8_t clicks = 1u,
+                uint16_t kmods = etch::Mod_None,
+                uint32_t key = 0u) noexcept
+            {
+                etch::begin_frame(v12ctx, etch::FrameDesc{
+                    .viewport_w = kHeadlessW,
+                    .viewport_h = kHeadlessH,
+                    .dpi_scale = 1.0f,
+                    .dt_seconds = kStepDt,
+                    .pointer_pos = ptr,
+                    .pointer_down = left_down,
+                    .right_pointer_down = right_down,
+                    .pointer_clicks = clicks,
+                    .key_mods = kmods,
+                    .key_pressed_code = key,
+                });
+                if (etch::shortcut(etch::Mod_Ctrl, SDLK_K, false)) {
+                    ++shortcut_gated;
+                }
+                if (etch::shortcut(etch::Mod_Ctrl, SDLK_K, true)) {
+                    ++shortcut_forced;
+                }
+                if (etch::right_clicked(kBtnId)) {
+                    ++btn_right_clicks;
+                }
+                if (etch::right_clicked_anywhere()) {
+                    ++any_right_clicks;
+                }
+                if (etch::double_clicked(kBtnId)) {
+                    ++btn_dbl_clicks;
+                }
+                if (pop_open && etch::should_close_popover(kPopId, kBtnId)) {
+                    pop_open = false;
+                }
+
+                const auto drops = etch::dropped_files();
+                if (!drops.empty()) {
+                    const etch::Str expected = etch::str_lit("C:/demo/\xE7\x9F\xA2\xE9\x87\x8F\xE5\x9B\xBE.svg");
+                    if (drops.size() == 1u &&
+                        drops[0].length == expected.length &&
+                        std::memcmp(drops[0].chars, expected.chars, expected.length) == 0)
+                    {
+                        drop_seen = true;
+                    }
+                } else if (drop_seen) {
+                    drop_cleared = true;
+                }
+
+                etch::begin_box(etch::BoxDesc{
+                    .axis = etch::Axis::Col,
+                    .width = etch::Sizing::grow(),
+                    .height = etch::Sizing::grow(),
+                    .padding = etch::Padding::all(60.0f),
+                    .gap = 16.0f,
+                    .background = etch::Color::rgb_hex(0x0F172A),
+                });
+                etch::begin_box(etch::BoxDesc{
+                    .id = kBtnId,
+                    .axis = etch::Axis::Row,
+                    .width = etch::Sizing::fixed(160.0f),
+                    .height = etch::Sizing::fixed(52.0f),
+                    .padding = etch::Padding::xy(10.0f, 8.0f),
+                    .gap = 8.0f,
+                    .align_y = etch::AlignY::Center,
+                    .background = etch::Color::rgb_hex(0x1E293B),
+                    .radius = etch::Corners::all(8.0f),
+                });
+                etch::draw_ring({
+                    .center = { 132.0f, 26.0f },
+                    .radius = 14.0f,
+                    .thickness = 3.5f,
+                    .sweep_angle_rad = 4.2f,
+                    .color = etch::Color::rgb_hex(0x38BDF8),
+                    .color_end = etch::Color::rgb_hex(0xA855F7),
+                    .track_color = etch::Color::rgba8(148, 163, 184, 50),
+                });
+                etch::draw_bezier({
+                    .p0 = { 6.0f, 44.0f },
+                    .p1 = { 48.0f, 8.0f },
+                    .p2 = { 90.0f, 46.0f },
+                    .p3 = { 120.0f, 12.0f },
+                    .cubic = true,
+                    .color_start = etch::Color::rgb_hex(0x34D399),
+                    .color_end = etch::Color::rgb_hex(0xFBBF24),
+                    .thickness = 2.0f,
+                    .foreground = true,
+                });
+                etch::icon({ .icon_id = ico_arc, .size_px = 20.0f, .color = etch::Color::rgb_hex(0xF8FAFC) });
+                etch::icon({ .icon_id = ico_donut, .size_px = 20.0f, .color = etch::Color::rgb_hex(0x38BDF8) });
+                etch::end_box();
+
+                ti_res = etch::text_input(etch::TextInputDesc{
+                    .id = kTiId,
+                    .buffer = u_buf,
+                    .capacity = sizeof(u_buf),
+                    .width = etch::Sizing::fixed(260.0f),
+                    .height = etch::Sizing::fixed(36.0f),
+                });
+
+                if (pop_open) {
+                    etch::begin_box(etch::BoxDesc{
+                        .id = kPopId,
+                        .width = etch::Sizing::fixed(220.0f),
+                        .height = etch::Sizing::fixed(120.0f),
+                        .background = etch::Color::rgb_hex(0x1E293B),
+                        .border_color = etch::Color::rgb_hex(0x38BDF8),
+                        .border_width = 1.0f,
+                        .radius = etch::Corners::all(10.0f),
+                        .attach_to = etch::AttachTo::Root,
+                        .anchor_parent = etch::Anchor::BottomRight,
+                        .floating_offset = { 40.0f, 40.0f },
+                        .z_index = 25,
+                        .clamp_to_viewport = true,
+                    });
+                    etch::end_box();
+                }
+
+                etch::end_box();
+                etch::end_frame(v12ctx);
+            };
+
+            step_v12({-1.0f, -1.0f}, false);
+            step_v12({-1.0f, -1.0f}, false);
+            const etch::FrameStats v12_stats = etch::frame_stats(v12ctx);
+            uint32_t ring_prims = 0u;
+            uint32_t bezier_prims = 0u;
+            uint32_t slug_prims = 0u;
+            for (const etch::Prim& p : etch::frame_prims(v12ctx)) {
+                const auto kind = static_cast<etch::PrimKind>(p.style.x & 0xFu);
+                if (kind == etch::PrimKind::RingArc) ++ring_prims;
+                else if (kind == etch::PrimKind::BezierWire) ++bezier_prims;
+                else if (kind == etch::PrimKind::SlugGlyph) ++slug_prims;
+            }
+
+            const etch::Rect b_bounds = etch::element_bounds(kBtnId);
+            const etch::Vec2 b_pt = { b_bounds.x + 0.5f * b_bounds.w, b_bounds.y + 0.5f * b_bounds.h };
+            const etch::Rect t_bounds = etch::element_bounds(kTiId);
+            const etch::Vec2 t_pt = { t_bounds.x + 0.5f * t_bounds.w, t_bounds.y + 0.5f * t_bounds.h };
+
+            // Frame-0 popover viewport clamp & outside-click immunity
+            pop_open = true;
+            step_v12({20.0f, 20.0f}, true);
+            const bool frame0_immune = pop_open;
+            const etch::Rect p_bounds = etch::element_bounds(kPopId);
+            const bool clamp_ok =
+                (p_bounds.w > 200.0f) &&
+                (p_bounds.x >= 5.5f) && (p_bounds.y >= 5.5f) &&
+                ((p_bounds.x + p_bounds.w) <= 1274.5f) &&
+                ((p_bounds.y + p_bounds.h) <= 794.5f);
+            step_v12({20.0f, 20.0f}, false);
+            step_v12({ p_bounds.x + 40.0f, p_bounds.y + 40.0f }, true);
+            const bool stay_inside = pop_open;
+            step_v12({ p_bounds.x + 40.0f, p_bounds.y + 40.0f }, false);
+            step_v12({20.0f, 20.0f}, true);
+            const bool closed_outside = !pop_open;
+            step_v12({20.0f, 20.0f}, false);
+
+            // Double click + Right click
+            step_v12(b_pt, true, false, 2u);
+            step_v12(b_pt, false, false, 1u);
+            step_v12(b_pt, false, true);
+            step_v12(b_pt, false, false);
+
+            // Shortcut suppression while writable text_input is focused
+            step_v12(t_pt, true);
+            step_v12(t_pt, false);
+            step_v12({-1.0f, -1.0f}, false, false, 1u, etch::Mod_Ctrl, SDLK_K);
+            const bool gated_while_typing = (shortcut_gated == 0u) && (shortcut_forced == 1u);
+            step_v12({20.0f, 20.0f}, true);
+            step_v12({20.0f, 20.0f}, false);
+            step_v12({-1.0f, -1.0f}, false, false, 1u, etch::Mod_Ctrl, SDLK_K);
+            const bool fired_unfocused = (shortcut_gated == 1u) && (shortcut_forced == 2u);
+
+            // UTF-8 text_input Undo/Redo + redo branch truncation on new edit
+            step_v12(t_pt, true);
+            step_v12(t_pt, false);
+            step_v12({-1.0f, -1.0f}, false, false, 1u, etch::Mod_None, SDLK_END);
+            {
+                SDL_Event tev = {};
+                tev.type = SDL_EVENT_TEXT_INPUT;
+                tev.text.text = " \xE4\xB8\x96\xE7\x95\x8C";
+                etch::process_event(v12ctx, tev);
+            }
+            step_v12({-1.0f, -1.0f}, false);
+            const bool ins_ok = (std::strcmp(u_buf, "Hello \xE4\xB8\x96\xE7\x95\x8C") == 0) && (ti_res.cursor_byte == 12u);
+            step_v12({-1.0f, -1.0f}, false, false, 1u, etch::Mod_Ctrl, SDLK_Z);
+            const bool undo_ok = (std::strcmp(u_buf, "Hello") == 0) && (ti_res.cursor_byte == 5u);
+            step_v12({-1.0f, -1.0f}, false, false, 1u, etch::Mod_Ctrl, SDLK_Y);
+            const bool redo_ok = (std::strcmp(u_buf, "Hello \xE4\xB8\x96\xE7\x95\x8C") == 0) && (ti_res.cursor_byte == 12u);
+            step_v12({-1.0f, -1.0f}, false, false, 1u, etch::Mod_Ctrl, SDLK_Z);
+            {
+                SDL_Event tev = {};
+                tev.type = SDL_EVENT_TEXT_INPUT;
+                tev.text.text = "!";
+                etch::process_event(v12ctx, tev);
+            }
+            step_v12({-1.0f, -1.0f}, false);
+            step_v12({-1.0f, -1.0f}, false, false, 1u, etch::Mod_Ctrl, SDLK_Y);
+            const bool trunc_ok = (std::strcmp(u_buf, "Hello!") == 0) && (ti_res.cursor_byte == 6u);
+
+            // Drop file injection & single-frame consumption
+            etch::inject_drop_file(v12ctx, etch::str_lit("C:/demo/\xE7\x9F\xA2\xE9\x87\x8F\xE5\x9B\xBE.svg"));
+            step_v12({-1.0f, -1.0f}, false);
+            step_v12({-1.0f, -1.0f}, false);
+
+            v12_ok =
+                icons_ok &&
+                (ring_prims >= 2u) &&
+                (bezier_prims >= 4u) &&
+                (slug_prims >= 2u) &&
+                (v12_stats.draw_call_count == 1u) &&
+                frame0_immune &&
+                clamp_ok &&
+                stay_inside &&
+                closed_outside &&
+                (btn_dbl_clicks == 1u) &&
+                (btn_right_clicks == 1u) &&
+                (any_right_clicks == 1u) &&
+                gated_while_typing &&
+                fired_unfocused &&
+                ins_ok &&
+                undo_ok &&
+                redo_ok &&
+                trunc_ok &&
+                drop_seen &&
+                drop_cleared;
+            if (!v12_ok) {
+                std::fprintf(
+                    stderr,
+                    "Headless assert [12] failed: icons=%d ring=%u bez=%u slug=%u dc=%u imm=%d clamp=%d(%.1f,%.1f %.1fx%.1f) stay=%d cls=%d dbl=%u rc=%u/%u sc=%d/%d undo=%d/%d/%d/%d drop=%d/%d\n",
+                    icons_ok ? 1 : 0, ring_prims, bezier_prims, slug_prims, v12_stats.draw_call_count,
+                    frame0_immune ? 1 : 0, clamp_ok ? 1 : 0, p_bounds.x, p_bounds.y, p_bounds.w, p_bounds.h,
+                    stay_inside ? 1 : 0, closed_outside ? 1 : 0, btn_dbl_clicks, btn_right_clicks, any_right_clicks,
+                    gated_while_typing ? 1 : 0, fired_unfocused ? 1 : 0,
+                    ins_ok ? 1 : 0, undo_ok ? 1 : 0, redo_ok ? 1 : 0, trunc_ok ? 1 : 0,
+                    drop_seen ? 1 : 0, drop_cleared ? 1 : 0);
+            }
+
+            etch::destroy_context(v12ctx);
+            etch::set_current_context(ctx);
+        }
+    }
+
+    const bool ok = png_ok && stats_ok && slug_ok && v10a_ok && v11_ok && v12_ok;
     std::printf(
-        "Headless %s -> %s (asserts=11/11, prims=%u, draw_calls=%u, slug_glyphs=%u, slug_curves=%u, layout_ms=%.3f, gpu_submit_ms=%.3f, arena_used=%zuB, scroll_y=%.1f, focus=0x%08X, idle=%d)\n",
+        "Headless %s -> %s (asserts=12/12, prims=%u, draw_calls=%u, slug_glyphs=%u, slug_curves=%u, layout_ms=%.3f, gpu_submit_ms=%.3f, arena_used=%zuB, scroll_y=%.1f, focus=0x%08X, idle=%d)\n",
         ok ? "OK" : "FAILED",
         out_png_path,
         final_stats.prim_count,
@@ -1737,7 +2137,7 @@ int run_interactive() noexcept {
     }
 
     SDL_Window* window = SDL_CreateWindow(
-        "Etch v1.1 — Pure-GPU UI Engine",
+        "Etch v1.2 — Pure-GPU UI Engine",
         1280,
         800,
         SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
@@ -1764,6 +2164,7 @@ int run_interactive() noexcept {
         .osc_tex = osc_tex,
         .running = true,
     };
+    init_sandbox_icons(&app);
 
     SDL_AddEventWatch(window_event_watch, &app);
     render_window_frame(&app, 0.0f);
