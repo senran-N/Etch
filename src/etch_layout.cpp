@@ -604,10 +604,24 @@ void push_prim(
     {
         return;
     }
-    if ((prim.bounds.x + prim.bounds.z + cull_pad_px <= prim.clip.x) ||
-        (prim.bounds.x - cull_pad_px >= prim.clip.z) ||
-        (prim.bounds.y + prim.bounds.w + cull_pad_px <= prim.clip.y) ||
-        (prim.bounds.y - cull_pad_px >= prim.clip.w))
+    float min_x = prim.bounds.x, min_y = prim.bounds.y;
+    float max_x = min_x + prim.bounds.z, max_y = min_y + prim.bounds.w;
+    const PrimKind kind = static_cast<PrimKind>(prim.style.x & 15u);
+    if (kind == PrimKind::RotatedRect || (kind == PrimKind::SlugGlyph && prim.payload.z != 0u)) {
+        const float angle = kind == PrimKind::RotatedRect
+            ? unpack_f16_cpu(static_cast<uint16_t>(prim.style.w >> 16))
+            : std::bit_cast<float>(prim.payload.z);
+        const float hx = 0.5f * prim.bounds.z, hy = 0.5f * prim.bounds.w;
+        const float cx = prim.bounds.x + hx, cy = prim.bounds.y + hy;
+        const float ac = std::fabs(std::cos(angle)), as = std::fabs(std::sin(angle));
+        const float ex = ac * hx + as * hy, ey = as * hx + ac * hy;
+        min_x = cx - ex; min_y = cy - ey;
+        max_x = cx + ex; max_y = cy + ey;
+    }
+    if ((max_x + cull_pad_px <= prim.clip.x) ||
+        (min_x - cull_pad_px >= prim.clip.z) ||
+        (max_y + cull_pad_px <= prim.clip.y) ||
+        (min_y - cull_pad_px >= prim.clip.w))
     {
         return;
     }
@@ -2712,7 +2726,7 @@ void emit_vector_icon_quad(
     uint16_t icon_id,
     Rect target_px,
     Color color,
-    const ClipEntry& clip) noexcept
+    const ClipEntry& clip, float angle_rad = 0.0f) noexcept
 {
     if (icon_id >= kMaxVectorIcons || color.a == 0u || target_px.w <= 0.0f || target_px.h <= 0.0f) {
         return;
@@ -2742,7 +2756,7 @@ void emit_vector_icon_quad(
             ic.num_hbands,
             ic.num_vbands,
             clip.radius,
-            PrimFlag_None));
+            PrimFlag_None, angle_rad));
 }
 
 DrawCmdNode* append_open_box_draw_cmd(Context* ctx, bool foreground) noexcept {
@@ -3004,6 +3018,45 @@ void emit_draw_text_cmd(
     }
 }
 
+void emit_vector_fill(Context* ctx, const FilledPathDesc& desc, Vec2 origin, float scale,
+    const ClipEntry& clip) noexcept {
+    const size_t mark = ctx->frame_arena.mark();
+    uint32_t count = 0;
+    const SlugRawCurve* raw = decode_vector_path(ctx, desc.svg_path_d, desc.commands, {}, &count);
+    if (count == 0) { ctx->frame_arena.rewind(mark); return; }
+    float min_x = raw[0].p1x, max_x = min_x, min_y = raw[0].p1y, max_y = min_y;
+    for (uint32_t i = 0; i < count; ++i) {
+        const SlugRawCurve& r = raw[i];
+        min_x = std::fmin(min_x, std::fmin(r.p1x, std::fmin(r.p2x, r.p3x)));
+        max_x = std::fmax(max_x, std::fmax(r.p1x, std::fmax(r.p2x, r.p3x)));
+        min_y = std::fmin(min_y, std::fmin(r.p1y, std::fmin(r.p2y, r.p3y)));
+        max_y = std::fmax(max_y, std::fmax(r.p1y, std::fmax(r.p2y, r.p3y)));
+    }
+    const float path_scale = scale * desc.scale;
+    const Vec2 base = origin + desc.offset * scale;
+    if (desc.fill.a > 0u || desc.fill_end.a > 0u) {
+        const CompiledSlugShape shape = compile_slug_contours(&ctx->atlas, raw, count,
+            min_x, min_y, max_x-min_x, max_y-min_y, ctx);
+        if (shape.has_outline) {
+            push_prim(ctx, Prim::make_slug_fill({base.x+min_x*path_scale, base.y-max_y*path_scale,
+                (max_x-min_x)*path_scale, (max_y-min_y)*path_scale}, clip.rect, desc.fill,
+                shape.band_offset, shape.num_hbands, shape.num_vbands, desc.fill_end,
+                desc.gradient_dir, desc.radial_gradient, clip.radius));
+        }
+    }
+    if (desc.stroke_width > 0.0f && desc.stroke_color.a > 0u) {
+        for (uint32_t i = 0; i < count; ++i) {
+            const SlugRawCurve& r = raw[i];
+            if (r.implicit_close) continue;
+            push_prim(ctx, Prim::make_bezier_wire(base + Vec2{r.p1x,-r.p1y}*path_scale,
+                base + Vec2{r.p2x,-r.p2y}*path_scale, base + Vec2{r.p3x,-r.p3y}*path_scale,
+                clip.rect, desc.stroke_color, desc.stroke_color, desc.stroke_width*path_scale*.5f,
+                {}, 0, clip.radius));
+        }
+    }
+    ctx->frame_arena.rewind(mark);
+}
+
 void emit_draw_list_command(
     Context* ctx,
     const DrawCmdNode* head,
@@ -3015,6 +3068,7 @@ void emit_draw_list_command(
     for (const DrawCmdNode* node = head; node != nullptr; node = node->next) {
         const float scale = node->world_scale * dpi;
         switch (node->kind) {
+            case DrawCmdKind::Fill: emit_vector_fill(ctx, node->fill_cmd, origin, scale, clip); break;
             case DrawCmdKind::Rect: {
                 const RectDrawDesc& rd = node->rect;
                 const Rect r_px = {
@@ -3025,8 +3079,11 @@ void emit_draw_list_command(
                 };
                 const Corners rad_px = scale_corners(rd.radius, scale);
                 const float bw_px = rd.border_width * scale;
-                const bool has_grad = (rd.fill_end.a > 0u) || rd.radial_gradient;
-                if (has_grad) {
+                const bool has_grad = (rd.fill_end.pack_rgba8() != 0u) || rd.radial_gradient;
+                if (std::fabs(rd.angle_rad) > 1e-5f) {
+                    push_prim(ctx, Prim::make_rotated_rect(r_px, clip.rect, rd.fill, rd.angle_rad,
+                        rad_px, rd.border_color, bw_px, rd.fill_end, rd.gradient_dir, rd.radial_gradient, clip.radius));
+                } else if (has_grad) {
                     push_prim(
                         ctx,
                         Prim::make_gradient_rect(
@@ -3180,7 +3237,7 @@ void emit_draw_list_command(
                     .w = ic.rect.w * scale,
                     .h = ic.rect.h * scale,
                 };
-                emit_vector_icon_quad(ctx, ic.icon_id, target_px, ic.color, clip);
+                emit_vector_icon_quad(ctx, ic.icon_id, target_px, ic.color, clip, ic.angle_rad);
                 break;
             }
             case DrawCmdKind::Text: {
@@ -3649,6 +3706,8 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
     }
 
     ctx->frame_arena.reset();
+    ctx->dyn_slug_curve_count = 0;
+    ctx->dyn_slug_band_count = 0;
     ctx->prim_count = 0u;
     ctx->batch_count = 0u;
     ctx->blur_split_count = 0u;
@@ -4576,7 +4635,7 @@ void icon(const IconDesc& desc_in) noexcept {
 }
 
 void draw_rect(const RectDrawDesc& desc) noexcept {
-    if (desc.rect.w <= 0.0f || desc.rect.h <= 0.0f) {
+    if (desc.rect.w <= 0.0f || desc.rect.h <= 0.0f || !std::isfinite(desc.angle_rad)) {
         return;
     }
     Context* ctx = current_context();
@@ -4594,6 +4653,86 @@ void draw_line(const LineDesc& desc) noexcept {
     if (DrawCmdNode* node = append_open_box_draw_cmd(ctx, desc.foreground)) {
         node->kind = DrawCmdKind::Line;
         node->line = desc;
+    }
+}
+
+void draw_filled_path(const FilledPathDesc& desc) noexcept {
+    Context* ctx = current_context();
+    if (!ctx || !ctx->in_frame || !std::isfinite(desc.offset.x) || !std::isfinite(desc.offset.y) || !std::isfinite(desc.scale) || desc.scale <= 0 ||
+        (desc.commands.empty() && (!desc.svg_path_d.chars || desc.svg_path_d.length == 0))) return;
+    for (const PathCmd& c : desc.commands) {
+        if (uint8_t(c.verb) > uint8_t(PathVerb::Close) ||
+            !std::isfinite(c.p1.x) || !std::isfinite(c.p1.y) || !std::isfinite(c.p2.x) ||
+            !std::isfinite(c.p2.y) || !std::isfinite(c.p3.x) || !std::isfinite(c.p3.y)) return;
+    }
+    FilledPathDesc owned = desc;
+    if (!desc.commands.empty()) {
+        PathCmd* copy = ctx->frame_arena.alloc_uninit<PathCmd>(desc.commands.size());
+        if (!copy) return;
+        std::memcpy(copy, desc.commands.data(), desc.commands.size_bytes());
+        owned.commands = {copy, desc.commands.size()};
+    }
+    if (desc.svg_path_d.length && !desc.svg_path_d.is_static) {
+        owned.svg_path_d = ctx->frame_arena.push_str(desc.svg_path_d.chars, desc.svg_path_d.length);
+        if (!owned.svg_path_d.chars) return;
+    }
+    if (DrawCmdNode* node = append_open_box_draw_cmd(ctx, desc.foreground)) {
+        node->kind = DrawCmdKind::Fill;
+        node->fill_cmd = owned;
+    }
+}
+
+void draw_filled_polygon(const FilledPolygonDesc& desc) noexcept {
+    Context* ctx = current_context();
+    if (!ctx || !ctx->in_frame || desc.points.size() < 3) return;
+    for (Vec2 p : desc.points) if (!std::isfinite(p.x) || !std::isfinite(p.y)) return;
+    // Convert caller-owned vertices immediately to owned commands.
+    PathCmd* commands = ctx->frame_arena.alloc<PathCmd>(desc.points.size()+1);
+    if (!commands) return;
+    for (size_t i = 0; i < desc.points.size(); ++i)
+        commands[i] = {.verb = i == 0 ? PathVerb::MoveTo : PathVerb::LineTo, .p1 = desc.points[i]};
+    commands[desc.points.size()] = {.verb = PathVerb::Close};
+    if (DrawCmdNode* node = append_open_box_draw_cmd(ctx, desc.foreground)) {
+        node->kind = DrawCmdKind::Fill;
+        node->fill_cmd = {.commands = {commands, desc.points.size()+1}, .fill = desc.fill,
+            .fill_end = desc.fill_end, .gradient_dir = desc.gradient_dir, .radial_gradient = desc.radial_gradient,
+            .stroke_color = desc.stroke_color, .stroke_width = desc.stroke_width, .foreground = desc.foreground};
+    }
+}
+
+void draw_area_series(const AreaSeriesDesc& desc) noexcept {
+    Context* ctx = current_context();
+    const size_t n = desc.points.size();
+    if (!ctx || !ctx->in_frame || n < 2 || !std::isfinite(desc.baseline_y)) return;
+    for (Vec2 p : desc.points) if (!std::isfinite(p.x) || !std::isfinite(p.y)) return;
+    PathCmd* cmds = ctx->frame_arena.alloc<PathCmd>(n+3);
+    if (!cmds) return;
+    cmds[0] = {.verb = PathVerb::MoveTo, .p1 = desc.points[0]};
+    for (size_t i = 1; i < n; ++i) {
+        const Vec2 a = desc.points[i-1], b = desc.points[i];
+        const Vec2 prev = desc.points[i > 1 ? i-2 : 0], next = desc.points[i+1 < n ? i+1 : i];
+        const Vec2 c1 = a + (b-prev)*(1.0f/6.0f), c2 = b - (next-a)*(1.0f/6.0f);
+        cmds[i] = desc.smooth ? PathCmd{.verb = PathVerb::CubicTo, .p1 = c1, .p2 = c2, .p3 = b}
+            : PathCmd{.verb = PathVerb::LineTo, .p1 = b};
+    }
+    cmds[n] = {.verb = PathVerb::LineTo, .p1 = {desc.points[n-1].x, desc.baseline_y}};
+    cmds[n+1] = {.verb = PathVerb::LineTo, .p1 = {desc.points[0].x, desc.baseline_y}};
+    cmds[n+2] = {.verb = PathVerb::Close};
+    if (desc.fill_top.a > 0u || desc.fill_bottom.a > 0u) {
+        if (DrawCmdNode* node = append_open_box_draw_cmd(ctx, desc.foreground)) {
+            node->kind = DrawCmdKind::Fill;
+            node->fill_cmd = {.commands = {cmds,n+3}, .fill = desc.fill_top, .fill_end = desc.fill_bottom};
+        }
+    }
+    // Stroke only the data series, sharing the exact interpolation controls with the fill.
+    if (desc.line_thickness > 0.0f && desc.line_color.a > 0u) {
+        for (size_t i = 1; i < n; ++i) {
+            if (desc.smooth) draw_bezier({.p0 = desc.points[i-1], .p1 = cmds[i].p1, .p2 = cmds[i].p2,
+                .p3 = cmds[i].p3, .cubic = true, .color_start = desc.line_color,
+                .thickness = desc.line_thickness, .foreground = desc.foreground});
+            else draw_line({.from = desc.points[i-1], .to = desc.points[i], .color = desc.line_color,
+                .thickness = desc.line_thickness, .foreground = desc.foreground});
+        }
     }
 }
 
@@ -4646,13 +4785,14 @@ void draw_ring(const RingDesc& desc) noexcept {
 }
 
 void draw_icon(const IconDrawDesc& desc) noexcept {
-    if (desc.icon_id >= kMaxVectorIcons || desc.color.a == 0u || desc.rect.w <= 0.0f || desc.rect.h <= 0.0f) {
+    if (!std::isfinite(desc.angle_rad) || desc.icon_id >= kMaxVectorIcons || desc.color.a == 0u || desc.rect.w <= 0.0f || desc.rect.h <= 0.0f) {
         return;
     }
     Context* ctx = current_context();
     if (DrawCmdNode* node = append_open_box_draw_cmd(ctx, desc.foreground)) {
         node->kind = DrawCmdKind::Icon;
         node->icon = desc;
+        if (std::fabs(desc.angle_rad) <= 1e-5f) node->icon.angle_rad = 0;
     }
 }
 
@@ -7694,7 +7834,7 @@ void end_frame(Context* ctx_arg) noexcept {
 
         emit_direct_text_px(
             ctx,
-            "ETCH 1.5 INSPECTOR   [F12]",
+            "ETCH 1.6 INSPECTOR   [F12]",
             hud_x + 12.0f,
             hud_y + 10.0f,
             12.0f,
@@ -7822,6 +7962,7 @@ void end_frame(Context* ctx_arg) noexcept {
     ctx->stats.blur_pass_count = app_blur_count;
     ctx->stats.slug_glyph_count = ctx->atlas.slug_glyph_count;
     ctx->stats.slug_curve_count = ctx->atlas.slug_curve_count;
+    ctx->stats.dynamic_slug_curve_count = ctx->dyn_slug_curve_count;
     ctx->stats.arena_used_bytes = ctx->frame_arena.used();
     ctx->stats.arena_peak_bytes = ctx->frame_arena.peak_offset;
     ctx->stats.layout_ms = layout_ms;

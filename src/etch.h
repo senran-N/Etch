@@ -2,6 +2,7 @@
 #define ETCH_H
 
 #include <bit>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -10,7 +11,7 @@
 #include <type_traits>
 
 #define ETCH_VERSION_MAJOR 1
-#define ETCH_VERSION_MINOR 5
+#define ETCH_VERSION_MINOR 6
 #define ETCH_VERSION_PATCH 0
 
 #ifndef ETCH_ASSERT
@@ -432,6 +433,8 @@ enum class PrimKind : uint8_t {
     CanvasGrid = 6,
     BezierWire = 7,
     RingArc = 8,
+    SlugFill = 9,
+    RotatedRect = 10,
 };
 
 enum PrimFlags : uint8_t {
@@ -588,7 +591,7 @@ struct alignas(16) Prim {
         };
     }
 
-    static constexpr Prim make_slug_glyph(
+    static Prim make_slug_glyph(
         Rect rect,
         Rect clip_rect,
         Color tint,
@@ -596,7 +599,8 @@ struct alignas(16) Prim {
         uint16_t num_hbands,
         uint16_t num_vbands,
         float clip_radius = 0.0f,
-        uint8_t flags = PrimFlag_StemDarken) noexcept
+        uint8_t flags = PrimFlag_StemDarken,
+        float angle_rad = 0.0f) noexcept
     {
         const uint8_t all_flags = static_cast<uint8_t>(flags | ((clip_radius > 0.0f) ? PrimFlag_RoundedClip : PrimFlag_None));
         return Prim{
@@ -605,7 +609,7 @@ struct alignas(16) Prim {
             .payload = {
                 band_offset,
                 static_cast<uint32_t>(num_hbands) | (static_cast<uint32_t>(num_vbands) << 16),
-                0u,
+                angle_rad == 0.0f ? 0u : std::bit_cast<uint32_t>(std::atan2(std::sin(angle_rad), std::cos(angle_rad))),
                 0u,
             },
             .style = {
@@ -615,6 +619,30 @@ struct alignas(16) Prim {
                 0u,
             },
         };
+    }
+
+    static constexpr Prim make_slug_fill(Rect rect, Rect clip_rect, Color fill,
+        uint32_t band_offset, uint16_t hbands, uint16_t vbands, Color fill_end = {},
+        Vec2 gradient_dir = {0, 1}, bool radial = false, float clip_radius = 0) noexcept
+    {
+        const uint8_t flags = static_cast<uint8_t>((clip_radius > 0 ? PrimFlag_RoundedClip : 0) |
+            ((fill_end.pack_rgba8() != 0 || radial) ? (radial ? PrimFlag_RadialGrad : PrimFlag_LinearGrad) : 0));
+        return Prim{.bounds = {rect.x, rect.y, rect.w, rect.h},
+            .clip = {clip_rect.x, clip_rect.y, clip_rect.x + clip_rect.w, clip_rect.y + clip_rect.h},
+            .payload = {band_offset, uint32_t(hbands) | (uint32_t(vbands) << 16), fill_end.pack_rgba8(), pack_f16x2(gradient_dir.x, gradient_dir.y)},
+            .style = {pack_header(PrimKind::SlugFill, flags, 0, clip_radius), fill.pack_rgba8(), 0, 0}};
+    }
+
+    static Prim make_rotated_rect(Rect rect, Rect clip_rect, Color fill, float angle_rad,
+        Corners radii = {}, Color border = {}, float border_width = 0, Color fill_end = {},
+        Vec2 gradient_dir = {0, 1}, bool radial = false, float clip_radius = 0) noexcept
+    {
+        Prim p = (fill_end.pack_rgba8() != 0 || radial)
+            ? make_gradient_rect(rect, clip_rect, fill, fill_end, gradient_dir, radii, border, border_width, clip_radius, radial)
+            : make_rect(rect, clip_rect, fill, radii, border, border_width, 1, clip_radius);
+        p.style.x = (p.style.x & ~0xFu) | uint32_t(PrimKind::RotatedRect);
+        p.style.w = pack_f16x2(border_width, std::atan2(std::sin(angle_rad), std::cos(angle_rad)));
+        return p;
     }
 
     static constexpr Prim make_texture(
@@ -886,6 +914,7 @@ struct FrameStats {
     uint32_t blur_pass_count = 0;
     uint32_t slug_glyph_count = 0;
     uint32_t slug_curve_count = 0;
+    uint32_t dynamic_slug_curve_count = 0;
     size_t arena_used_bytes = 0;
     size_t arena_peak_bytes = 0;
     double layout_ms = 0.0;
@@ -1085,6 +1114,7 @@ struct RectDrawDesc {
     Color   border_color = {};
     float   border_width = 0.0f;
     bool    foreground = false;
+    float   angle_rad = 0.0f;
 };
 
 struct LineDesc {
@@ -1106,6 +1136,45 @@ struct PolylineDesc {
     float glow_px = 0.0f;
     bool  closed = false;
     bool  foreground = false;
+};
+
+struct FilledPolygonDesc {
+    std::span<const Vec2> points = {};
+    Color fill = {};
+    Color fill_end = {};
+    Vec2 gradient_dir = {0, 1};
+    bool radial_gradient = false;
+    Color stroke_color = {};
+    float stroke_width = 0;
+    bool foreground = false;
+};
+enum class PathVerb : uint8_t { MoveTo = 0, LineTo = 1, QuadTo = 2, CubicTo = 3, Close = 4 };
+struct PathCmd {
+    PathVerb verb = PathVerb::MoveTo;
+    Vec2 p1 = {}, p2 = {}, p3 = {};
+};
+struct FilledPathDesc {
+    std::span<const PathCmd> commands = {};
+    Str svg_path_d = {};
+    Vec2 offset = {};
+    float scale = 1;
+    Color fill = {};
+    Color fill_end = {};
+    Vec2 gradient_dir = {0, 1};
+    bool radial_gradient = false;
+    Color stroke_color = {};
+    float stroke_width = 0;
+    bool foreground = false;
+};
+struct AreaSeriesDesc {
+    std::span<const Vec2> points = {};
+    float baseline_y = 0;
+    Color fill_top = Color::rgba8(56, 189, 248, 96);
+    Color fill_bottom = Color::rgba8(56, 189, 248, 0);
+    Color line_color = Color::rgb_hex(0x38BDF8);
+    float line_thickness = 1.75f;
+    bool smooth = false;
+    bool foreground = false;
 };
 
 struct BezierDesc {
@@ -1142,6 +1211,7 @@ struct IconDrawDesc {
     Rect     rect = {};
     Color    color = Color::white();
     bool     foreground = false;
+    float    angle_rad = 0.0f;
 };
 
 struct TextDrawDesc {
@@ -1550,6 +1620,9 @@ void icon(const IconDesc& desc) noexcept;
 // Box-local immediate 2D vector drawing (coordinates relative to the currently open begin_box)
 void draw_rect(const RectDrawDesc& desc) noexcept;
 void draw_line(const LineDesc& desc) noexcept;
+void draw_filled_polygon(const FilledPolygonDesc& desc) noexcept;
+void draw_filled_path(const FilledPathDesc& desc) noexcept;
+void draw_area_series(const AreaSeriesDesc& desc) noexcept;
 void draw_polyline(const PolylineDesc& desc) noexcept;
 void draw_bezier(const BezierDesc& desc) noexcept;
 void draw_ring(const RingDesc& desc) noexcept;

@@ -10,6 +10,8 @@
 #define ETCH_PRIM_CANVAS_GRID 6u
 #define ETCH_PRIM_BEZIER_WIRE 7u
 #define ETCH_PRIM_RING_ARC    8u
+#define ETCH_PRIM_SLUG_FILL   9u
+#define ETCH_PRIM_ROT_RECT    10u
 
 #define ETCH_FLAG_LINEAR_GRAD   (1u << 0)
 #define ETCH_FLAG_RADIAL_GRAD   (1u << 1)
@@ -81,9 +83,13 @@ ETCH_COMBINED_SAMPLER(3) SamplerState      g_smp3 : register(s3, space2);
 ETCH_FRAG_STORAGE(4) StructuredBuffer<uint4> g_slug_curves : register(t4, space2);
 ETCH_FRAG_STORAGE(5) StructuredBuffer<uint2> g_slug_bands  : register(t5, space2);
 
+ETCH_FRAG_STORAGE(6) StructuredBuffer<uint4> g_dyn_slug_curves : register(t6, space2);
+ETCH_FRAG_STORAGE(7) StructuredBuffer<uint2> g_dyn_slug_bands : register(t7, space2);
+
 struct VSOut
 {
     float4 position        : SV_Position;
+    nointerpolation float2 rotation : TEXCOORD11;
     float2 pixel_pos       : TEXCOORD0;
     nointerpolation float4 bounds         : TEXCOORD1;
     nointerpolation float4 clip           : TEXCOORD2;
@@ -138,9 +144,9 @@ float srgb_to_linear_chan(float c)
     return (c <= 0.04045f) ? (c * (1.0f / 12.92f)) : pow(max((c + 0.055f) * (1.0f / 1.055f), 0.0f), 2.4f);
 }
 
-float3 srgb_to_linear(float3 c)
+float4 srgb_to_linear(float4 c)
 {
-    return float3(srgb_to_linear_chan(c.r), srgb_to_linear_chan(c.g), srgb_to_linear_chan(c.b));
+    return float4(srgb_to_linear_chan(c.r), srgb_to_linear_chan(c.g), srgb_to_linear_chan(c.b), c.a);
 }
 
 float linear_to_srgb_chan(float c)
@@ -148,9 +154,9 @@ float linear_to_srgb_chan(float c)
     return (c <= 0.0031308f) ? (c * 12.92f) : (1.055f * pow(max(c, 0.0f), 1.0f / 2.4f) - 0.055f);
 }
 
-float3 linear_to_srgb(float3 c)
+float4 linear_to_srgb(float4 c)
 {
-    return float3(linear_to_srgb_chan(c.r), linear_to_srgb_chan(c.g), linear_to_srgb_chan(c.b));
+    return float4(linear_to_srgb_chan(c.r), linear_to_srgb_chan(c.g), linear_to_srgb_chan(c.b), c.a);
 }
 
 float4 unpack_rgba8_srgb_to_linear(uint packed)
@@ -161,7 +167,7 @@ float4 unpack_rgba8_srgb_to_linear(uint packed)
         float((packed >> 16) & 0xFFu),
         float((packed >> 24) & 0xFFu)
     ) * (1.0f / 255.0f);
-    return float4(srgb_to_linear(c.rgb), c.a);
+    return srgb_to_linear(c);
 }
 
 VSOut vs_main(uint vertex_id : SV_VertexID, uint instance_id : SV_InstanceID)
@@ -204,6 +210,17 @@ VSOut vs_main(uint vertex_id : SV_VertexID, uint instance_id : SV_InstanceID)
     float2 q_min = p.bounds.xy - pad;
     float2 q_max = p.bounds.xy + p.bounds.zw + pad;
 
+    float angle = kind == ETCH_PRIM_ROT_RECT ? bw_soft.y :
+        (kind == ETCH_PRIM_SLUG_GLYPH ? asfloat(p.payload.z) : 0.0f);
+    float c = cos(angle), sn = sin(angle);
+    if (angle != 0.0f) {
+        float2 hs = p.bounds.zw * 0.5f;
+        float2 extent = float2(abs(c)*hs.x + abs(sn)*hs.y, abs(sn)*hs.x + abs(c)*hs.y) + pad;
+        float2 center = p.bounds.xy + hs;
+        q_min = center - extent;
+        q_max = center + extent;
+    }
+    if (kind == ETCH_PRIM_ROT_RECT) bw_soft.y = 1.0f;
     // Cull / tighten quad to clip rectangle (+1px AA margin) for fillrate savings.
     q_min = max(q_min, p.clip.xy - 1.0f);
     q_max = min(q_max, p.clip.zw + 1.0f);
@@ -242,8 +259,8 @@ VSOut vs_main(uint vertex_id : SV_VertexID, uint instance_id : SV_InstanceID)
     }
     else if ((flags & (ETCH_FLAG_LINEAR_GRAD | ETCH_FLAG_RADIAL_GRAD)) != 0u)
     {
-        col1 = unpack_rgba8_srgb_to_linear(p.payload.x);
-        grad_dir = unpack_f16x2_custom(p.payload.y);
+        col1 = unpack_rgba8_srgb_to_linear(kind == ETCH_PRIM_SLUG_FILL ? p.payload.z : p.payload.x);
+        grad_dir = unpack_f16x2_custom(kind == ETCH_PRIM_SLUG_FILL ? p.payload.w : p.payload.y);
     }
 
     VSOut o;
@@ -253,6 +270,7 @@ VSOut vs_main(uint vertex_id : SV_VertexID, uint instance_id : SV_InstanceID)
         0.0f,
         1.0f
     );
+    o.rotation = float2(c, sn);
     o.pixel_pos    = px;
     o.bounds       = p.bounds;
     o.clip         = p.clip;
@@ -321,7 +339,8 @@ float2 slug_solve_vert_poly(float4 p12, float2 p3)
                   (a.y * t2 - b.y * 2.0f) * t2 + p12.y);
 }
 
-float slug_render(float2 render_coord, float2 pixels_per_unit, uint band_offset, uint packed_band_counts)
+float slug_render_shared(float2 render_coord, float2 pixels_per_unit, uint band_offset, uint packed_band_counts,
+    StructuredBuffer<uint4> curves, StructuredBuffer<uint2> bands)
 {
     uint num_hbands = packed_band_counts & 0xFFFFu;
     uint num_vbands = (packed_band_counts >> 16) & 0xFFFFu;
@@ -335,12 +354,13 @@ float slug_render(float2 render_coord, float2 pixels_per_unit, uint band_offset,
 
     float xcov = 0.0f;
     float xwgt = 0.0f;
-    uint2 hband = g_slug_bands[band_offset + uint(hband_idx)];
+    // CPU band entries occupy 16 bytes; each logical entry spans two uint2 lanes.
+    uint2 hband = bands[(band_offset + uint(hband_idx)) * 2u];
     uint  hlist_base = band_offset + hband.y;
     for (uint i = 0u; i < hband.x; ++i)
     {
-        uint  curve_idx = g_slug_bands[hlist_base + i].x;
-        uint4 c = g_slug_curves[curve_idx];
+        uint  curve_idx = bands[(hlist_base + i) * 2u].x;
+        uint4 c = curves[curve_idx];
         float2 cp1 = unpack_f16x2_custom(c.x) - render_coord;
         float2 cp2 = unpack_f16x2_custom(c.y) - render_coord;
         float2 cp3 = unpack_f16x2_custom(c.z) - render_coord;
@@ -369,12 +389,12 @@ float slug_render(float2 render_coord, float2 pixels_per_unit, uint band_offset,
 
     float ycov = 0.0f;
     float ywgt = 0.0f;
-    uint2 vband = g_slug_bands[band_offset + num_hbands + uint(vband_idx)];
+    uint2 vband = bands[(band_offset + num_hbands + uint(vband_idx)) * 2u];
     uint  vlist_base = band_offset + vband.y;
     for (uint j = 0u; j < vband.x; ++j)
     {
-        uint  curve_idx = g_slug_bands[vlist_base + j].x;
-        uint4 c = g_slug_curves[curve_idx];
+        uint  curve_idx = bands[(vlist_base + j) * 2u].x;
+        uint4 c = curves[curve_idx];
         float2 cp1 = unpack_f16x2_custom(c.x) - render_coord;
         float2 cp2 = unpack_f16x2_custom(c.y) - render_coord;
         float2 cp3 = unpack_f16x2_custom(c.z) - render_coord;
@@ -403,6 +423,13 @@ float slug_render(float2 render_coord, float2 pixels_per_unit, uint band_offset,
 
     return saturate(max(abs(xcov * xwgt + ycov * ywgt) / max(xwgt + ywgt, 1.0f / 65536.0f),
                         min(abs(xcov), abs(ycov))));
+}
+
+float slug_render(float2 coord, float2 size, uint offset, uint counts) {
+    return slug_render_shared(coord, size, offset, counts, g_slug_curves, g_slug_bands);
+}
+float slug_render_dyn(float2 coord, float2 size, uint offset, uint counts) {
+    return slug_render_shared(coord, size, offset, counts, g_dyn_slug_curves, g_dyn_slug_bands);
 }
 
 float sd_rounded_box(float2 p, float2 half_size, float4 radii)
@@ -455,7 +482,7 @@ float2 sd_quadratic_bezier(float2 pos, float2 A, float2 B, float2 C)
         float  v   = acos(clamp(q / (-2.0f * z * z * z), -1.0f, 1.0f)) / 3.0f;
         float  m   = cos(v);
         float  n   = sin(v) * 1.732050808f;
-        float3 t   = saturate(float3(m + m, -n - m, n - m) * z - kx);
+        float4 t   = saturate(float4(m + m, -n - m, n - m, 0.0f) * z - kx);
         float2 dv1 = d + (c + b * t.x) * t.x;
         float2 dv2 = d + (c + b * t.y) * t.y;
         float2 dv3 = d + (c + b * t.z) * t.z;
@@ -485,6 +512,27 @@ float4 sample_slot(uint slot, float2 uv)
     if (slot == 2u) return g_tex2.SampleLevel(g_smp2, uv, 0.0f);
     if (slot == 3u) return g_tex3.SampleLevel(g_smp3, uv, 0.0f);
     return g_tex0.SampleLevel(g_smp0, uv, 0.0f);
+}
+
+float4 gradient_color(VSOut input, float2 norm_uv) {
+    float4 fill_col = input.color0;
+    uint flags = input.meta.y;
+        if ((flags & ETCH_FLAG_LINEAR_GRAD) != 0u)
+        {
+            float2 dir = input.grad_params.xy;
+            float dir_len = length(dir);
+            dir = (dir_len > 1e-4f) ? (dir / dir_len) : float2(0.0f, 1.0f);
+            float span = max(0.5f * (abs(dir.x) + abs(dir.y)), 1e-4f);
+            float t = saturate(0.5f + dot(norm_uv - 0.5f, dir) / (2.0f * span));
+            fill_col = lerp(input.color0, input.color1, t);
+        }
+        else if ((flags & ETCH_FLAG_RADIAL_GRAD) != 0u)
+        {
+            float t = saturate(length((norm_uv - 0.5f) * 2.0f));
+            fill_col = lerp(input.color0, input.color1, t);
+        }
+
+    return fill_col;
 }
 
 float4 ps_main(VSOut input) : SV_Target0
@@ -518,30 +566,16 @@ float4 ps_main(VSOut input) : SV_Target0
     float2 half_size = 0.5f * size;
     float2 center    = input.bounds.xy + half_size;
     float2 p_rel     = input.pixel_pos - center;
+    float2 p_local = float2(input.rotation.x*p_rel.x + input.rotation.y*p_rel.y,
+        -input.rotation.y*p_rel.x + input.rotation.x*p_rel.y);
 
     float4 out_pm = float4(0.0f, 0.0f, 0.0f, 0.0f);
 
-    if (kind == ETCH_PRIM_RECT)
+    if (kind == ETCH_PRIM_RECT || kind == ETCH_PRIM_ROT_RECT)
     {
-        float d = sd_rounded_box(p_rel, half_size, input.radii);
+        float d = sd_rounded_box(p_local, half_size, input.radii);
 
-        float4 fill_col = input.color0;
-        if ((flags & ETCH_FLAG_LINEAR_GRAD) != 0u)
-        {
-            float2 norm_uv = (input.pixel_pos - input.bounds.xy) / size;
-            float2 dir = input.grad_params.xy;
-            float dir_len = length(dir);
-            dir = (dir_len > 1e-4f) ? (dir / dir_len) : float2(0.0f, 1.0f);
-            float span = max(0.5f * (abs(dir.x) + abs(dir.y)), 1e-4f);
-            float t = saturate(0.5f + dot(norm_uv - 0.5f, dir) / (2.0f * span));
-            fill_col = lerp(input.color0, input.color1, t);
-        }
-        else if ((flags & ETCH_FLAG_RADIAL_GRAD) != 0u)
-        {
-            float2 norm_uv = (input.pixel_pos - input.bounds.xy) / size;
-            float t = saturate(length((norm_uv - 0.5f) * 2.0f));
-            fill_col = lerp(input.color0, input.color1, t);
-        }
+        float4 fill_col = gradient_color(input, (p_local + half_size) / size);
 
         float border_w  = input.grad_params.z;
         float softness  = input.grad_params.w;
@@ -572,7 +606,7 @@ float4 ps_main(VSOut input) : SV_Target0
         float  cov     = sample_slot(tex_slot, uv).a;
         if ((flags & ETCH_FLAG_STEM_DARKEN) != 0u)
         {
-            float luma = saturate(dot(input.color0.rgb, float3(0.2126f, 0.7152f, 0.0722f)));
+            float luma = saturate(dot(input.color0, float4(0.2126f, 0.7152f, 0.0722f, 0.0f)));
             cov = lerp(cov, cov * (2.0f - cov), 0.35f * luma);
         }
         out_pm = float4(input.color0.rgb, 1.0f) * (input.color0.a * cov);
@@ -580,16 +614,24 @@ float4 ps_main(VSOut input) : SV_Target0
     else if (kind == ETCH_PRIM_SLUG_GLYPH)
     {
         float2 render_coord = float2(
-            (input.pixel_pos.x - input.bounds.x) / size.x,
-            1.0f - (input.pixel_pos.y - input.bounds.y) / size.y);
+            (p_local.x + half_size.x) / size.x,
+            1.0f - (p_local.y + half_size.y) / size.y);
         float cov = slug_render(render_coord, size, input.slug_meta.x, input.slug_meta.y);
+        if (any(input.rotation != float2(1.0f, 0.0f)))
+            cov *= saturate(0.5f - max(abs(p_local.x)-half_size.x, abs(p_local.y)-half_size.y));
         if ((flags & ETCH_FLAG_STEM_DARKEN) != 0u)
         {
             float darken_t = saturate((28.0f - size.y) / 16.0f);
-            float luma = saturate(dot(input.color0.rgb, float3(0.2126f, 0.7152f, 0.0722f)));
+            float luma = saturate(dot(input.color0, float4(0.2126f, 0.7152f, 0.0722f, 0.0f)));
             cov = lerp(cov, cov * (2.0f - cov), 0.30f * luma * darken_t);
         }
         out_pm = float4(input.color0.rgb, 1.0f) * (input.color0.a * cov);
+    }
+    else if (kind == ETCH_PRIM_SLUG_FILL) {
+        float2 uv = (p_rel + half_size) / size;
+        float cov = slug_render_dyn(float2(uv.x, 1.0f-uv.y), size, input.slug_meta.x, input.slug_meta.y);
+        float4 col = gradient_color(input, uv);
+        out_pm = float4(col.rgb, 1.0f) * (col.a * cov);
     }
     else if (kind == ETCH_PRIM_TEXTURE)
     {
@@ -621,11 +663,11 @@ float4 ps_main(VSOut input) : SV_Target0
     else if (kind == ETCH_PRIM_BLUR_GLASS)
     {
         float2 backdrop_uv = saturate(input.pixel_pos * input.uv_rect.xy);
-        float3 blur_lin    = sample_slot(tex_slot, backdrop_uv).rgb;
-        float3 glass_lin   = lerp(blur_lin, input.color0.rgb, input.color0.a);
+        float4 blur_lin    = sample_slot(tex_slot, backdrop_uv);
+        float4 glass_lin   = lerp(blur_lin, input.color0, input.color0.a);
 
         // Apply +-0.5/255 IGN dithering in sRGB space before converting back to linear.
-        float3 glass_srgb = linear_to_srgb(saturate(glass_lin));
+        float4 glass_srgb = linear_to_srgb(saturate(glass_lin));
         float  ign        = frac(52.9829189f * frac(dot(input.pixel_pos, float2(0.06711056f, 0.00583715f))));
         glass_srgb        = saturate(glass_srgb + (ign - 0.5f) * (1.0f / 255.0f));
         glass_lin         = srgb_to_linear(glass_srgb);
@@ -639,7 +681,7 @@ float4 ps_main(VSOut input) : SV_Target0
         float border_t  = 1.0f - inner_cov;
 
         float4 b_pm = float4(input.border_color.rgb, 1.0f) * (input.border_color.a * border_t);
-        float4 g_pm = float4(glass_lin, 1.0f);
+        float4 g_pm = float4(glass_lin.rgb, 1.0f);
         out_pm      = (b_pm + g_pm * (1.0f - b_pm.a)) * outer_cov;
     }
     else if (kind == ETCH_PRIM_CANVAS_GRID)
@@ -776,8 +818,8 @@ float4 ps_main(VSOut input) : SV_Target0
 
     if ((flags & ETCH_GLOBAL_MANUAL_SRGB) != 0u && out_pm.a > 1e-5f)
     {
-        float3 straight_lin = saturate(out_pm.rgb / out_pm.a);
-        out_pm.rgb = linear_to_srgb(straight_lin) * out_pm.a;
+        float4 straight_lin = saturate(out_pm / out_pm.a);
+        out_pm.rgb = linear_to_srgb(straight_lin).rgb * out_pm.a;
     }
 
     return out_pm;

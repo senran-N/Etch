@@ -22,8 +22,8 @@
 - **Layout**: `third_party/clay.h` (pure C single-header Flexbox layout).
 - **Text Pipeline**:
   - Phase 1 (v0.1–v0.3, retired): `third_party/stb_truetype.h` bitmap glyph atlas.
-  - Phase 2 (v0.6–v1.5, active): Multi-font slots (`kFontSans`/`kFontBold`/`kFontMono`/user slots), cluster-safe HarfBuzz OpenType shaping (`kern`/`liga`/`calt`) with automatic fallback chain, inline rich `text_spans` (`TextSpan`/`RichTextDesc`), SVG-to-Slug vector icons (`register_svg_icon` / `icon`), analytic `RingArc` & immediate box-local `draw_*` (`draw_text`/`draw_image`/`measure_text`), native RGBA/PNG/BMP GPU texture loader (`create_texture_rgba`/`load_texture_file`/`load_texture_memory`), frameless custom window chrome & multi-window swapchains (`claim_window_swapchain`/`set_window_chrome`), zero-heap drag-and-drop & canvas marquee multi-selection, pro desktop shortcuts/popover clamping/UTF-8 undo-redo, and Public Domain / MIT `Slug` quadratic Bezier GPU curve evaluation (`src/etch_slug.cpp`).
-- **Etch v1.5 workbench**: isolated multi-window UI frames, spatial OS file/text drop, modal focus scopes, keyboard focus rings, and system theme; binary-split multi-tab `DockSpace`, resizable/sortable virtual `Table`, and collapsible hierarchical `Tree`, demonstrated by Etch Studio 1.5.
+  - Phase 2 (v0.6–v1.6, active): Multi-font slots (`kFontSans`/`kFontBold`/`kFontMono`/user slots), cluster-safe HarfBuzz OpenType shaping (`kern`/`liga`/`calt`) with automatic fallback chain, inline rich `text_spans` (`TextSpan`/`RichTextDesc`), SVG-to-Slug vector icons (`register_svg_icon` / `icon`), analytic `RingArc` & immediate box-local `draw_*` (`draw_text`/`draw_image`/`measure_text`), native RGBA/PNG/BMP GPU texture loader (`create_texture_rgba`/`load_texture_file`/`load_texture_memory`), frameless custom window chrome & multi-window swapchains (`claim_window_swapchain`/`set_window_chrome`), zero-heap drag-and-drop & canvas marquee multi-selection, pro desktop shortcuts/popover clamping/UTF-8 undo-redo, and Public Domain / MIT `Slug` quadratic Bezier GPU curve evaluation (`src/etch_slug.cpp`).
+- **Etch v1.6 workbench**: isolated multi-window UI frames, spatial OS file/text drop, modal focus scopes, keyboard focus rings, and system theme; binary-split multi-tab `DockSpace`, resizable/sortable virtual `Table`, and collapsible hierarchical `Tree`, demonstrated by Etch Studio 1.6.
 - **Memory & State**:
   - Frame temporaries: `etch::Arena` linear allocator, $O(1)$ reset at frame end.
   - Cross-frame state: flat hash table keyed by `uint32_t` semantic ID (focus, hover, scroll inertia, spring animation).
@@ -50,7 +50,7 @@ etch/
 │   └── etch_unity.cpp        # Unity build translation unit including all engine .cpp files
 └── examples/
     ├── sandbox.cpp           # Core interactive & "--headless" regression harness
-    └── etch_studio.cpp       # Etch Studio 1.5 flagship DockSpace, resizable/sortable Table, hierarchical Tree, render-graph, vector dials, custom chrome, DND & 1M workbench + "--headless"
+    └── etch_studio.cpp       # Etch Studio 1.6 flagship DockSpace, resizable/sortable Table, hierarchical Tree, render-graph, vector dials, custom chrome, DND & 1M workbench + "--headless"
 ```
 
 ---
@@ -66,7 +66,7 @@ etch/
    - Every struct uploaded to an HLSL `StructuredBuffer` or Uniform Buffer MUST carry explicit `alignas(16)` and `static_assert(sizeof(T) % 16 == 0)`.
    - Fields inside GPU structs are restricted to `Vec4`, `Uint4`, or explicitly aligned 32-bit scalars. **NEVER put a 12-byte `float3` / `Vec3` in a GPU struct.**
    - `etch::Prim` is strictly **64 bytes** (`4 x 16B`: `bounds`, `clip`, `payload`, `style`) with `alignas(16)` so `Prim[]` can pack directly into a shared `SDL_GPUTransferBuffer` after 32-byte `GlobalsUniform` with zero copy overhead.
-   - `etch_uber.hlsl` binds 4 fixed sampler slots (`Slot 0` solid white fallback, `Slot 1..3` external textures/backdrop blur) plus 2 fragment `StructuredBuffer` storage slots (`t4..t5`: Slug curves & band directory) to stay within 1–3 draw calls without Bindless, and decodes sRGB `RGBA8` colors to linear space for physically accurate blending and stem darkening.
+   - `etch_uber.hlsl` binds 4 fixed sampler slots (`Slot 0` solid white fallback, `Slot 1..3` external textures/backdrop blur) plus 4 fragment `StructuredBuffer` storage slots (`t4..t7`: Slug curves & band directory) to stay within 1–3 draw calls without Bindless, and decodes sRGB `RGBA8` colors to linear space for physically accurate blending and stem darkening.
 4. **Headless Visual Verification Loop**:
    - `sandbox --headless` must render a test frame offscreen without creating a visible window and write `frame_check.png` via `third_party/stb_image_write.h`.
    - After modifying shaders, batching, or layout code, rebuild, run `sandbox --headless`, and inspect `frame_check.png` for clipping offsets, alignment bugs, or AA artifacts.
@@ -85,3 +85,5 @@ etch/
 ## 6. Git Commit Discipline
 - Commit promptly (`git status` → `git add` → atomic `git commit`) after every verified sub-milestone or cohesive feature passes Release build (`0` warnings), `--headless` visual/behavioral checks, and FlowGuard `flow_verify`.
 - Never let multi-stage changes accumulate uncommitted across milestones, and never commit compiled binaries, SDK `.lib`/`.dll`/`.pdb` blobs, or temporary screenshots.
+
+- **Etch v1.6 vectors**: transient cycled GPU Slug filled polygons/paths/gradient area series and analytic 2D rotation, with frame-arena scratch and no CPU triangulation.

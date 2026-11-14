@@ -284,7 +284,7 @@ bool ensure_slug_storage_pair(
     return true;
 }
 
-void upload_slug_delta(
+bool upload_slug_delta(
     SDL_GPUDevice* device,
     SDL_GPUCopyPass* copy_pass,
     const void* host_data,
@@ -292,10 +292,10 @@ void upload_slug_delta(
     uint32_t total_count,
     uint32_t* uploaded_count,
     SDL_GPUBuffer* gpu_buf,
-    SDL_GPUTransferBuffer* tbuf) noexcept
+    SDL_GPUTransferBuffer* tbuf, bool cycle = false) noexcept
 {
-    if (*uploaded_count >= total_count || !host_data || !gpu_buf || !tbuf) {
-        return;
+    if (*uploaded_count >= total_count) {
+        return true;
     }
     const uint32_t first = *uploaded_count;
     const uint32_t count = total_count - first;
@@ -303,7 +303,7 @@ void upload_slug_delta(
     const uint32_t byte_size = count * elem_size;
     void* mapped = SDL_MapGPUTransferBuffer(device, tbuf, true);
     if (!mapped) {
-        return;
+        return false;
     }
     std::memcpy(mapped, static_cast<const uint8_t*>(host_data) + byte_offset, byte_size);
     SDL_UnmapGPUTransferBuffer(device, tbuf);
@@ -317,8 +317,9 @@ void upload_slug_delta(
         .offset = byte_offset,
         .size = byte_size,
     };
-    SDL_UploadToGPUBuffer(copy_pass, &src, &dst, false);
+    SDL_UploadToGPUBuffer(copy_pass, &src, &dst, cycle);
     *uploaded_count = total_count;
+    return true;
 }
 
 void emit_uber_batches(
@@ -359,8 +360,8 @@ void emit_uber_batches(
     SDL_GPUBuffer* storage_bufs[1] = { ctx->prim_gpu_buf };
     SDL_BindGPUVertexStorageBuffers(render_pass, 0u, storage_bufs, 1u);
 
-    SDL_GPUBuffer* slug_bufs[2] = { ctx->slug_curve_gpu_buf, ctx->slug_band_gpu_buf };
-    SDL_BindGPUFragmentStorageBuffers(render_pass, 0u, slug_bufs, 2u);
+    SDL_GPUBuffer* slug_bufs[4] = { ctx->slug_curve_gpu_buf, ctx->slug_band_gpu_buf, ctx->dyn_slug_curve_gpu_buf, ctx->dyn_slug_band_gpu_buf };
+    SDL_BindGPUFragmentStorageBuffers(render_pass, 0u, slug_bufs, 4u);
 
     const uint32_t manual_srgb_bit = is_srgb_gpu_format(target_fmt) ? 0u : (1u << 31);
     const float inv_w = 1.0f / static_cast<float>(target_w);
@@ -585,7 +586,18 @@ bool record_frame_commands(
         return false;
     }
 
-    if (ctx->atlas.dirty || ctx->prim_count > 0u || slug_curves_pending || slug_bands_pending) {
+    uint32_t dyn_curves_uploaded = 0u;
+    uint32_t dyn_bands_uploaded = 0u;
+    if (ctx->dyn_slug_curve_count > 0u && !ensure_slug_storage_pair(ctx->device,
+        ctx->dyn_slug_curve_count, static_cast<uint32_t>(sizeof(SlugCurveGpu)), &ctx->dyn_slug_curve_gpu_buf,
+        &ctx->dyn_slug_curve_gpu_cap, &ctx->dyn_slug_curve_tbuf, &ctx->dyn_slug_curve_tbuf_cap,
+        &dyn_curves_uploaded)) return false;
+    if (ctx->dyn_slug_band_count > 0u && !ensure_slug_storage_pair(ctx->device,
+        ctx->dyn_slug_band_count, static_cast<uint32_t>(sizeof(SlugBandEntryGpu)), &ctx->dyn_slug_band_gpu_buf,
+        &ctx->dyn_slug_band_gpu_cap, &ctx->dyn_slug_band_tbuf, &ctx->dyn_slug_band_tbuf_cap,
+        &dyn_bands_uploaded)) return false;
+    if (ctx->atlas.dirty || ctx->prim_count > 0u || slug_curves_pending || slug_bands_pending ||
+        ctx->dyn_slug_curve_count > 0u || ctx->dyn_slug_band_count > 0u) {
         SDL_GPUCopyPass* copy_pass = SDL_BeginGPUCopyPass(cmd);
         if (!copy_pass) {
             return false;
@@ -639,6 +651,16 @@ bool record_frame_commands(
             ctx->slug_band_gpu_buf,
             ctx->slug_band_tbuf);
 
+        if (ctx->dyn_slug_curve_count > 0u && !upload_slug_delta(ctx->device, copy_pass,
+            ctx->dyn_slug_curves, static_cast<uint32_t>(sizeof(SlugCurveGpu)), ctx->dyn_slug_curve_count,
+            &dyn_curves_uploaded, ctx->dyn_slug_curve_gpu_buf, ctx->dyn_slug_curve_tbuf, true)) {
+            SDL_EndGPUCopyPass(copy_pass); return false;
+        }
+        if (ctx->dyn_slug_band_count > 0u && !upload_slug_delta(ctx->device, copy_pass,
+            ctx->dyn_slug_bands, static_cast<uint32_t>(sizeof(SlugBandEntryGpu)), ctx->dyn_slug_band_count,
+            &dyn_bands_uploaded, ctx->dyn_slug_band_gpu_buf, ctx->dyn_slug_band_tbuf, true)) {
+            SDL_EndGPUCopyPass(copy_pass); return false;
+        }
         if (ctx->prim_count > 0u && ctx->prim_gpu_buf && ctx->prim_transfer_buf) {
             const uint32_t byte_size = ctx->prim_count * static_cast<uint32_t>(sizeof(Prim));
             void* mapped = SDL_MapGPUTransferBuffer(ctx->device, ctx->prim_transfer_buf, true);
@@ -896,10 +918,13 @@ Context* create_context(const ContextDesc& desc) noexcept {
         return nullptr;
     }
 
+    ctx->atlas.scratch = &ctx->frame_arena;
     if (!font_atlas_init(&ctx->atlas, desc.font_path)) {
         destroy_context(ctx);
         return nullptr;
     }
+    // font_atlas_init clears the atlas, including its scratch pointer.
+    ctx->atlas.scratch = &ctx->frame_arena;
 
     // Initialize Clay layout arena cleanly.
     const uint32_t clay_min = Clay_MinMemorySize();
@@ -995,7 +1020,7 @@ Context* create_context(const ContextDesc& desc) noexcept {
         .stage = SDL_GPU_SHADERSTAGE_FRAGMENT,
         .num_samplers = 4u,
         .num_storage_textures = 0u,
-        .num_storage_buffers = 2u,
+        .num_storage_buffers = 4u,
         .num_uniform_buffers = 0u,
         .props = 0u,
     };
@@ -1112,9 +1137,15 @@ Context* create_context(const ContextDesc& desc) noexcept {
     };
     ctx->slug_band_gpu_buf = SDL_CreateGPUBuffer(ctx->device, &slug_band_info);
 
+    ctx->dyn_slug_curve_gpu_cap = 256;
+    const SDL_GPUBufferCreateInfo dyn_curve_info = {.usage = SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ, .size = 256u * sizeof(SlugCurveGpu)};
+    ctx->dyn_slug_curve_gpu_buf = SDL_CreateGPUBuffer(ctx->device, &dyn_curve_info);
+    ctx->dyn_slug_band_gpu_cap = 256;
+    const SDL_GPUBufferCreateInfo dyn_band_info = {.usage = SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ, .size = 256u * sizeof(SlugBandEntryGpu)};
+    ctx->dyn_slug_band_gpu_buf = SDL_CreateGPUBuffer(ctx->device, &dyn_band_info);
     if (!ctx->prim_gpu_buf || !ctx->prim_transfer_buf ||
         !ctx->atlas.gpu_tex || !ctx->atlas_transfer_buf ||
-        !ctx->slug_curve_gpu_buf || !ctx->slug_band_gpu_buf)
+        !ctx->slug_curve_gpu_buf || !ctx->slug_band_gpu_buf || !ctx->dyn_slug_curve_gpu_buf || !ctx->dyn_slug_band_gpu_buf)
     {
         destroy_context(ctx);
         return nullptr;
@@ -1179,6 +1210,10 @@ void destroy_context(Context* ctx) noexcept {
         if (ctx->linear_sampler) SDL_ReleaseGPUSampler(ctx->device, ctx->linear_sampler);
         if (ctx->prim_gpu_buf) SDL_ReleaseGPUBuffer(ctx->device, ctx->prim_gpu_buf);
         if (ctx->prim_transfer_buf) SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->prim_transfer_buf);
+        if (ctx->dyn_slug_curve_gpu_buf) SDL_ReleaseGPUBuffer(ctx->device, ctx->dyn_slug_curve_gpu_buf);
+        if (ctx->dyn_slug_curve_tbuf) SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->dyn_slug_curve_tbuf);
+        if (ctx->dyn_slug_band_gpu_buf) SDL_ReleaseGPUBuffer(ctx->device, ctx->dyn_slug_band_gpu_buf);
+        if (ctx->dyn_slug_band_tbuf) SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->dyn_slug_band_tbuf);
         if (ctx->slug_curve_gpu_buf) SDL_ReleaseGPUBuffer(ctx->device, ctx->slug_curve_gpu_buf);
         if (ctx->slug_band_gpu_buf) SDL_ReleaseGPUBuffer(ctx->device, ctx->slug_band_gpu_buf);
         if (ctx->slug_curve_tbuf) SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->slug_curve_tbuf);
@@ -1207,6 +1242,8 @@ void destroy_context(Context* ctx) noexcept {
     std::free(ctx->clipboard_fallback);
     ctx->clipboard_fallback = nullptr;
     ctx->clipboard_fallback_cap = 0u;
+    std::free(ctx->dyn_slug_curves);
+    std::free(ctx->dyn_slug_bands);
     std::free(ctx->prims);
     std::free(ctx->active_ui->clay_mem);
     state_map_destroy(&ctx->active_ui->states);

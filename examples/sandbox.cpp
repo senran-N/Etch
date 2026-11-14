@@ -507,7 +507,7 @@ void build_sandbox_ui(AppState* app, const etch::FrameStats& prev_stats) noexcep
                 .gradient_dir = {1.0f, 0.2f},
                 .radius = Corners::all(999.0f),
             }) {
-                text("ETCH v0.6", {
+                text("ETCH v1.6", {
                     .color = Color::white(),
                     .font_size_px = 13.0f,
                     .letter_spacing = 0.4f,
@@ -520,7 +520,7 @@ void build_sandbox_ui(AppState* app, const etch::FrameStats& prev_stats) noexcep
                 .width = Sizing::grow(),
                 .gap = 3.0f,
             }) {
-                text("Etch Pure-GPU Engine v0.6 (Slug · HarfBuzz · Kawase)", {
+                text("Etch Pure-GPU Engine v1.6 (Slug · HarfBuzz · Kawase)", {
                     .color = text_primary,
                     .font_size_px = 19.0f,
                     .wrap = false,
@@ -1019,7 +1019,7 @@ void build_sandbox_ui(AppState* app, const etch::FrameStats& prev_stats) noexcep
                     });
                 }
 
-                // Card 4: Live v0.6 Telemetry & Slug Specimen
+                // Card 4: Live v1.6 Telemetry & Slug Specimen
                 ETCH_BOX({
                     .id = id("card_stats"),
                     .axis = Axis::Col,
@@ -1035,7 +1035,7 @@ void build_sandbox_ui(AppState* app, const etch::FrameStats& prev_stats) noexcep
                     .shadow_blur = 18.0f,
                     .shadow_offset = {0.0f, 6.0f},
                 }) {
-                    text("v0.6 Telemetry (Slug \xE6\x9B\xB2\xE7\xBA\xBF \xC2\xB7 HarfBuzz \xC2\xB7 Kawase)", {
+                    text("v1.6 Telemetry (Slug \xE6\x9B\xB2\xE7\xBA\xBF \xC2\xB7 HarfBuzz \xC2\xB7 Kawase)", {
                         .color = text_primary,
                         .font_size_px = 15.5f,
                         .wrap = false,
@@ -1215,6 +1215,15 @@ void build_sandbox_ui(AppState* app, const etch::FrameStats& prev_stats) noexcep
                             .width = Sizing::fixed(102.0f),
                             .height = Sizing::fixed(44.0f),
                         }) {
+                            const float na = -0.65f;
+                            draw_rect({
+                                .rect = {22.0f + std::cos(na) * 8.0f - 4.5f, 22.0f + std::sin(na) * 8.0f - 1.1f, 9.0f, 2.2f},
+                                .fill = Color::white(),
+                                .radius = Corners::all(1.1f),
+                                .angle_rad = na,
+                            });
+                            draw_icon({.icon_id = app->ico_spark, .rect = {66.0f,14.0f,16.0f,16.0f},
+                                .color = Color::white(), .angle_rad = 0.45f});
                             draw_ring({
                                 .center = { 22.0f, 22.0f },
                                 .radius = 16.0f,
@@ -1244,25 +1253,43 @@ void build_sandbox_ui(AppState* app, const etch::FrameStats& prev_stats) noexcep
                         }
 
                         ETCH_BOX({
+                            .id = id("v16_fill_box"),
+                            .width = Sizing::fixed(72.0f),
+                            .height = Sizing::fixed(44.0f),
+                        }) {
+                            Vec2 star[10] = {};
+                            for (uint32_t i = 0; i < 10; ++i) {
+                                const float a = float(i)*0.62831853f-1.57079633f;
+                                const float r = (i & 1u) ? 6.0f : 14.0f;
+                                star[i] = {18.0f+std::cos(a)*r, 22.0f+std::sin(a)*r};
+                            }
+                            draw_filled_polygon({.points = star, .fill = Color::rgb_hex(0xFBBF24)});
+                            draw_filled_path({.svg_path_d = str_lit("M 40 34 Q 54 4 68 22 Q 60 38 40 34 Z"),
+                                .fill = Color::rgb_hex(0xA78BFA), .fill_end = Color::rgb_hex(0x38BDF8)});
+                        }
+
+                        ETCH_BOX({
                             .id = id("v12_plot_box"),
                             .width = Sizing::grow(),
                             .height = Sizing::fixed(44.0f),
                             .background = Color::rgba8(15, 23, 42, 160),
                             .radius = Corners::all(6.0f),
+                            .clip_children = true,
                         }) {
                             static constexpr Vec2 kSparkPts[5] = {
-                                { 8.0f, 32.0f }, { 36.0f, 20.0f }, { 64.0f, 26.0f }, { 96.0f, 12.0f }, { 128.0f, 16.0f },
+                                { 6.0f, 32.0f }, { 32.0f, 20.0f }, { 58.0f, 26.0f }, { 84.0f, 12.0f }, { 108.0f, 16.0f },
                             };
+                            draw_area_series({.points = kSparkPts, .baseline_y = 42, .smooth = true});
                             draw_polyline({
                                 .points = kSparkPts,
                                 .color = Color::rgba8(148, 163, 184, 150),
                                 .thickness = 1.4f,
                             });
                             draw_bezier({
-                                .p0 = { 8.0f, 34.0f },
+                                .p0 = { 6.0f, 34.0f },
                                 .p1 = { 46.0f, 4.0f },
                                 .p2 = { 88.0f, 40.0f },
-                                .p3 = { 128.0f, 10.0f },
+                                .p3 = { 108.0f, 10.0f },
                                 .cubic = true,
                                 .color_start = Color::rgb_hex(0x38BDF8),
                                 .color_end = Color::rgb_hex(0xF472B6),
@@ -2683,9 +2710,89 @@ int run_headless(const char* out_png_path) noexcept {
 
     // [15] Multi-window isolation, spatial OS drop, modal focus and system theme.
     const bool v15_ok = check_v15_window_ui();
-    const bool ok = v15_ok && png_ok && stats_ok && slug_ok && v10a_ok && v11_ok && v12_ok && v13_ok && v14_ok;
+    // [16] Transient vectors, rotation, stack lifetime, capacity growth and idle reset.
+    etch::set_current_context(ctx);
+    bool v16_ok = true;
+    char vector_png[1024] = {};
+    std::snprintf(vector_png, sizeof(vector_png), "%s.vectors.png", out_png_path);
+    uint32_t baseline_fills = 0u, baseline_wires = 0u;
+    for (int frame = 0; frame < 4; ++frame) {
+        etch::begin_frame(ctx, {.viewport_w = 320, .viewport_h = 180});
+        ETCH_BOX({.width = etch::Sizing::fixed(320), .height = etch::Sizing::fixed(180),
+            .radius = etch::Corners::all(14.0f), .clip_children = true}) {
+            etch::Vec2 vertices[600] = {};
+            for (uint32_t i = 0; i < 600; ++i) {
+                const float a = float(i)*0.0104719755f;
+                vertices[i] = {70+45*std::cos(a),70+45*std::sin(a)};
+            }
+            etch::draw_filled_polygon({.points = vertices, .fill = etch::Color::white()});
+            etch::Vec2 star[10] = {};
+            for (uint32_t i = 0; i < 10; ++i) {
+                const float a = float(i)*0.62831853f-1.57079633f;
+                const float r = (i & 1u) ? 9.0f : 20.0f;
+                star[i] = {100.0f+std::cos(a)*r, 125.0f+std::sin(a)*r};
+            }
+            etch::draw_filled_polygon({.points = star, .fill = etch::Color::rgb_hex(0xFBBF24),
+                .fill_end = etch::Color::rgb_hex(0xEA580C), .radial_gradient = true,
+                .stroke_color = etch::Color::white(), .stroke_width = 1.5f});
+            char svg[] = "M 130 20 C 210 0 240 120 140 100 Z";
+            etch::draw_filled_path({.svg_path_d = etch::str_cstr(svg), .fill = etch::Color::rgb_hex(0x38BDF8),
+                .fill_end = etch::Color::rgba8(56,189,248,0)});
+            etch::draw_rect({.rect = {140,50,70,15}, .fill = etch::Color::white(), .angle_rad = 7.1f});
+            etch::draw_icon({.icon_id = app.ico_spark, .rect = {220,40,35,35},
+                .color = etch::Color::white(), .angle_rad = -0.5f});
+            etch::draw_rect({.rect = {20.0f,-18.0f,90.0f,12.0f},
+                .fill = etch::Color::white(), .angle_rad = 0.785398f});
+            etch::draw_icon({.icon_id = app.ico_spark, .rect = {110.0f,-14.0f,24.0f,24.0f},
+                .color = etch::Color::white(), .angle_rad = 0.785398f});
+            // This icon is wholly above the clip until rotation, including the CPU cull pad.
+            etch::draw_icon({.icon_id = app.ico_spark, .rect = {150.0f,-28.0f,24.0f,24.0f},
+                .color = etch::Color::white(), .angle_rad = 0.785398f});
+            // Only the quadratic arc: one wire, with no horizontal closing chord.
+            if (frame > 0) {
+                etch::draw_filled_path({.svg_path_d = etch::str_lit("M 160 145 Q 200 105 250 145"),
+                    .fill = {}, .stroke_color = etch::Color::white(), .stroke_width = 2.0f});
+            }
+        }
+        etch::end_frame(ctx);
+        bool fill = false, rect = false, glyph = false;
+        bool clipped_rect = false, clipped_glyph = false, above_clip_glyph = false;
+        uint32_t fills = 0u, wires = 0u;
+        for (const etch::Prim& p : etch::frame_prims(ctx)) {
+            fill |= (p.style.x & 15u) == uint32_t(etch::PrimKind::SlugFill);
+            rect |= (p.style.x & 15u) == uint32_t(etch::PrimKind::RotatedRect);
+            glyph |= (p.style.x & 15u) == uint32_t(etch::PrimKind::SlugGlyph) && p.payload.z != 0;
+            if (p.bounds.y < p.clip.y) {
+                clipped_rect |= (p.style.x & 15u) == uint32_t(etch::PrimKind::RotatedRect);
+                if ((p.style.x & 15u) == uint32_t(etch::PrimKind::SlugGlyph) && p.payload.z != 0u) {
+                    clipped_glyph |= p.bounds.x == 110.0f;
+                    above_clip_glyph |= p.bounds.y + p.bounds.w + 2.0f <= p.clip.y;
+                }
+            }
+            fills += (p.style.x & 15u) == uint32_t(etch::PrimKind::SlugFill) ? 1u : 0u;
+            wires += (p.style.x & 15u) == uint32_t(etch::PrimKind::BezierWire) ? 1u : 0u;
+        }
+        if (frame == 0) {
+            baseline_fills = fills;
+            baseline_wires = wires;
+        } else {
+            v16_ok &= fills == baseline_fills && wires == baseline_wires + 1u;
+        }
+        v16_ok &= fill && rect && glyph && etch::frame_stats(ctx).dynamic_slug_curve_count >= 600;
+        v16_ok &= clipped_rect && clipped_glyph && above_clip_glyph;
+        v16_ok &= etch::render_headless_png(ctx, 320, 180, vector_png);
+    }
+    v16_ok &= etch::frame_stats(ctx).draw_call_count <= 3 && !etch::needs_redraw(ctx) && etch::frame_stats(ctx).idle_sleeping;
+    etch::begin_frame(ctx, {.viewport_w = 320, .viewport_h = 180});
+    ETCH_BOX({.width = etch::Sizing::fixed(320), .height = etch::Sizing::fixed(180)}) {
+        etch::text(etch::str_lit("Pure UI"));
+    }
+    etch::end_frame(ctx);
+    v16_ok &= etch::frame_stats(ctx).dynamic_slug_curve_count == 0;
+    if (!v16_ok) std::fprintf(stderr, "Headless assert [16] failed: transient fill/rotation/idle regression\n");
+    const bool ok = v16_ok && v15_ok && png_ok && stats_ok && slug_ok && v10a_ok && v11_ok && v12_ok && v13_ok && v14_ok;
     std::printf(
-        "Headless %s -> %s (asserts=15/15, prims=%u, draw_calls=%u, slug_glyphs=%u, slug_curves=%u, layout_ms=%.3f, gpu_submit_ms=%.3f, arena_used=%zuB, scroll_y=%.1f, focus=0x%08X, idle=%d)\n",
+        "Headless %s -> %s (asserts=16/16, prims=%u, draw_calls=%u, slug_glyphs=%u, slug_curves=%u, layout_ms=%.3f, gpu_submit_ms=%.3f, arena_used=%zuB, scroll_y=%.1f, focus=0x%08X, idle=%d)\n",
         ok ? "OK" : "FAILED",
         out_png_path,
         final_stats.prim_count,
@@ -2710,7 +2817,7 @@ int run_interactive() noexcept {
     }
 
     SDL_Window* window = SDL_CreateWindow(
-        "Etch v1.3 — Pure-GPU UI Engine",
+        "Etch v1.6 — Pure-GPU UI Engine",
         1280,
         800,
         SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);

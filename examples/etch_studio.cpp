@@ -1,5 +1,5 @@
-// Etch Studio 1.5 — Pure-GPU Render-Graph & 1M Telemetry Workbench.
-// Showcases Etch 1.5 capabilities (frameless window chrome, box-local draw_text,
+// Etch Studio 1.6 — Pure-GPU Render-Graph & 1M Telemetry Workbench.
+// Showcases Etch 1.6 capabilities (frameless window chrome, box-local draw_text,
 // native RGBA texture upload/update, zero-heap drag-drop, canvas marquee
 // multi-selection, RingArc & SVG Slug icons) in Orthodox C++20 with zero
 // per-frame heap allocations, 1-3 draw-call batching, and "--headless" checks.
@@ -585,14 +585,14 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
                         .color = etch::Color::white(),
                     });
                 }
-                etch::text(etch::str_lit("ETCH 1.5"), {
+                etch::text(etch::str_lit("ETCH 1.6"), {
                     .color = etch::Color::white(),
                     .font_size_px = 12.0f,
                     .wrap = false,
                 });
             }
 
-            etch::text(etch::str_lit("Etch Studio 1.5 — GPU Render-Graph & Telemetry"), {
+            etch::text(etch::str_lit("Etch Studio 1.6 — GPU Render-Graph & Telemetry"), {
                 .color = etch::Color::rgb_hex(0xE2E8F0),
                 .font_size_px = 14.0f,
                 .wrap = false,
@@ -603,7 +603,7 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
                     // Destruction occurs after the serialized main build ends.
                     SDL_HideWindow(app->tear_off_window);
                 } else {
-                    app->tear_off_window = SDL_CreateWindow("Etch Studio 1.5 — Tear-Off Preview", 480, 360, SDL_WINDOW_RESIZABLE);
+                    app->tear_off_window = SDL_CreateWindow("Etch Studio 1.6 — Tear-Off Preview", 480, 360, SDL_WINDOW_RESIZABLE);
                 }
             }
             draw_button(tear_id, "Tear-Off Preview", etch::Color::rgb_hex(0x1E293B), etch::Color::rgb_hex(0x475569));
@@ -932,6 +932,15 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
                                     .glow_px = 3.0f,
                                     .round_caps = true,
                                 });
+                                const float tip_a = start_a + active_sweep;
+                                const float nx = 19.0f + std::cos(tip_a) * 11.2f;
+                                const float ny = 19.0f + std::sin(tip_a) * 11.2f;
+                                etch::draw_rect({
+                                    .rect = {nx - 3.4f, ny - 1.1f, 6.8f, 2.2f},
+                                    .fill = etch::Color::white(),
+                                    .radius = etch::Corners::all(1.1f),
+                                    .angle_rad = tip_a,
+                                });
                                 if (icon_id != etch::kInvalidIcon) {
                                     etch::draw_icon(etch::IconDrawDesc{
                                         .icon_id = icon_id,
@@ -1012,6 +1021,9 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
                         const float yv = aces_tonemap(t * anim_exposure * 1.6f);
                         pts[s] = { pad_x + t * inner_w, (ph - pad_y) - yv * inner_h };
                     }
+                    etch::draw_area_series({.points = pts, .baseline_y = ph-pad_y, .smooth = true});
+                    etch::draw_filled_path({.svg_path_d = etch::str_lit("M 0 8 Q 8 -4 16 8 Q 8 20 0 8 Z"),
+                        .offset = {pad_x + 28.0f, 5.0f}, .scale = 0.75f, .fill = etch::Color::rgb_hex(0x38BDF8)});
                     etch::draw_polyline(etch::PolylineDesc{
                         .points = std::span<const etch::Vec2>(pts, 17),
                         .color = etch::Color::rgb_hex(0x38BDF8),
@@ -1075,7 +1087,7 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
             }
             etch::text_spans({
                 etch::TextSpan{
-                    .text = etch::str_lit("v1.5 "),
+                    .text = etch::str_lit("v1.6 "),
                     .color = etch::Color::rgb_hex(0xF8FAFC),
                     .font_id = etch::kFontBold,
                 },
@@ -1837,7 +1849,7 @@ void step_headless_frame(
 
 void build_preview_ui(StudioApp* app) noexcept {
     ETCH_BOX({.id = etch::id("tear_preview"), .width = etch::Sizing::grow(), .height = etch::Sizing::grow(), .background = etch::Color::rgb_hex(0x111827), .focusable = true}) {
-        etch::text(etch::str_lit("Etch Studio 1.5 — Preview"));
+        etch::text(etch::str_lit("Etch Studio 1.6 — Preview"));
         etch::image({.texture = app->preview_tex, .width = etch::Sizing::fixed(256), .height = etch::Sizing::fixed(256)});
     }
 }
@@ -2469,6 +2481,17 @@ int run_headless(const char* out_png_path) noexcept {
         return 1;
     }
 
+    // [S12] Studio uses transient Slug fills and analytically rotated gauge needles.
+    bool s12_fill = false, s12_rotation = false;
+    for (const etch::Prim& p : prims) {
+        s12_fill |= (p.style.x & 15u) == uint32_t(etch::PrimKind::SlugFill);
+        s12_rotation |= (p.style.x & 15u) == uint32_t(etch::PrimKind::RotatedRect);
+    }
+    if (!s12_fill || !s12_rotation || final_stats.dynamic_slug_curve_count == 0 || final_stats.draw_call_count > 3) {
+        std::fprintf(stderr, "Headless Studio [S12] failed: vector completeness\n");
+        cleanup_release(); return 1;
+    }
+
     // [S11] Exercise Studio's own palette, spatial canvas drops and preview UI.
     app.preset_popover_open = false;
     app.ctx_menu_open = false;
@@ -2504,7 +2527,7 @@ int run_headless(const char* out_png_path) noexcept {
     }
     step_headless_frame(&app, kW, kH, kDt);
     s11_ok &= app.node_count == before_drop + 2;
-    app.tear_off_window = SDL_CreateWindow("Etch Studio 1.5 — Tear-Off Preview", 480, 360, SDL_WINDOW_HIDDEN);
+    app.tear_off_window = SDL_CreateWindow("Etch Studio 1.6 — Tear-Off Preview", 480, 360, SDL_WINDOW_HIDDEN);
     s11_ok &= app.tear_off_window != nullptr;
     if (app.tear_off_window) {
         etch::begin_window_frame(ctx, app.tear_off_window, kDt);
@@ -2531,7 +2554,7 @@ int run_headless(const char* out_png_path) noexcept {
     }
     const char* driver = SDL_GetGPUDeviceDriver(etch::gpu_device(ctx));
     std::printf(
-        "Headless Studio OK (%s) -> %s (asserts=11/11, prims=%u, draw_calls=%u, blur_pass=%u, slug_glyphs=%u, grid=%u, wire=%u, layout_us=%.0f, vrows=[%u..%u))\n",
+        "Headless Studio OK (%s) -> %s (asserts=12/12, prims=%u, draw_calls=%u, blur_pass=%u, slug_glyphs=%u, grid=%u, wire=%u, layout_us=%.0f, vrows=[%u..%u))\n",
         driver ? driver : "unknown",
         out_png_path,
         final_stats.prim_count,
@@ -2555,7 +2578,7 @@ int run_interactive() noexcept {
     }
 
     SDL_Window* window = SDL_CreateWindow(
-        "Etch Studio 1.5 — GPU Render-Graph & 1M Trace Workbench",
+        "Etch Studio 1.6 — GPU Render-Graph & 1M Trace Workbench",
         1440,
         900,
         SDL_WINDOW_BORDERLESS | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);

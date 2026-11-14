@@ -404,6 +404,7 @@ struct SlugRawCurve {
     float p1x, p1y;
     float p2x, p2y;
     float p3x, p3y;
+    bool implicit_close = false;
 };
 
 struct SlugCurveSortItem {
@@ -437,13 +438,20 @@ CompiledSlugShape compile_slug_contours(
     float norm_min_x,
     float norm_min_y,
     float norm_span_x,
-    float norm_span_y) noexcept
+    float norm_span_y, Context* dynamic = nullptr) noexcept
 {
     CompiledSlugShape out = {};
-    if (!atlas || !raw || raw_count == 0u || norm_span_x < 1e-3f || norm_span_y < 1e-3f) {
+    if (raw_count == 0u || norm_span_x < 1e-3f || norm_span_y < 1e-3f) {
         return out;
     }
 
+    const size_t scratch_mark = atlas->scratch->mark();
+    SlugCurveGpu*& curves = dynamic ? dynamic->dyn_slug_curves : atlas->slug_curves;
+    uint32_t& curve_count = dynamic ? dynamic->dyn_slug_curve_count : atlas->slug_curve_count;
+    uint32_t& curve_cap = dynamic ? dynamic->dyn_slug_curve_cap : atlas->slug_curve_cap;
+    SlugBandEntryGpu*& bands = dynamic ? dynamic->dyn_slug_bands : atlas->slug_bands;
+    uint32_t& band_count = dynamic ? dynamic->dyn_slug_band_count : atlas->slug_band_count;
+    uint32_t& band_cap = dynamic ? dynamic->dyn_slug_band_cap : atlas->slug_band_cap;
     const float inv_w = 1.0f / norm_span_x;
     const float inv_h = 1.0f / norm_span_y;
 
@@ -452,10 +460,7 @@ CompiledSlugShape compile_slug_contours(
         float min_x, min_y, max_x, max_y;
         uint32_t p1_xy, p2_xy, p3_xy;
     };
-    DecodedCurve stack_dec[kStackRawCap];
-    DecodedCurve* dec = (raw_count <= kStackRawCap)
-        ? stack_dec
-        : static_cast<DecodedCurve*>(std::malloc(size_t(raw_count) * sizeof(DecodedCurve)));
+    DecodedCurve* dec = atlas->scratch->alloc_uninit<DecodedCurve>(raw_count);
     uint32_t kept = 0u;
 
     if (!dec) {
@@ -493,10 +498,10 @@ CompiledSlugShape compile_slug_contours(
         };
     }
 
-    if (kept > 0u && ensure_array_cap(&atlas->slug_curves, &atlas->slug_curve_cap, atlas->slug_curve_count + kept)) {
-        const uint32_t base_curve_idx = atlas->slug_curve_count;
+    if (kept > 0u && ensure_array_cap(&curves, &curve_cap, curve_count + kept)) {
+        const uint32_t base_curve_idx = curve_count;
         for (uint32_t i = 0u; i < kept; ++i) {
-            atlas->slug_curves[atlas->slug_curve_count++] = SlugCurveGpu{
+            curves[curve_count++] = SlugCurveGpu{
                 .p1_xy = dec[i].p1_xy,
                 .p2_xy = dec[i].p2_xy,
                 .p3_xy = dec[i].p3_xy,
@@ -504,22 +509,18 @@ CompiledSlugShape compile_slug_contours(
             };
         }
 
-        uint16_t nb = static_cast<uint16_t>((kept + 3u) / 4u);
-        if (nb < 1u) nb = 1u;
-        if (nb > kMaxSlugBands) nb = static_cast<uint16_t>(kMaxSlugBands);
+        const uint32_t desired_bands = (kept + 3u) / 4u;
+        const uint32_t nb = desired_bands > kMaxSlugBands ? kMaxSlugBands : desired_bands;
         const uint32_t num_hb = nb;
         const uint32_t num_vb = nb;
 
-        SlugCurveSortItem stack_sort[kStackRawCap];
-        SlugCurveSortItem* sort_buf = (kept <= kStackRawCap)
-            ? stack_sort
-            : static_cast<SlugCurveSortItem*>(std::malloc(size_t(kept) * sizeof(SlugCurveSortItem)));
+        SlugCurveSortItem* sort_buf = atlas->scratch->alloc_uninit<SlugCurveSortItem>(kept);
 
         // Conservative worst-case band storage: headers + (nb + nb) * kept
         const uint32_t worst_bands = num_hb + num_vb + (num_hb + num_vb) * kept;
-        if (sort_buf && ensure_array_cap(&atlas->slug_bands, &atlas->slug_band_cap, atlas->slug_band_count + worst_bands)) {
-            const uint32_t band_offset = atlas->slug_band_count;
-            atlas->slug_band_count += num_hb + num_vb;
+        if (sort_buf && ensure_array_cap(&bands, &band_cap, band_count + worst_bands)) {
+            const uint32_t band_offset = band_count;
+            band_count += num_hb + num_vb;
             constexpr float kBandEps = 1e-4f;
 
             for (uint32_t b = 0u; b < num_hb; ++b) {
@@ -536,10 +537,10 @@ CompiledSlugShape compile_slug_contours(
                     }
                 }
                 sort_band_desc(sort_buf, cnt);
-                const uint32_t rel_off = atlas->slug_band_count - band_offset;
-                atlas->slug_bands[band_offset + b] = SlugBandEntryGpu{ cnt, rel_off };
+                const uint32_t rel_off = band_count - band_offset;
+                bands[band_offset + b] = SlugBandEntryGpu{ cnt, rel_off };
                 for (uint32_t m = 0u; m < cnt; ++m) {
-                    atlas->slug_bands[atlas->slug_band_count++] = SlugBandEntryGpu{ sort_buf[m].curve_idx, 0u };
+                    bands[band_count++] = SlugBandEntryGpu{ sort_buf[m].curve_idx, 0u };
                 }
             }
 
@@ -557,10 +558,10 @@ CompiledSlugShape compile_slug_contours(
                     }
                 }
                 sort_band_desc(sort_buf, cnt);
-                const uint32_t rel_off = atlas->slug_band_count - band_offset;
-                atlas->slug_bands[band_offset + num_hb + b] = SlugBandEntryGpu{ cnt, rel_off };
+                const uint32_t rel_off = band_count - band_offset;
+                bands[band_offset + num_hb + b] = SlugBandEntryGpu{ cnt, rel_off };
                 for (uint32_t m = 0u; m < cnt; ++m) {
-                    atlas->slug_bands[atlas->slug_band_count++] = SlugBandEntryGpu{ sort_buf[m].curve_idx, 0u };
+                    bands[band_count++] = SlugBandEntryGpu{ sort_buf[m].curve_idx, 0u };
                 }
             }
 
@@ -569,13 +570,9 @@ CompiledSlugShape compile_slug_contours(
             out.num_vbands = static_cast<uint16_t>(num_vb);
             out.has_outline = true;
         }
-        if (sort_buf != stack_sort) {
-            std::free(sort_buf);
-        }
+
     }
-    if (dec != stack_dec) {
-        std::free(dec);
-    }
+    atlas->scratch->rewind(scratch_mark);
     return out;
 }
 
@@ -614,23 +611,21 @@ SlugGlyphEntry slug_get_glyph(FontAtlas* atlas, uint16_t slot_idx, uint32_t glyp
         return entry;
     }
 
+    const size_t raw_mark = atlas->scratch->mark();
     SlugRawCurve stack_raw[kStackRawCap];
     SlugRawCurve* raw = stack_raw;
     uint32_t raw_cap = kStackRawCap;
     uint32_t raw_count = 0u;
-    SlugRawCurve* heap_raw = nullptr;
 
     auto push_raw = [&](SlugRawCurve c) noexcept -> bool {
         if (raw_count >= raw_cap) {
             const uint32_t new_cap = raw_cap * 2u;
-            SlugRawCurve* next = static_cast<SlugRawCurve*>(std::malloc(size_t(new_cap) * sizeof(SlugRawCurve)));
+            SlugRawCurve* next = atlas->scratch->alloc_uninit<SlugRawCurve>(new_cap);
             if (!next) {
                 return false;
             }
             std::memcpy(next, raw, size_t(raw_count) * sizeof(SlugRawCurve));
-            std::free(heap_raw);
-            heap_raw = next;
-            raw = heap_raw;
+            raw = next;
             raw_cap = new_cap;
         }
         raw[raw_count++] = c;
@@ -721,7 +716,7 @@ SlugGlyphEntry slug_get_glyph(FontAtlas* atlas, uint16_t slot_idx, uint32_t glyp
         entry.num_vbands = compiled.num_vbands;
         entry.has_outline = true;
     }
-    std::free(heap_raw);
+    atlas->scratch->rewind(raw_mark);
 
     if ((atlas->slug_glyph_count + 1u) * 4u >= atlas->slug_glyph_cap * 3u && slug_glyph_rehash(atlas)) {
         const uint32_t nmask = atlas->slug_glyph_cap - 1u;
@@ -1146,50 +1141,26 @@ bool is_font_loaded(const Context* ctx, uint16_t font_id) noexcept {
     return ctx && font_id < kMaxFontSlots && ctx->atlas.slots[font_id].loaded;
 }
 
-uint16_t register_svg_icon(
-    Context* ctx,
-    Str svg_path_d,
-    Vec4 view_box,
-    uint16_t slot_hint) noexcept
-{
-    if (!ctx || !svg_path_d.chars || svg_path_d.length == 0u ||
-        view_box.z <= 1e-3f || view_box.w <= 1e-3f)
-    {
-        return kInvalidIcon;
-    }
-
-    uint16_t slot = kInvalidIcon;
-    if (slot_hint < kMaxVectorIcons) {
-        slot = slot_hint;
-    } else {
-        for (uint16_t i = 0u; i < kMaxVectorIcons; ++i) {
-            if (!ctx->atlas.icons[i].loaded) {
-                slot = i;
-                break;
-            }
-        }
-    }
-    if (slot == kInvalidIcon) {
-        return kInvalidIcon;
-    }
-
-    SlugRawCurve stack_raw[kStackRawCap];
-    SlugRawCurve* raw = stack_raw;
+// Shared SVG and native path decoder. Caller owns the frame-arena mark.
+static SlugRawCurve* decode_vector_path(Context* ctx, Str svg_path_d,
+    std::span<const PathCmd> commands, Vec4 view_box, uint32_t* count) noexcept {
+    SlugRawCurve* raw = ctx->frame_arena.alloc_uninit<SlugRawCurve>(kStackRawCap);
+    if (!raw) { *count = 0; return nullptr; }
     uint32_t raw_cap = kStackRawCap;
     uint32_t raw_count = 0u;
-    SlugRawCurve* heap_raw = nullptr;
+    bool complete = true;
+
 
     auto push_raw = [&](SlugRawCurve c) noexcept -> bool {
         if (raw_count >= raw_cap) {
             const uint32_t new_cap = raw_cap * 2u;
-            SlugRawCurve* next = static_cast<SlugRawCurve*>(std::malloc(size_t(new_cap) * sizeof(SlugRawCurve)));
+            SlugRawCurve* next = ctx->frame_arena.alloc_uninit<SlugRawCurve>(new_cap);
             if (!next) {
+                complete = false;
                 return false;
             }
             std::memcpy(next, raw, size_t(raw_count) * sizeof(SlugRawCurve));
-            std::free(heap_raw);
-            heap_raw = next;
-            raw = heap_raw;
+            raw = next;
             raw_cap = new_cap;
         }
         raw[raw_count++] = c;
@@ -1202,15 +1173,15 @@ uint16_t register_svg_icon(
     auto map_svg = [&](Vec2 p) noexcept -> Vec2 {
         return Vec2{ p.x - vx, (vy + vh) - p.y };
     };
-    auto emit_quad = [&](Vec2 p1, Vec2 p2, Vec2 p3) noexcept {
+    auto emit_quad = [&](Vec2 p1, Vec2 p2, Vec2 p3, bool is_implicit = false) noexcept {
         const Vec2 a = map_svg(p1);
         const Vec2 b = map_svg(p2);
         const Vec2 c = map_svg(p3);
-        push_raw(SlugRawCurve{ a.x, a.y, b.x, b.y, c.x, c.y });
+        push_raw(SlugRawCurve{ a.x, a.y, b.x, b.y, c.x, c.y, is_implicit });
     };
-    auto emit_line = [&](Vec2 p1, Vec2 p2) noexcept {
+    auto emit_line = [&](Vec2 p1, Vec2 p2, bool is_implicit = false) noexcept {
         if (p1.x != p2.x || p1.y != p2.y) {
-            emit_quad(p1, (p1 + p2) * 0.5f, p2);
+            emit_quad(p1, (p1 + p2) * 0.5f, p2, is_implicit);
         }
     };
     auto emit_half_cubic = [&](Vec2 q0, Vec2 h1, Vec2 h2, Vec2 q3) noexcept {
@@ -1315,7 +1286,7 @@ uint16_t register_svg_icon(
     };
 
     const char* p = svg_path_d.chars;
-    const char* end = svg_path_d.chars + svg_path_d.length;
+    const char* end = svg_path_d.chars ? svg_path_d.chars + svg_path_d.length : nullptr;
     char cmd = '\0';
     Vec2 cur = {};
     Vec2 subpath_start = {};
@@ -1325,15 +1296,24 @@ uint16_t register_svg_icon(
     bool has_cubic_ctrl = false;
     bool subpath_has_segments = false;
 
-    auto close_subpath = [&]() noexcept {
+    auto close_subpath = [&](bool is_explicit) noexcept {
         if (subpath_has_segments) {
-            emit_line(cur, subpath_start);
+            emit_line(cur, subpath_start, !is_explicit);
             subpath_has_segments = false;
         }
         cur = subpath_start;
     };
 
-    while (p < end) {
+    for (const PathCmd& c : commands) {
+        switch (c.verb) {
+            case PathVerb::MoveTo: close_subpath(false); cur = c.p1; subpath_start = cur; break;
+            case PathVerb::LineTo: emit_line(cur, c.p1); cur = c.p1; subpath_has_segments = true; break;
+            case PathVerb::QuadTo: emit_quad(cur, c.p1, c.p2); cur = c.p2; subpath_has_segments = true; break;
+            case PathVerb::CubicTo: emit_cubic(cur, c.p1, c.p2, c.p3); cur = c.p3; subpath_has_segments = true; break;
+            case PathVerb::Close: close_subpath(true); break;
+        }
+    }
+    while (p && p < end) {
         p = svg_skip_ws_comma(p, end);
         if (p >= end) {
             break;
@@ -1345,7 +1325,7 @@ uint16_t register_svg_icon(
         }
 
         if (cmd == 'Z' || cmd == 'z') {
-            close_subpath();
+            close_subpath(true);
             has_quad_ctrl = false;
             has_cubic_ctrl = false;
             cmd = '\0';
@@ -1361,7 +1341,7 @@ uint16_t register_svg_icon(
                     p = end;
                     break;
                 }
-                close_subpath();
+                close_subpath(false);
                 cur = rel ? Vec2{ cur.x + x, cur.y + y } : Vec2{ x, y };
                 subpath_start = cur;
                 has_quad_ctrl = false;
@@ -1516,7 +1496,42 @@ uint16_t register_svg_icon(
                 break;
         }
     }
-    close_subpath();
+    close_subpath(false);
+
+    *count = complete ? raw_count : 0;
+    return raw;
+}
+
+uint16_t register_svg_icon(
+    Context* ctx,
+    Str svg_path_d,
+    Vec4 view_box,
+    uint16_t slot_hint) noexcept
+{
+    if (!ctx || !svg_path_d.chars || svg_path_d.length == 0u ||
+        view_box.z <= 1e-3f || view_box.w <= 1e-3f)
+    {
+        return kInvalidIcon;
+    }
+
+    uint16_t slot = kInvalidIcon;
+    if (slot_hint < kMaxVectorIcons) {
+        slot = slot_hint;
+    } else {
+        for (uint16_t i = 0u; i < kMaxVectorIcons; ++i) {
+            if (!ctx->atlas.icons[i].loaded) {
+                slot = i;
+                break;
+            }
+        }
+    }
+    if (slot == kInvalidIcon) {
+        return kInvalidIcon;
+    }
+
+    const size_t mark = ctx->frame_arena.mark();
+    uint32_t raw_count = 0;
+    const SlugRawCurve* raw = decode_vector_path(ctx, svg_path_d, {}, view_box, &raw_count);
 
     const CompiledSlugShape compiled = compile_slug_contours(
         &ctx->atlas,
@@ -1526,7 +1541,7 @@ uint16_t register_svg_icon(
         0.0f,
         view_box.z,
         view_box.w);
-    std::free(heap_raw);
+    ctx->frame_arena.rewind(mark);
 
     if (!compiled.has_outline) {
         return kInvalidIcon;

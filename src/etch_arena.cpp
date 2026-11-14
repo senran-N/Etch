@@ -129,11 +129,13 @@ struct alignas(16) SlugCurveGpu {
 static_assert(sizeof(SlugCurveGpu) == 16);
 static_assert(sizeof(SlugCurveGpu) % 16 == 0);
 
-struct SlugBandEntryGpu {
+struct alignas(16) SlugBandEntryGpu {
     uint32_t x = 0; // band header: count; curve item: curve_idx
     uint32_t y = 0; // band header: rel_offset; curve item: 0
+    uint32_t pad0 = 0, pad1 = 0;
 };
-static_assert(sizeof(SlugBandEntryGpu) == 8);
+static_assert(sizeof(SlugBandEntryGpu) == 16);
+static_assert(sizeof(SlugBandEntryGpu) % 16 == 0);
 
 struct SlugGlyphEntry {
     uint64_t key = 0; // Packed (slot_idx + 1, generation, glyph_id); 0 = empty
@@ -190,6 +192,7 @@ struct VectorIconEntry {
 };
 
 struct FontAtlas {
+    Arena* scratch = nullptr;
     SlugGlyphEntry*   slug_glyphs = nullptr; // Open-addressed table (power-of-2 capacity)
     uint32_t          slug_glyph_cap = 0;
     uint32_t          slug_glyph_count = 0;
@@ -263,6 +266,7 @@ enum class DrawCmdKind : uint8_t {
     Icon = 5,
     Text = 6,
     Image = 7,
+    Fill = 8,
 };
 
 struct DrawCmdNode {
@@ -283,6 +287,7 @@ struct DrawCmdNode {
     IconDrawDesc  icon = {};
     TextDrawDesc  text_cmd = {};
     ImageDrawDesc image_cmd = {};
+    FilledPathDesc fill_cmd = {};
 };
 
 
@@ -727,6 +732,20 @@ struct Context {
     uint32_t      clipboard_fallback_cap = 0;
 
     uint64_t   layout_start_ticks = 0;
+    SlugCurveGpu* dyn_slug_curves = nullptr;
+    uint32_t dyn_slug_curve_count = 0;
+    uint32_t dyn_slug_curve_cap = 0;
+    SlugBandEntryGpu* dyn_slug_bands = nullptr;
+    uint32_t dyn_slug_band_count = 0;
+    uint32_t dyn_slug_band_cap = 0;
+    SDL_GPUBuffer* dyn_slug_curve_gpu_buf = nullptr;
+    uint32_t dyn_slug_curve_gpu_cap = 0;
+    SDL_GPUTransferBuffer* dyn_slug_curve_tbuf = nullptr;
+    uint32_t dyn_slug_curve_tbuf_cap = 0;
+    SDL_GPUBuffer* dyn_slug_band_gpu_buf = nullptr;
+    uint32_t dyn_slug_band_gpu_cap = 0;
+    SDL_GPUTransferBuffer* dyn_slug_band_tbuf = nullptr;
+    uint32_t dyn_slug_band_tbuf_cap = 0;
     FrameStats stats = {};
 };
 
