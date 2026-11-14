@@ -273,228 +273,140 @@ inline uint32_t next_utf8_codepoint(const char*& p, const char* end) noexcept {
     return 0xFFFDu;
 }
 
-constexpr uint32_t hash_u64_to_32(uint64_t x) noexcept {
-    x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ull;
-    x = (x ^ (x >> 27)) * 0x94D049BB133111EBull;
-    x = x ^ (x >> 31);
-    return static_cast<uint32_t>(x);
+inline uint32_t count_utf8_cps(const char* beg, uint32_t len) noexcept {
+    const char* p = beg;
+    const char* end = beg + len;
+    uint32_t n = 0u;
+    while (p < end) {
+        (void)next_utf8_codepoint(p, end);
+        ++n;
+    }
+    return n;
 }
 
-bool try_load_font_file(FontAtlas* atlas, const char* path) noexcept {
-    if (!atlas || !path || path[0] == '\0') {
-        return false;
-    }
-    size_t sz = 0;
-    void* raw = SDL_LoadFile(path, &sz);
-    if (!raw || sz < 16u) {
-        if (raw) {
-            SDL_free(raw);
-        }
-        return false;
-    }
-    const unsigned char* bytes = static_cast<const unsigned char*>(raw);
-    const int offset = stbtt_GetFontOffsetForIndex(bytes, 0);
-    if (offset < 0 || !stbtt_InitFont(&atlas->font_info, bytes, offset)) {
-        SDL_free(raw);
-        return false;
-    }
-    atlas->font_file_data = static_cast<uint8_t*>(raw);
-    atlas->font_file_size = sz;
-    stbtt_GetFontVMetrics(&atlas->font_info, &atlas->font_ascent, &atlas->font_descent, &atlas->font_line_gap);
-    atlas->font_valid = true;
-    return true;
-}
-
-bool font_atlas_init(FontAtlas* atlas, const char* preferred_font_path) noexcept {
-    if (!atlas) {
-        return false;
-    }
-    *atlas = {};
-    atlas->glyphs = static_cast<GlyphEntry*>(std::calloc(kGlyphTableCapacity, sizeof(GlyphEntry)));
-    atlas->pixels = static_cast<uint8_t*>(std::calloc(size_t(kAtlasSize) * kAtlasSize * 4u, 1u));
-    atlas->raster_scratch = static_cast<uint8_t*>(std::calloc(256u * 256u, 1u));
-    if (!atlas->glyphs || !atlas->pixels || !atlas->raster_scratch) {
-        return false;
-    }
-
-    // Reserve top-left 4x4 texels as opaque white (255, 255, 255, 255) for slot-0 fallback.
-    for (uint32_t y = 0; y < 4u; ++y) {
-        for (uint32_t x = 0; x < 4u; ++x) {
-            uint8_t* dst = atlas->pixels + (y * kAtlasSize + x) * 4u;
-            dst[0] = 255u;
-            dst[1] = 255u;
-            dst[2] = 255u;
-            dst[3] = 255u;
-        }
-    }
-    atlas->shelf_x = 6u;
-    atlas->shelf_y = 0u;
-    atlas->shelf_h = 6u;
-    atlas->dirty_y0 = 0u;
-    atlas->dirty_y1 = 4u;
-    atlas->dirty = true;
-
-    const char* fallbacks[] = {
-        preferred_font_path,
-#if defined(_WIN32)
-        "C:/Windows/Fonts/msyh.ttc",
-        "C:/Windows/Fonts/segoeui.ttf",
-        "C:/Windows/Fonts/arial.ttf",
-#elif defined(__APPLE__)
-        "/System/Library/Fonts/PingFang.ttc",
-        "/System/Library/Fonts/Helvetica.ttc",
-#else
-        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-#endif
+// Measures a single-line UTF-8 segment (no '\n') in logical px.
+// Computes total line width and, optionally, the x offsets at `stop_a` and `stop_b` relative to `seg`.
+void measure_line_segment_x(
+    Context* ctx,
+    const char* seg,
+    uint32_t seg_len,
+    uint32_t stop_a,
+    uint32_t stop_b,
+    float base_px,
+    float letter_spacing,
+    bool mask_bullets,
+    bool spacing_between_glyphs_only,
+    float* out_xa,
+    float* out_xb,
+    float* out_total_w) noexcept
+{
+    uint32_t glyph_idx = 0u;
+    const auto next_spacing = [&]() noexcept -> float {
+        const float sp = (!spacing_between_glyphs_only || glyph_idx > 0u) ? letter_spacing : 0.0f;
+        ++glyph_idx;
+        return sp;
     };
-    for (const char* path : fallbacks) {
-        if (path && try_load_font_file(atlas, path)) {
-            break;
-        }
-    }
-    return true;
-}
 
-void font_atlas_destroy(FontAtlas* atlas) noexcept {
-    if (!atlas) {
+    float total_w = 0.0f;
+    float xa = 0.0f;
+    float xb = 0.0f;
+
+    if (!ctx || !ctx->atlas.font_valid) {
+        const float cp_w = base_px * 0.55f;
+        const char* p = seg;
+        const char* end = seg + seg_len;
+        while (p < end) {
+            const uint32_t cp_off = static_cast<uint32_t>(p - seg);
+            const uint32_t cp = next_utf8_codepoint(p, end);
+            const float adv = ((cp == '\t' && !mask_bullets) ? 4.0f * cp_w : cp_w) + next_spacing();
+            if (cp_off < stop_a) xa += adv;
+            if (cp_off < stop_b) xb += adv;
+            total_w += adv;
+        }
+        if (out_xa) *out_xa = xa;
+        if (out_xb) *out_xb = xb;
+        if (out_total_w) *out_total_w = total_w;
         return;
     }
-    if (atlas->font_file_data) {
-        SDL_free(atlas->font_file_data);
-    }
-    std::free(atlas->raster_scratch);
-    std::free(atlas->pixels);
-    std::free(atlas->glyphs);
-    *atlas = {};
-}
 
-const GlyphEntry* font_atlas_get_glyph(FontAtlas* atlas, uint32_t codepoint, float phys_px_size) noexcept {
-    static const GlyphEntry kEmptyGlyph = {};
-    if (!atlas || !atlas->font_valid || !atlas->glyphs) {
-        return &kEmptyGlyph;
-    }
-    const float clamped_px = (phys_px_size < 6.0f) ? 6.0f : ((phys_px_size > 128.0f) ? 128.0f : phys_px_size);
-    const uint16_t size_q2 = static_cast<uint16_t>(clamped_px * 4.0f + 0.5f);
-    const float quant_px = static_cast<float>(size_q2) * 0.25f;
-    const uint64_t key = (static_cast<uint64_t>(codepoint) << 16) | static_cast<uint64_t>(size_q2);
-
-    const uint32_t mask = kGlyphTableCapacity - 1u;
-    uint32_t idx = hash_u64_to_32(key) & mask;
-    uint32_t probes = 0u;
-    while (probes < kGlyphTableCapacity) {
-        GlyphEntry& slot = atlas->glyphs[idx];
-        if (slot.key == key) {
-            return &slot;
+    const float scale = stbtt_ScaleForPixelHeight(&ctx->atlas.font_info, base_px);
+    if (mask_bullets) {
+        const float bullet_adv = ctx->atlas.bullet_advance_em * scale;
+        const char* p = seg;
+        const char* end = seg + seg_len;
+        while (p < end) {
+            const uint32_t cp_off = static_cast<uint32_t>(p - seg);
+            (void)next_utf8_codepoint(p, end);
+            const float adv = bullet_adv + next_spacing();
+            if (cp_off < stop_a) xa += adv;
+            if (cp_off < stop_b) xb += adv;
+            total_w += adv;
         }
-        if (slot.key == 0ull) {
-            break;
+        if (out_xa) *out_xa = xa;
+        if (out_xb) *out_xb = xb;
+        if (out_total_w) *out_total_w = total_w;
+        return;
+    }
+
+    const auto cluster_stop_dx = [&](uint32_t stop, uint32_t abs_c0, uint32_t abs_c1, float cluster_adv, bool is_rtl) noexcept -> float {
+        if (is_rtl) {
+            if (stop <= abs_c0) return cluster_adv;
+            if (stop >= abs_c1) return 0.0f;
+            const uint32_t n_tot = count_utf8_cps(seg + abs_c0, abs_c1 - abs_c0);
+            const uint32_t n_pre = count_utf8_cps(seg + abs_c0, stop - abs_c0);
+            return cluster_adv * (1.0f - static_cast<float>(n_pre) / static_cast<float>(n_tot > 0u ? n_tot : 1u));
         }
-        idx = (idx + 1u) & mask;
-        ++probes;
-    }
-    if (probes >= kGlyphTableCapacity) {
-        return &kEmptyGlyph;
-    }
-
-    int glyph_index = stbtt_FindGlyphIndex(&atlas->font_info, static_cast<int>(codepoint));
-    if (glyph_index == 0 && codepoint != 0u && codepoint != 0x20u && codepoint != 0x09u) {
-        // Fallback to '?' when a Unicode glyph is missing in a Latin-only fallback font.
-        const int q_idx = stbtt_FindGlyphIndex(&atlas->font_info, '?');
-        if (q_idx != 0) {
-            glyph_index = q_idx;
-        }
-    }
-
-    const float scale = stbtt_ScaleForPixelHeight(&atlas->font_info, quant_px);
-    int adv_unscaled = 0;
-    int lsb_unscaled = 0;
-    stbtt_GetGlyphHMetrics(&atlas->font_info, glyph_index, &adv_unscaled, &lsb_unscaled);
-    const float advance = static_cast<float>(adv_unscaled) * scale;
-
-    int ix0 = 0;
-    int iy0 = 0;
-    int ix1 = 0;
-    int iy1 = 0;
-    stbtt_GetGlyphBitmapBox(&atlas->font_info, glyph_index, scale, scale, &ix0, &iy0, &ix1, &iy1);
-    const int gw = ix1 - ix0;
-    const int gh = iy1 - iy0;
-
-    GlyphEntry entry = {
-        .key = key,
-        .xoff = static_cast<float>(ix0),
-        .yoff = static_cast<float>(iy0),
-        .width = static_cast<float>(gw),
-        .height = static_cast<float>(gh),
-        .advance = advance,
-        .visible = false,
+        if (stop >= abs_c1) return cluster_adv;
+        if (stop <= abs_c0) return 0.0f;
+        const uint32_t n_tot = count_utf8_cps(seg + abs_c0, abs_c1 - abs_c0);
+        const uint32_t n_pre = count_utf8_cps(seg + abs_c0, stop - abs_c0);
+        return cluster_adv * (static_cast<float>(n_pre) / static_cast<float>(n_tot > 0u ? n_tot : 1u));
     };
 
-    if (gw > 0 && gh > 0 && gw <= 254 && gh <= 254 && codepoint != 0x20u && codepoint != 0x09u) {
-        constexpr uint32_t kPad = 2u;
-        const uint32_t uw = static_cast<uint32_t>(gw);
-        const uint32_t uh = static_cast<uint32_t>(gh);
-
-        if (atlas->shelf_x + uw + kPad > kAtlasSize) {
-            atlas->shelf_x = 0u;
-            atlas->shelf_y += atlas->shelf_h + kPad;
-            atlas->shelf_h = 0u;
+    uint32_t pos = 0u;
+    while (pos < seg_len) {
+        if (seg[pos] == '\t') {
+            const float adv = 4.0f * ctx->atlas.space_advance_em * scale + next_spacing();
+            if (pos < stop_a) xa += adv;
+            if (pos < stop_b) xb += adv;
+            total_w += adv;
+            ++pos;
+            continue;
         }
-        if (atlas->shelf_y + uh + kPad <= kAtlasSize) {
-            const uint32_t ax = atlas->shelf_x;
-            const uint32_t ay = atlas->shelf_y;
-
-            std::memset(atlas->raster_scratch, 0, size_t(gw) * size_t(gh));
-            stbtt_MakeGlyphBitmap(
-                &atlas->font_info,
-                atlas->raster_scratch,
-                gw,
-                gh,
-                gw,
-                scale,
-                scale,
-                glyph_index);
-
-            for (uint32_t row = 0; row < uh; ++row) {
-                const uint8_t* src = atlas->raster_scratch + row * uw;
-                uint8_t* dst = atlas->pixels + ((ay + row) * kAtlasSize + ax) * 4u;
-                for (uint32_t col = 0; col < uw; ++col) {
-                    const uint8_t cov = src[col];
-                    dst[col * 4u + 0u] = 255u;
-                    dst[col * 4u + 1u] = 255u;
-                    dst[col * 4u + 2u] = 255u;
-                    dst[col * 4u + 3u] = cov;
-                }
-            }
-
-            const float inv_atlas = 1.0f / static_cast<float>(kAtlasSize);
-            entry.u0 = static_cast<float>(ax) * inv_atlas;
-            entry.v0 = static_cast<float>(ay) * inv_atlas;
-            entry.u1 = static_cast<float>(ax + uw) * inv_atlas;
-            entry.v1 = static_cast<float>(ay + uh) * inv_atlas;
-            entry.visible = true;
-
-            atlas->shelf_x += uw + kPad;
-            if (uh > atlas->shelf_h) {
-                atlas->shelf_h = uh;
-            }
-            if (!atlas->dirty) {
-                atlas->dirty = true;
-                atlas->dirty_y0 = ay;
-                atlas->dirty_y1 = ay + uh;
-            } else {
-                if (ay < atlas->dirty_y0) {
-                    atlas->dirty_y0 = ay;
-                }
-                if (ay + uh > atlas->dirty_y1) {
-                    atlas->dirty_y1 = ay + uh;
-                }
-            }
+        uint32_t run_end = pos;
+        while (run_end < seg_len && seg[run_end] != '\t') {
+            ++run_end;
         }
+        const uint32_t run_len = run_end - pos;
+        const std::span<const ShapedGlyph> glyphs = shape_utf8_run(ctx, seg + pos, run_len);
+        const bool is_rtl = HB_DIRECTION_IS_BACKWARD(hb_buffer_get_direction(ctx->atlas.hb_buf));
+        const uint32_t gcount = static_cast<uint32_t>(glyphs.size());
+        uint32_t gi = 0u;
+        while (gi < gcount) {
+            const uint32_t c0 = glyphs[gi].cluster;
+            uint32_t gi_end = gi + 1u;
+            while (gi_end < gcount && glyphs[gi_end].cluster == c0) {
+                ++gi_end;
+            }
+            float cluster_adv = 0.0f;
+            for (uint32_t k = gi; k < gi_end; ++k) {
+                cluster_adv += glyphs[k].x_advance_em * scale + next_spacing();
+            }
+            const uint32_t c1 = is_rtl
+                ? ((gi > 0u && glyphs[gi - 1u].cluster > c0) ? glyphs[gi - 1u].cluster : run_len)
+                : ((gi_end < gcount && glyphs[gi_end].cluster > c0) ? glyphs[gi_end].cluster : run_len);
+            const uint32_t abs_c0 = pos + c0;
+            const uint32_t abs_c1 = pos + c1;
+            if (out_xa) xa += cluster_stop_dx(stop_a, abs_c0, abs_c1, cluster_adv, is_rtl);
+            if (out_xb) xb += cluster_stop_dx(stop_b, abs_c0, abs_c1, cluster_adv, is_rtl);
+            total_w += cluster_adv;
+            gi = gi_end;
+        }
+        pos = run_end;
     }
-
-    atlas->glyphs[idx] = entry;
-    return &atlas->glyphs[idx];
+    if (out_xa) *out_xa = xa;
+    if (out_xb) *out_xb = xb;
+    if (out_total_w) *out_total_w = total_w;
 }
 
 Clay_Dimensions etch_measure_text(
@@ -505,30 +417,25 @@ Clay_Dimensions etch_measure_text(
     Context* ctx = static_cast<Context*>(user_data);
     const float logical_font_px = (config && config->fontSize > 0u) ? static_cast<float>(config->fontSize) : 16.0f;
     const float letter_spacing = config ? static_cast<float>(config->letterSpacing) : 0.0f;
-    const float dpi = (ctx && ctx->dpi_scale > 0.0f) ? ctx->dpi_scale : 1.0f;
-
-    if (!ctx || !ctx->atlas.font_valid) {
-        const float est_w = static_cast<float>(text.length) * logical_font_px * 0.55f;
-        return Clay_Dimensions{ est_w, logical_font_px };
+    if (!text.chars || text.length <= 0) {
+        return Clay_Dimensions{ .width = 0.0f, .height = logical_font_px };
     }
-
-    const float phys_px = logical_font_px * dpi;
-    const char* p = text.chars;
-    const char* end = (text.chars && text.length > 0) ? (text.chars + text.length) : text.chars;
-    float width_phys = 0.0f;
-    uint32_t glyph_count = 0u;
-    while (p < end) {
-        const uint32_t cp = next_utf8_codepoint(p, end);
-        const GlyphEntry* g = font_atlas_get_glyph(&ctx->atlas, cp, phys_px);
-        width_phys += g->advance;
-        if (glyph_count > 0u) {
-            width_phys += letter_spacing * dpi;
-        }
-        ++glyph_count;
-    }
-
+    float width_logical = 0.0f;
+    measure_line_segment_x(
+        ctx,
+        text.chars,
+        static_cast<uint32_t>(text.length),
+        0u,
+        0u,
+        logical_font_px,
+        letter_spacing,
+        false,
+        true,
+        nullptr,
+        nullptr,
+        &width_logical);
     return Clay_Dimensions{
-        .width = width_phys / dpi,
+        .width = width_logical,
         .height = logical_font_px,
     };
 }
@@ -762,6 +669,41 @@ void emit_box_background_and_shadow(
     }
 }
 
+void emit_slug_glyph_quad(
+    Context* ctx,
+    uint32_t glyph_id,
+    float scale_px,
+    float pen_x_px,
+    float baseline_y_px,
+    float x_offset_em,
+    float y_offset_em,
+    const ClipEntry& clip_px,
+    Color tint) noexcept
+{
+    const SlugGlyphEntry ge = slug_get_glyph(&ctx->atlas, glyph_id);
+    if (!ge.has_outline) {
+        return;
+    }
+    const float box_x = pen_x_px + (x_offset_em + ge.min_x_em) * scale_px;
+    const float box_y = baseline_y_px - (y_offset_em + ge.max_y_em) * scale_px;
+    const float box_w = (ge.max_x_em - ge.min_x_em) * scale_px;
+    const float box_h = (ge.max_y_em - ge.min_y_em) * scale_px;
+    if (box_w <= 0.0f || box_h <= 0.0f) {
+        return;
+    }
+    push_prim(
+        ctx,
+        Prim::make_slug_glyph(
+            Rect{ box_x, box_y, box_w, box_h },
+            clip_px.rect,
+            tint,
+            ge.band_offset,
+            ge.num_hbands,
+            ge.num_vbands,
+            clip_px.radius,
+            PrimFlag_StemDarken));
+}
+
 void emit_text_command(
     Context* ctx,
     const Clay_RenderCommand* cmd,
@@ -790,28 +732,33 @@ void emit_text_command(
         static_cast<uint8_t>(td.textColor.a + 0.5f));
 
     float pen_x = cmd->boundingBox.x * dpi;
-    const char* p = chars;
-    const char* end = chars + len;
-    while (p < end) {
-        const uint32_t cp = next_utf8_codepoint(p, end);
-        const GlyphEntry* g = font_atlas_get_glyph(&ctx->atlas, cp, phys_px);
-        if (g->visible) {
-            const float gx = std::floor(pen_x + g->xoff + 0.5f);
-            const float gy = std::floor(baseline_y + g->yoff + 0.5f);
-            const Rect g_rect = { gx, gy, g->width, g->height };
-            push_prim(
-                ctx,
-                Prim::make_glyph(
-                    g_rect,
-                    clip.rect,
-                    tint,
-                    Vec2{g->u0, g->v0},
-                    Vec2{g->u1, g->v1},
-                    0u,
-                    clip.radius,
-                    PrimFlag_StemDarken));
+    const uint32_t ulen = static_cast<uint32_t>(len);
+    uint32_t pos = 0u;
+    while (pos < ulen) {
+        if (chars[pos] == '\t') {
+            pen_x += 4.0f * ctx->atlas.space_advance_em * scale + letter_spacing_px;
+            ++pos;
+            continue;
         }
-        pen_x += g->advance + letter_spacing_px;
+        uint32_t run_end = pos;
+        while (run_end < ulen && chars[run_end] != '\t') {
+            ++run_end;
+        }
+        const std::span<const ShapedGlyph> glyphs = shape_utf8_run(ctx, chars + pos, run_end - pos);
+        for (const ShapedGlyph& g : glyphs) {
+            emit_slug_glyph_quad(
+                ctx,
+                g.glyph_id,
+                scale,
+                pen_x,
+                baseline_y,
+                g.x_offset_em,
+                g.y_offset_em,
+                clip,
+                tint);
+            pen_x += g.x_advance_em * scale + letter_spacing_px;
+        }
+        pos = run_end;
     }
 }
 
@@ -1209,21 +1156,6 @@ TextInnerGeom compute_text_inner_geom(Rect box_logical, const TextInputDesc& des
     };
 }
 
-float measure_cp_logical_adv(Context* ctx, uint32_t cp, float font_size_px, float letter_spacing) noexcept {
-    const float base_px = (font_size_px > 0.0f) ? font_size_px : 14.0f;
-    if (!ctx || !ctx->atlas.font_valid) {
-        return (cp == '\t' ? 4.0f : 1.0f) * (base_px * 0.55f) + letter_spacing;
-    }
-    const float dpi = (ctx->dpi_scale > 0.0f) ? ctx->dpi_scale : 1.0f;
-    const float phys_px = base_px * dpi;
-    if (cp == '\t') {
-        const GlyphEntry* sp = font_atlas_get_glyph(&ctx->atlas, ' ', phys_px);
-        return 4.0f * (sp->advance / dpi) + letter_spacing;
-    }
-    const GlyphEntry* g = font_atlas_get_glyph(&ctx->atlas, cp, phys_px);
-    return (g->advance / dpi) + letter_spacing;
-}
-
 struct TextVisualPos {
     float    x = 0.0f;
     float    y = 0.0f;
@@ -1238,39 +1170,29 @@ TextVisualPos text_byte_to_visual(Context* ctx, const TextInputDesc& desc, Str t
         return out;
     }
     const uint32_t clamped = utf8_clamp_boundary(text.chars, text.length, byte_pos);
-    const char* p = text.chars;
-    const char* end = text.chars + clamped;
-    while (p < end) {
-        const uint32_t cp = next_utf8_codepoint(p, end);
-        if (cp == '\n' && desc.multiline) {
-            out.x = 0.0f;
-            out.y += line_adv;
-            ++out.line_idx;
-            continue;
-        }
-        const uint32_t vis_cp = desc.password ? 0x2022u : cp;
-        out.x += measure_cp_logical_adv(ctx, vis_cp, base_px, desc.letter_spacing);
+    if (!desc.multiline) {
+        measure_line_segment_x(
+            ctx, text.chars, text.length, clamped, 0u,
+            base_px, desc.letter_spacing, desc.password, false, &out.x, nullptr, nullptr);
+        return out;
     }
-    return out;
-}
 
-float text_slice_width(Context* ctx, const TextInputDesc& desc, const char* s, uint32_t byte_len, bool apply_password_mask) noexcept {
-    if (!s || byte_len == 0u) {
-        return 0.0f;
-    }
-    const float base_px = (desc.font_size_px > 0.0f) ? desc.font_size_px : 14.0f;
-    const char* p = s;
-    const char* end = s + byte_len;
-    float w = 0.0f;
-    while (p < end) {
-        const uint32_t cp = next_utf8_codepoint(p, end);
-        if (cp == '\n') {
-            continue;
+    uint32_t line_start = 0u;
+    for (;;) {
+        uint32_t line_end = line_start;
+        while (line_end < text.length && text.chars[line_end] != '\n') {
+            ++line_end;
         }
-        const uint32_t vis_cp = apply_password_mask ? 0x2022u : cp;
-        w += measure_cp_logical_adv(ctx, vis_cp, base_px, desc.letter_spacing);
+        if (clamped <= line_end) {
+            measure_line_segment_x(
+                ctx, text.chars + line_start, line_end - line_start, clamped - line_start, 0u,
+                base_px, desc.letter_spacing, desc.password, false, &out.x, nullptr, nullptr);
+            return out;
+        }
+        out.y += line_adv;
+        ++out.line_idx;
+        line_start = line_end + 1u;
     }
-    return w;
 }
 
 uint32_t visual_point_to_byte(Context* ctx, const TextInputDesc& desc, Str text, float local_x, float local_y) noexcept {
@@ -1283,31 +1205,121 @@ uint32_t visual_point_to_byte(Context* ctx, const TextInputDesc& desc, Str text,
         ? static_cast<uint32_t>((local_y > 0.0f) ? std::floor(local_y / line_adv) : 0.0f)
         : 0u;
 
-    const char* p = text.chars;
-    const char* end = text.chars + text.length;
-    uint32_t cur_line = 0u;
-    float pen_x = 0.0f;
-    while (p < end) {
-        const char* cp_start = p;
-        const uint32_t cp = next_utf8_codepoint(p, end);
-        if (cp == '\n' && desc.multiline) {
-            if (cur_line == target_line) {
-                return static_cast<uint32_t>(cp_start - text.chars);
+    uint32_t line_start = 0u;
+    uint32_t line_end = text.length;
+    if (desc.multiline) {
+        uint32_t cur_line = 0u;
+        while (cur_line < target_line && line_start < text.length) {
+            if (text.chars[line_start] == '\n') {
+                ++cur_line;
             }
-            ++cur_line;
-            pen_x = 0.0f;
-            continue;
+            ++line_start;
         }
-        if (cur_line == target_line) {
-            const uint32_t vis_cp = desc.password ? 0x2022u : cp;
-            const float adv = measure_cp_logical_adv(ctx, vis_cp, base_px, desc.letter_spacing);
+        if (cur_line < target_line) {
+            return text.length;
+        }
+        line_end = line_start;
+        while (line_end < text.length && text.chars[line_end] != '\n') {
+            ++line_end;
+        }
+    }
+
+    const char* seg = text.chars + line_start;
+    const uint32_t seg_len = line_end - line_start;
+    float pen_x = 0.0f;
+
+    if (!ctx || !ctx->atlas.font_valid || desc.password) {
+        const float cp_adv = (!ctx || !ctx->atlas.font_valid)
+            ? (base_px * 0.55f)
+            : (ctx->atlas.bullet_advance_em * stbtt_ScaleForPixelHeight(&ctx->atlas.font_info, base_px));
+        const char* p = seg;
+        const char* end = seg + seg_len;
+        while (p < end) {
+            const char* cp_start = p;
+            const uint32_t cp = next_utf8_codepoint(p, end);
+            const float adv = ((cp == '\t' && !desc.password) ? 4.0f * cp_adv : cp_adv) + desc.letter_spacing;
             if (local_x < pen_x + 0.5f * adv) {
-                return static_cast<uint32_t>(cp_start - text.chars);
+                return line_start + static_cast<uint32_t>(cp_start - seg);
             }
             pen_x += adv;
         }
+        return line_end;
     }
-    return text.length;
+
+    const float scale = stbtt_ScaleForPixelHeight(&ctx->atlas.font_info, base_px);
+    bool last_run_rtl = false;
+    uint32_t last_run_start = 0u;
+    uint32_t pos = 0u;
+    while (pos < seg_len) {
+        if (seg[pos] == '\t') {
+            const float adv = 4.0f * ctx->atlas.space_advance_em * scale + desc.letter_spacing;
+            if (local_x < pen_x + 0.5f * adv) {
+                return line_start + pos;
+            }
+            pen_x += adv;
+            last_run_rtl = false;
+            last_run_start = pos;
+            ++pos;
+            continue;
+        }
+        uint32_t run_end = pos;
+        while (run_end < seg_len && seg[run_end] != '\t') {
+            ++run_end;
+        }
+        const uint32_t run_len = run_end - pos;
+        const std::span<const ShapedGlyph> glyphs = shape_utf8_run(ctx, seg + pos, run_len);
+        const bool is_rtl = HB_DIRECTION_IS_BACKWARD(hb_buffer_get_direction(ctx->atlas.hb_buf));
+        const uint32_t gcount = static_cast<uint32_t>(glyphs.size());
+        uint32_t gi = 0u;
+        while (gi < gcount) {
+            const uint32_t c0 = glyphs[gi].cluster;
+            uint32_t gi_end = gi + 1u;
+            while (gi_end < gcount && glyphs[gi_end].cluster == c0) {
+                ++gi_end;
+            }
+            float cluster_adv = 0.0f;
+            for (uint32_t k = gi; k < gi_end; ++k) {
+                cluster_adv += glyphs[k].x_advance_em * scale + desc.letter_spacing;
+            }
+            const uint32_t c1 = is_rtl
+                ? ((gi > 0u && glyphs[gi - 1u].cluster > c0) ? glyphs[gi - 1u].cluster : run_len)
+                : ((gi_end < gcount && glyphs[gi_end].cluster > c0) ? glyphs[gi_end].cluster : run_len);
+            if (local_x < pen_x + cluster_adv && c1 > c0) {
+                const uint32_t n_cp = count_utf8_cps(seg + pos + c0, c1 - c0);
+                if (is_rtl) {
+                    const float rel_x = local_x - pen_x;
+                    const uint32_t slot = (cluster_adv > 0.0f && rel_x > 0.0f)
+                        ? static_cast<uint32_t>(std::floor((rel_x / cluster_adv) * static_cast<float>(n_cp) + 0.5f))
+                        : 0u;
+                    const uint32_t clamped_slot = (slot < n_cp) ? slot : n_cp;
+                    const uint32_t target_k = n_cp - clamped_slot;
+                    const char* cp_p = seg + pos + c0;
+                    const char* cl_end = seg + pos + c1;
+                    for (uint32_t k = 0u; k < target_k && cp_p < cl_end; ++k) {
+                        (void)next_utf8_codepoint(cp_p, cl_end);
+                    }
+                    return line_start + static_cast<uint32_t>(cp_p - seg);
+                }
+                const char* cp_p = seg + pos + c0;
+                const char* cl_end = seg + pos + c1;
+                for (uint32_t k = 0u; k < n_cp && cp_p < cl_end; ++k) {
+                    const uint32_t cp_off = static_cast<uint32_t>(cp_p - seg);
+                    (void)next_utf8_codepoint(cp_p, cl_end);
+                    const float mid = pen_x + ((static_cast<float>(k) + 0.5f) / static_cast<float>(n_cp)) * cluster_adv;
+                    if (local_x < mid) {
+                        return line_start + cp_off;
+                    }
+                }
+                return line_start + pos + c1;
+            }
+            pen_x += cluster_adv;
+            gi = gi_end;
+        }
+        last_run_rtl = is_rtl;
+        last_run_start = pos;
+        pos = run_end;
+    }
+    return last_run_rtl ? (line_start + last_run_start) : line_end;
 }
 
 void move_caret_vertical(
@@ -1382,43 +1394,82 @@ void measure_text_content_and_ime(
     float pen_x = 0.0f;
     float pen_y = 0.0f;
     float max_w = 0.0f;
+    float cx = 0.0f;
+    float cy = 0.0f;
+    float cw = 0.0f;
+    float caret_dx = 0.0f;
 
-    const auto walk_slice = [&](const char* beg, uint32_t slice_len, bool mask) noexcept {
-        const char* p = beg;
-        const char* end = beg + slice_len;
-        while (p < end) {
-            const uint32_t cp = next_utf8_codepoint(p, end);
-            if (cp == '\n' && desc.multiline) {
+    if (composing && ctx && ctx->ime_comp_len > 0u) {
+        const auto walk_slice = [&](const char* beg, uint32_t slice_len, bool mask) noexcept {
+            uint32_t pos = 0u;
+            while (pos <= slice_len) {
+                uint32_t seg_end = pos;
+                while (seg_end < slice_len && !(desc.multiline && beg[seg_end] == '\n')) {
+                    ++seg_end;
+                }
+                if (seg_end > pos) {
+                    float seg_w = 0.0f;
+                    measure_line_segment_x(
+                        ctx, beg + pos, seg_end - pos, 0u, 0u,
+                        base_px, desc.letter_spacing, mask, false, nullptr, nullptr, &seg_w);
+                    pen_x += seg_w;
+                }
                 if (pen_x > max_w) {
                     max_w = pen_x;
                 }
+                if (seg_end >= slice_len) {
+                    break;
+                }
                 pen_x = 0.0f;
                 pen_y += line_adv;
-                continue;
+                pos = seg_end + 1u;
             }
-            const uint32_t vis_cp = mask ? 0x2022u : cp;
-            pen_x += measure_cp_logical_adv(ctx, vis_cp, base_px, desc.letter_spacing);
-        }
-        if (pen_x > max_w) {
-            max_w = pen_x;
-        }
-    };
+        };
 
-    walk_slice(s, c_byte, desc.password);
-    const float cx = pen_x;
-    const float cy = pen_y;
-    float cw = 0.0f;
-    float caret_dx = 0.0f;
-    if (composing && ctx && ctx->ime_comp_len > 0u) {
-        cw = text_slice_width(ctx, desc, ctx->ime_comp_utf8, ctx->ime_comp_len, false);
-        caret_dx = text_slice_width(ctx, desc, ctx->ime_comp_utf8, ctx->ime_comp_cursor_byte, false);
+        walk_slice(s, c_byte, desc.password);
+        cx = pen_x;
+        cy = pen_y;
+        measure_line_segment_x(
+            ctx, ctx->ime_comp_utf8, ctx->ime_comp_len, ctx->ime_comp_cursor_byte, 0u,
+            base_px, desc.letter_spacing, false, false, &caret_dx, nullptr, &cw);
         pen_x += cw;
         if (pen_x > max_w) {
             max_w = pen_x;
         }
-    }
-    if (c_byte < len) {
-        walk_slice(s + c_byte, len - c_byte, desc.password);
+        if (c_byte < len) {
+            walk_slice(s + c_byte, len - c_byte, desc.password);
+        }
+    } else if (!desc.multiline) {
+        measure_line_segment_x(
+            ctx, s, len, c_byte, 0u,
+            base_px, desc.letter_spacing, desc.password, false, &cx, nullptr, &max_w);
+    } else {
+        uint32_t line_start = 0u;
+        for (;;) {
+            uint32_t line_end = line_start;
+            while (line_end < len && s[line_end] != '\n') {
+                ++line_end;
+            }
+            float line_w = 0.0f;
+            if (c_byte >= line_start && c_byte <= line_end) {
+                cy = pen_y;
+                measure_line_segment_x(
+                    ctx, s + line_start, line_end - line_start, c_byte - line_start, 0u,
+                    base_px, desc.letter_spacing, desc.password, false, &cx, nullptr, &line_w);
+            } else {
+                measure_line_segment_x(
+                    ctx, s + line_start, line_end - line_start, 0u, 0u,
+                    base_px, desc.letter_spacing, desc.password, false, nullptr, nullptr, &line_w);
+            }
+            if (line_w > max_w) {
+                max_w = line_w;
+            }
+            if (line_end >= len) {
+                break;
+            }
+            pen_y += line_adv;
+            line_start = line_end + 1u;
+        }
     }
 
     if (out_total_w) *out_total_w = max_w;
@@ -1542,38 +1593,68 @@ void emit_utf8_glyph_run(
     }
     const float base_px = (font_size_px > 0.0f) ? font_size_px : 14.0f;
     const float phys_px = base_px * dpi;
-    const char* p = s;
-    const char* end = s + len;
-    while (p < end) {
-        const uint32_t cp = next_utf8_codepoint(p, end);
-        if (cp == '\n' && multiline) {
-            *io_pen_x = 0.0f;
-            *io_pen_y += line_adv_logical;
+    const float scale_px = stbtt_ScaleForPixelHeight(&ctx->atlas.font_info, phys_px);
+    const float scale_logical = scale_px / dpi;
+
+    if (mask_bullets) {
+        const float bullet_adv_logical = ctx->atlas.bullet_advance_em * scale_logical + letter_spacing;
+        const char* p = s;
+        const char* end = s + len;
+        while (p < end) {
+            const uint32_t cp = next_utf8_codepoint(p, end);
+            if (cp == '\n') {
+                if (multiline) {
+                    *io_pen_x = 0.0f;
+                    *io_pen_y += line_adv_logical;
+                }
+                continue;
+            }
+            const float pen_x_px = (origin_x + *io_pen_x - scroll_x) * dpi;
+            const float base_y_px = (origin_y + *io_pen_y - scroll_y) * dpi + ascender_px;
+            emit_slug_glyph_quad(
+                ctx, ctx->atlas.bullet_glyph_id, scale_px, pen_x_px, base_y_px, 0.0f, 0.0f, clip_px, tint);
+            *io_pen_x += bullet_adv_logical;
+        }
+        return;
+    }
+
+    uint32_t pos = 0u;
+    while (pos < len) {
+        const char ch = s[pos];
+        if (ch == '\n') {
+            if (multiline) {
+                *io_pen_x = 0.0f;
+                *io_pen_y += line_adv_logical;
+            }
+            ++pos;
             continue;
         }
-        const uint32_t vis_cp = mask_bullets ? 0x2022u : ((cp == '\t') ? ' ' : cp);
-        const GlyphEntry* g = font_atlas_get_glyph(&ctx->atlas, vis_cp, phys_px);
-        const float adv = measure_cp_logical_adv(ctx, vis_cp, base_px, letter_spacing);
-        if (cp == '\t') {
-            *io_pen_x += measure_cp_logical_adv(ctx, '\t', base_px, letter_spacing);
+        if (ch == '\t') {
+            *io_pen_x += 4.0f * ctx->atlas.space_advance_em * scale_logical + letter_spacing;
+            ++pos;
             continue;
         }
-        if (g->visible) {
-            const float gx = std::floor((origin_x + *io_pen_x - scroll_x) * dpi + g->xoff + 0.5f);
-            const float gy = std::floor((origin_y + *io_pen_y - scroll_y) * dpi + ascender_px + g->yoff + 0.5f);
-            push_prim(
+        uint32_t run_end = pos;
+        while (run_end < len && s[run_end] != '\t' && s[run_end] != '\n') {
+            ++run_end;
+        }
+        const std::span<const ShapedGlyph> glyphs = shape_utf8_run(ctx, s + pos, run_end - pos);
+        for (const ShapedGlyph& g : glyphs) {
+            const float pen_x_px = (origin_x + *io_pen_x - scroll_x) * dpi;
+            const float base_y_px = (origin_y + *io_pen_y - scroll_y) * dpi + ascender_px;
+            emit_slug_glyph_quad(
                 ctx,
-                Prim::make_glyph(
-                    Rect{ gx, gy, g->width, g->height },
-                    clip_px.rect,
-                    tint,
-                    Vec2{ g->u0, g->v0 },
-                    Vec2{ g->u1, g->v1 },
-                    0u,
-                    clip_px.radius,
-                    PrimFlag_StemDarken));
+                g.glyph_id,
+                scale_px,
+                pen_x_px,
+                base_y_px,
+                g.x_offset_em,
+                g.y_offset_em,
+                clip_px,
+                tint);
+            *io_pen_x += g.x_advance_em * scale_logical + letter_spacing;
         }
-        *io_pen_x += adv;
+        pos = run_end;
     }
 }
 
@@ -1663,15 +1744,20 @@ void emit_text_input_command(
             const uint32_t he = (sel_max < le) ? sel_max : le;
             const bool spans_nl = desc.multiline && sel_max > le && sel_min <= le;
             if (he > hs || spans_nl) {
-                const float x0 = text_slice_width(ctx, desc, s + ls, hs - ls, desc.password);
-                float x1 = text_slice_width(ctx, desc, s + ls, he - ls, desc.password);
+                float x0 = 0.0f;
+                float x1 = 0.0f;
+                measure_line_segment_x(
+                    ctx, s + ls, le - ls, hs - ls, he - ls,
+                    base_px, desc.letter_spacing, desc.password, false, &x0, &x1, nullptr);
+                float sx0 = (x0 < x1) ? x0 : x1;
+                float sx1 = (x0 < x1) ? x1 : x0;
                 if (spans_nl) {
-                    x1 += 6.0f;
+                    sx1 += 6.0f;
                 }
                 const Rect sel_px = {
-                    (geom.origin_x + x0 - scroll_x) * dpi,
+                    (geom.origin_x + sx0 - scroll_x) * dpi,
                     (geom.origin_y + line_y - scroll_y - 1.0f) * dpi,
-                    ((x1 > x0) ? (x1 - x0) : 2.0f) * dpi,
+                    ((sx1 > sx0) ? (sx1 - sx0) : 2.0f) * dpi,
                     (geom.line_h + 2.0f) * dpi,
                 };
                 push_prim(ctx, Prim::make_rect(sel_px, inner_clip.rect, sel_col, Corners::all(2.0f * dpi), {}, 0.0f, 1.0f, 0.0f));
@@ -1707,17 +1793,27 @@ void emit_text_input_command(
 
         const float comp_start_x = pen_x;
         const float comp_start_y = pen_y;
-        const float comp_w = text_slice_width(ctx, desc, ctx->ime_comp_utf8, ctx->ime_comp_len, false);
-        const float caret_dx = text_slice_width(ctx, desc, ctx->ime_comp_utf8, ctx->ime_comp_cursor_byte, false);
+        float comp_w = 0.0f;
+        float caret_dx = 0.0f;
+        float clause_end_dx = 0.0f;
+        uint32_t cl_end = ctx->ime_comp_cursor_byte + ctx->ime_comp_sel_len_byte;
+        if (cl_end > ctx->ime_comp_len) {
+            cl_end = ctx->ime_comp_len;
+        }
+        measure_line_segment_x(
+            ctx, ctx->ime_comp_utf8, ctx->ime_comp_len,
+            ctx->ime_comp_cursor_byte, cl_end,
+            base_px, desc.letter_spacing, false, false,
+            &caret_dx, &clause_end_dx, &comp_w);
         caret_vx = comp_start_x + caret_dx;
         caret_vy = comp_start_y;
 
         if (ctx->ime_comp_sel_len_byte > 0u) {
-            const float cl_w = text_slice_width(
-                ctx, desc, ctx->ime_comp_utf8 + ctx->ime_comp_cursor_byte, ctx->ime_comp_sel_len_byte, false);
+            const float cl_left = (caret_dx < clause_end_dx) ? caret_dx : clause_end_dx;
+            const float cl_w = (caret_dx < clause_end_dx) ? (clause_end_dx - caret_dx) : (caret_dx - clause_end_dx);
             if (cl_w > 0.0f) {
                 const Rect clause_bg = {
-                    (geom.origin_x + comp_start_x + caret_dx - scroll_x) * dpi,
+                    (geom.origin_x + comp_start_x + cl_left - scroll_x) * dpi,
                     (geom.origin_y + comp_start_y - scroll_y - 1.0f) * dpi,
                     cl_w * dpi,
                     (geom.line_h + 2.0f) * dpi,
@@ -3362,6 +3458,8 @@ void end_frame(Context* ctx_arg) noexcept {
     ctx->in_frame = false;
     ctx->stats.prim_count = ctx->prim_count;
     ctx->stats.draw_call_count = ctx->batch_count;
+    ctx->stats.slug_glyph_count = ctx->atlas.slug_glyph_count;
+    ctx->stats.slug_curve_count = ctx->atlas.slug_curve_count;
     ctx->stats.arena_used_bytes = ctx->frame_arena.used();
     ctx->stats.arena_peak_bytes = ctx->frame_arena.peak_offset;
     ctx->stats.layout_ms = (freq > 0u)

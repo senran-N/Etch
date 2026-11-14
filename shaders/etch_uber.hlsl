@@ -68,6 +68,15 @@ ETCH_COMBINED_SAMPLER(2) SamplerState      g_smp2 : register(s2, space2);
 ETCH_COMBINED_SAMPLER(3) Texture2D<float4> g_tex3 : register(t3, space2);
 ETCH_COMBINED_SAMPLER(3) SamplerState      g_smp3 : register(s3, space2);
 
+#ifdef __spirv__
+#define ETCH_FRAG_STORAGE(slot) [[vk::binding(slot, 2)]]
+#else
+#define ETCH_FRAG_STORAGE(slot)
+#endif
+
+ETCH_FRAG_STORAGE(4) StructuredBuffer<uint4> g_slug_curves : register(t4, space2);
+ETCH_FRAG_STORAGE(5) StructuredBuffer<uint2> g_slug_bands  : register(t5, space2);
+
 struct VSOut
 {
     float4 position        : SV_Position;
@@ -81,6 +90,7 @@ struct VSOut
     nointerpolation float4 uv_rect        : TEXCOORD7;
     nointerpolation float4 grad_params    : TEXCOORD8; // xy = grad_dir, z = border_width, w = softness
     nointerpolation uint4  meta           : TEXCOORD9; // x = kind, y = flags | manual_srgb_bit, z = tex_slot, w = asuint(clip_radius)
+    nointerpolation uint2  slug_meta      : TEXCOORD10; // x = band_offset, y = num_hbands | (num_vbands << 16)
 };
 
 // Bitwise IEEE-754 binary16 -> float32 decode for portable SM 6.0 DXIL & Vulkan 1.0 SPIR-V.
@@ -232,7 +242,146 @@ VSOut vs_main(uint vertex_id : SV_VertexID, uint instance_id : SV_InstanceID)
     o.uv_rect      = uv_rect;
     o.grad_params  = float4(grad_dir.x, grad_dir.y, bw_soft.x, bw_soft.y);
     o.meta         = uint4(kind, flags | (g_flags & ETCH_GLOBAL_MANUAL_SRGB), tex_slot, asuint(clip_r));
+    o.slug_meta    = uint2(p.payload.x, p.payload.y);
     return o;
+}
+
+uint slug_calc_root_code(float y1, float y2, float y3)
+{
+    uint i1 = asuint(y1) >> 31u;
+    uint i2 = asuint(y2) >> 30u;
+    uint i3 = asuint(y3) >> 29u;
+    uint shift = (i2 & 2u) | (i1 & ~2u);
+    shift = (i3 & 4u) | (shift & ~4u);
+    return (0x2E74u >> shift) & 0x0101u;
+}
+
+float2 slug_solve_horiz_poly(float4 p12, float2 p3)
+{
+    float2 a = p12.xy - p12.zw * 2.0f + p3;
+    float2 b = p12.xy - p12.zw;
+    float t1, t2;
+    if (abs(a.y) < (1.0f / 65536.0f))
+    {
+        float t = (abs(b.y) > 1e-6f) ? clamp(p12.y * (0.5f / b.y), -1e4f, 1e4f) : 0.5f;
+        t1 = t;
+        t2 = t;
+    }
+    else
+    {
+        float ra = 1.0f / a.y;
+        float d  = sqrt(max(b.y * b.y - a.y * p12.y, 0.0f));
+        t1 = (b.y - d) * ra;
+        t2 = (b.y + d) * ra;
+    }
+    return float2((a.x * t1 - b.x * 2.0f) * t1 + p12.x,
+                  (a.x * t2 - b.x * 2.0f) * t2 + p12.x);
+}
+
+float2 slug_solve_vert_poly(float4 p12, float2 p3)
+{
+    float2 a = p12.xy - p12.zw * 2.0f + p3;
+    float2 b = p12.xy - p12.zw;
+    float t1, t2;
+    if (abs(a.x) < (1.0f / 65536.0f))
+    {
+        float t = (abs(b.x) > 1e-6f) ? clamp(p12.x * (0.5f / b.x), -1e4f, 1e4f) : 0.5f;
+        t1 = t;
+        t2 = t;
+    }
+    else
+    {
+        float ra = 1.0f / a.x;
+        float d  = sqrt(max(b.x * b.x - a.x * p12.x, 0.0f));
+        t1 = (b.x - d) * ra;
+        t2 = (b.x + d) * ra;
+    }
+    return float2((a.y * t1 - b.y * 2.0f) * t1 + p12.y,
+                  (a.y * t2 - b.y * 2.0f) * t2 + p12.y);
+}
+
+float slug_render(float2 render_coord, float2 pixels_per_unit, uint band_offset, uint packed_band_counts)
+{
+    uint num_hbands = packed_band_counts & 0xFFFFu;
+    uint num_vbands = (packed_band_counts >> 16) & 0xFFFFu;
+    if (num_hbands == 0u || num_vbands == 0u)
+    {
+        return 0.0f;
+    }
+
+    int hband_idx = clamp(int(render_coord.y * float(num_hbands)), 0, int(num_hbands) - 1);
+    int vband_idx = clamp(int(render_coord.x * float(num_vbands)), 0, int(num_vbands) - 1);
+
+    float xcov = 0.0f;
+    float xwgt = 0.0f;
+    uint2 hband = g_slug_bands[band_offset + uint(hband_idx)];
+    uint  hlist_base = band_offset + hband.y;
+    for (uint i = 0u; i < hband.x; ++i)
+    {
+        uint  curve_idx = g_slug_bands[hlist_base + i].x;
+        uint4 c = g_slug_curves[curve_idx];
+        float2 cp1 = unpack_f16x2_custom(c.x) - render_coord;
+        float2 cp2 = unpack_f16x2_custom(c.y) - render_coord;
+        float2 cp3 = unpack_f16x2_custom(c.z) - render_coord;
+
+        if (max(max(cp1.x, cp2.x), cp3.x) * pixels_per_unit.x < -0.5f)
+        {
+            break;
+        }
+
+        uint code = slug_calc_root_code(cp1.y, cp2.y, cp3.y);
+        if (code != 0u)
+        {
+            float2 r = slug_solve_horiz_poly(float4(cp1, cp2), cp3) * pixels_per_unit.x;
+            if ((code & 1u) != 0u)
+            {
+                xcov += saturate(r.x + 0.5f);
+                xwgt = max(xwgt, saturate(1.0f - abs(r.x) * 2.0f));
+            }
+            if (code > 1u)
+            {
+                xcov -= saturate(r.y + 0.5f);
+                xwgt = max(xwgt, saturate(1.0f - abs(r.y) * 2.0f));
+            }
+        }
+    }
+
+    float ycov = 0.0f;
+    float ywgt = 0.0f;
+    uint2 vband = g_slug_bands[band_offset + num_hbands + uint(vband_idx)];
+    uint  vlist_base = band_offset + vband.y;
+    for (uint j = 0u; j < vband.x; ++j)
+    {
+        uint  curve_idx = g_slug_bands[vlist_base + j].x;
+        uint4 c = g_slug_curves[curve_idx];
+        float2 cp1 = unpack_f16x2_custom(c.x) - render_coord;
+        float2 cp2 = unpack_f16x2_custom(c.y) - render_coord;
+        float2 cp3 = unpack_f16x2_custom(c.z) - render_coord;
+
+        if (max(max(cp1.y, cp2.y), cp3.y) * pixels_per_unit.y < -0.5f)
+        {
+            break;
+        }
+
+        uint code = slug_calc_root_code(cp1.x, cp2.x, cp3.x);
+        if (code != 0u)
+        {
+            float2 r = slug_solve_vert_poly(float4(cp1, cp2), cp3) * pixels_per_unit.y;
+            if ((code & 1u) != 0u)
+            {
+                ycov -= saturate(r.x + 0.5f);
+                ywgt = max(ywgt, saturate(1.0f - abs(r.x) * 2.0f));
+            }
+            if (code > 1u)
+            {
+                ycov += saturate(r.y + 0.5f);
+                ywgt = max(ywgt, saturate(1.0f - abs(r.y) * 2.0f));
+            }
+        }
+    }
+
+    return saturate(max(abs(xcov * xwgt + ycov * ywgt) / max(xwgt + ywgt, 1.0f / 65536.0f),
+                        min(abs(xcov), abs(ycov))));
 }
 
 float sd_rounded_box(float2 p, float2 half_size, float4 radii)
@@ -349,6 +498,20 @@ float4 ps_main(VSOut input) : SV_Target0
         {
             float luma = saturate(dot(input.color0.rgb, float3(0.2126f, 0.7152f, 0.0722f)));
             cov = lerp(cov, cov * (2.0f - cov), 0.35f * luma);
+        }
+        out_pm = float4(input.color0.rgb, 1.0f) * (input.color0.a * cov);
+    }
+    else if (kind == ETCH_PRIM_SLUG_GLYPH)
+    {
+        float2 render_coord = float2(
+            (input.pixel_pos.x - input.bounds.x) / size.x,
+            1.0f - (input.pixel_pos.y - input.bounds.y) / size.y);
+        float cov = slug_render(render_coord, size, input.slug_meta.x, input.slug_meta.y);
+        if ((flags & ETCH_FLAG_STEM_DARKEN) != 0u)
+        {
+            float darken_t = saturate((28.0f - size.y) / 16.0f);
+            float luma = saturate(dot(input.color0.rgb, float3(0.2126f, 0.7152f, 0.0722f)));
+            cov = lerp(cov, cov * (2.0f - cov), 0.30f * luma * darken_t);
         }
         out_pm = float4(input.color0.rgb, 1.0f) * (input.color0.a * cov);
     }

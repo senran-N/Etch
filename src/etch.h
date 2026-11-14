@@ -577,6 +577,35 @@ struct alignas(16) Prim {
         };
     }
 
+    static constexpr Prim make_slug_glyph(
+        Rect rect,
+        Rect clip_rect,
+        Color tint,
+        uint32_t band_offset,
+        uint16_t num_hbands,
+        uint16_t num_vbands,
+        float clip_radius = 0.0f,
+        uint8_t flags = PrimFlag_StemDarken) noexcept
+    {
+        const uint8_t all_flags = static_cast<uint8_t>(flags | ((clip_radius > 0.0f) ? PrimFlag_RoundedClip : PrimFlag_None));
+        return Prim{
+            .bounds = {rect.x, rect.y, rect.w, rect.h},
+            .clip = {clip_rect.x, clip_rect.y, clip_rect.x + clip_rect.w, clip_rect.y + clip_rect.h},
+            .payload = {
+                band_offset,
+                static_cast<uint32_t>(num_hbands) | (static_cast<uint32_t>(num_vbands) << 16),
+                0u,
+                0u,
+            },
+            .style = {
+                pack_header(PrimKind::SlugGlyph, all_flags, 0u, clip_radius),
+                tint.pack_rgba8(),
+                0u,
+                0u,
+            },
+        };
+    }
+
     static constexpr Prim make_texture(
         Rect rect,
         Rect clip_rect,
@@ -694,6 +723,8 @@ struct FrameDesc {
 struct FrameStats {
     uint32_t prim_count = 0;
     uint32_t draw_call_count = 0;
+    uint32_t slug_glyph_count = 0;
+    uint32_t slug_curve_count = 0;
     size_t arena_used_bytes = 0;
     size_t arena_peak_bytes = 0;
     double layout_ms = 0.0;

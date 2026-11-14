@@ -302,7 +302,7 @@ void build_sandbox_ui(AppState* app, const etch::FrameStats& prev_stats) noexcep
                 .gradient_dir = {1.0f, 0.2f},
                 .radius = Corners::all(999.0f),
             }) {
-                text("ETCH v0.3", {
+                text("ETCH v0.6", {
                     .color = Color::white(),
                     .font_size_px = 13.0f,
                     .letter_spacing = 0.4f,
@@ -315,7 +315,7 @@ void build_sandbox_ui(AppState* app, const etch::FrameStats& prev_stats) noexcep
                 .width = Sizing::grow(),
                 .gap = 3.0f,
             }) {
-                text("Etch Pure-GPU Interaction Heart (UTF-8 Text · IME · Springs · Scroll)", {
+                text("Etch Pure-GPU Engine v0.6 (Slug · HarfBuzz · Kawase)", {
                     .color = text_primary,
                     .font_size_px = 19.0f,
                     .wrap = false,
@@ -813,14 +813,14 @@ void build_sandbox_ui(AppState* app, const etch::FrameStats& prev_stats) noexcep
                     });
                 }
 
-                // Card 4: Live v0.3 Telemetry HUD
+                // Card 4: Live v0.6 Telemetry & Slug Specimen
                 ETCH_BOX({
                     .id = id("card_stats"),
                     .axis = Axis::Col,
                     .width = Sizing::grow(),
                     .height = Sizing::grow(),
-                    .padding = Padding::all(18.0f),
-                    .gap = 7.0f,
+                    .padding = Padding::all(16.0f),
+                    .gap = 6.0f,
                     .background = panel_bg,
                     .border_color = panel_border,
                     .border_width = 1.0f,
@@ -829,19 +829,56 @@ void build_sandbox_ui(AppState* app, const etch::FrameStats& prev_stats) noexcep
                     .shadow_blur = 18.0f,
                     .shadow_offset = {0.0f, 6.0f},
                 }) {
-                    text("v0.3 Telemetry (文本核心 · IME · 裁剪休眠探针)", {
+                    text("v0.6 Telemetry (Slug \xE6\x9B\xB2\xE7\xBA\xBF \xC2\xB7 HarfBuzz \xC2\xB7 Kawase)", {
                         .color = text_primary,
                         .font_size_px = 15.5f,
                         .wrap = false,
                     });
 
-                    char line1[96] = {};
+                    ETCH_BOX({
+                        .id = id("slug_specimen"),
+                        .axis = Axis::Row,
+                        .width = Sizing::grow(),
+                        .padding = Padding::xy(14.0f, 6.0f),
+                        .gap = 12.0f,
+                        .align_y = AlignY::Center,
+                        .background = sub_surface,
+                        .border_color = Color::rgba8(56, 189, 248, 85),
+                        .border_width = 1.0f,
+                        .radius = Corners::all(10.0f),
+                    }) {
+                        text("\xE6\xB0\xB8 Ag fi AV", {
+                            .color = text_primary,
+                            .font_size_px = 32.0f,
+                            .wrap = false,
+                        });
+                        ETCH_BOX({
+                            .axis = Axis::Col,
+                            .width = Sizing::grow(),
+                            .gap = 2.0f,
+                        }) {
+                            text("HarfBuzz + Slug GPU Bezier", {
+                                .color = Color::rgb_hex(0x38BDF8),
+                                .font_size_px = 12.0f,
+                                .wrap = false,
+                            });
+                            text("\xE6\x97\xA0\xE7\xBA\xB9\xE7\x90\x86\xE5\x9B\xBE\xE9\x9B\x86 \xC2\xB7 \xE4\xBB\xBB\xE6\x84\x8F\xE7\xBC\xA9\xE6\x94\xBE\xE9\x94\x90\xE5\x88\xA9 \xC2\xB7 kern/liga", {
+                                .color = text_muted,
+                                .font_size_px = 11.5f,
+                                .wrap = false,
+                            });
+                        }
+                    }
+
+                    char line1[128] = {};
                     std::snprintf(
                         line1,
                         sizeof(line1),
-                        "Draw Calls: %u  |  GPU Prims: %u (32-row culled list)",
+                        "Draw Calls: %u  |  Prims: %u  |  Slug: %ug / %uc",
                         prev_stats.draw_call_count,
-                        prev_stats.prim_count);
+                        prev_stats.prim_count,
+                        prev_stats.slug_glyph_count,
+                        prev_stats.slug_curve_count);
                     text(line1, { .color = Color::rgb_hex(0x38BDF8), .font_size_px = 12.5f, .wrap = false });
 
                     char line2[96] = {};
@@ -1283,13 +1320,31 @@ int run_headless(const char* out_png_path) noexcept {
         std::fprintf(stderr, "Headless assert [8b] failed: expected draw_calls=2 and idle=1 with frosted popover, got draw_calls=%u idle=%d\n",
             final_stats.draw_call_count, final_stats.idle_sleeping ? 1 : 0);
     }
-    const bool ok = png_ok && stats_ok;
+    uint32_t slug_prim_count = 0u;
+    uint32_t legacy_glyph_count = 0u;
+    for (const etch::Prim& p : etch::frame_prims(ctx)) {
+        const auto kind = static_cast<etch::PrimKind>(p.style.x & 0xFu);
+        if (kind == etch::PrimKind::SlugGlyph) {
+            ++slug_prim_count;
+        } else if (kind == etch::PrimKind::Glyph) {
+            ++legacy_glyph_count;
+        }
+    }
+    const bool slug_ok = (slug_prim_count > 0u) && (legacy_glyph_count == 0u) &&
+                         (final_stats.slug_glyph_count > 0u) && (final_stats.slug_curve_count > 0u);
+    if (!slug_ok) {
+        std::fprintf(stderr, "Headless assert [9a] failed: expected Slug text pipeline (slug_prims=%u, legacy=%u, glyphs=%u, curves=%u)\n",
+            slug_prim_count, legacy_glyph_count, final_stats.slug_glyph_count, final_stats.slug_curve_count);
+    }
+    const bool ok = png_ok && stats_ok && slug_ok;
     std::printf(
-        "Headless %s -> %s (asserts=8/8, prims=%u, draw_calls=%u, layout_ms=%.3f, gpu_submit_ms=%.3f, arena_used=%zuB, scroll_y=%.1f, focus=0x%08X, idle=%d)\n",
+        "Headless %s -> %s (asserts=9/9, prims=%u, draw_calls=%u, slug_glyphs=%u, slug_curves=%u, layout_ms=%.3f, gpu_submit_ms=%.3f, arena_used=%zuB, scroll_y=%.1f, focus=0x%08X, idle=%d)\n",
         ok ? "OK" : "FAILED",
         out_png_path,
         final_stats.prim_count,
         final_stats.draw_call_count,
+        final_stats.slug_glyph_count,
+        final_stats.slug_curve_count,
         final_stats.layout_ms,
         final_stats.gpu_submit_ms,
         final_stats.arena_used_bytes,
@@ -1308,7 +1363,7 @@ int run_interactive() noexcept {
     }
 
     SDL_Window* window = SDL_CreateWindow(
-        "Etch v0.3 — Pure-GPU Interaction Heart",
+        "Etch v0.6 — Pure-GPU UI Engine",
         1280,
         800,
         SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);

@@ -44,6 +44,10 @@
 #    pragma GCC diagnostic pop
 #endif
 
+#include <hb.h>
+#include <hb-ot.h>
+
 #include "etch_arena.cpp"
+#include "etch_slug.cpp"
 #include "etch_layout.cpp"
 #include "etch_gpu.cpp"

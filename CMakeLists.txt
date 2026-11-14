@@ -151,6 +151,56 @@ find_program(ETCH_SHADERCROSS_EXE
     HINTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/SDL_shadercross/bin"
 )
 
+# Prefer a vendored prebuilt archive/source tree under third_party/harfbuzz before falling back to system packages.
+set(ETCH_HB_LIB_TARGET "")
+if (WIN32 AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/harfbuzz/lib/harfbuzz.lib")
+    add_library(harfbuzz_static STATIC IMPORTED GLOBAL)
+    set_target_properties(harfbuzz_static PROPERTIES
+        IMPORTED_LOCATION "${CMAKE_CURRENT_SOURCE_DIR}/third_party/harfbuzz/lib/harfbuzz.lib"
+        INTERFACE_INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/third_party/harfbuzz/include;${CMAKE_CURRENT_SOURCE_DIR}/third_party/harfbuzz/include/harfbuzz"
+    )
+    set(ETCH_HB_LIB_TARGET harfbuzz_static)
+elseif (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/harfbuzz/lib/libharfbuzz.a")
+    add_library(harfbuzz_static STATIC IMPORTED GLOBAL)
+    set_target_properties(harfbuzz_static PROPERTIES
+        IMPORTED_LOCATION "${CMAKE_CURRENT_SOURCE_DIR}/third_party/harfbuzz/lib/libharfbuzz.a"
+        INTERFACE_INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/third_party/harfbuzz/include;${CMAKE_CURRENT_SOURCE_DIR}/third_party/harfbuzz/include/harfbuzz"
+    )
+    set(ETCH_HB_LIB_TARGET harfbuzz_static)
+elseif (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/harfbuzz/CMakeLists.txt")
+    add_subdirectory(third_party/harfbuzz EXCLUDE_FROM_ALL)
+    set(ETCH_HB_LIB_TARGET harfbuzz)
+else ()
+    find_package(harfbuzz CONFIG QUIET)
+    if (TARGET harfbuzz::harfbuzz)
+        set(ETCH_HB_LIB_TARGET harfbuzz::harfbuzz)
+    else ()
+        find_package(PkgConfig QUIET)
+        if (PkgConfig_FOUND)
+            pkg_check_modules(HARFBUZZ QUIET IMPORTED_TARGET harfbuzz)
+            if (TARGET PkgConfig::HARFBUZZ)
+                set(ETCH_HB_LIB_TARGET PkgConfig::HARFBUZZ)
+            endif ()
+        endif ()
+        if (NOT ETCH_HB_LIB_TARGET)
+            find_library(ETCH_HARFBUZZ_LIBRARY NAMES harfbuzz libharfbuzz)
+            find_path(ETCH_HARFBUZZ_INCLUDE_DIR NAMES hb.h PATH_SUFFIXES harfbuzz)
+            if (ETCH_HARFBUZZ_LIBRARY AND ETCH_HARFBUZZ_INCLUDE_DIR)
+                add_library(harfbuzz_system UNKNOWN IMPORTED GLOBAL)
+                set_target_properties(harfbuzz_system PROPERTIES
+                    IMPORTED_LOCATION "${ETCH_HARFBUZZ_LIBRARY}"
+                    INTERFACE_INCLUDE_DIRECTORIES "${ETCH_HARFBUZZ_INCLUDE_DIR}"
+                )
+                set(ETCH_HB_LIB_TARGET harfbuzz_system)
+            endif ()
+        endif ()
+    endif ()
+endif ()
+
+if (NOT ETCH_HB_LIB_TARGET)
+    message(FATAL_ERROR "HarfBuzz not found. Provide third_party/harfbuzz/lib/harfbuzz.lib (or libharfbuzz.a), third_party/harfbuzz source, or install system HarfBuzz (vcpkg/brew/apt).")
+endif ()
+
 # Unity Build static library: compiles src/etch_unity.cpp as a single translation unit.
 add_library(etch STATIC
     src/etch_unity.cpp
@@ -159,7 +209,7 @@ add_library(etch STATIC
 )
 set_source_files_properties(src/etch_unity.cpp PROPERTIES
     OBJECT_DEPENDS
-        "${CMAKE_CURRENT_SOURCE_DIR}/src/etch.h;${CMAKE_CURRENT_SOURCE_DIR}/src/etch_arena.cpp;${CMAKE_CURRENT_SOURCE_DIR}/src/etch_layout.cpp;${CMAKE_CURRENT_SOURCE_DIR}/src/etch_gpu.cpp;${CMAKE_CURRENT_SOURCE_DIR}/third_party/clay.h;${CMAKE_CURRENT_SOURCE_DIR}/third_party/stb_truetype.h;${CMAKE_CURRENT_SOURCE_DIR}/third_party/stb_image_write.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/etch.h;${CMAKE_CURRENT_SOURCE_DIR}/src/etch_arena.cpp;${CMAKE_CURRENT_SOURCE_DIR}/src/etch_slug.cpp;${CMAKE_CURRENT_SOURCE_DIR}/src/etch_layout.cpp;${CMAKE_CURRENT_SOURCE_DIR}/src/etch_gpu.cpp;${CMAKE_CURRENT_SOURCE_DIR}/third_party/clay.h;${CMAKE_CURRENT_SOURCE_DIR}/third_party/stb_truetype.h;${CMAKE_CURRENT_SOURCE_DIR}/third_party/stb_image_write.h"
 )
 etch_configure_orthodox_cpp(etch)
 target_include_directories(etch
@@ -167,7 +217,10 @@ target_include_directories(etch
     PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders_gen"
             "${CMAKE_CURRENT_SOURCE_DIR}/third_party"
 )
-target_link_libraries(etch PUBLIC SDL3::SDL3)
+target_link_libraries(etch
+    PUBLIC  SDL3::SDL3
+    PRIVATE ${ETCH_HB_LIB_TARGET}
+)
 
 if (ETCH_BUILD_EXAMPLES)
     add_executable(sandbox

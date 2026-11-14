@@ -225,6 +225,102 @@ bool ensure_blur_targets(Context* ctx, uint32_t width, uint32_t height) noexcept
     return true;
 }
 
+bool ensure_slug_storage_pair(
+    SDL_GPUDevice* device,
+    uint32_t needed_count,
+    uint32_t elem_size,
+    SDL_GPUBuffer** gpu_buf,
+    uint32_t* gpu_cap,
+    SDL_GPUTransferBuffer** tbuf,
+    uint32_t* tbuf_cap,
+    uint32_t* uploaded_count) noexcept
+{
+    if (needed_count == 0u) {
+        return true;
+    }
+    if (*gpu_cap < needed_count) {
+        uint32_t new_cap = (*gpu_cap > 0u) ? *gpu_cap : 256u;
+        while (new_cap < needed_count) {
+            new_cap *= 2u;
+        }
+        const SDL_GPUBufferCreateInfo info = {
+            .usage = SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ,
+            .size = new_cap * elem_size,
+            .props = 0u,
+        };
+        SDL_GPUBuffer* next_buf = SDL_CreateGPUBuffer(device, &info);
+        if (!next_buf) {
+            return false;
+        }
+        if (*gpu_buf) {
+            SDL_ReleaseGPUBuffer(device, *gpu_buf);
+        }
+        *gpu_buf = next_buf;
+        *gpu_cap = new_cap;
+        *uploaded_count = 0u;
+    }
+
+    const uint32_t delta_count = needed_count - *uploaded_count;
+    if (delta_count > 0u && *tbuf_cap < delta_count) {
+        uint32_t new_tcap = (*tbuf_cap > 0u) ? *tbuf_cap : 256u;
+        while (new_tcap < delta_count) {
+            new_tcap *= 2u;
+        }
+        const SDL_GPUTransferBufferCreateInfo tinfo = {
+            .usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD,
+            .size = new_tcap * elem_size,
+            .props = 0u,
+        };
+        SDL_GPUTransferBuffer* next_tb = SDL_CreateGPUTransferBuffer(device, &tinfo);
+        if (!next_tb) {
+            return false;
+        }
+        if (*tbuf) {
+            SDL_ReleaseGPUTransferBuffer(device, *tbuf);
+        }
+        *tbuf = next_tb;
+        *tbuf_cap = new_tcap;
+    }
+    return true;
+}
+
+void upload_slug_delta(
+    SDL_GPUDevice* device,
+    SDL_GPUCopyPass* copy_pass,
+    const void* host_data,
+    uint32_t elem_size,
+    uint32_t total_count,
+    uint32_t* uploaded_count,
+    SDL_GPUBuffer* gpu_buf,
+    SDL_GPUTransferBuffer* tbuf) noexcept
+{
+    if (*uploaded_count >= total_count || !host_data || !gpu_buf || !tbuf) {
+        return;
+    }
+    const uint32_t first = *uploaded_count;
+    const uint32_t count = total_count - first;
+    const uint32_t byte_offset = first * elem_size;
+    const uint32_t byte_size = count * elem_size;
+    void* mapped = SDL_MapGPUTransferBuffer(device, tbuf, true);
+    if (!mapped) {
+        return;
+    }
+    std::memcpy(mapped, static_cast<const uint8_t*>(host_data) + byte_offset, byte_size);
+    SDL_UnmapGPUTransferBuffer(device, tbuf);
+
+    const SDL_GPUTransferBufferLocation src = {
+        .transfer_buffer = tbuf,
+        .offset = 0u,
+    };
+    const SDL_GPUBufferRegion dst = {
+        .buffer = gpu_buf,
+        .offset = byte_offset,
+        .size = byte_size,
+    };
+    SDL_UploadToGPUBuffer(copy_pass, &src, &dst, false);
+    *uploaded_count = total_count;
+}
+
 void emit_uber_batches(
     Context* ctx,
     SDL_GPUCommandBuffer* cmd,
@@ -262,6 +358,9 @@ void emit_uber_batches(
 
     SDL_GPUBuffer* storage_bufs[1] = { ctx->prim_gpu_buf };
     SDL_BindGPUVertexStorageBuffers(render_pass, 0u, storage_bufs, 1u);
+
+    SDL_GPUBuffer* slug_bufs[2] = { ctx->slug_curve_gpu_buf, ctx->slug_band_gpu_buf };
+    SDL_BindGPUFragmentStorageBuffers(render_pass, 0u, slug_bufs, 2u);
 
     const uint32_t manual_srgb_bit = is_srgb_gpu_format(target_fmt) ? 0u : (1u << 31);
     const float inv_w = 1.0f / static_cast<float>(target_w);
@@ -441,47 +540,88 @@ bool record_frame_commands(
         return false;
     }
 
-    if (ctx->atlas.dirty || ctx->prim_count > 0u) {
+    const bool slug_curves_pending = ctx->atlas.uploaded_slug_curves < ctx->atlas.slug_curve_count;
+    const bool slug_bands_pending = ctx->atlas.uploaded_slug_bands < ctx->atlas.slug_band_count;
+    if (slug_curves_pending &&
+        !ensure_slug_storage_pair(
+            ctx->device,
+            ctx->atlas.slug_curve_count,
+            static_cast<uint32_t>(sizeof(SlugCurveGpu)),
+            &ctx->slug_curve_gpu_buf,
+            &ctx->slug_curve_gpu_cap,
+            &ctx->slug_curve_tbuf,
+            &ctx->slug_curve_tbuf_cap,
+            &ctx->atlas.uploaded_slug_curves))
+    {
+        return false;
+    }
+    if (slug_bands_pending &&
+        !ensure_slug_storage_pair(
+            ctx->device,
+            ctx->atlas.slug_band_count,
+            static_cast<uint32_t>(sizeof(SlugBandEntryGpu)),
+            &ctx->slug_band_gpu_buf,
+            &ctx->slug_band_gpu_cap,
+            &ctx->slug_band_tbuf,
+            &ctx->slug_band_tbuf_cap,
+            &ctx->atlas.uploaded_slug_bands))
+    {
+        return false;
+    }
+
+    if (ctx->atlas.dirty || ctx->prim_count > 0u || slug_curves_pending || slug_bands_pending) {
         SDL_GPUCopyPass* copy_pass = SDL_BeginGPUCopyPass(cmd);
         if (!copy_pass) {
             return false;
         }
 
         if (ctx->atlas.dirty && ctx->atlas.gpu_tex && ctx->atlas_transfer_buf) {
-            const uint32_t y0 = ctx->atlas.dirty_y0;
-            const uint32_t y1 = (ctx->atlas.dirty_y1 <= kAtlasSize) ? ctx->atlas.dirty_y1 : kAtlasSize;
-            if (y1 > y0) {
-                const uint32_t row_count = y1 - y0;
-                const size_t row_stride = size_t(kAtlasSize) * 4u;
-                void* mapped = SDL_MapGPUTransferBuffer(ctx->device, ctx->atlas_transfer_buf, true);
-                if (mapped) {
-                    std::memcpy(mapped, ctx->atlas.pixels + size_t(y0) * row_stride, size_t(row_count) * row_stride);
-                    SDL_UnmapGPUTransferBuffer(ctx->device, ctx->atlas_transfer_buf);
+            void* mapped = SDL_MapGPUTransferBuffer(ctx->device, ctx->atlas_transfer_buf, true);
+            if (mapped) {
+                std::memcpy(mapped, ctx->atlas.pixels, size_t(kAtlasSize) * kAtlasSize * 4u);
+                SDL_UnmapGPUTransferBuffer(ctx->device, ctx->atlas_transfer_buf);
 
-                    const SDL_GPUTextureTransferInfo src = {
-                        .transfer_buffer = ctx->atlas_transfer_buf,
-                        .offset = 0u,
-                        .pixels_per_row = kAtlasSize,
-                        .rows_per_layer = row_count,
-                    };
-                    const SDL_GPUTextureRegion dst = {
-                        .texture = ctx->atlas.gpu_tex,
-                        .mip_level = 0u,
-                        .layer = 0u,
-                        .x = 0u,
-                        .y = y0,
-                        .z = 0u,
-                        .w = kAtlasSize,
-                        .h = row_count,
-                        .d = 1u,
-                    };
-                    SDL_UploadToGPUTexture(copy_pass, &src, &dst, false);
-                }
+                const SDL_GPUTextureTransferInfo src = {
+                    .transfer_buffer = ctx->atlas_transfer_buf,
+                    .offset = 0u,
+                    .pixels_per_row = kAtlasSize,
+                    .rows_per_layer = kAtlasSize,
+                };
+                const SDL_GPUTextureRegion dst = {
+                    .texture = ctx->atlas.gpu_tex,
+                    .mip_level = 0u,
+                    .layer = 0u,
+                    .x = 0u,
+                    .y = 0u,
+                    .z = 0u,
+                    .w = kAtlasSize,
+                    .h = kAtlasSize,
+                    .d = 1u,
+                };
+                SDL_UploadToGPUTexture(copy_pass, &src, &dst, false);
             }
             ctx->atlas.dirty = false;
-            ctx->atlas.dirty_y0 = 0u;
-            ctx->atlas.dirty_y1 = 0u;
         }
+
+        upload_slug_delta(
+            ctx->device,
+            copy_pass,
+            ctx->atlas.slug_curves,
+            static_cast<uint32_t>(sizeof(SlugCurveGpu)),
+            ctx->atlas.slug_curve_count,
+            &ctx->atlas.uploaded_slug_curves,
+            ctx->slug_curve_gpu_buf,
+            ctx->slug_curve_tbuf);
+
+        upload_slug_delta(
+            ctx->device,
+            copy_pass,
+            ctx->atlas.slug_bands,
+            static_cast<uint32_t>(sizeof(SlugBandEntryGpu)),
+            ctx->atlas.slug_band_count,
+            &ctx->atlas.uploaded_slug_bands,
+            ctx->slug_band_gpu_buf,
+            ctx->slug_band_tbuf);
 
         if (ctx->prim_count > 0u && ctx->prim_gpu_buf && ctx->prim_transfer_buf) {
             const uint32_t byte_size = ctx->prim_count * static_cast<uint32_t>(sizeof(Prim));
@@ -837,7 +977,7 @@ Context* create_context(const ContextDesc& desc) noexcept {
         .stage = SDL_GPU_SHADERSTAGE_FRAGMENT,
         .num_samplers = 4u,
         .num_storage_textures = 0u,
-        .num_storage_buffers = 0u,
+        .num_storage_buffers = 2u,
         .num_uniform_buffers = 0u,
         .props = 0u,
     };
@@ -938,8 +1078,25 @@ Context* create_context(const ContextDesc& desc) noexcept {
     };
     ctx->atlas_transfer_buf = SDL_CreateGPUTransferBuffer(ctx->device, &atlas_tbuf_info);
 
+    ctx->slug_curve_gpu_cap = kInitialSlugCurveCap;
+    const SDL_GPUBufferCreateInfo slug_curve_info = {
+        .usage = SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ,
+        .size = ctx->slug_curve_gpu_cap * static_cast<uint32_t>(sizeof(SlugCurveGpu)),
+        .props = 0u,
+    };
+    ctx->slug_curve_gpu_buf = SDL_CreateGPUBuffer(ctx->device, &slug_curve_info);
+
+    ctx->slug_band_gpu_cap = kInitialSlugBandCap;
+    const SDL_GPUBufferCreateInfo slug_band_info = {
+        .usage = SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ,
+        .size = ctx->slug_band_gpu_cap * static_cast<uint32_t>(sizeof(SlugBandEntryGpu)),
+        .props = 0u,
+    };
+    ctx->slug_band_gpu_buf = SDL_CreateGPUBuffer(ctx->device, &slug_band_info);
+
     if (!ctx->prim_gpu_buf || !ctx->prim_transfer_buf ||
-        !ctx->atlas.gpu_tex || !ctx->atlas_transfer_buf)
+        !ctx->atlas.gpu_tex || !ctx->atlas_transfer_buf ||
+        !ctx->slug_curve_gpu_buf || !ctx->slug_band_gpu_buf)
     {
         destroy_context(ctx);
         return nullptr;
@@ -1004,6 +1161,10 @@ void destroy_context(Context* ctx) noexcept {
         if (ctx->linear_sampler) SDL_ReleaseGPUSampler(ctx->device, ctx->linear_sampler);
         if (ctx->prim_gpu_buf) SDL_ReleaseGPUBuffer(ctx->device, ctx->prim_gpu_buf);
         if (ctx->prim_transfer_buf) SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->prim_transfer_buf);
+        if (ctx->slug_curve_gpu_buf) SDL_ReleaseGPUBuffer(ctx->device, ctx->slug_curve_gpu_buf);
+        if (ctx->slug_band_gpu_buf) SDL_ReleaseGPUBuffer(ctx->device, ctx->slug_band_gpu_buf);
+        if (ctx->slug_curve_tbuf) SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->slug_curve_tbuf);
+        if (ctx->slug_band_tbuf) SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->slug_band_tbuf);
         if (ctx->atlas_transfer_buf) SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->atlas_transfer_buf);
         if (ctx->atlas.gpu_tex) SDL_ReleaseGPUTexture(ctx->device, ctx->atlas.gpu_tex);
         release_blur_targets(ctx);

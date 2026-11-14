@@ -16,8 +16,8 @@
 - **Window / Input / GPU**: `SDL3` + `SDL_GPU` (Vulkan / Metal / DX12) + `SDL_shadercross` (single **HLSL** shader source compiled offline or loaded as SPIR-V / DXIL / MSL).
 - **Layout**: `third_party/clay.h` (pure C single-header Flexbox layout).
 - **Text Pipeline**:
-  - Phase 1 (v0.1): `third_party/stb_truetype.h` dynamic glyph atlas.
-  - Phase 2 (v0.6): `HarfBuzz` shaping + Public Domain / MIT `Slug` quadratic Bezier GPU curve evaluation.
+  - Phase 1 (v0.1–v0.3, retired): `third_party/stb_truetype.h` bitmap glyph atlas.
+  - Phase 2 (v0.6, active): `HarfBuzz` OpenType shaping (`kern`/`liga`/`calt`) + Public Domain / MIT `Slug` quadratic Bezier GPU curve evaluation (`src/etch_slug.cpp`).
 - **Memory & State**:
   - Frame temporaries: `etch::Arena` linear allocator, $O(1)$ reset at frame end.
   - Cross-frame state: flat hash table keyed by `uint32_t` semantic ID (focus, hover, scroll inertia, spring animation).
@@ -29,12 +29,16 @@
 etch/
 ├── CLAUDE.md                 # This constitution
 ├── CMakeLists.txt            # Minimal CMake compiling etch_unity.cpp & examples
-├── third_party/              # Vendored headers & local SDL3 SDK
+├── third_party/              # Vendored headers, HarfBuzz (headers/prebuilt or system), Slug shaders, SDL3 SDK
+│   ├── harfbuzz/
+│   └── slug/
 ├── shaders/
-│   └── etch_uber.hlsl        # SDF rounded rect/border/gradient/shadow/glyph uber shader
+│   ├── etch_kawase.hlsl      # Dual-pass Kawase downsample/upsample backdrop blur & present shader
+│   └── etch_uber.hlsl        # SDF rounded rect/border/gradient/shadow/Slug Bezier text uber shader
 ├── src/
 │   ├── etch.h                # Single public header: Arena, Prim & declarative UI API
 │   ├── etch_arena.cpp
+│   ├── etch_slug.cpp         # HarfBuzz shaping & Slug quadratic Bezier contour/band extractor
 │   ├── etch_layout.cpp
 │   ├── etch_gpu.cpp
 │   └── etch_unity.cpp        # Unity build translation unit including all engine .cpp files
@@ -55,7 +59,7 @@ etch/
    - Every struct uploaded to an HLSL `StructuredBuffer` or Uniform Buffer MUST carry explicit `alignas(16)` and `static_assert(sizeof(T) % 16 == 0)`.
    - Fields inside GPU structs are restricted to `Vec4`, `Uint4`, or explicitly aligned 32-bit scalars. **NEVER put a 12-byte `float3` / `Vec3` in a GPU struct.**
    - `etch::Prim` is strictly **64 bytes** (`4 x 16B`: `bounds`, `clip`, `payload`, `style`) with `alignas(16)` so `Prim[]` can pack directly into a shared `SDL_GPUTransferBuffer` after 32-byte `GlobalsUniform` with zero copy overhead.
-   - `etch_uber.hlsl` binds 4 fixed sampler slots (`Slot 0` font atlas/white pixel, `Slot 1..3` external textures/backdrop blur) to stay within 1–3 draw calls without Bindless, and decodes sRGB `RGBA8` colors to linear space for physically accurate blending and stem darkening.
+   - `etch_uber.hlsl` binds 4 fixed sampler slots (`Slot 0` solid white fallback, `Slot 1..3` external textures/backdrop blur) plus 2 fragment `StructuredBuffer` storage slots (`t4..t5`: Slug curves & band directory) to stay within 1–3 draw calls without Bindless, and decodes sRGB `RGBA8` colors to linear space for physically accurate blending and stem darkening.
 4. **Headless Visual Verification Loop**:
    - `sandbox --headless` must render a test frame offscreen without creating a visible window and write `frame_check.png` via `third_party/stb_image_write.h`.
    - After modifying shaders, batching, or layout code, rebuild, run `sandbox --headless`, and inspect `frame_check.png` for clipping offsets, alignment bugs, or AA artifacts.

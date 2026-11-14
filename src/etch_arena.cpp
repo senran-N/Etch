@@ -9,8 +9,11 @@
 
 namespace etch {
 
-inline constexpr uint32_t kAtlasSize = 1024u;
-inline constexpr uint32_t kGlyphTableCapacity = 4096u;
+inline constexpr uint32_t kAtlasSize = 16u;
+inline constexpr uint32_t kSlugGlyphTableCapacity = 4096u;
+inline constexpr uint32_t kMaxSlugBands = 8u;
+inline constexpr uint32_t kInitialSlugCurveCap = 4096u;
+inline constexpr uint32_t kInitialSlugBandCap = 8192u;
 inline constexpr uint32_t kDefaultStateCapacity = 1024u;
 inline constexpr uint32_t kMaxBatches = 256u;
 inline constexpr uint32_t kMaxClipDepth = 64u;
@@ -55,39 +58,75 @@ struct StateMap {
     uint32_t     count = 0;
 };
 
-struct GlyphEntry {
-    uint64_t key = 0; // (uint64_t(codepoint) << 16) | size_q2; 0 = empty
-    float    u0 = 0.0f;
-    float    v0 = 0.0f;
-    float    u1 = 0.0f;
-    float    v1 = 0.0f;
-    float    xoff = 0.0f;
-    float    yoff = 0.0f;
-    float    width = 0.0f;
-    float    height = 0.0f;
-    float    advance = 0.0f;
-    bool     visible = false;
+struct alignas(16) SlugCurveGpu {
+    uint32_t p1_xy = 0; // f16x2 normalized [0,1] Y-UP
+    uint32_t p2_xy = 0; // f16x2 normalized [0,1] Y-UP
+    uint32_t p3_xy = 0; // f16x2 normalized [0,1] Y-UP
+    uint32_t pad0 = 0;
+};
+static_assert(sizeof(SlugCurveGpu) == 16);
+static_assert(sizeof(SlugCurveGpu) % 16 == 0);
+
+struct SlugBandEntryGpu {
+    uint32_t x = 0; // band header: count; curve item: curve_idx
+    uint32_t y = 0; // band header: rel_offset; curve item: 0
+};
+static_assert(sizeof(SlugBandEntryGpu) == 8);
+
+struct SlugGlyphEntry {
+    uint32_t key = 0; // glyph_id + 1u; 0 = empty
+    float    min_x_em = 0.0f;
+    float    min_y_em = 0.0f;
+    float    max_x_em = 0.0f;
+    float    max_y_em = 0.0f;
+    uint32_t band_offset = 0;
+    uint16_t num_hbands = 0;
+    uint16_t num_vbands = 0;
+    bool     has_outline = false;
+};
+
+struct ShapedGlyph {
+    uint32_t glyph_id = 0;
+    uint32_t cluster = 0;
+    float    x_advance_em = 0.0f;
+    float    x_offset_em = 0.0f;
+    float    y_offset_em = 0.0f;
 };
 
 struct FontAtlas {
-    GlyphEntry*     glyphs = nullptr; // Open-addressed table of kGlyphTableCapacity slots
-    uint8_t*        pixels = nullptr; // kAtlasSize * kAtlasSize * 4 RGBA8
-    uint8_t*        raster_scratch = nullptr; // 256 * 256 reusable 8-bit bitmap scratch
-    SDL_GPUTexture* gpu_tex = nullptr;
-    uint32_t       shelf_x = 6u;
-    uint32_t       shelf_y = 0u;
-    uint32_t       shelf_h = 0u;
-    uint32_t       dirty_y0 = 0u;
-    uint32_t       dirty_y1 = 0u;
-    bool           dirty = false;
+    SlugGlyphEntry*   slug_glyphs = nullptr; // Open-addressed table (power-of-2 capacity)
+    uint32_t          slug_glyph_cap = 0;
+    uint32_t          slug_glyph_count = 0;
+    SlugCurveGpu*     slug_curves = nullptr;
+    uint32_t          slug_curve_count = 0;
+    uint32_t          slug_curve_cap = 0;
+    SlugBandEntryGpu* slug_bands = nullptr;
+    uint32_t          slug_band_count = 0;
+    uint32_t          slug_band_cap = 0;
+    uint32_t          uploaded_slug_curves = 0;
+    uint32_t          uploaded_slug_bands = 0;
 
-    stbtt_fontinfo font_info = {};
-    uint8_t*       font_file_data = nullptr;
-    size_t         font_file_size = 0;
-    int32_t        font_ascent = 0;
-    int32_t        font_descent = 0;
-    int32_t        font_line_gap = 0;
-    bool           font_valid = false;
+    uint8_t*          pixels = nullptr; // kAtlasSize * kAtlasSize * 4 solid white fallback
+    SDL_GPUTexture*   gpu_tex = nullptr;
+    bool              dirty = false;
+
+    stbtt_fontinfo    font_info = {};
+    uint8_t*          font_file_data = nullptr;
+    size_t            font_file_size = 0;
+    int32_t           font_ascent = 0;
+    int32_t           font_descent = 0;
+    int32_t           font_line_gap = 0;
+    bool              font_valid = false;
+
+    hb_blob_t*        hb_blob = nullptr;
+    hb_face_t*        hb_face = nullptr;
+    hb_font_t*        hb_font = nullptr;
+    hb_buffer_t*      hb_buf = nullptr;
+    ShapedGlyph*      shape_scratch = nullptr;
+    uint32_t          shape_scratch_cap = 0;
+    uint32_t          bullet_glyph_id = 0;
+    float             bullet_advance_em = 0.0f;
+    float             space_advance_em = 0.0f;
 };
 
 struct DrawBatch {
@@ -188,6 +227,14 @@ struct Context {
     SDL_GPUBuffer*           prim_gpu_buf = nullptr;
     SDL_GPUTransferBuffer*   prim_transfer_buf = nullptr;
     SDL_GPUTransferBuffer*   atlas_transfer_buf = nullptr;
+    SDL_GPUBuffer*           slug_curve_gpu_buf = nullptr;
+    uint32_t                 slug_curve_gpu_cap = 0;
+    SDL_GPUBuffer*           slug_band_gpu_buf = nullptr;
+    uint32_t                 slug_band_gpu_cap = 0;
+    SDL_GPUTransferBuffer*   slug_curve_tbuf = nullptr;
+    uint32_t                 slug_curve_tbuf_cap = 0;
+    SDL_GPUTransferBuffer*   slug_band_tbuf = nullptr;
+    uint32_t                 slug_band_tbuf_cap = 0;
 
     // Offscreen scene + dual-Kawase pyramid textures (R8G8B8A8_UNORM_SRGB)
     SDL_GPUTexture*          scene_tex = nullptr;

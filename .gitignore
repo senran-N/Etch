@@ -17,6 +17,7 @@ compile_commands.json
 
 # Local binary toolchains & SDK binaries (vendored headers stay tracked)
 /third_party/dxc/
+/third_party/harfbuzz/lib/
 /third_party/SDL3/lib/
 /third_party/SDL3/cmake/
 /third_party/SDL3/share/
