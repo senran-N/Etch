@@ -2,7 +2,12 @@
 
 ## 1. Project Identity & End-State Goals
 - **Codename**: `Etch` (Namespace `etch::`, Macro prefix `ETCH_`, Library `etch` / `libetch`)
-- **Goal**: Ultra-lightweight, pure GPU-driven cross-platform desktop UI engine (8,000–15,000 LOC core, < 3 MB binary, 0% CPU/GPU at idle, < 0.2 ms layout, 1–3 draw calls per frame, SDF rounded primitives + dual Kawase blur + Slug/HarfBuzz text, zero-copy `SDL_GPUTexture*` external viewports).
+- **Permanent architectural invariants**:
+  - Orthodox C++20 zero-overhead purity, built as the single translation unit `etch_unity.cpp`.
+  - Steady-state zero per-frame heap allocation: `etch::Arena` has O(1) reset; explicit/geometric capacity reserve occurs only at documented overflow boundaries.
+  - 64-byte `alignas(16)` `etch::Prim`; 1–3 GPU draw calls per window UI pass, exactly 1 at idle without blur/external textures.
+  - 0% CPU/GPU at idle and < 0.2 ms layout.
+  - HarfBuzz + Slug GPU Bezier text/vector rendering, zero scalable font bitmap atlases, zero-copy `SDL_GPUTexture*` viewports, and mechanism-first anti-over-defensive rigor.
 - **Non-Goals ("Three Don'ts")**:
   1. No HTML/CSS parser.
   2. No bloated kitchen-sink business widget library.
@@ -17,7 +22,8 @@
 - **Layout**: `third_party/clay.h` (pure C single-header Flexbox layout).
 - **Text Pipeline**:
   - Phase 1 (v0.1–v0.3, retired): `third_party/stb_truetype.h` bitmap glyph atlas.
-  - Phase 2 (v0.6–v1.3, active): Multi-font slots (`kFontSans`/`kFontBold`/`kFontMono`/user slots), cluster-safe HarfBuzz OpenType shaping (`kern`/`liga`/`calt`) with automatic fallback chain, inline rich `text_spans` (`TextSpan`/`RichTextDesc`), SVG-to-Slug vector icons (`register_svg_icon` / `icon`), analytic `RingArc` & immediate box-local `draw_*` (`draw_text`/`draw_image`/`measure_text`), native RGBA/PNG/BMP GPU texture loader (`create_texture_rgba`/`load_texture_file`/`load_texture_memory`), frameless custom window chrome & multi-window swapchains (`claim_window_swapchain`/`set_window_chrome`), zero-heap drag-and-drop & canvas marquee multi-selection, pro desktop shortcuts/popover clamping/UTF-8 undo-redo, and Public Domain / MIT `Slug` quadratic Bezier GPU curve evaluation (`src/etch_slug.cpp`).
+  - Phase 2 (v0.6–v1.4, active): Multi-font slots (`kFontSans`/`kFontBold`/`kFontMono`/user slots), cluster-safe HarfBuzz OpenType shaping (`kern`/`liga`/`calt`) with automatic fallback chain, inline rich `text_spans` (`TextSpan`/`RichTextDesc`), SVG-to-Slug vector icons (`register_svg_icon` / `icon`), analytic `RingArc` & immediate box-local `draw_*` (`draw_text`/`draw_image`/`measure_text`), native RGBA/PNG/BMP GPU texture loader (`create_texture_rgba`/`load_texture_file`/`load_texture_memory`), frameless custom window chrome & multi-window swapchains (`claim_window_swapchain`/`set_window_chrome`), zero-heap drag-and-drop & canvas marquee multi-selection, pro desktop shortcuts/popover clamping/UTF-8 undo-redo, and Public Domain / MIT `Slug` quadratic Bezier GPU curve evaluation (`src/etch_slug.cpp`).
+- **Etch v1.4 workbench**: binary-split multi-tab `DockSpace`, resizable/sortable virtual `Table`, and collapsible hierarchical `Tree`, demonstrated by Etch Studio 1.4.
 - **Memory & State**:
   - Frame temporaries: `etch::Arena` linear allocator, $O(1)$ reset at frame end.
   - Cross-frame state: flat hash table keyed by `uint32_t` semantic ID (focus, hover, scroll inertia, spring animation).
@@ -44,7 +50,7 @@ etch/
 │   └── etch_unity.cpp        # Unity build translation unit including all engine .cpp files
 └── examples/
     ├── sandbox.cpp           # Core interactive & "--headless" regression harness
-    └── etch_studio.cpp       # Etch Studio 1.3 flagship render-graph, vector dials, custom chrome, DND & 1M workbench + "--headless"
+    └── etch_studio.cpp       # Etch Studio 1.4 flagship DockSpace, resizable/sortable Table, hierarchical Tree, render-graph, vector dials, custom chrome, DND & 1M workbench + "--headless"
 ```
 
 ---

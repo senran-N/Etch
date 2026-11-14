@@ -6595,6 +6595,436 @@ bool debug_wireframe(const Context* ctx_arg) noexcept {
     return ctx != nullptr && ctx->debug_wireframe_open;
 }
 
+namespace {
+constexpr uint32_t kDockSplitTagBase = 0xD100u;
+constexpr uint32_t kInternalDockDragKind = 0xD0C4u;
+constexpr uint32_t kTableOuterTag = 0x7400u;
+constexpr uint32_t kTableHeaderTag = 0x7401u;
+constexpr uint32_t kTableColTagBase = 0x7500u;
+constexpr uint32_t kTreeChevronTag = 0x7EE0u;
+DockSpaceSlot* dock_slot(Context* ctx, uint32_t id) noexcept {
+    for (auto& s : ctx->dock_spaces) if (s.id == id) return &s;
+    return nullptr;
+}
+DockTabSlot* dock_tab(DockSpaceSlot* s, uint32_t id) noexcept {
+    for (auto& t : s->tabs) if (t.id == id) return &t;
+    return nullptr;
+}
+uint32_t dock_visible(DockSpaceSlot* s, uint32_t leaf) noexcept {
+    const uint32_t active = s->nodes[leaf - 1u].active;
+    for (auto& t : s->tabs) if (t.leaf == leaf && t.open && t.id == active) return active;
+    for (auto& t : s->tabs) if (t.leaf == leaf && t.open) return t.id;
+    return 0;
+}
+void dock_reparent(DockSpaceSlot* s, uint32_t from, uint32_t to) noexcept {
+    for (auto& t : s->tabs) if (t.leaf == from) t.leaf = to;
+    auto& n = s->nodes[to - 1u];
+    if (n.first) { s->nodes[n.first - 1u].parent = to; s->nodes[n.second - 1u].parent = to; }
+}
+void dock_collapse(DockSpaceSlot* s, uint32_t leaf) noexcept {
+    auto& n = s->nodes[leaf - 1u];
+    if (n.first || dock_visible(s, leaf) || !n.parent) return;
+    const uint32_t parent = n.parent;
+    auto& p = s->nodes[parent - 1u];
+    const uint32_t sibling = p.first == leaf ? p.second : p.first;
+    const uint32_t grand = p.parent;
+    // Closed tabs remain addressable and reopen in the promoted sibling subtree.
+    uint32_t destination = sibling;
+    while (s->nodes[destination - 1u].first) destination = s->nodes[destination - 1u].first;
+    for (auto& t : s->tabs) if (t.leaf == leaf) t.leaf = destination;
+    p = s->nodes[sibling - 1u]; p.parent = grand;
+    dock_reparent(s, sibling, parent);
+    s->nodes[sibling - 1u] = {}; n = {};
+}
+}
+bool dock_space_initialized(uint32_t id) noexcept {
+    Context* ctx = current_context(); return ctx && id && dock_slot(ctx, id);
+}
+uint32_t dock_reset_root(uint32_t id) noexcept {
+    Context* ctx = current_context(); if (!ctx || !id || ctx->dock_cursor.space) return 0;
+    DockSpaceSlot* s = dock_slot(ctx, id);
+    if (!s) for (auto& slot : ctx->dock_spaces) if (!slot.id) { s = &slot; break; }
+    if (!s) return 0;
+    *s = {}; s->id = id; s->root = 1; s->nodes[0].used = true; return 1;
+}
+bool dock_split_node(uint32_t id, uint32_t node, Axis axis, float ratio,
+    uint32_t* out_a, uint32_t* out_b, uint32_t split_id, float min_a, float min_b) noexcept {
+    Context* ctx = current_context();
+    if (!ctx || !id || !node || node > kMaxDockNodes || ctx->dock_cursor.space || !std::isfinite(ratio)) return false;
+    auto* s = dock_slot(ctx, id); if (!s || !s->nodes[node - 1u].used || s->nodes[node - 1u].first) return false;
+    uint32_t free_nodes[2] = {}; uint32_t count = 0;
+    for (uint32_t i = 0; i < kMaxDockNodes && count < 2; ++i) if (!s->nodes[i].used) free_nodes[count++] = i + 1;
+    if (count != 2) return false;
+    auto& n = s->nodes[node - 1u]; const uint32_t a = free_nodes[0], b = free_nodes[1];
+    s->nodes[a - 1u] = n; s->nodes[a - 1u].parent = node;
+    s->nodes[b - 1u] = {}; s->nodes[b - 1u].used = true; s->nodes[b - 1u].parent = node;
+    dock_reparent(s, node, a);
+    n.first = a; n.second = b; n.axis = axis; n.active = 0;
+    n.split_id = split_id ? split_id : id_index(id, kDockSplitTagBase + s->split_seq++);
+    n.min_first = min_a; n.min_second = min_b;
+    set_split_ratio(n.split_id, ratio);
+    if (out_a) *out_a = a; if (out_b) *out_b = b; return true;
+}
+bool dock_add_pane(uint32_t id, uint32_t leaf, const DockPaneDesc& pane) noexcept {
+    Context* ctx = current_context();
+    if (!ctx || !id || !pane.id || !leaf || leaf > kMaxDockNodes || (pane.title.length && !pane.title.chars) || ctx->dock_cursor.space) return false;
+    auto* s = dock_slot(ctx, id); if (!s || !s->nodes[leaf - 1u].used || s->nodes[leaf - 1u].first || dock_tab(s, pane.id)) return false;
+    for (auto& t : s->tabs) if (!t.id) {
+        t.id = pane.id; t.leaf = leaf; t.icon_id = pane.icon_id; t.closable = pane.closable; t.open = pane.default_open;
+        uint32_t len = pane.title.length < 47u ? pane.title.length : 47u;
+        if (len < pane.title.length) while (len && (static_cast<uint8_t>(pane.title.chars[len]) & 0xC0u) == 0x80u) --len;
+        if (len) std::memcpy(t.title, pane.title.chars, len); t.title[len] = 0;
+        s->nodes[leaf - 1u].active = dock_visible(s, leaf); return true;
+    }
+    return false;
+}
+uint32_t dock_find_pane_leaf(uint32_t id, uint32_t pane) noexcept {
+    Context* ctx = current_context(); if (!ctx || !id || !pane) return 0;
+    auto* s = dock_slot(ctx, id); auto* t = s ? dock_tab(s, pane) : nullptr; return t ? t->leaf : 0;
+}
+uint32_t dock_active_pane(uint32_t id, uint32_t leaf) noexcept {
+    Context* ctx = current_context(); if (!ctx || !id || !leaf || leaf > kMaxDockNodes) return 0;
+    auto* s = dock_slot(ctx, id); return s && s->nodes[leaf - 1u].used ? dock_visible(s, leaf) : 0;
+}
+bool dock_is_pane_open(uint32_t id, uint32_t pane) noexcept {
+    Context* ctx = current_context(); if (!ctx || !id || !pane) return false;
+    auto* s = dock_slot(ctx, id); auto* t = s ? dock_tab(s, pane) : nullptr; return t && t->open;
+}
+void dock_activate_pane(uint32_t id, uint32_t pane) noexcept {
+    Context* ctx = current_context(); if (!ctx || !id || !pane) return;
+    auto* s = dock_slot(ctx, id); auto* t = s ? dock_tab(s, pane) : nullptr;
+    if (t && t->open) { s->nodes[t->leaf - 1u].active = pane; request_redraw(ctx); }
+}
+void dock_set_pane_open(uint32_t id, uint32_t pane, bool open) noexcept {
+    Context* ctx = current_context(); if (!ctx || !id || !pane || ctx->dock_cursor.space) return;
+    auto* s = dock_slot(ctx, id); auto* t = s ? dock_tab(s, pane) : nullptr;
+    if (t) { t->open = open; if (open) s->nodes[t->leaf - 1u].active = pane; else dock_collapse(s, t->leaf); request_redraw(ctx); }
+}
+bool dock_dock_pane(uint32_t id, uint32_t pane, uint32_t target, DockZone zone, float ratio) noexcept {
+    Context* ctx = current_context();
+    if (!ctx || !id || !pane || !target || pane == target || zone < DockZone::Center || zone > DockZone::Bottom || !std::isfinite(ratio) || ctx->dock_cursor.space) return false;
+    auto* s = dock_slot(ctx, id); auto* t = s ? dock_tab(s, pane) : nullptr; auto* dst = s ? dock_tab(s, target) : nullptr;
+    if (!t || !dst || !dst->open) return false;
+    if (zone != DockZone::Center) {
+        uint32_t count = 0; for (auto& n : s->nodes) if (!n.used) ++count;
+        if (count < 2) return false;
+    }
+    const uint32_t source = t->leaf;
+    if (zone == DockZone::Center) { t->leaf = dst->leaf; t->open = true; s->nodes[t->leaf - 1u].active = pane; }
+    else {
+        uint32_t a = 0, b = 0;
+        const bool before = zone == DockZone::Left || zone == DockZone::Top;
+        if (!dock_split_node(id, dst->leaf, (zone == DockZone::Left || zone == DockZone::Right) ? Axis::Row : Axis::Col,
+            ratio, &a, &b)) return false;
+        // Existing tabs were moved into first; swap leaf contents for a leading insertion.
+        if (before) { for (auto& tab : s->tabs) if (tab.leaf == a) tab.leaf = b; s->nodes[b - 1u].active = target; }
+        t->leaf = before ? a : b; t->open = true; s->nodes[t->leaf - 1u].active = pane;
+    }
+    // The source may have become an internal split if docking within its own leaf.
+    dock_collapse(s, source); request_redraw(ctx); return true;
+}
+void begin_dock_space(const DockSpaceDesc& desc) noexcept {
+    Context* ctx = current_context(); if (!ctx || !ctx->in_frame || !desc.id || ctx->dock_cursor.space) return;
+    if (!dock_space_initialized(desc.id)) dock_reset_root(desc.id);
+    auto* s = dock_slot(ctx, desc.id); if (!s) return;
+    auto& c = ctx->dock_cursor; c = {}; c.space = s; c.desc = desc; c.depth = 1; c.stack[0].node_idx = s->root;
+    begin_box({ .id = desc.id, .axis = Axis::Col, .width = desc.width, .height = desc.height, .background = desc.background });
+}
+uint32_t next_dock_pane() noexcept {
+    Context* ctx = current_context(); if (!ctx || !ctx->in_frame || !ctx->dock_cursor.space) return 0;
+    auto& c = ctx->dock_cursor; auto* s = c.space; const auto& d = c.desc;
+    if (c.pane_open) { end_box(); end_box(); c.pane_open = false; }
+    while (c.depth) {
+        auto& e = c.stack[c.depth - 1]; auto& n = s->nodes[e.node_idx - 1];
+        if (n.first) {
+            if (e.phase == 0) {
+                begin_split({ .id = n.split_id, .axis = n.axis, .default_ratio = split_ratio(n.split_id),
+                    .min_first_px = n.min_first, .min_second_px = n.min_second, .divider_size_px = d.divider_size_px });
+                e.phase = 1; c.stack[c.depth++] = {n.first, 0};
+            } else if (e.phase == 1) { split_second(); e.phase = 2; c.stack[c.depth++] = {n.second, 0}; }
+            else { end_split(); --c.depth; }
+            continue;
+        }
+        const uint32_t leaf = e.node_idx; --c.depth; n.active = dock_visible(s, leaf); if (!n.active) continue;
+        const uint32_t leaf_id = id_index(d.id, 0xD200u + leaf);
+        begin_box({ .id = leaf_id, .axis = Axis::Col, .width = Sizing::percent(1), .height = Sizing::percent(1),
+            .background = d.pane_background, .border_color = d.pane_border_color, .border_width = d.pane_border_width,
+            .radius = d.pane_radius, .clip_children = true });
+        begin_box({ .width = Sizing::grow(), .height = Sizing::fixed(d.tab_bar_height_px), .background = d.tab_bar_bg });
+        for (auto& t : s->tabs) if (t.leaf == leaf && t.open) {
+            const uint32_t tab_id = id_index(t.id, 0xD300u), close_id = id_index(t.id, 0xD301u);
+            if (clicked(tab_id)) n.active = t.id;
+            if (dragging(tab_id, 4.0f)) begin_drag_payload(tab_id, kInternalDockDragKind, Str{t.title}, nullptr, 0, 0, t.id);
+            begin_box({ .id = tab_id, .height = Sizing::grow(), .padding = Padding::xy(10, 0), .gap = 6,
+                .align_y = AlignY::Center, .background = n.active == t.id ? d.tab_active_bg : (hovered(tab_id) ? d.tab_hover_bg : Color{}), .focusable = true });
+            if (n.active == t.id) {
+                const float tab_w = element_bounds(tab_id).w;
+                draw_line({
+                    .from = {2.0f, d.tab_bar_height_px - 1.5f},
+                    .to = {(tab_w > 4.0f) ? (tab_w - 2.0f) : 58.0f, d.tab_bar_height_px - 1.5f},
+                    .color = d.tab_accent,
+                    .thickness = 2.0f,
+                });
+            }
+            if (t.icon_id != kInvalidIcon) icon({ .icon_id = t.icon_id, .size_px = 14 });
+            text(Str{t.title}, { .font_size_px = 12.5f, .wrap = false });
+            if (t.closable) {
+                begin_box({ .id = close_id, .width = Sizing::fixed(14), .height = Sizing::fixed(20), .align_y = AlignY::Center });
+                text(str_lit("x"), { .font_size_px = 12 }); end_box();
+                if (clicked(close_id)) { t.open = false; c.move_pane = t.id; c.target = 0; }
+            }
+            end_box();
+        }
+        end_box(); n.active = dock_visible(s, leaf);
+        DragPayloadView payload = {};
+        const Rect r = element_bounds(leaf_id); const Vec2 p = ctx->pointer_pos;
+        if (peek_drag_payload(&payload, kInternalDockDragKind) && p.x >= r.x && p.y >= r.y && p.x < r.x + r.w && p.y < r.y + r.h) {
+            const float x = (p.x - r.x) / r.w, y = (p.y - r.y) / r.h;
+            DockZone z = DockZone::Center;
+            if (x < .28f || x > .72f || y < .28f || y > .72f) {
+                const float dx = x < .5f ? x : 1-x, dy = y < .5f ? y : 1-y;
+                z = dx < dy ? (x < .5f ? DockZone::Left : DockZone::Right) : (y < .5f ? DockZone::Top : DockZone::Bottom);
+            }
+            Rect hi = {0,0,r.w,r.h};
+            if (z == DockZone::Left || z == DockZone::Right) { hi.w *= .5f; if (z == DockZone::Right) hi.x = hi.w; }
+            if (z == DockZone::Top || z == DockZone::Bottom) { hi.h *= .5f; if (z == DockZone::Bottom) hi.y = hi.h; }
+            draw_rect({ .rect = hi, .fill = Color::rgba8(56,189,248,65), .foreground = true });
+            if (accept_drag_payload(leaf_id, kInternalDockDragKind, &payload)) { c.move_pane = payload.u32; c.target = n.active; c.zone = z; }
+        }
+        const float leaf_h = element_bounds(leaf_id).h;
+        begin_box({ .axis = Axis::Col, .width = Sizing::percent(1), .height = Sizing::fixed(leaf_h > d.tab_bar_height_px ? leaf_h-d.tab_bar_height_px : 1) }); c.pane_open = true;
+        if (n.active) return n.active;
+        end_box(); end_box(); c.pane_open = false;
+    }
+    return 0;
+}
+void end_dock_space() noexcept {
+    Context* ctx = current_context(); if (!ctx || !ctx->in_frame || !ctx->dock_cursor.space) return;
+    auto& c = ctx->dock_cursor;
+    if (c.pane_open) { end_box(); end_box(); }
+    while (c.depth) { auto& e = c.stack[--c.depth]; if (e.phase) end_split(); }
+    end_box();
+    const uint32_t id = c.desc.id, pane = c.move_pane, target = c.target; const DockZone zone = c.zone;
+    auto* s = c.space; c = {};
+    if (pane && target) dock_dock_pane(id, pane, target, zone);
+    else if (pane) { auto* t = dock_tab(s, pane); dock_collapse(s, t->leaf); request_redraw(ctx); }
+}
+namespace {
+TableMetadata* table_metadata(Context* ctx, uint32_t id) noexcept {
+    for (auto& m : ctx->tables) if (m.id == id) return &m;
+    return nullptr;
+}
+uint32_t table_col_id(const TableDesc& d, uint32_t c) noexcept {
+    return d.columns[c].id ? d.columns[c].id : id_index(d.id, kTableColTagBase + c);
+}
+void table_close_row(TableStackEntry& t) noexcept {
+    if (t.cell_open) { end_box(); t.cell_open = false; }
+    if (t.row_open) { end_box(); t.row_open = false; }
+}
+}
+TableResult begin_table(const TableDesc& desc) noexcept {
+    Context* ctx = current_context();
+    if (!ctx || !ctx->in_frame || !desc.id || desc.columns.empty() || desc.columns.size() > kMaxTableColumns || ctx->table_depth == 8 ||
+        !std::isfinite(desc.row_height_px) || desc.row_height_px <= 0) return {};
+    for (const auto& col : desc.columns) if (!std::isfinite(col.width) || !std::isfinite(col.min_width) || !std::isfinite(col.max_width) || col.min_width < 0 || col.max_width < col.min_width) return {};
+    auto* metadata = table_metadata(ctx, desc.id);
+    if (!metadata) for (auto& slot : ctx->tables) if (!slot.id) { metadata = &slot; metadata->id = desc.id; break; }
+    if (!metadata) return {};
+    auto& t = ctx->table_stack[ctx->table_depth++]; t = {}; t.desc = desc; t.count = static_cast<uint32_t>(desc.columns.size());
+    for (uint32_t c = 0; c < t.count; ++c) t.columns[c] = desc.columns[c];
+    t.desc.columns = {t.columns, t.count};
+    auto* ws = state_map_get_or_insert(&ctx->states, desc.id, ctx->frame_index);
+    if (!ws->table_initialized) {
+        ws->table_initialized = true; ws->table_sort_column = desc.default_sort_column < t.count ? desc.default_sort_column : 0;
+        ws->table_sort_descending = desc.default_sort_descending;
+    }
+    TableResult result = { .sort_column = ws->table_sort_column, .sort_descending = ws->table_sort_descending, .sort_changed = ws->table_sort_changed };
+    ws->table_sort_changed = false;
+    const uint32_t outer_id = id_index(desc.id, kTableOuterTag);
+    const float gutter = desc.show_scrollbar ? 10.0f : 0;
+    float viewport = element_bounds(id_index(desc.id,0x7402u)).w;
+    if (viewport <= 0) viewport = desc.width.kind == SizingKind::Fixed ? desc.width.value : static_cast<float>(ctx->viewport_w) / ctx->dpi_scale;
+    float remaining = viewport - desc.padding.left - desc.padding.right - gutter;
+    float weights = 0; bool resizing = false;
+    for (uint32_t c = 0; c < t.count; ++c) {
+        const auto& col = t.columns[c]; const uint32_t cid = table_col_id(desc, c), rid = id_index(cid, 0x7600u);
+        state_map_get_or_insert(&ctx->states, rid, ctx->frame_index);
+        auto* cw = state_map_get_or_insert(&ctx->states, cid, ctx->frame_index);
+        const bool active = ctx->active_id == rid;
+        const bool ended = cw->column_resizing && !active;
+        cw->column_resizing = active;
+        if (col.resizable) {
+            if (double_clicked(rid)) { cw->column_override = false; request_redraw(ctx); }
+            else if (state_map_find(&ctx->states, rid)->pressed_this_frame) { cw->column_grab = ctx->pointer_pos.x - (cw->column_width > 0 ? cw->column_width : col.width); }
+            else if (active && ctx->prev_pointer_down) {
+                cw->column_width = clamp_range(ctx->pointer_pos.x - cw->column_grab, col.min_width, col.max_width);
+                cw->column_override = true; request_redraw(ctx);
+            }
+            if (active || hovered(rid)) ctx->desired_cursor = Cursor::ResizeEW;
+        }
+        resizing = resizing || active || ended;
+        if (cw->column_override || col.sizing == TableColumnSizing::Fixed) {
+            t.col_widths[c] = clamp_range(cw->column_override ? cw->column_width : col.width, col.min_width, col.max_width);
+            remaining -= t.col_widths[c];
+        } else weights += col.width > 0 ? col.width : 1;
+    }
+    // Water-fill stretch columns, respecting each column's declared bounds.
+    bool resolved[kMaxTableColumns] = {};
+    for (uint32_t pass = 0; pass <= t.count; ++pass) {
+        bool clamped = false;
+        for (uint32_t c = 0; c < t.count; ++c) {
+            const auto& col = t.columns[c]; auto* cw = state_map_find(&ctx->states, table_col_id(desc, c));
+            if (resolved[c] || cw->column_override || col.sizing != TableColumnSizing::Stretch) continue;
+            const float weight = col.width > 0 ? col.width : 1;
+            const float width = weights > 0 ? remaining * weight / weights : col.min_width;
+            if (pass == t.count || width < col.min_width || width > col.max_width) {
+                t.col_widths[c] = clamp_range(width, col.min_width, col.max_width);
+                remaining -= t.col_widths[c]; weights -= weight; resolved[c] = true; clamped = true;
+            } else t.col_widths[c] = width;
+        }
+        if (!clamped) break;
+    }
+    begin_box({ .id = id_index(desc.id,0x7402u), .axis = Axis::Col, .width = desc.width.kind == SizingKind::Grow ? Sizing::percent(1) : desc.width, .height = desc.height });
+    begin_box({ .id = outer_id, .axis = Axis::Col, .width = desc.width, .height = desc.height,
+        .background = desc.background, .border_color = desc.border_color, .border_width = desc.border_width, .radius = desc.radius, .clip_children = true });
+    begin_box({ .id = id_index(desc.id, kTableHeaderTag), .width = Sizing::grow(), .height = Sizing::fixed(desc.header_height_px),
+        .padding = {desc.padding.left, desc.padding.right + gutter, 0, 0}, .background = desc.header_background });
+    for (uint32_t c = 0; c < t.count; ++c) {
+        const auto& col = t.columns[c]; const uint32_t cid = table_col_id(desc, c), hid = id_index(cid, 0x7601u), rid = id_index(cid, 0x7600u);
+        auto* cw = state_map_find(&ctx->states, cid); cw->column_width = t.col_widths[c];
+        if (col.sortable && clicked(hid) && !resizing) {
+            result.sort_descending = result.sort_column == c ? !result.sort_descending : true;
+            result.sort_column = c; result.sort_changed = true;
+        }
+        begin_box({ .id = hid, .width = Sizing::fixed(t.col_widths[c]), .height = Sizing::grow(),
+            .padding = Padding::xy(desc.cell_padding_x,0), .align_x = col.align_x, .align_y = AlignY::Center, .clip_children = true, .focusable = true });
+        text(col.title, { .font_size_px = 12, .wrap = false });
+        draw_line({ .from = {t.col_widths[c]-1,0}, .to = {t.col_widths[c]-1,desc.header_height_px}, .color = desc.border_color });
+        if (result.sort_column == c) {
+            const float x = t.col_widths[c] - 14, y = desc.header_height_px * .5f;
+            const float dir = result.sort_descending ? 3.0f : -3.0f;
+            draw_line({ .from = {x-3,y-dir}, .to = {x,y+dir}, .color = Color::rgb_hex(0x38BDF8) });
+            draw_line({ .from = {x,y+dir}, .to = {x+3,y-dir}, .color = Color::rgb_hex(0x38BDF8) });
+        }
+        if (col.resizable) box({ .id = rid, .width = Sizing::fixed(6), .height = Sizing::fixed(desc.header_height_px),
+            .attach_to = AttachTo::Parent, .anchor_element = Anchor::TopRight, .anchor_parent = Anchor::TopRight, .floating_offset = {0,0} });
+        end_box();
+    }
+    end_box();
+    ws = state_map_find(&ctx->states, desc.id);
+    ws->table_sort_column = result.sort_column; ws->table_sort_descending = result.sort_descending; metadata->count = t.count;
+    for (uint32_t c = 0; c < t.count; ++c) { metadata->widths[c] = t.col_widths[c]; metadata->column_ids[c] = table_col_id(desc,c); metadata->min_widths[c] = t.columns[c].min_width; metadata->max_widths[c] = t.columns[c].max_width; }
+    const float outer_h = element_bounds(outer_id).h;
+    const float table_h = outer_h > 0 ? outer_h : (desc.height.kind == SizingKind::Fixed ? desc.height.value : 1);
+    // Clay clipping permits child overflow. Bound the viewport independently of visible row content.
+    begin_box({ .axis = Axis::Col, .width = Sizing::grow(), .height = Sizing::fixed(table_h > desc.header_height_px ? table_h-desc.header_height_px : 1) });
+    result.slice = begin_virtual_list({ .id = desc.id, .item_count = desc.item_count, .item_height_px = desc.row_height_px,
+        .row_gap_px = desc.row_gap_px, .overscan_rows = desc.overscan_rows, .width = Sizing::grow(), .height = Sizing::grow(),
+        .padding = desc.padding, .background = Color::transparent(), .border_width = 0, .show_scrollbar = desc.show_scrollbar });
+    // Rows own the horizontal insets, including the scrollbar gutter. Keep the list's vertical padding.
+    Clay__GetOpenLayoutElement()->config.layout.padding.left = 0;
+    Clay__GetOpenLayoutElement()->config.layout.padding.right = 0;
+    t.cursor_row = result.slice.first_index; t.end_row = result.slice.end_index;
+    return result;
+}
+bool table_next_row(uint32_t* out, Color bg, Color border) noexcept {
+    Context* ctx = current_context(); if (!ctx || !ctx->in_frame || !ctx->table_depth) return false;
+    auto& t = ctx->table_stack[ctx->table_depth - 1]; table_close_row(t);
+    if (t.cursor_row >= t.end_row) return false;
+    const auto& d = t.desc; const uint32_t row = t.cursor_row++, rid = id_index(d.id, 0x100000u + row);
+    if (out) *out = row;
+    begin_box({ .id = rid, .width = Sizing::grow(), .height = Sizing::fixed(d.row_height_px),
+        .padding = {d.padding.left, d.padding.right + (d.show_scrollbar ? 10.0f : 0.0f), 0, 0},
+        .background = bg.a ? bg : (hovered(rid) ? d.hover_row_color : ((row & 1u) ? d.zebra_color : Color{})),
+        .border_color = border, .border_width = border.a ? 1.0f : 0.0f });
+    t.col_cursor = 0; t.row_open = true; return true;
+}
+bool table_next_column() noexcept {
+    Context* ctx = current_context(); if (!ctx || !ctx->in_frame || !ctx->table_depth) return false;
+    auto& t = ctx->table_stack[ctx->table_depth - 1]; if (!t.row_open) return false;
+    if (t.cell_open) { end_box(); t.cell_open = false; }
+    if (t.col_cursor == t.count) return false;
+    const uint32_t c = t.col_cursor++;
+    begin_box({ .id = id_index(id_index(t.desc.id, 0x100000u + t.cursor_row - 1),c), .width = Sizing::fixed(t.col_widths[c]), .height = Sizing::grow(),
+        .padding = Padding::xy(t.desc.cell_padding_x,0), .align_x = t.columns[c].align_x, .align_y = AlignY::Center, .clip_children = true });
+    t.cell_open = true; return true;
+}
+void end_table() noexcept {
+    Context* ctx = current_context(); if (!ctx || !ctx->in_frame || !ctx->table_depth) return;
+    auto& t = ctx->table_stack[--ctx->table_depth]; table_close_row(t); end_virtual_list(); end_box(); end_box(); end_box();
+}
+float table_column_width(uint32_t id, uint32_t col) noexcept {
+    Context* ctx = current_context(); if (!ctx || !id || col >= kMaxTableColumns) return 0;
+    const auto* metadata = table_metadata(ctx,id); return metadata && col < metadata->count ? metadata->widths[col] : 0;
+}
+void set_table_column_width(uint32_t id, uint32_t col, float width) noexcept {
+    Context* ctx = current_context(); if (!ctx || !id || col >= kMaxTableColumns || !std::isfinite(width) || width <= 0) return;
+    auto* metadata = table_metadata(ctx,id); if (!metadata || col >= metadata->count) return;
+    width = clamp_range(width,metadata->min_widths[col],metadata->max_widths[col]); metadata->widths[col] = width;
+    const uint32_t cid = metadata->column_ids[col]; auto* cw = state_map_get_or_insert(&ctx->states,cid,ctx->frame_index);
+    cw->column_width = width; cw->column_override = true; request_redraw(ctx);
+}
+void set_table_sort(uint32_t id, uint32_t col, bool descending) noexcept {
+    Context* ctx = current_context(); if (!ctx || !id || col >= kMaxTableColumns) return;
+    auto* ws = state_map_get_or_insert(&ctx->states,id,ctx->frame_index);
+    const auto* metadata = table_metadata(ctx,id);
+    if (metadata && col >= metadata->count) return;
+    ws->table_sort_changed = !ws->table_initialized || ws->table_sort_column != col || ws->table_sort_descending != descending;
+    ws->table_initialized = true; ws->table_sort_column = col; ws->table_sort_descending = descending; request_redraw(ctx);
+}
+void table_scroll_to_row(uint32_t id, uint32_t row, float height, AlignY align) noexcept { virtual_list_scroll_to_row(id,row,height,align); }
+bool is_tree_open(uint32_t id) noexcept {
+    Context* ctx = current_context(); if (!ctx || !id) return false;
+    const auto* ws = state_map_find(&ctx->states,id); return ws && ws->tree_open;
+}
+void set_tree_open(uint32_t id, bool open) noexcept {
+    Context* ctx = current_context(); if (!ctx || !id) return;
+    auto* ws = state_map_get_or_insert(&ctx->states,id,ctx->frame_index); ws->tree_initialized = true; ws->tree_open = open; request_redraw(ctx);
+}
+TreeNodeResult begin_tree_node(const TreeNodeDesc& d) noexcept {
+    Context* ctx = current_context(); if (!ctx || !ctx->in_frame || !d.id || ctx->tree_depth >= kMaxTreeDepth) return {};
+    const uint32_t chev = id_index(d.id,kTreeChevronTag);
+    auto* ws = state_map_get_or_insert(&ctx->states,d.id,ctx->frame_index);
+    if (!ws->tree_initialized) { ws->tree_initialized = true; ws->tree_open = d.default_open; }
+    TreeNodeResult r = { .clicked = clicked(d.id), .double_clicked = double_clicked(d.id), .hovered = hovered(d.id) };
+    bool open = ws->tree_open;
+    if (!d.leaf) {
+        if (clicked(chev) || r.double_clicked) { open = !open; r.toggled = true; }
+        if (focused(d.id)) {
+            if (key_pressed(SDLK_RIGHT) && !open) { open = true; r.toggled = true; }
+            if (key_pressed(SDLK_LEFT) && open) { open = false; r.toggled = true; }
+        }
+    }
+    ws->tree_open = open;
+    begin_box({ .id = d.id, .width = Sizing::grow(), .height = Sizing::fixed(d.row_height_px),
+        .padding = {static_cast<float>(ctx->tree_depth)*d.indent_px,0,0,0}, .gap = 4,
+        .align_y = AlignY::Center, .background = d.selected ? d.selected_bg : (r.hovered ? d.hover_bg : Color{}), .focusable = true });
+    if (d.selected) draw_line({ .from = {1,2}, .to = {1,d.row_height_px-2}, .color = d.selected_accent, .thickness = 2 });
+    begin_box({ .id = chev, .width = Sizing::fixed(16), .height = Sizing::fixed(d.row_height_px) });
+    if (!d.leaf) {
+        const float y = d.row_height_px*.5f;
+        draw_line({ .from = open ? Vec2{4,y-2} : Vec2{6,y-4}, .to = open ? Vec2{8,y+2} : Vec2{10,y}, .color = d.text_color });
+        draw_line({ .from = open ? Vec2{8,y+2} : Vec2{10,y}, .to = open ? Vec2{12,y-2} : Vec2{6,y+4}, .color = d.text_color });
+    }
+    end_box();
+    if (d.icon_id != kInvalidIcon) icon({ .icon_id = d.icon_id, .size_px = 14, .color = d.icon_color });
+    text(d.label,{ .color = d.text_color, .font_size_px = d.font_size_px, .font_id = d.font_id, .wrap = false }); end_box();
+    r.open = !d.leaf && open;
+    if (r.open) {
+        begin_box({ .id = id_index(d.id,0x7EE1u), .axis = Axis::Col, .width = Sizing::grow(), .height = Sizing::fit() });
+        if (d.show_indent_guide) {
+            const float x = static_cast<float>(ctx->tree_depth)*d.indent_px+8;
+            draw_line({ .from = {x,0}, .to = {x,element_bounds(id_index(d.id,0x7EE1u)).h}, .color = Color::rgba8(148,163,184,40) });
+        }
+        ++ctx->tree_depth;
+    }
+    return r;
+}
+void end_tree_node() noexcept {
+    Context* ctx = current_context(); if (!ctx || !ctx->in_frame || !ctx->tree_depth) return;
+    --ctx->tree_depth; end_box();
+}
+
 void end_frame(Context* ctx_arg) noexcept {
     Context* ctx = ctx_arg ? ctx_arg : current_context();
     if (!ctx || !ctx->in_frame || !ctx->clay_ctx) {
@@ -6602,6 +7032,7 @@ void end_frame(Context* ctx_arg) noexcept {
     }
     Clay_SetCurrentContext(ctx->clay_ctx);
 
+    while (ctx->tree_depth) end_tree_node();
     const float dpi = ctx->dpi_scale;
     const Rect root_clip = {
         0.0f,
@@ -7185,7 +7616,7 @@ void end_frame(Context* ctx_arg) noexcept {
 
         emit_direct_text_px(
             ctx,
-            "ETCH 1.3 INSPECTOR   [F12]",
+            "ETCH 1.4 INSPECTOR   [F12]",
             hud_x + 12.0f,
             hud_y + 10.0f,
             12.0f,

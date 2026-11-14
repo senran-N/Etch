@@ -1,5 +1,5 @@
-// Etch Studio 1.3 — Pure-GPU Render-Graph & 1M Telemetry Workbench.
-// Showcases Etch 1.3 capabilities (frameless window chrome, box-local draw_text,
+// Etch Studio 1.4 — Pure-GPU Render-Graph & 1M Telemetry Workbench.
+// Showcases Etch 1.4 capabilities (frameless window chrome, box-local draw_text,
 // native RGBA texture upload/update, zero-heap drag-drop, canvas marquee
 // multi-selection, RingArc & SVG Slug icons) in Orthodox C++20 with zero
 // per-frame heap allocations, 1-3 draw-call batching, and "--headless" checks.
@@ -61,7 +61,7 @@ struct PresetSpec {
 
 inline constexpr PresetSpec kPresets[3] = {
     { "Cinematic ACES",  "Balanced HDR + soft bloom",    0.68f, 1.15f, etch::Color::rgb_hex(0x38BDF8), etch::Color::rgb_hex(0xF59E0B) },
-    { "Cyber Neon",      "High bloom + chromatic glow",  0.94f, 1.38f, etch::Color::rgb_hex(0xF472B6), etch::Color::rgb_hex(0x22D3EE) },
+    { "Cyber Neon",      "High bloom + chromatic glow",  0.94f, 1.48f, etch::Color::rgb_hex(0xF472B6), etch::Color::rgb_hex(0x22D3EE) },
     { "Clinical Studio", "Crisp reference tone curve",   0.34f, 0.96f, etch::Color::rgb_hex(0x34D399), etch::Color::rgb_hex(0x94A3B8) },
 };
 
@@ -91,6 +91,10 @@ struct StudioApp {
     };
 
     uint32_t node_count = kInitialNodes;
+    uint32_t trace_sort_column = 0;
+    uint32_t trace_first_row = 0;
+    bool trace_sort_descending = false;
+    bool trace_sort_changed = false;
     uint32_t selected_node = 2u;
     uint32_t node_selected_mask = (1u << 2u);
     uint32_t jump_clicks = 0u;
@@ -559,14 +563,14 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
                         .color = etch::Color::white(),
                     });
                 }
-                etch::text(etch::str_lit("ETCH 1.3"), {
+                etch::text(etch::str_lit("ETCH 1.4"), {
                     .color = etch::Color::white(),
                     .font_size_px = 12.0f,
                     .wrap = false,
                 });
             }
 
-            etch::text(etch::str_lit("Etch Studio 1.3 — GPU Render-Graph & Telemetry"), {
+            etch::text(etch::str_lit("Etch Studio 1.4 — GPU Render-Graph & Telemetry"), {
                 .color = etch::Color::rgb_hex(0xE2E8F0),
                 .font_size_px = 14.0f,
                 .wrap = false,
@@ -647,18 +651,49 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
             draw_chrome_btn(kBtnWinClose, app->ico_win_close, etch::Color::rgb_hex(0xDC2626));
         }
 
-        // Main 3-Pane Split Workspace
-        etch::begin_split(etch::SplitDesc{
-            .id = kSplitH,
-            .axis = etch::Axis::Row,
-            .width = etch::Sizing::grow(),
-            .height = etch::Sizing::grow(),
-            .default_ratio = 0.25f,
-            .min_first_px = 280.0f,
-            .min_second_px = 520.0f,
-            .divider_size_px = kDividerPx,
-        });
-
+        const uint32_t kDockMain = etch::id("studio_dock");
+        const uint32_t kPaneInspector = etch::id("studio_pane_inspector");
+        const uint32_t kPaneOutliner = etch::id("studio_pane_outliner");
+        const uint32_t kPaneCanvas = etch::id("studio_pane_canvas");
+        const uint32_t kPaneTrace = etch::id("studio_pane_trace");
+        if (!etch::dock_space_initialized(kDockMain)) {
+            const uint32_t root = etch::dock_reset_root(kDockMain);
+            uint32_t left = 0, right = 0, top = 0, bottom = 0;
+            etch::dock_split_node(kDockMain, root, etch::Axis::Row, .25f, &left, &right, kSplitH, 280, 520);
+            etch::dock_split_node(kDockMain, right, etch::Axis::Col, .62f, &top, &bottom, kSplitV, 260, 180);
+            etch::dock_add_pane(kDockMain, left, { .id = kPaneInspector, .title = etch::str_lit("Inspector") });
+            etch::dock_add_pane(kDockMain, left, { .id = kPaneOutliner, .title = etch::str_lit("Outliner") });
+            etch::dock_add_pane(kDockMain, top, { .id = kPaneCanvas, .title = etch::str_lit("Node Graph") });
+            etch::dock_add_pane(kDockMain, bottom, { .id = kPaneTrace, .title = etch::str_lit("1M Trace Table") });
+        }
+        etch::begin_dock_space({ .id = kDockMain, .divider_size_px = kDividerPx });
+        while (const uint32_t pane = etch::next_dock_pane()) {
+        if (pane == kPaneOutliner) {
+            const auto root = etch::begin_tree_node({ .id = etch::id("studio_tree_root"), .label = etch::str_lit("FramePipeline"), .default_open = true });
+            if (root.open) {
+                static constexpr const char* groups[] = {"Deferred", "Tone", "Bloom Passes"};
+                for (uint32_t g = 0; g < 3; ++g) {
+                    const auto group = etch::begin_tree_node({ .id = etch::id_index(etch::id("studio_tree_group"),g), .label = etch::Str{groups[g]}, .default_open = true });
+                    if (group.open) {
+                        for (uint32_t i = g; i < app->node_count; i += 3) {
+                            const auto item = etch::begin_tree_node({ .id = etch::id_index(etch::id("studio_tree_node"),i), .label = etch::Str{app->nodes[i].title}, .selected = app->selected_node == i, .leaf = true });
+                            if (item.clicked) {
+                                app->selected_node = i; app->node_selected_mask = 1u << i;
+                                etch::CanvasState view = etch::canvas_state(kCanvas);
+                                view.pan = {100.0f-app->nodes[i].pos.x*view.zoom, 80.0f-app->nodes[i].pos.y*view.zoom};
+                                etch::set_canvas_view(kCanvas,view.pan,view.zoom);
+                                etch::request_focus(kCanvas);
+                            }
+                            const auto shader = etch::begin_tree_node({ .id = etch::id_index(etch::id("studio_tree_shader"),i), .label = etch::str_lit("    Shader / vertex + fragment"), .leaf = true });
+                            (void)shader;
+                        }
+                        etch::end_tree_node();
+                    }
+                }
+                etch::end_tree_node();
+            }
+        }
+        if (pane == kPaneInspector) {
         // Pane 1: Left Inspector (UTF-8 IME filter + Spring shader controls + Inertial Node List)
         ETCH_BOX({
             .axis = etch::Axis::Col,
@@ -1007,7 +1042,7 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
             }
             etch::text_spans({
                 etch::TextSpan{
-                    .text = etch::str_lit("v1.3 "),
+                    .text = etch::str_lit("v1.4 "),
                     .color = etch::Color::rgb_hex(0xF8FAFC),
                     .font_id = etch::kFontBold,
                 },
@@ -1172,19 +1207,8 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
             }
         }
 
-        // Right Column Split: Infinite 2D Canvas (Top) / 1M Virtual Trace List (Bottom)
-        etch::split_second();
-        etch::begin_split(etch::SplitDesc{
-            .id = kSplitV,
-            .axis = etch::Axis::Col,
-            .width = etch::Sizing::grow(),
-            .height = etch::Sizing::grow(),
-            .default_ratio = 0.62f,
-            .min_first_px = 260.0f,
-            .min_second_px = 180.0f,
-            .divider_size_px = kDividerPx,
-        });
-
+        }
+        if (pane == kPaneCanvas) {
         // Pane 2: Infinite 2D Node-Graph Canvas
         const etch::CanvasState cs = etch::begin_canvas(etch::CanvasDesc{
             .id = kCanvas,
@@ -1432,8 +1456,9 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
 
         etch::end_canvas();
 
-        // Pane 3: 1,000,000-Row Virtual Telemetry Log
-        etch::split_second();
+        }
+        if (pane == kPaneTrace) {
+        // Pane 3: Resizable, sortable virtual telemetry table
         ETCH_BOX({
             .axis = etch::Axis::Col,
             .width = etch::Sizing::grow(),
@@ -1456,7 +1481,7 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
                 std::snprintf(
                     vhdr,
                     sizeof(vhdr),
-                    "GPU Trace Virtual List  [%u..%u) / 1,000,000 rows",
+                    "GPU Trace Table  [%u..%u) / 1,000,000 rows",
                     app->last_trace_slice.first_index,
                     app->last_trace_slice.end_index);
                 etch::text(etch::str_cstr(vhdr), {
@@ -1470,97 +1495,40 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
                 draw_button(kBtnRowEnd, "999,990", etch::Color::rgb_hex(0x1E293B), etch::Color::rgba8(148, 163, 184, 52), 8.0f, 3.0f, 11.5f);
             }
 
-            const etch::VirtualListSlice slice = etch::begin_virtual_list(etch::VirtualListDesc{
-                .id = kTraceList,
-                .item_count = kTraceRowCount,
-                .item_height_px = kTraceRowHeight,
-                .row_gap_px = 0.0f,
-                .overscan_rows = 2u,
-                .width = etch::Sizing::grow(),
-                .height = etch::Sizing::grow(),
-                .padding = etch::Padding::xy(6.0f, 4.0f),
-                .background = etch::Color::rgb_hex(0x090D16),
-                .border_color = etch::Color::rgba8(148, 163, 184, 34),
-                .border_width = 1.0f,
-                .radius = etch::Corners::all(8.0f),
-                .show_scrollbar = true,
-            });
-            app->last_trace_slice = slice;
-
-            const bool has_filter = (app->filter_buf[0] != '\0');
-            for (uint32_t row = slice.first_index; row < slice.end_index; ++row) {
-                const uint32_t pass_idx = row % 6u;
-                const float gpu_us = 18.0f + static_cast<float>((row * 37u) % 140u) * 0.45f;
-                const uint32_t prim_est = 920u + (row * 13u) % 480u;
-                char row_id_buf[16] = {};
-                std::snprintf(row_id_buf, sizeof(row_id_buf), "#%07u ", row);
-                char metrics_buf[48] = {};
-                std::snprintf(metrics_buf, sizeof(metrics_buf), " %6.1f us  %4u prims ", gpu_us, prim_est);
-                const char* pass_name = kTracePassNames[pass_idx];
-                const bool matched = has_filter && (std::strstr(pass_name, app->filter_buf) != nullptr);
-                const etch::Color row_bg = matched
-                    ? etch::Color::rgba8(14, 116, 144, 92)
-                    : ((row & 1u) ? etch::Color::rgba8(30, 41, 59, 44) : etch::Color::transparent());
-                static constexpr etch::Color kPassTints[6] = {
-                    etch::Color::rgb_hex(0x38BDF8),
-                    etch::Color::rgb_hex(0x34D399),
-                    etch::Color::rgb_hex(0xF472B6),
-                    etch::Color::rgb_hex(0xFBBF24),
-                    etch::Color::rgb_hex(0xA78BFA),
-                    etch::Color::rgb_hex(0x60A5FA),
-                };
-                const etch::Color pt = kPassTints[pass_idx];
-                ETCH_BOX({
-                    .axis = etch::Axis::Row,
-                    .width = etch::Sizing::grow(),
-                    .height = etch::Sizing::fixed(kTraceRowHeight),
-                    .padding = etch::Padding::xy(10.0f, 0.0f),
-                    .align_y = etch::AlignY::Center,
-                    .background = row_bg,
-                    .border_color = matched ? etch::Color::rgba8(56, 189, 248, 140) : etch::Color::transparent(),
-                    .border_width = matched ? 1.0f : 0.0f,
-                    .radius = etch::Corners::all(4.0f),
-                }) {
-                    etch::text_spans({
-                        etch::TextSpan{
-                            .text = etch::str_cstr(row_id_buf),
-                            .color = matched ? etch::Color::rgb_hex(0xE0F2FE) : etch::Color::rgb_hex(0x94A3B8),
-                            .font_size_px = 11.5f,
-                            .font_id = etch::kFontMono,
-                        },
-                        etch::TextSpan{
-                            .text = etch::str_cstr(pass_name),
-                            .color = pt,
-                            .background = etch::Color::rgba8(pt.r, pt.g, pt.b, 28),
-                            .border_color = etch::Color::rgba8(pt.r, pt.g, pt.b, 84),
-                            .font_size_px = 11.0f,
-                            .font_id = etch::kFontBold,
-                            .padding_x = 6.0f,
-                            .bg_radius = 4.0f,
-                        },
-                        etch::TextSpan{
-                            .text = etch::str_cstr(metrics_buf),
-                            .color = matched ? etch::Color::rgb_hex(0xE0F2FE) : etch::Color::rgb_hex(0xCBD5E1),
-                            .font_size_px = 11.5f,
-                            .font_id = etch::kFontMono,
-                        },
-                        etch::TextSpan{
-                            .text = etch::str_lit("1-3 DC \xC2\xB7 Slug \xE2\x9C\x93"),
-                            .color = etch::Color::rgb_hex(0x64748B),
-                            .font_size_px = 11.5f,
-                            .font_id = etch::kFontSans,
-                        },
-                    }, {
-                        .font_size_px = 11.5f,
-                        .wrap = false,
-                    });
-                }
+            const etch::TableColumnDesc columns[] = {
+                { .title = etch::str_lit("#Row"), .width = 100 },
+                { .title = etch::str_lit("Render Pass"), .sizing = etch::TableColumnSizing::Stretch, .width = 2 },
+                { .title = etch::str_lit("GPU Time"), .width = 110 },
+                { .title = etch::str_lit("Prims"), .width = 90 },
+                { .title = etch::str_lit("Pipeline"), .sizing = etch::TableColumnSizing::Stretch, .width = 1 },
+            };
+            const auto table = etch::begin_table({ .id = kTraceList, .columns = columns, .item_count = kTraceRowCount,
+                .row_height_px = kTraceRowHeight, .padding = etch::Padding::xy(6,4) });
+            app->last_trace_slice = table.slice;
+            app->trace_sort_column = table.sort_column; app->trace_sort_descending = table.sort_descending;
+            app->trace_sort_changed = table.sort_changed;
+            uint32_t rank = 0;
+            while (etch::table_next_row(&rank)) {
+                // Each metric is a bijective arithmetic permutation: inversion of rank is O(1).
+                const uint32_t ordered = table.sort_descending ? kTraceRowCount-1-rank : rank;
+                const uint32_t row = table.sort_column == 2 ? static_cast<uint32_t>((static_cast<uint64_t>(ordered)*972973u)%kTraceRowCount) :
+                    (table.sort_column == 3 ? static_cast<uint32_t>((static_cast<uint64_t>(ordered)*230769u)%kTraceRowCount) : ordered);
+                if (rank == table.slice.first_index) app->trace_first_row = row;
+                char cells[5][64] = {};
+                std::snprintf(cells[0],sizeof(cells[0]),"#%07u",row);
+                std::snprintf(cells[1],sizeof(cells[1]),"%s",kTracePassNames[row%6]);
+                std::snprintf(cells[2],sizeof(cells[2]),"%.2f us",18.0+static_cast<double>((row*37u)%kTraceRowCount)*.0001);
+                std::snprintf(cells[3],sizeof(cells[3]),"%u",920u+(row*13u)%kTraceRowCount);
+                std::snprintf(cells[4],sizeof(cells[4]),"GPU / Slug");
+                uint32_t col = 0;
+                while (etch::table_next_column()) etch::text(etch::Str{cells[col++]},{ .font_size_px = 11.5f, .font_id = etch::kFontMono, .wrap = false });
             }
-            etch::end_virtual_list();
+            etch::end_table();
         }
 
-        etch::end_split();
-        etch::end_split();
+        }
+        }
+        etch::end_dock_space();
     }
 
     // Floating Dual-Kawase Frosted-Glass Preset Popover (NO clip_children on floating element)
@@ -1940,6 +1908,8 @@ int run_headless(const char* out_png_path) noexcept {
         step_headless_frame(&app, kW, kH, kDt, pt, false);
     };
 
+    for (uint32_t warm = 0; warm < 4; ++warm) step_headless_frame(&app, kW, kH, kDt);
+
     // [S1] Idle sleep & 1-draw-call batching (Popover closed)
     step_headless_frame(&app, kW, kH, kDt);
     step_headless_frame(&app, kW, kH, kDt);
@@ -2252,7 +2222,7 @@ int run_headless(const char* out_png_path) noexcept {
         step_headless_frame(&app, kW, kH, kDt);
     }
 
-    // [S9] Etch 1.3 Chrome Hit-Test, Box-Local draw_text, Palette->Canvas DND & Marquee Group Drag
+    // [S9] Etch 1.4 Chrome Hit-Test, Box-Local draw_text, Palette->Canvas DND & Marquee Group Drag
     const etch::Rect tb_r = etch::element_bounds(etch::id("studio_toolbar"));
     const etch::Rect pr_r = etch::element_bounds(etch::id("studio_btn_presets"));
     if (etch::evaluate_window_hit(ctx, etch::Vec2{2.0f, 2.0f}) != etch::WindowHit::ResizeTopLeft ||
@@ -2335,6 +2305,50 @@ int run_headless(const char* out_png_path) noexcept {
         return 1;
     }
 
+    // [S10] Live dock tabs/splits, hierarchical selection, table resize/sort and large jumps.
+    const uint32_t dock = etch::id("studio_dock"), inspector = etch::id("studio_pane_inspector"), outliner = etch::id("studio_pane_outliner");
+    const auto click_widget = [&](uint32_t widget) noexcept {
+        const auto r = etch::element_bounds(widget); click_point({r.x+r.w*.5f,r.y+r.h*.5f});
+    };
+    bool s10_ok = true;
+    click_widget(etch::id_index(outliner,0xD300u));
+    s10_ok &= etch::dock_active_pane(dock,etch::dock_find_pane_leaf(dock,outliner)) == outliner;
+    const uint32_t tree_root = etch::id("studio_tree_root");
+    click_widget(etch::id_index(tree_root,0x7EE0u)); s10_ok &= !etch::is_tree_open(tree_root);
+    click_widget(etch::id_index(tree_root,0x7EE0u)); s10_ok &= etch::is_tree_open(tree_root);
+    click_widget(etch::id_index(etch::id("studio_tree_node"),0)); s10_ok &= app.selected_node == 0;
+    s10_ok &= etch::dock_dock_pane(dock,outliner,inspector,etch::DockZone::Bottom);
+    step_headless_frame(&app,kW,kH,kDt); step_headless_frame(&app,kW,kH,kDt);
+    const uint32_t inspector_leaf = etch::dock_find_pane_leaf(dock,inspector), outliner_leaf = etch::dock_find_pane_leaf(dock,outliner);
+    const auto ir = etch::element_bounds(etch::id_index(dock,0xD200u+inspector_leaf));
+    const auto obr = etch::element_bounds(etch::id_index(dock,0xD200u+outliner_leaf));
+    s10_ok &= ir.h > 0 && obr.h > 0 && obr.y > ir.y;
+    s10_ok &= etch::dock_dock_pane(dock,outliner,inspector,etch::DockZone::Center);
+    etch::dock_activate_pane(dock,inspector); step_headless_frame(&app,kW,kH,kDt); step_headless_frame(&app,kW,kH,kDt);
+    const auto restored = etch::element_bounds(etch::id_index(dock,0xD200u+etch::dock_find_pane_leaf(dock,inspector)));
+    s10_ok &= restored.h > ir.h+obr.h;
+    const uint32_t column1 = etch::id_index(kTraceList,0x7501u);
+    const auto handle = etch::element_bounds(etch::id_index(column1,0x7600u));
+    const float width_before = etch::table_column_width(kTraceList,1);
+    const auto sort_before = app.trace_sort_column;
+    const etch::Vec2 table_drag_start = {handle.x+3,handle.y+handle.h*.5f};
+    step_headless_frame(&app,kW,kH,kDt,table_drag_start,true);
+    step_headless_frame(&app,kW,kH,kDt,{table_drag_start.x+32,table_drag_start.y},true);
+    step_headless_frame(&app,kW,kH,kDt,{table_drag_start.x+32,table_drag_start.y},false);
+    s10_ok &= etch::table_column_width(kTraceList,1) > width_before+20 && app.trace_sort_column == sort_before && !app.trace_sort_changed;
+    etch::table_scroll_to_row(kTraceList,500000,kTraceRowHeight); step_headless_frame(&app,kW,kH,kDt);
+    const uint32_t gpu_header = etch::id_index(etch::id_index(kTraceList,0x7502u),0x7601u);
+    click_widget(gpu_header); s10_ok &= app.trace_sort_changed && app.trace_sort_column == 2 && app.trace_sort_descending;
+    const uint32_t descending_row = app.trace_first_row;
+    click_widget(gpu_header); s10_ok &= app.trace_sort_changed && !app.trace_sort_descending && app.trace_first_row != descending_row;
+    s10_ok &= app.last_trace_slice.first_index <= 500000 && app.last_trace_slice.end_index > 500000;
+    etch::table_scroll_to_row(kTraceList,999990,kTraceRowHeight); step_headless_frame(&app,kW,kH,kDt); step_headless_frame(&app,kW,kH,kDt);
+    const uint32_t first_trace = app.last_trace_slice.first_index;
+    const auto header1 = etch::element_bounds(etch::id_index(column1,0x7601u));
+    const auto cell1 = etch::element_bounds(etch::id_index(etch::id_index(kTraceList,0x100000u+first_trace),1));
+    s10_ok &= first_trace <= 999990 && app.last_trace_slice.end_index == 1000000 && std::fabs(header1.x-cell1.x) < 1;
+    if (!s10_ok) { std::fprintf(stderr,"Headless Studio [S10] failed: dock/tree/table regression\n"); cleanup_release(); return 1; }
+
     // [S6] Spring preset change + Dual-Kawase Popover + F12 HUD + PNG Export
     const uint32_t kBtnPresets = etch::id("studio_btn_presets");
     const etch::Rect presets_rect = etch::element_bounds(kBtnPresets);
@@ -2395,7 +2409,7 @@ int run_headless(const char* out_png_path) noexcept {
 
     const char* driver = SDL_GetGPUDeviceDriver(etch::gpu_device(ctx));
     std::printf(
-        "Headless Studio OK (%s) -> %s (asserts=9/9, prims=%u, draw_calls=%u, blur_pass=%u, slug_glyphs=%u, grid=%u, wire=%u, layout_us=%.0f, vrows=[%u..%u))\n",
+        "Headless Studio OK (%s) -> %s (asserts=10/10, prims=%u, draw_calls=%u, blur_pass=%u, slug_glyphs=%u, grid=%u, wire=%u, layout_us=%.0f, vrows=[%u..%u))\n",
         driver ? driver : "unknown",
         out_png_path,
         final_stats.prim_count,
@@ -2419,7 +2433,7 @@ int run_interactive() noexcept {
     }
 
     SDL_Window* window = SDL_CreateWindow(
-        "Etch Studio 1.3 — GPU Render-Graph & 1M Trace Workbench",
+        "Etch Studio 1.4 — GPU Render-Graph & 1M Trace Workbench",
         1440,
         900,
         SDL_WINDOW_BORDERLESS | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);

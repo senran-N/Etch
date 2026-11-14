@@ -10,7 +10,7 @@
 #include <type_traits>
 
 #define ETCH_VERSION_MAJOR 1
-#define ETCH_VERSION_MINOR 3
+#define ETCH_VERSION_MINOR 4
 #define ETCH_VERSION_PATCH 0
 
 #ifndef ETCH_ASSERT
@@ -1283,6 +1283,88 @@ struct VirtualListSlice {
     double max_scroll_y = 0.0;
     float viewport_height = 0.0f;
 };
+
+
+enum class DockZone : uint8_t { None = 0, Center = 1, Left = 2, Right = 3, Top = 4, Bottom = 5 };
+struct DockPaneDesc {
+    uint32_t id = 0; Str title = {}; uint16_t icon_id = kInvalidIcon;
+    bool closable = false; bool default_open = true;
+};
+struct DockSpaceDesc {
+    uint32_t id = 0;
+    Sizing width = Sizing::grow(); Sizing height = Sizing::grow();
+    float tab_bar_height_px = 30.0f; float divider_size_px = 6.0f;
+    Color background = {}; Color pane_background = Color::rgb_hex(0x0F1522);
+    Color pane_border_color = Color::rgba8(148, 163, 184, 38);
+    float pane_border_width = 1.0f; Corners pane_radius = Corners::all(10.0f);
+    Color tab_bar_bg = Color::rgb_hex(0x0B101A); Color tab_active_bg = Color::rgb_hex(0x162033);
+    Color tab_hover_bg = Color::rgb_hex(0x111827); Color tab_accent = Color::rgb_hex(0x38BDF8);
+};
+bool dock_space_initialized(uint32_t dock_id) noexcept;
+uint32_t dock_reset_root(uint32_t dock_id) noexcept;
+bool dock_split_node(uint32_t dock_id, uint32_t node_idx, Axis axis, float default_ratio,
+    uint32_t* out_first_node, uint32_t* out_second_node, uint32_t split_widget_id = 0,
+    float min_first_px = 120.0f, float min_second_px = 120.0f) noexcept;
+bool dock_add_pane(uint32_t dock_id, uint32_t leaf_node_idx, const DockPaneDesc& pane) noexcept;
+bool dock_dock_pane(uint32_t dock_id, uint32_t pane_id, uint32_t target_pane_id, DockZone zone, float split_ratio = 0.5f) noexcept;
+void dock_activate_pane(uint32_t dock_id, uint32_t pane_id) noexcept;
+uint32_t dock_active_pane(uint32_t dock_id, uint32_t leaf_node_idx) noexcept;
+uint32_t dock_find_pane_leaf(uint32_t dock_id, uint32_t pane_id) noexcept;
+bool dock_is_pane_open(uint32_t dock_id, uint32_t pane_id) noexcept;
+void dock_set_pane_open(uint32_t dock_id, uint32_t pane_id, bool open) noexcept;
+void begin_dock_space(const DockSpaceDesc& desc) noexcept;
+uint32_t next_dock_pane() noexcept;
+void end_dock_space() noexcept;
+
+inline constexpr uint32_t kMaxTableColumns = 16u;
+enum class TableColumnSizing : uint8_t { Fixed = 0, Stretch = 1 };
+struct TableColumnDesc {
+    uint32_t id = 0; Str title = {}; TableColumnSizing sizing = TableColumnSizing::Fixed;
+    float width = 120.0f; float min_width = 48.0f; float max_width = 800.0f;
+    AlignX align_x = AlignX::Left; bool resizable = true; bool sortable = true;
+};
+struct TableDesc {
+    uint32_t id = 0; std::span<const TableColumnDesc> columns = {};
+    uint32_t item_count = 0; float header_height_px = 30.0f; float row_height_px = 26.0f;
+    float row_gap_px = 0.0f; uint32_t overscan_rows = 2u;
+    uint32_t default_sort_column = 0; bool default_sort_descending = false;
+    float cell_padding_x = 10.0f; Sizing width = Sizing::grow(); Sizing height = Sizing::grow();
+    Padding padding = {}; Color background = Color::rgb_hex(0x090D16);
+    Color header_background = Color::rgb_hex(0x111726);
+    Color zebra_color = Color::rgba8(30, 41, 59, 44); Color hover_row_color = Color::rgba8(56, 189, 248, 22);
+    Color border_color = Color::rgba8(148, 163, 184, 34); float border_width = 1.0f;
+    Corners radius = Corners::all(8.0f); bool show_scrollbar = true;
+};
+struct TableResult {
+    VirtualListSlice slice = {}; uint32_t sort_column = 0;
+    bool sort_descending = false; bool sort_changed = false;
+};
+TableResult begin_table(const TableDesc& desc) noexcept;
+bool table_next_row(uint32_t* out_row_index = nullptr, Color row_bg_override = {}, Color row_border_override = {}) noexcept;
+bool table_next_column() noexcept;
+void end_table() noexcept;
+float table_column_width(uint32_t table_id, uint32_t col_index) noexcept;
+void set_table_column_width(uint32_t table_id, uint32_t col_index, float width_px) noexcept;
+void set_table_sort(uint32_t table_id, uint32_t col_index, bool descending) noexcept;
+void table_scroll_to_row(uint32_t table_id, uint32_t row_index, float row_height_px, AlignY align = AlignY::Top) noexcept;
+
+struct TreeNodeDesc {
+    uint32_t id = 0; Str label = {}; uint16_t icon_id = kInvalidIcon;
+    Color icon_color = Color::rgb_hex(0x38BDF8); Color text_color = Color::rgb_hex(0xE2E8F0);
+    Color selected_bg = Color::rgb_hex(0x1A2942); Color selected_accent = Color::rgb_hex(0x38BDF8);
+    Color hover_bg = Color::rgb_hex(0x162033);
+    float row_height_px = 26.0f; float font_size_px = 12.5f; float indent_px = 16.0f;
+    uint16_t font_id = kFontSans; bool default_open = false; bool selected = false;
+    bool leaf = false; bool show_indent_guide = true;
+};
+struct TreeNodeResult {
+    bool open = false; bool clicked = false; bool double_clicked = false;
+    bool toggled = false; bool hovered = false;
+};
+TreeNodeResult begin_tree_node(const TreeNodeDesc& desc) noexcept;
+void end_tree_node() noexcept;
+bool is_tree_open(uint32_t node_id) noexcept;
+void set_tree_open(uint32_t node_id, bool open) noexcept;
 
 struct CanvasDesc {
     uint32_t id = 0;

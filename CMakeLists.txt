@@ -1,7 +1,12 @@
 cmake_minimum_required(VERSION 3.24)
-project(etch VERSION 1.3.0 LANGUAGES C CXX)
+project(etch VERSION 1.4.0 LANGUAGES C CXX)
 
 option(ETCH_BUILD_EXAMPLES "Build Etch sandbox and etch_studio examples" ON)
+
+# CMake's default /EHsc conflicts with the explicit no-exceptions contract.
+if (MSVC OR CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+    string(REPLACE "/EHsc" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
+endif ()
 
 # Enforce Orthodox C+ (C-style C++20 without exceptions or RTTI) on engine & example targets.
 function(etch_configure_orthodox_cpp target)

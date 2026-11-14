@@ -2323,9 +2323,112 @@ int run_headless(const char* out_png_path) noexcept {
         }
     }
 
-    const bool ok = png_ok && stats_ok && slug_ok && v10a_ok && v11_ok && v12_ok && v13_ok;
+
+    // [14] Dock topology, balanced early exit, virtual table interaction and tree input.
+    bool v14_ok = false;
+    {
+        auto* test = etch::create_context({ .headless = true });
+        if (test) {
+            etch::set_current_context(test);
+            const uint32_t dock = etch::id("v14_dock"), p1 = etch::id("v14_p1"), p2 = etch::id("v14_p2"), p3 = etch::id("v14_p3");
+            uint32_t left = 0, right = 0;
+            const uint32_t root = etch::dock_reset_root(dock);
+            bool checks = etch::dock_split_node(dock,root,etch::Axis::Row,.5f,&left,&right);
+            checks &= etch::dock_add_pane(dock,left,{ .id = p1, .title = etch::str_lit("P1") });
+            checks &= etch::dock_add_pane(dock,left,{ .id = p2, .title = etch::str_lit("P2"), .closable = true });
+            checks &= etch::dock_add_pane(dock,right,{ .id = p3, .title = etch::str_lit("P3") });
+            const uint32_t table_id = etch::id("v14_table"), tree = etch::id("v14_tree");
+            const etch::TableColumnDesc cols[] = {
+                { .title = etch::str_lit("Fixed"), .width = 120 },
+                { .title = etch::str_lit("Stretch"), .sizing = etch::TableColumnSizing::Stretch, .width = 1 },
+                { .title = etch::str_lit("Sort"), .width = 100 },
+                { .title = etch::str_lit("Tail"), .sizing = etch::TableColumnSizing::Stretch, .width = 1 },
+            };
+            etch::TableResult tr = {}; etch::TreeNodeResult nr = {}; uint32_t first_row = 0;
+            bool early = false;
+            const auto step = [&](etch::Vec2 point = {-1,-1}, bool down = false, uint32_t key = 0) noexcept {
+                etch::begin_frame(test,{ .viewport_w = 1000, .viewport_h = 720, .dt_seconds = 1.0f/60,
+                    .pointer_pos = point, .pointer_down = down, .key_pressed_code = key });
+                etch::begin_box({ .axis = etch::Axis::Col, .width = etch::Sizing::grow(), .height = etch::Sizing::grow() });
+                etch::begin_dock_space({ .id = dock, .height = etch::Sizing::fixed(180) });
+                while (const uint32_t pane = etch::next_dock_pane()) { etch::text(etch::str_lit("Content")); (void)pane; if (early) break; }
+                etch::end_dock_space();
+                tr = etch::begin_table({ .id = table_id, .columns = cols, .item_count = 1000000, .height = etch::Sizing::fixed(300), .padding = etch::Padding::xy(7,3) });
+                uint32_t row = 0; first_row = tr.slice.first_index;
+                while (etch::table_next_row(&row)) {
+                    while (etch::table_next_column()) { etch::text(etch::str_lit("cell")); if (early) break; }
+                    if (early) break;
+                }
+                etch::end_table();
+                nr = etch::begin_tree_node({ .id = tree, .label = etch::str_lit("Parent") });
+                if (nr.open) { const auto leaf = etch::begin_tree_node({ .id = etch::id("v14_leaf"), .label = etch::str_lit("Leaf"), .default_open = true, .leaf = true }); checks &= !leaf.open; etch::end_tree_node(); }
+                etch::end_box(); etch::end_frame(test);
+            };
+            const auto click = [&](uint32_t widget) noexcept {
+                const auto b = etch::element_bounds(widget); const etch::Vec2 p = {b.x+b.w*.5f,b.y+b.h*.5f}; step(p,true); step(p,false);
+            };
+            step(); step(); click(etch::id_index(p2,0xD300u));
+            checks &= etch::dock_active_pane(dock,left) == p2;
+            checks &= etch::dock_dock_pane(dock,p2,p3,etch::DockZone::Right); step(); step();
+            const uint32_t moved = etch::dock_find_pane_leaf(dock,p2);
+            checks &= moved != etch::dock_find_pane_leaf(dock,p3);
+            checks &= etch::dock_dock_pane(dock,p2,p3,etch::DockZone::Center); step();
+            checks &= etch::dock_find_pane_leaf(dock,p3) == right;
+            checks &= etch::dock_dock_pane(dock,p2,p3,etch::DockZone::Bottom); step();
+            etch::dock_set_pane_open(dock,p2,false); step(); checks &= etch::dock_find_pane_leaf(dock,p3) == right;
+            etch::dock_set_pane_open(dock,p2,true); checks &= etch::dock_is_pane_open(dock,p2);
+            // Release a real tab payload over each of the five geometric dock sectors.
+            const etch::DockZone zones[] = {etch::DockZone::Left,etch::DockZone::Right,etch::DockZone::Top,etch::DockZone::Bottom,etch::DockZone::Center};
+            for (const auto zone : zones) {
+                etch::dock_activate_pane(dock,p2); step(); step();
+                const uint32_t source_leaf = etch::dock_find_pane_leaf(dock,p2);
+                const auto tab = etch::element_bounds(etch::id_index(p2,0xD300u));
+                const uint32_t target_leaf = etch::dock_find_pane_leaf(dock,p1);
+                const auto target_rect = etch::element_bounds(etch::id_index(dock,0xD200u+target_leaf));
+                const etch::Vec2 start = {tab.x+tab.w*.5f,tab.y+tab.h*.5f};
+                const etch::Vec2 finish = {target_rect.x+target_rect.w*(zone == etch::DockZone::Left ? .1f : (zone == etch::DockZone::Right ? .9f : .5f)),
+                    target_rect.y+target_rect.h*(zone == etch::DockZone::Top ? .1f : (zone == etch::DockZone::Bottom ? .9f : .5f))};
+                step(start,true); step(finish,true); step(finish,false); step();
+                checks &= (etch::dock_find_pane_leaf(dock,p2) == etch::dock_find_pane_leaf(dock,p1)) == (zone == etch::DockZone::Center);
+                if (zone != etch::DockZone::Center) {
+                    checks &= etch::dock_find_pane_leaf(dock,p2) != source_leaf;
+                    checks &= etch::dock_dock_pane(dock,p2,p3,etch::DockZone::Center);
+                }
+            }
+            // Capacity failure must preserve both pane locations and the complete topology.
+            const uint32_t full = etch::id("v14_full"); uint32_t branch = etch::dock_reset_root(full), spare = 0;
+            for (uint32_t n = 0; n < 15; ++n) {
+                uint32_t child = 0; checks &= etch::dock_split_node(full,branch,etch::Axis::Row,.5f,&child,&spare); branch = child;
+            }
+            checks &= etch::dock_add_pane(full,branch,{ .id = p1, .title = etch::str_lit("source") });
+            checks &= etch::dock_add_pane(full,spare,{ .id = p2, .title = etch::str_lit("target") });
+            checks &= !etch::dock_dock_pane(full,p1,p2,etch::DockZone::Right);
+            checks &= etch::dock_find_pane_leaf(full,p1) == branch && etch::dock_find_pane_leaf(full,p2) == spare;
+            early = true; step(); early = false; step();
+            const uint32_t col0 = etch::id_index(table_id,0x7500u);
+            const auto handle = etch::element_bounds(etch::id_index(col0,0x7600u));
+            const float before = etch::table_column_width(table_id,0);
+            const etch::Vec2 hp = {handle.x+3,handle.y+handle.h*.5f}; step(hp,true); step({hp.x+42,hp.y},true); step({hp.x+42,hp.y},false);
+            checks &= etch::table_column_width(table_id,0) > before+30 && !tr.sort_changed;
+            click(etch::id_index(etch::id_index(table_id,0x7502u),0x7601u)); checks &= tr.sort_column == 2 && tr.sort_changed;
+            etch::table_scroll_to_row(table_id,750000,26); step(); step();
+            checks &= tr.slice.first_index <= 750000 && tr.slice.end_index > 750000;
+            const auto header = etch::element_bounds(etch::id_index(etch::id_index(table_id,0x7501u),0x7601u));
+            const auto cell = etch::element_bounds(etch::id_index(etch::id_index(table_id,0x100000u+first_row),1));
+            checks &= std::fabs(header.x-cell.x) < 1.0f;
+            click(etch::id_index(tree,0x7EE0u)); checks &= nr.open && nr.toggled;
+            click(tree); step({-1,-1},false,SDLK_LEFT); checks &= !nr.open;
+            step({-1,-1},false,SDLK_RIGHT); checks &= nr.open;
+            click(etch::id_index(tree,0x7EE0u)); checks &= !nr.open;
+            v14_ok = checks;
+            if (!checks) std::fprintf(stderr,"Headless assert [14] failed: dock/table/tree regression\n");
+            etch::destroy_context(test); etch::set_current_context(ctx);
+        }
+    }
+
+    const bool ok = png_ok && stats_ok && slug_ok && v10a_ok && v11_ok && v12_ok && v13_ok && v14_ok;
     std::printf(
-        "Headless %s -> %s (asserts=13/13, prims=%u, draw_calls=%u, slug_glyphs=%u, slug_curves=%u, layout_ms=%.3f, gpu_submit_ms=%.3f, arena_used=%zuB, scroll_y=%.1f, focus=0x%08X, idle=%d)\n",
+        "Headless %s -> %s (asserts=14/14, prims=%u, draw_calls=%u, slug_glyphs=%u, slug_curves=%u, layout_ms=%.3f, gpu_submit_ms=%.3f, arena_used=%zuB, scroll_y=%.1f, focus=0x%08X, idle=%d)\n",
         ok ? "OK" : "FAILED",
         out_png_path,
         final_stats.prim_count,

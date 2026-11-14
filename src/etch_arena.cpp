@@ -19,7 +19,7 @@ inline constexpr uint32_t kMaxBatches = 256u;
 inline constexpr uint32_t kMaxClipDepth = 64u;
 inline constexpr uint32_t kMaxCachedPipelines = 4u;
 inline constexpr uint32_t kMaxBlurSplits = 4u;
-inline constexpr uint32_t kMaxSplitDepth = 16u;
+inline constexpr uint32_t kMaxSplitDepth = 32u;
 inline constexpr uint32_t kMaxCanvasDepth = 8u;
 inline constexpr uint32_t kHudHistorySamples = 64u;
 inline constexpr uint32_t kMaxFocusablePerFrame = 256u;
@@ -70,6 +70,16 @@ struct WidgetState {
     float    edit_scroll_y = 0.0f;
     float    edit_preferred_x = -1.0f;
 
+    bool tree_initialized = false;
+    bool tree_open = false;
+    bool table_initialized = false;
+    bool table_sort_descending = false;
+    bool table_sort_changed = false;
+    uint32_t table_sort_column = 0;
+    bool column_override = false;
+    float column_width = 0.0f;
+    float column_grab = 0.0f;
+    bool column_resizing = false;
     // Split Pane state
     bool     split_initialized = false;
     float    split_ratio = 0.5f;
@@ -434,6 +444,45 @@ inline SDL_GPUTexture* blur_tex_sentinel() noexcept {
     return reinterpret_cast<SDL_GPUTexture*>(&s_blur_tex_tag);
 }
 
+
+inline constexpr uint32_t kMaxDockSpaces = 4u;
+inline constexpr uint32_t kMaxDockNodes = 32u;
+inline constexpr uint32_t kMaxDockTabs = 32u;
+inline constexpr uint32_t kMaxDockTraverseDepth = 32u;
+inline constexpr uint32_t kMaxTreeDepth = 32u;
+struct DockNode {
+    bool used = false; uint32_t parent = 0; uint32_t first = 0; uint32_t second = 0;
+    uint32_t split_id = 0; Axis axis = Axis::Row;
+    float min_first = 120.0f; float min_second = 120.0f;
+    uint32_t active = 0;
+};
+struct DockTabSlot {
+    uint32_t id = 0; uint32_t leaf = 0; char title[48] = {};
+    uint16_t icon_id = kInvalidIcon; bool closable = false; bool open = false;
+};
+struct DockSpaceSlot {
+    uint32_t id = 0; uint32_t root = 0; uint32_t split_seq = 0;
+    DockNode nodes[kMaxDockNodes] = {}; DockTabSlot tabs[kMaxDockTabs] = {};
+};
+struct DockTraverseEntry { uint32_t node_idx = 0; uint8_t phase = 0; };
+struct DockCursor {
+    DockSpaceSlot* space = nullptr; DockSpaceDesc desc = {};
+    DockTraverseEntry stack[kMaxDockTraverseDepth] = {}; uint32_t depth = 0;
+    bool pane_open = false; uint32_t move_pane = 0; uint32_t target = 0; DockZone zone = DockZone::None;
+};
+struct TableMetadata {
+    uint32_t id = 0; uint32_t count = 0;
+    uint32_t column_ids[kMaxTableColumns] = {};
+    float widths[kMaxTableColumns] = {};
+    float min_widths[kMaxTableColumns] = {};
+    float max_widths[kMaxTableColumns] = {};
+};
+struct TableStackEntry {
+    TableDesc desc = {}; TableColumnDesc columns[kMaxTableColumns] = {};
+    float col_widths[kMaxTableColumns] = {}; uint32_t count = 0;
+    uint32_t cursor_row = 0; uint32_t end_row = 0; uint32_t col_cursor = 0;
+    bool row_open = false; bool cell_open = false;
+};
 struct Context {
     Arena         frame_arena = {};
     void*         clay_mem = nullptr;
@@ -543,6 +592,12 @@ struct Context {
     uint32_t    wake_event_type = 0u;
     float       sim_dt = 0.0f;
 
+    DockSpaceSlot dock_spaces[kMaxDockSpaces] = {};
+    DockCursor dock_cursor = {};
+    TableMetadata tables[16] = {};
+    TableStackEntry table_stack[8] = {};
+    uint32_t table_depth = 0;
+    uint32_t tree_depth = 0;
     SplitStackEntry  split_stack[kMaxSplitDepth] = {};
     uint32_t         split_depth = 0;
     CanvasStackEntry canvas_stack[kMaxCanvasDepth] = {};
