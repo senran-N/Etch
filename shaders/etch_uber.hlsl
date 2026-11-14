@@ -205,6 +205,10 @@ VSOut vs_main(uint vertex_id : SV_VertexID, uint instance_id : SV_InstanceID)
     {
         uv_rect = float4(unpack_unorm16x2(p.payload.x), unpack_unorm16x2(p.payload.y));
     }
+    else if (kind == ETCH_PRIM_BLUR_GLASS)
+    {
+        uv_rect = float4(g_inv_viewport_size, 0.0f, 0.0f);
+    }
     else if ((flags & (ETCH_FLAG_LINEAR_GRAD | ETCH_FLAG_RADIAL_GRAD)) != 0u)
     {
         col1 = unpack_rgba8_srgb_to_linear(p.payload.x);
@@ -374,6 +378,30 @@ float4 ps_main(VSOut input) : SV_Target0
             tex_pm = float4(texel.rgb * input.color0.rgb * ta, ta);
         }
         out_pm = (b_pm + tex_pm * (1.0f - b_pm.a)) * outer_cov;
+    }
+    else if (kind == ETCH_PRIM_BLUR_GLASS)
+    {
+        float2 backdrop_uv = saturate(input.pixel_pos * input.uv_rect.xy);
+        float3 blur_lin    = sample_slot(tex_slot, backdrop_uv).rgb;
+        float3 glass_lin   = lerp(blur_lin, input.color0.rgb, input.color0.a);
+
+        // Apply +-0.5/255 IGN dithering in sRGB space before converting back to linear.
+        float3 glass_srgb = linear_to_srgb(saturate(glass_lin));
+        float  ign        = frac(52.9829189f * frac(dot(input.pixel_pos, float2(0.06711056f, 0.00583715f))));
+        glass_srgb        = saturate(glass_srgb + (ign - 0.5f) * (1.0f / 255.0f));
+        glass_lin         = srgb_to_linear(glass_srgb);
+
+        float d         = sd_rounded_box(p_rel, half_size, input.radii);
+        float border_w  = input.grad_params.z;
+        float softness  = input.grad_params.w;
+        float inv_aa    = 1.0f / max(softness, 0.5f);
+        float outer_cov = saturate(0.5f - d * inv_aa);
+        float inner_cov = (border_w > 0.0f) ? saturate(0.5f - (d + border_w)) : 1.0f;
+        float border_t  = 1.0f - inner_cov;
+
+        float4 b_pm = float4(input.border_color.rgb, 1.0f) * (input.border_color.a * border_t);
+        float4 g_pm = float4(glass_lin, 1.0f);
+        out_pm      = (b_pm + g_pm * (1.0f - b_pm.a)) * outer_cov;
     }
 
     out_pm *= clip_cov;

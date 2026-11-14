@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(etch VERSION 0.3.0 LANGUAGES C CXX)
+project(etch VERSION 0.6.0 LANGUAGES C CXX)
 
 option(ETCH_BUILD_EXAMPLES "Build Etch sandbox example" ON)
 
@@ -54,12 +54,17 @@ if (NOT ETCH_DXC_EXE)
 endif ()
 
 set(ETCH_UBER_SHADER "${CMAKE_CURRENT_SOURCE_DIR}/shaders/etch_uber.hlsl")
+set(ETCH_KAWASE_SHADER "${CMAKE_CURRENT_SOURCE_DIR}/shaders/etch_kawase.hlsl")
 set(ETCH_SHADER_GEN_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders_gen")
 set(ETCH_SHADER_HEADERS
     "${ETCH_SHADER_GEN_DIR}/etch_uber_vs_dxil.h"
     "${ETCH_SHADER_GEN_DIR}/etch_uber_ps_dxil.h"
     "${ETCH_SHADER_GEN_DIR}/etch_uber_vs_spv.h"
     "${ETCH_SHADER_GEN_DIR}/etch_uber_ps_spv.h"
+    "${ETCH_SHADER_GEN_DIR}/etch_kawase_vs_dxil.h"
+    "${ETCH_SHADER_GEN_DIR}/etch_kawase_ps_dxil.h"
+    "${ETCH_SHADER_GEN_DIR}/etch_kawase_vs_spv.h"
+    "${ETCH_SHADER_GEN_DIR}/etch_kawase_ps_spv.h"
 )
 
 if (ETCH_DXC_EXE)
@@ -77,6 +82,22 @@ if (ETCH_DXC_EXE)
                 -Fh "${ETCH_SHADER_GEN_DIR}/etch_uber_ps_dxil.h" "${ETCH_UBER_SHADER}"
         DEPENDS "${ETCH_UBER_SHADER}"
         COMMENT "Compiling etch_uber.hlsl (ps_6_0 DXIL)"
+        VERBATIM
+    )
+    add_custom_command(
+        OUTPUT  "${ETCH_SHADER_GEN_DIR}/etch_kawase_vs_dxil.h"
+        COMMAND "${ETCH_DXC_EXE}" -T vs_6_0 -E vs_main -O3 -WX -Ges -Vn g_etch_kawase_vs_dxil
+                -Fh "${ETCH_SHADER_GEN_DIR}/etch_kawase_vs_dxil.h" "${ETCH_KAWASE_SHADER}"
+        DEPENDS "${ETCH_KAWASE_SHADER}"
+        COMMENT "Compiling etch_kawase.hlsl (vs_6_0 DXIL)"
+        VERBATIM
+    )
+    add_custom_command(
+        OUTPUT  "${ETCH_SHADER_GEN_DIR}/etch_kawase_ps_dxil.h"
+        COMMAND "${ETCH_DXC_EXE}" -T ps_6_0 -E ps_main -O3 -WX -Ges -Vn g_etch_kawase_ps_dxil
+                -Fh "${ETCH_SHADER_GEN_DIR}/etch_kawase_ps_dxil.h" "${ETCH_KAWASE_SHADER}"
+        DEPENDS "${ETCH_KAWASE_SHADER}"
+        COMMENT "Compiling etch_kawase.hlsl (ps_6_0 DXIL)"
         VERBATIM
     )
 
@@ -103,6 +124,22 @@ if (ETCH_DXC_EXE)
                     -Vn g_etch_uber_ps_spv -Fh "${ETCH_SHADER_GEN_DIR}/etch_uber_ps_spv.h" "${ETCH_UBER_SHADER}"
             DEPENDS "${ETCH_UBER_SHADER}"
             COMMENT "Compiling etch_uber.hlsl (ps_6_0 SPIR-V)"
+            VERBATIM
+        )
+        add_custom_command(
+            OUTPUT  "${ETCH_SHADER_GEN_DIR}/etch_kawase_vs_spv.h"
+            COMMAND "${ETCH_DXC_EXE}" -spirv "-fspv-target-env=vulkan1.0" -T vs_6_0 -E vs_main -O3 -WX -Ges
+                    -Vn g_etch_kawase_vs_spv -Fh "${ETCH_SHADER_GEN_DIR}/etch_kawase_vs_spv.h" "${ETCH_KAWASE_SHADER}"
+            DEPENDS "${ETCH_KAWASE_SHADER}"
+            COMMENT "Compiling etch_kawase.hlsl (vs_6_0 SPIR-V)"
+            VERBATIM
+        )
+        add_custom_command(
+            OUTPUT  "${ETCH_SHADER_GEN_DIR}/etch_kawase_ps_spv.h"
+            COMMAND "${ETCH_DXC_EXE}" -spirv "-fspv-target-env=vulkan1.0" -T ps_6_0 -E ps_main -O3 -WX -Ges
+                    -Vn g_etch_kawase_ps_spv -Fh "${ETCH_SHADER_GEN_DIR}/etch_kawase_ps_spv.h" "${ETCH_KAWASE_SHADER}"
+            DEPENDS "${ETCH_KAWASE_SHADER}"
+            COMMENT "Compiling etch_kawase.hlsl (ps_6_0 SPIR-V)"
             VERBATIM
         )
     endif ()

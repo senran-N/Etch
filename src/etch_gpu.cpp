@@ -36,30 +36,37 @@ inline SDL_FColor make_clear_fcolor(Color c, SDL_GPUTextureFormat target_fmt) no
     };
 }
 
-SDL_GPUGraphicsPipeline* get_or_create_pipeline(Context* ctx, SDL_GPUTextureFormat target_fmt) noexcept {
-    if (!ctx || !ctx->device || !ctx->vs_shader || !ctx->ps_shader ||
-        target_fmt == SDL_GPU_TEXTUREFORMAT_INVALID)
-    {
-        return nullptr;
-    }
+inline constexpr SDL_GPUTextureFormat kBlurTexFormat = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB;
 
-    for (uint32_t i = 0u; i < ctx->pipeline_count; ++i) {
-        if (ctx->pipelines[i].format == target_fmt) {
-            return ctx->pipelines[i].pipeline;
-        }
-    }
-    if (ctx->pipeline_count >= kMaxCachedPipelines) {
-        return nullptr;
-    }
+struct alignas(16) KawaseUniform {
+    float    texel_size[2];
+    float    offset;
+    uint32_t mode;
+};
+static_assert(sizeof(KawaseUniform) == 16);
+static_assert(sizeof(KawaseUniform) % 16 == 0);
 
+inline float clampf_blur(float v, float lo, float hi) noexcept {
+    return (v < lo) ? lo : ((v > hi) ? hi : v);
+}
+
+SDL_GPUGraphicsPipeline* create_graphics_pipeline(
+    SDL_GPUDevice* device,
+    SDL_GPUShader* vs,
+    SDL_GPUShader* ps,
+    SDL_GPUTextureFormat target_fmt,
+    bool enable_blend) noexcept
+{
     SDL_GPUColorTargetBlendState blend = {};
-    blend.enable_blend = true;
-    blend.src_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
-    blend.dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
-    blend.color_blend_op = SDL_GPU_BLENDOP_ADD;
-    blend.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
-    blend.dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
-    blend.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
+    blend.enable_blend = enable_blend;
+    if (enable_blend) {
+        blend.src_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+        blend.dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+        blend.color_blend_op = SDL_GPU_BLENDOP_ADD;
+        blend.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+        blend.dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+        blend.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
+    }
     blend.color_write_mask =
         SDL_GPU_COLORCOMPONENT_R | SDL_GPU_COLORCOMPONENT_G |
         SDL_GPU_COLORCOMPONENT_B | SDL_GPU_COLORCOMPONENT_A;
@@ -70,8 +77,8 @@ SDL_GPUGraphicsPipeline* get_or_create_pipeline(Context* ctx, SDL_GPUTextureForm
     };
 
     SDL_GPUGraphicsPipelineCreateInfo info = {};
-    info.vertex_shader = ctx->vs_shader;
-    info.fragment_shader = ctx->ps_shader;
+    info.vertex_shader = vs;
+    info.fragment_shader = ps;
     info.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
     info.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
     info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
@@ -82,17 +89,304 @@ SDL_GPUGraphicsPipeline* get_or_create_pipeline(Context* ctx, SDL_GPUTextureForm
     info.target_info.num_color_targets = 1u;
     info.target_info.has_depth_stencil_target = false;
 
-    SDL_GPUGraphicsPipeline* pipe = SDL_CreateGPUGraphicsPipeline(ctx->device, &info);
+    SDL_GPUGraphicsPipeline* pipe = SDL_CreateGPUGraphicsPipeline(device, &info);
     if (!pipe) {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "SDL_CreateGPUGraphicsPipeline failed: %s", SDL_GetError());
         return nullptr;
     }
+    return pipe;
+}
 
-    ctx->pipelines[ctx->pipeline_count++] = CachedPipeline{
+SDL_GPUGraphicsPipeline* get_or_create_cached_pipeline(
+    SDL_GPUDevice* device,
+    SDL_GPUShader* vs,
+    SDL_GPUShader* ps,
+    SDL_GPUTextureFormat target_fmt,
+    bool enable_blend,
+    CachedPipeline* cache,
+    uint32_t* count) noexcept
+{
+    if (!device || !vs || !ps || target_fmt == SDL_GPU_TEXTUREFORMAT_INVALID) {
+        return nullptr;
+    }
+    for (uint32_t i = 0u; i < *count; ++i) {
+        if (cache[i].format == target_fmt) {
+            return cache[i].pipeline;
+        }
+    }
+    if (*count >= kMaxCachedPipelines) {
+        return nullptr;
+    }
+    SDL_GPUGraphicsPipeline* pipe = create_graphics_pipeline(device, vs, ps, target_fmt, enable_blend);
+    if (!pipe) {
+        return nullptr;
+    }
+    cache[(*count)++] = CachedPipeline{
         .format = target_fmt,
         .pipeline = pipe,
     };
     return pipe;
+}
+
+SDL_GPUGraphicsPipeline* get_or_create_pipeline(Context* ctx, SDL_GPUTextureFormat target_fmt) noexcept {
+    if (!ctx) {
+        return nullptr;
+    }
+    return get_or_create_cached_pipeline(
+        ctx->device,
+        ctx->vs_shader,
+        ctx->ps_shader,
+        target_fmt,
+        true,
+        ctx->pipelines,
+        &ctx->pipeline_count);
+}
+
+SDL_GPUGraphicsPipeline* get_or_create_present_pipeline(Context* ctx, SDL_GPUTextureFormat target_fmt) noexcept {
+    if (!ctx) {
+        return nullptr;
+    }
+    return get_or_create_cached_pipeline(
+        ctx->device,
+        ctx->kawase_vs_shader,
+        ctx->kawase_ps_shader,
+        target_fmt,
+        false,
+        ctx->present_pipelines,
+        &ctx->present_pipeline_count);
+}
+
+SDL_GPUGraphicsPipeline* get_or_create_kawase_pipeline(Context* ctx) noexcept {
+    if (!ctx->kawase_pipe) {
+        ctx->kawase_pipe = create_graphics_pipeline(
+            ctx->device,
+            ctx->kawase_vs_shader,
+            ctx->kawase_ps_shader,
+            kBlurTexFormat,
+            false);
+    }
+    return ctx->kawase_pipe;
+}
+
+void release_blur_targets(Context* ctx) noexcept {
+    if (ctx->scene_tex) {
+        SDL_ReleaseGPUTexture(ctx->device, ctx->scene_tex);
+        ctx->scene_tex = nullptr;
+    }
+    if (ctx->blur_half_tex) {
+        SDL_ReleaseGPUTexture(ctx->device, ctx->blur_half_tex);
+        ctx->blur_half_tex = nullptr;
+    }
+    if (ctx->blur_quarter_tex) {
+        SDL_ReleaseGPUTexture(ctx->device, ctx->blur_quarter_tex);
+        ctx->blur_quarter_tex = nullptr;
+    }
+    ctx->blur_rt_w = 0u;
+    ctx->blur_rt_h = 0u;
+}
+
+bool ensure_blur_targets(Context* ctx, uint32_t width, uint32_t height) noexcept {
+    if (ctx->scene_tex && ctx->blur_half_tex && ctx->blur_quarter_tex &&
+        ctx->blur_rt_w == width && ctx->blur_rt_h == height)
+    {
+        return true;
+    }
+    release_blur_targets(ctx);
+
+    const uint32_t half_w = (width > 1u) ? (width / 2u) : 1u;
+    const uint32_t half_h = (height > 1u) ? (height / 2u) : 1u;
+    const uint32_t quarter_w = (width > 3u) ? (width / 4u) : 1u;
+    const uint32_t quarter_h = (height > 3u) ? (height / 4u) : 1u;
+
+    auto make_rt = [&](uint32_t w, uint32_t h) noexcept -> SDL_GPUTexture* {
+        const SDL_GPUTextureCreateInfo info = {
+            .type = SDL_GPU_TEXTURETYPE_2D,
+            .format = kBlurTexFormat,
+            .usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER,
+            .width = w,
+            .height = h,
+            .layer_count_or_depth = 1u,
+            .num_levels = 1u,
+            .sample_count = SDL_GPU_SAMPLECOUNT_1,
+            .props = 0u,
+        };
+        return SDL_CreateGPUTexture(ctx->device, &info);
+    };
+
+    ctx->scene_tex = make_rt(width, height);
+    ctx->blur_half_tex = make_rt(half_w, half_h);
+    ctx->blur_quarter_tex = make_rt(quarter_w, quarter_h);
+    if (!ctx->scene_tex || !ctx->blur_half_tex || !ctx->blur_quarter_tex) {
+        release_blur_targets(ctx);
+        return false;
+    }
+    ctx->blur_rt_w = width;
+    ctx->blur_rt_h = height;
+    return true;
+}
+
+void emit_uber_batches(
+    Context* ctx,
+    SDL_GPUCommandBuffer* cmd,
+    SDL_GPURenderPass* render_pass,
+    SDL_GPUGraphicsPipeline* pipeline,
+    SDL_GPUTextureFormat target_fmt,
+    uint32_t target_w,
+    uint32_t target_h,
+    uint32_t begin_batch,
+    uint32_t end_batch) noexcept
+{
+    if (ctx->prim_count == 0u || begin_batch >= end_batch) {
+        return;
+    }
+
+    SDL_BindGPUGraphicsPipeline(render_pass, pipeline);
+
+    const SDL_GPUViewport viewport = {
+        .x = 0.0f,
+        .y = 0.0f,
+        .w = static_cast<float>(target_w),
+        .h = static_cast<float>(target_h),
+        .min_depth = 0.0f,
+        .max_depth = 1.0f,
+    };
+    SDL_SetGPUViewport(render_pass, &viewport);
+
+    const SDL_Rect scissor = {
+        .x = 0,
+        .y = 0,
+        .w = static_cast<int>(target_w),
+        .h = static_cast<int>(target_h),
+    };
+    SDL_SetGPUScissor(render_pass, &scissor);
+
+    SDL_GPUBuffer* storage_bufs[1] = { ctx->prim_gpu_buf };
+    SDL_BindGPUVertexStorageBuffers(render_pass, 0u, storage_bufs, 1u);
+
+    const uint32_t manual_srgb_bit = is_srgb_gpu_format(target_fmt) ? 0u : (1u << 31);
+    const float inv_w = 1.0f / static_cast<float>(target_w);
+    const float inv_h = 1.0f / static_cast<float>(target_h);
+    SDL_GPUTexture* sentinel = blur_tex_sentinel();
+
+    for (uint32_t b = begin_batch; b < end_batch; ++b) {
+        const DrawBatch& batch = ctx->batches[b];
+        if (batch.prim_count == 0u) {
+            continue;
+        }
+
+        auto resolve_tex = [&](SDL_GPUTexture* t) noexcept -> SDL_GPUTexture* {
+            if (t == sentinel) {
+                return ctx->blur_half_tex ? ctx->blur_half_tex : ctx->atlas.gpu_tex;
+            }
+            return t ? t : ctx->atlas.gpu_tex;
+        };
+
+        SDL_GPUTextureSamplerBinding bindings[4] = {
+            { ctx->atlas.gpu_tex, ctx->linear_sampler },
+            { resolve_tex(batch.ext_textures[0]), ctx->linear_sampler },
+            { resolve_tex(batch.ext_textures[1]), ctx->linear_sampler },
+            { resolve_tex(batch.ext_textures[2]), ctx->linear_sampler },
+        };
+        SDL_BindGPUFragmentSamplers(render_pass, 0u, bindings, 4u);
+
+        const GlobalsUniform globals = {
+            .viewport_size = { static_cast<float>(target_w), static_cast<float>(target_h) },
+            .inv_viewport_size = { inv_w, inv_h },
+            .dpi_scale = ctx->dpi_scale,
+            .time_seconds = ctx->elapsed_seconds,
+            .frame_index = ctx->frame_index,
+            .flags = (batch.first_prim & 0x00FFFFFFu) | manual_srgb_bit,
+        };
+        SDL_PushGPUVertexUniformData(cmd, 0u, &globals, static_cast<Uint32>(sizeof(globals)));
+
+        // Portable across D3D12/Vulkan/Metal: always pass 0 for first_vertex & first_instance.
+        SDL_DrawGPUPrimitives(render_pass, 6u, batch.prim_count, 0u, 0u);
+    }
+}
+
+bool run_uber_render_pass(
+    Context* ctx,
+    SDL_GPUCommandBuffer* cmd,
+    SDL_GPUTexture* dst_tex,
+    SDL_GPUTextureFormat dst_fmt,
+    uint32_t dst_w,
+    uint32_t dst_h,
+    SDL_GPUGraphicsPipeline* pipeline,
+    SDL_GPULoadOp load_op,
+    Color clear_color,
+    uint32_t begin_batch,
+    uint32_t end_batch) noexcept
+{
+    SDL_GPUColorTargetInfo color_target = {};
+    color_target.texture = dst_tex;
+    color_target.clear_color = make_clear_fcolor(clear_color, dst_fmt);
+    color_target.load_op = load_op;
+    color_target.store_op = SDL_GPU_STOREOP_STORE;
+
+    SDL_GPURenderPass* render_pass = SDL_BeginGPURenderPass(cmd, &color_target, 1u, nullptr);
+    if (!render_pass) {
+        return false;
+    }
+    emit_uber_batches(ctx, cmd, render_pass, pipeline, dst_fmt, dst_w, dst_h, begin_batch, end_batch);
+    SDL_EndGPURenderPass(render_pass);
+    return true;
+}
+
+bool run_kawase_step(
+    Context* ctx,
+    SDL_GPUCommandBuffer* cmd,
+    SDL_GPUGraphicsPipeline* pipe,
+    SDL_GPUTexture* src_tex,
+    SDL_GPUTexture* dst_tex,
+    uint32_t dst_w,
+    uint32_t dst_h,
+    float texel_x,
+    float texel_y,
+    float offset,
+    uint32_t mode) noexcept
+{
+    SDL_GPUColorTargetInfo ct = {};
+    ct.texture = dst_tex;
+    ct.load_op = SDL_GPU_LOADOP_DONT_CARE;
+    ct.store_op = SDL_GPU_STOREOP_STORE;
+
+    SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(cmd, &ct, 1u, nullptr);
+    if (!pass) {
+        return false;
+    }
+
+    SDL_BindGPUGraphicsPipeline(pass, pipe);
+
+    const SDL_GPUViewport viewport = {
+        .x = 0.0f,
+        .y = 0.0f,
+        .w = static_cast<float>(dst_w),
+        .h = static_cast<float>(dst_h),
+        .min_depth = 0.0f,
+        .max_depth = 1.0f,
+    };
+    SDL_SetGPUViewport(pass, &viewport);
+
+    const SDL_Rect scissor = {
+        .x = 0,
+        .y = 0,
+        .w = static_cast<int>(dst_w),
+        .h = static_cast<int>(dst_h),
+    };
+    SDL_SetGPUScissor(pass, &scissor);
+
+    const SDL_GPUTextureSamplerBinding smp = { src_tex, ctx->linear_sampler };
+    SDL_BindGPUFragmentSamplers(pass, 0u, &smp, 1u);
+
+    const KawaseUniform u = {
+        .texel_size = { texel_x, texel_y },
+        .offset = offset,
+        .mode = mode,
+    };
+    SDL_PushGPUFragmentUniformData(cmd, 0u, &u, static_cast<Uint32>(sizeof(u)));
+    SDL_DrawGPUPrimitives(pass, 3u, 1u, 0u, 0u);
+    SDL_EndGPURenderPass(pass);
+    return true;
 }
 
 bool claim_window_swapchain(Context* ctx, SDL_Window* win) noexcept {
@@ -212,76 +506,152 @@ bool record_frame_commands(
         SDL_EndGPUCopyPass(copy_pass);
     }
 
-    SDL_GPUColorTargetInfo color_target = {};
-    color_target.texture = target_tex;
-    color_target.clear_color = make_clear_fcolor(clear_color, target_fmt);
-    color_target.load_op = SDL_GPU_LOADOP_CLEAR;
-    color_target.store_op = SDL_GPU_STOREOP_STORE;
+    if (ctx->blur_split_count == 0u) {
+        return run_uber_render_pass(
+            ctx,
+            cmd,
+            target_tex,
+            target_fmt,
+            target_w,
+            target_h,
+            pipeline,
+            SDL_GPU_LOADOP_CLEAR,
+            clear_color,
+            0u,
+            ctx->batch_count);
+    }
 
-    SDL_GPURenderPass* render_pass = SDL_BeginGPURenderPass(cmd, &color_target, 1u, nullptr);
-    if (!render_pass) {
+    if (!ensure_blur_targets(ctx, target_w, target_h)) {
+        return false;
+    }
+    SDL_GPUGraphicsPipeline* scene_pipe = get_or_create_pipeline(ctx, kBlurTexFormat);
+    SDL_GPUGraphicsPipeline* kawase_pipe = get_or_create_kawase_pipeline(ctx);
+    const bool target_srgb = is_srgb_gpu_format(target_fmt);
+    SDL_GPUGraphicsPipeline* present_pipe = target_srgb ? nullptr : get_or_create_present_pipeline(ctx, target_fmt);
+    if (!scene_pipe || !kawase_pipe || (!target_srgb && !present_pipe)) {
         return false;
     }
 
-    if (ctx->prim_count > 0u && ctx->batch_count > 0u) {
-        SDL_BindGPUGraphicsPipeline(render_pass, pipeline);
+    const uint32_t half_w = (target_w > 1u) ? (target_w / 2u) : 1u;
+    const uint32_t half_h = (target_h > 1u) ? (target_h / 2u) : 1u;
+    const uint32_t quarter_w = (target_w > 3u) ? (target_w / 4u) : 1u;
+    const uint32_t quarter_h = (target_h > 3u) ? (target_h / 4u) : 1u;
 
-        const SDL_GPUViewport viewport = {
-            .x = 0.0f,
-            .y = 0.0f,
-            .w = static_cast<float>(target_w),
-            .h = static_cast<float>(target_h),
-            .min_depth = 0.0f,
-            .max_depth = 1.0f,
-        };
-        SDL_SetGPUViewport(render_pass, &viewport);
+    for (uint32_t s = 0u; s < ctx->blur_split_count; ++s) {
+        const uint32_t prev_batch = (s == 0u) ? 0u : ctx->blur_splits[s - 1u].split_batch;
+        const uint32_t split_batch = ctx->blur_splits[s].split_batch;
+        const float radius_px = ctx->blur_splits[s].blur_radius_px;
 
-        const SDL_Rect scissor = {
-            .x = 0,
-            .y = 0,
-            .w = static_cast<int>(target_w),
-            .h = static_cast<int>(target_h),
-        };
-        SDL_SetGPUScissor(render_pass, &scissor);
-
-        SDL_GPUBuffer* storage_bufs[1] = { ctx->prim_gpu_buf };
-        SDL_BindGPUVertexStorageBuffers(render_pass, 0u, storage_bufs, 1u);
-
-        const uint32_t manual_srgb_bit = is_srgb_gpu_format(target_fmt) ? 0u : (1u << 31);
-        const float inv_w = 1.0f / static_cast<float>(target_w);
-        const float inv_h = 1.0f / static_cast<float>(target_h);
-
-        for (uint32_t b = 0u; b < ctx->batch_count; ++b) {
-            const DrawBatch& batch = ctx->batches[b];
-            if (batch.prim_count == 0u) {
-                continue;
+        if (s == 0u || split_batch > prev_batch) {
+            if (!run_uber_render_pass(
+                    ctx,
+                    cmd,
+                    ctx->scene_tex,
+                    kBlurTexFormat,
+                    target_w,
+                    target_h,
+                    scene_pipe,
+                    (s == 0u) ? SDL_GPU_LOADOP_CLEAR : SDL_GPU_LOADOP_LOAD,
+                    clear_color,
+                    prev_batch,
+                    split_batch))
+            {
+                return false;
             }
+        }
 
-            SDL_GPUTextureSamplerBinding bindings[4] = {
-                { ctx->atlas.gpu_tex, ctx->linear_sampler },
-                { batch.ext_textures[0] ? batch.ext_textures[0] : ctx->atlas.gpu_tex, ctx->linear_sampler },
-                { batch.ext_textures[1] ? batch.ext_textures[1] : ctx->atlas.gpu_tex, ctx->linear_sampler },
-                { batch.ext_textures[2] ? batch.ext_textures[2] : ctx->atlas.gpu_tex, ctx->linear_sampler },
-            };
-            SDL_BindGPUFragmentSamplers(render_pass, 0u, bindings, 4u);
+        const float off_down1 = clampf_blur(1.0f + radius_px * 0.04f, 0.5f, 3.0f);
+        const float off_down2 = clampf_blur(1.0f + radius_px * 0.06f, 0.5f, 4.0f);
+        const float off_up    = clampf_blur(0.6f + radius_px * 0.03f, 0.5f, 2.5f);
 
-            const GlobalsUniform globals = {
-                .viewport_size = { static_cast<float>(target_w), static_cast<float>(target_h) },
-                .inv_viewport_size = { inv_w, inv_h },
-                .dpi_scale = ctx->dpi_scale,
-                .time_seconds = ctx->elapsed_seconds,
-                .frame_index = ctx->frame_index,
-                .flags = (batch.first_prim & 0x00FFFFFFu) | manual_srgb_bit,
-            };
-            SDL_PushGPUVertexUniformData(cmd, 0u, &globals, static_cast<Uint32>(sizeof(globals)));
-
-            // Portable across D3D12/Vulkan/Metal: always pass 0 for first_vertex & first_instance.
-            SDL_DrawGPUPrimitives(render_pass, 6u, batch.prim_count, 0u, 0u);
+        if (!run_kawase_step(
+                ctx, cmd, kawase_pipe,
+                ctx->scene_tex, ctx->blur_half_tex, half_w, half_h,
+                1.0f / static_cast<float>(target_w), 1.0f / static_cast<float>(target_h),
+                off_down1, 0u))
+        {
+            return false;
+        }
+        if (!run_kawase_step(
+                ctx, cmd, kawase_pipe,
+                ctx->blur_half_tex, ctx->blur_quarter_tex, quarter_w, quarter_h,
+                1.0f / static_cast<float>(half_w), 1.0f / static_cast<float>(half_h),
+                off_down2, 0u))
+        {
+            return false;
+        }
+        if (!run_kawase_step(
+                ctx, cmd, kawase_pipe,
+                ctx->blur_quarter_tex, ctx->blur_half_tex, half_w, half_h,
+                1.0f / static_cast<float>(quarter_w), 1.0f / static_cast<float>(quarter_h),
+                off_up, 1u))
+        {
+            return false;
         }
     }
 
-    SDL_EndGPURenderPass(render_pass);
-    return true;
+    const uint32_t last_batch = ctx->blur_splits[ctx->blur_split_count - 1u].split_batch;
+    if (target_srgb) {
+        const SDL_GPUBlitInfo blit = {
+            .source = {
+                .texture = ctx->scene_tex,
+                .mip_level = 0u,
+                .layer_or_depth_plane = 0u,
+                .x = 0u,
+                .y = 0u,
+                .w = target_w,
+                .h = target_h,
+            },
+            .destination = {
+                .texture = target_tex,
+                .mip_level = 0u,
+                .layer_or_depth_plane = 0u,
+                .x = 0u,
+                .y = 0u,
+                .w = target_w,
+                .h = target_h,
+            },
+            .load_op = SDL_GPU_LOADOP_DONT_CARE,
+            .clear_color = {},
+            .flip_mode = SDL_FLIP_NONE,
+            .filter = SDL_GPU_FILTER_NEAREST,
+            .cycle = false,
+        };
+        SDL_BlitGPUTexture(cmd, &blit);
+        return run_uber_render_pass(
+            ctx,
+            cmd,
+            target_tex,
+            target_fmt,
+            target_w,
+            target_h,
+            pipeline,
+            SDL_GPU_LOADOP_LOAD,
+            clear_color,
+            last_batch,
+            ctx->batch_count);
+    }
+
+    if (!run_uber_render_pass(
+            ctx,
+            cmd,
+            ctx->scene_tex,
+            kBlurTexFormat,
+            target_w,
+            target_h,
+            scene_pipe,
+            SDL_GPU_LOADOP_LOAD,
+            clear_color,
+            last_batch,
+            ctx->batch_count))
+    {
+        return false;
+    }
+    return run_kawase_step(
+        ctx, cmd, present_pipe,
+        ctx->scene_tex, target_tex, target_w, target_h,
+        1.0f / static_cast<float>(target_w), 1.0f / static_cast<float>(target_h),
+        0.0f, 2u);
 }
 
 bool ensure_headless_resources(Context* ctx, uint32_t width, uint32_t height, uint32_t stride_bytes) noexcept {
@@ -414,6 +784,10 @@ Context* create_context(const ContextDesc& desc) noexcept {
     size_t vs_size = 0;
     const Uint8* ps_code = nullptr;
     size_t ps_size = 0;
+    const Uint8* kawase_vs_code = nullptr;
+    size_t kawase_vs_size = 0;
+    const Uint8* kawase_ps_code = nullptr;
+    size_t kawase_ps_size = 0;
 
     if ((supported & SDL_GPU_SHADERFORMAT_DXIL) != 0u) {
         chosen_fmt = SDL_GPU_SHADERFORMAT_DXIL;
@@ -421,12 +795,20 @@ Context* create_context(const ContextDesc& desc) noexcept {
         vs_size = sizeof(g_etch_uber_vs_dxil);
         ps_code = g_etch_uber_ps_dxil;
         ps_size = sizeof(g_etch_uber_ps_dxil);
+        kawase_vs_code = g_etch_kawase_vs_dxil;
+        kawase_vs_size = sizeof(g_etch_kawase_vs_dxil);
+        kawase_ps_code = g_etch_kawase_ps_dxil;
+        kawase_ps_size = sizeof(g_etch_kawase_ps_dxil);
     } else if ((supported & SDL_GPU_SHADERFORMAT_SPIRV) != 0u) {
         chosen_fmt = SDL_GPU_SHADERFORMAT_SPIRV;
         vs_code = g_etch_uber_vs_spv;
         vs_size = sizeof(g_etch_uber_vs_spv);
         ps_code = g_etch_uber_ps_spv;
         ps_size = sizeof(g_etch_uber_ps_spv);
+        kawase_vs_code = g_etch_kawase_vs_spv;
+        kawase_vs_size = sizeof(g_etch_kawase_vs_spv);
+        kawase_ps_code = g_etch_kawase_ps_spv;
+        kawase_ps_size = sizeof(g_etch_kawase_ps_spv);
     } else {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "No compatible shader format (DXIL/SPIR-V) supported by SDL_GPUDevice");
         destroy_context(ctx);
@@ -461,7 +843,37 @@ Context* create_context(const ContextDesc& desc) noexcept {
     };
     ctx->ps_shader = SDL_CreateGPUShader(ctx->device, &ps_info);
 
-    if (!ctx->vs_shader || !ctx->ps_shader) {
+    const SDL_GPUShaderCreateInfo kawase_vs_info = {
+        .code_size = kawase_vs_size,
+        .code = kawase_vs_code,
+        .entrypoint = "vs_main",
+        .format = chosen_fmt,
+        .stage = SDL_GPU_SHADERSTAGE_VERTEX,
+        .num_samplers = 0u,
+        .num_storage_textures = 0u,
+        .num_storage_buffers = 0u,
+        .num_uniform_buffers = 0u,
+        .props = 0u,
+    };
+    ctx->kawase_vs_shader = SDL_CreateGPUShader(ctx->device, &kawase_vs_info);
+
+    const SDL_GPUShaderCreateInfo kawase_ps_info = {
+        .code_size = kawase_ps_size,
+        .code = kawase_ps_code,
+        .entrypoint = "ps_main",
+        .format = chosen_fmt,
+        .stage = SDL_GPU_SHADERSTAGE_FRAGMENT,
+        .num_samplers = 1u,
+        .num_storage_textures = 0u,
+        .num_storage_buffers = 0u,
+        .num_uniform_buffers = 1u,
+        .props = 0u,
+    };
+    ctx->kawase_ps_shader = SDL_CreateGPUShader(ctx->device, &kawase_ps_info);
+
+    if (!ctx->vs_shader || !ctx->ps_shader ||
+        !ctx->kawase_vs_shader || !ctx->kawase_ps_shader)
+    {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "SDL_CreateGPUShader failed: %s", SDL_GetError());
         destroy_context(ctx);
         return nullptr;
@@ -579,13 +991,22 @@ void destroy_context(Context* ctx) noexcept {
                 SDL_ReleaseGPUGraphicsPipeline(ctx->device, ctx->pipelines[i].pipeline);
             }
         }
+        for (uint32_t i = 0u; i < ctx->present_pipeline_count; ++i) {
+            if (ctx->present_pipelines[i].pipeline) {
+                SDL_ReleaseGPUGraphicsPipeline(ctx->device, ctx->present_pipelines[i].pipeline);
+            }
+        }
+        if (ctx->kawase_pipe) SDL_ReleaseGPUGraphicsPipeline(ctx->device, ctx->kawase_pipe);
         if (ctx->vs_shader) SDL_ReleaseGPUShader(ctx->device, ctx->vs_shader);
         if (ctx->ps_shader) SDL_ReleaseGPUShader(ctx->device, ctx->ps_shader);
+        if (ctx->kawase_vs_shader) SDL_ReleaseGPUShader(ctx->device, ctx->kawase_vs_shader);
+        if (ctx->kawase_ps_shader) SDL_ReleaseGPUShader(ctx->device, ctx->kawase_ps_shader);
         if (ctx->linear_sampler) SDL_ReleaseGPUSampler(ctx->device, ctx->linear_sampler);
         if (ctx->prim_gpu_buf) SDL_ReleaseGPUBuffer(ctx->device, ctx->prim_gpu_buf);
         if (ctx->prim_transfer_buf) SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->prim_transfer_buf);
         if (ctx->atlas_transfer_buf) SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->atlas_transfer_buf);
         if (ctx->atlas.gpu_tex) SDL_ReleaseGPUTexture(ctx->device, ctx->atlas.gpu_tex);
+        release_blur_targets(ctx);
         if (ctx->headless_tex) SDL_ReleaseGPUTexture(ctx->device, ctx->headless_tex);
         if (ctx->headless_dl_buf) SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->headless_dl_buf);
         if (ctx->window) SDL_ReleaseWindowFromGPUDevice(ctx->device, ctx->window);

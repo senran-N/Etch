@@ -606,10 +606,65 @@ void push_prim(
     final_p.style.x = (final_p.style.x & ~(0x3FFu << 10)) | ((static_cast<uint32_t>(tex_slot) & 0x3FFu) << 10);
     ctx->prims[ctx->prim_count++] = final_p;
     ++cur->prim_count;
+
+    const uint32_t pkind = final_p.style.x & 0xFu;
+    if (pkind != static_cast<uint32_t>(PrimKind::Shadow) &&
+        pkind != static_cast<uint32_t>(PrimKind::BlurGlass))
+    {
+        ctx->layer_has_bg_prims = true;
+    }
 }
 
 inline Corners scale_corners(Corners c, float dpi) noexcept {
     return Corners{ c.tl * dpi, c.tr * dpi, c.br * dpi, c.bl * dpi };
+}
+
+bool begin_blur_layer(Context* ctx, Rect box_px, float radius_px) noexcept {
+    if (!ctx->layer_has_bg_prims && ctx->blur_split_count > 0u) {
+        BlurSplit& cur = ctx->blur_splits[ctx->blur_split_count - 1u];
+        const bool overlaps =
+            box_px.x < (cur.union_bounds.x + cur.union_bounds.w) &&
+            (box_px.x + box_px.w) > cur.union_bounds.x &&
+            box_px.y < (cur.union_bounds.y + cur.union_bounds.h) &&
+            (box_px.y + box_px.h) > cur.union_bounds.y;
+        if (!overlaps) {
+            const float x0 = (box_px.x < cur.union_bounds.x) ? box_px.x : cur.union_bounds.x;
+            const float y0 = (box_px.y < cur.union_bounds.y) ? box_px.y : cur.union_bounds.y;
+            const float rx1 = box_px.x + box_px.w;
+            const float cx1 = cur.union_bounds.x + cur.union_bounds.w;
+            const float by1 = box_px.y + box_px.h;
+            const float cy1 = cur.union_bounds.y + cur.union_bounds.h;
+            const float x1 = (rx1 > cx1) ? rx1 : cx1;
+            const float y1 = (by1 > cy1) ? by1 : cy1;
+            cur.union_bounds = Rect{ x0, y0, x1 - x0, y1 - y0 };
+            if (radius_px > cur.blur_radius_px) {
+                cur.blur_radius_px = radius_px;
+            }
+            return true;
+        }
+    }
+    if (ctx->blur_split_count >= kMaxBlurSplits) {
+        return false;
+    }
+    if (ctx->batch_count > 0u && ctx->batches[ctx->batch_count - 1u].prim_count > 0u) {
+        if (ctx->batch_count >= kMaxBatches) {
+            return false;
+        }
+        ctx->batches[ctx->batch_count++] = DrawBatch{
+            .first_prim = ctx->prim_count,
+            .prim_count = 0u,
+            .ext_textures = {},
+            .ext_count = 0u,
+        };
+    }
+    const uint32_t split_batch = (ctx->batch_count > 0u) ? (ctx->batch_count - 1u) : 0u;
+    ctx->blur_splits[ctx->blur_split_count++] = BlurSplit{
+        .split_batch = split_batch,
+        .blur_radius_px = radius_px,
+        .union_bounds = box_px,
+    };
+    ctx->layer_has_bg_prims = false;
+    return true;
 }
 
 void emit_box_background_and_shadow(
@@ -624,6 +679,15 @@ void emit_box_background_and_shadow(
     }
     const BoxDesc& d = extra->desc;
     const Corners rad_px = scale_corners(d.radius, dpi);
+    const bool has_grad = (d.background_end.a > 0u) || d.radial_gradient;
+    const bool box_visible =
+        clip.rect.w > 0.0f && clip.rect.h > 0.0f &&
+        box_px.w > 0.0f && box_px.h > 0.0f &&
+        (box_px.x + box_px.w) > clip.rect.x && box_px.x < (clip.rect.x + clip.rect.w) &&
+        (box_px.y + box_px.h) > clip.rect.y && box_px.y < (clip.rect.y + clip.rect.h);
+    const bool use_blur =
+        (d.backdrop_blur > 0.0f) && !has_grad && box_visible &&
+        begin_blur_layer(ctx, box_px, d.backdrop_blur * dpi);
 
     if (d.shadow_color.a > 0u && d.shadow_blur > 0.0f) {
         const float blur_px = d.shadow_blur * dpi;
@@ -646,18 +710,30 @@ void emit_box_background_and_shadow(
             2.0f * blur_px + 2.0f);
     }
 
-    const bool has_grad = (d.background_end.a > 0u) || d.radial_gradient;
     const bool has_fill = (d.background.a > 0u) || has_grad;
     const bool any_clip = d.clip_children || d.scroll_x || d.scroll_y;
     const bool draw_border_here = !any_clip && d.border_width > 0.0f && d.border_color.a > 0u;
-    if (!has_fill && !draw_border_here) {
+    if (!has_fill && !draw_border_here && !use_blur) {
         return;
     }
 
     const Color border_col = draw_border_here ? d.border_color : Color{};
     const float border_w = draw_border_here ? (d.border_width * dpi) : 0.0f;
 
-    if (has_grad) {
+    if (use_blur) {
+        push_prim(
+            ctx,
+            Prim::make_blur_glass(
+                box_px,
+                clip.rect,
+                d.background,
+                rad_px,
+                border_col,
+                border_w,
+                0u,
+                clip.radius),
+            blur_tex_sentinel());
+    } else if (has_grad) {
         push_prim(
             ctx,
             Prim::make_gradient_rect(
@@ -1957,6 +2033,8 @@ void begin_frame(Context* ctx, const FrameDesc& desc) noexcept {
     ctx->frame_arena.reset();
     ctx->prim_count = 0u;
     ctx->batch_count = 0u;
+    ctx->blur_split_count = 0u;
+    ctx->layer_has_bg_prims = true;
 
     const float dpi = (desc.dpi_scale > 0.0f) ? desc.dpi_scale : 1.0f;
     ctx->viewport_w = (desc.viewport_w > 0u) ? desc.viewport_w : 1u;
@@ -2168,6 +2246,7 @@ void begin_box(const BoxDesc& desc) noexcept {
         desc.background_end.a > 0u ||
         desc.radial_gradient ||
         (desc.shadow_color.a > 0u && desc.shadow_blur > 0.0f) ||
+        desc.backdrop_blur > 0.0f ||
         has_border;
 
     BoxExtra* extra = nullptr;

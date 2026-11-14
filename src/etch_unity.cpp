@@ -22,6 +22,10 @@
 #include "etch_uber_ps_dxil.h"
 #include "etch_uber_vs_spv.h"
 #include "etch_uber_ps_spv.h"
+#include "etch_kawase_vs_dxil.h"
+#include "etch_kawase_ps_dxil.h"
+#include "etch_kawase_vs_spv.h"
+#include "etch_kawase_ps_spv.h"
 
 #define CLAY_IMPLEMENTATION
 #include "clay.h"

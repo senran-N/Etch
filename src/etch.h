@@ -9,7 +9,7 @@
 #include <type_traits>
 
 #define ETCH_VERSION_MAJOR 0
-#define ETCH_VERSION_MINOR 3
+#define ETCH_VERSION_MINOR 6
 #define ETCH_VERSION_PATCH 0
 
 #ifndef ETCH_ASSERT
@@ -608,6 +608,35 @@ struct alignas(16) Prim {
             },
         };
     }
+
+    static constexpr Prim make_blur_glass(
+        Rect rect,
+        Rect clip_rect,
+        Color tint,
+        Corners radius = {},
+        Color border_color = {},
+        float border_width = 0.0f,
+        uint16_t tex_slot = 0,
+        float clip_radius = 0.0f) noexcept
+    {
+        const uint8_t all_flags = static_cast<uint8_t>((clip_radius > 0.0f) ? PrimFlag_RoundedClip : PrimFlag_None);
+        return Prim{
+            .bounds = {rect.x, rect.y, rect.w, rect.h},
+            .clip = {clip_rect.x, clip_rect.y, clip_rect.x + clip_rect.w, clip_rect.y + clip_rect.h},
+            .payload = {
+                0u,
+                0u,
+                pack_f16x2(radius.tl, radius.tr),
+                pack_f16x2(radius.br, radius.bl),
+            },
+            .style = {
+                pack_header(PrimKind::BlurGlass, all_flags, tex_slot, clip_radius),
+                tint.pack_rgba8(),
+                border_color.pack_rgba8(),
+                pack_f16x2(border_width, 1.0f),
+            },
+        };
+    }
 };
 
 static_assert(sizeof(Prim) == 64);
@@ -788,6 +817,7 @@ struct BoxDesc {
     int16_t z_index = 10;
     bool pointer_passthrough = false;
     bool clip_to_parent = false;
+    float backdrop_blur = 0.0f;
 };
 
 struct TextDesc {

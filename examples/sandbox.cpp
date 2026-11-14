@@ -603,8 +603,8 @@ void build_sandbox_ui(AppState* app, const etch::FrameStats& prev_stats) noexcep
                                         .height = Sizing::fit(),
                                         .padding = Padding::all(10.0f),
                                         .gap = 5.0f,
-                                        .background = Color::rgb_hex(0x161D2E),
-                                        .border_color = Color::rgba8(56, 189, 248, 160),
+                                        .background = Color::rgba8(18, 25, 42, 138),
+                                        .border_color = Color::rgba8(125, 211, 252, 170),
                                         .border_width = 1.0f,
                                         .radius = Corners::all(12.0f),
                                         .shadow_color = Color::rgba8(0, 0, 0, 190),
@@ -615,6 +615,7 @@ void build_sandbox_ui(AppState* app, const etch::FrameStats& prev_stats) noexcep
                                         .anchor_parent = Anchor::BottomRight,
                                         .floating_offset = {-16.0f, 8.0f},
                                         .z_index = 50,
+                                        .backdrop_blur = 20.0f,
                                     }) {
                                         text("Floating Z=50 Layer (Passthrough Guarded)", {
                                             .color = Color::rgb_hex(0x7DD3FC),
@@ -1250,6 +1251,13 @@ int run_headless(const char* out_png_path) noexcept {
         return 1;
     }
 
+    const etch::FrameStats pre_blur_stats = etch::frame_stats(ctx);
+    if (pre_blur_stats.draw_call_count != 1u) {
+        std::fprintf(stderr, "Headless assert [8a] failed: expected 1 draw call without blur, got %u\n", pre_blur_stats.draw_call_count);
+        cleanup_release();
+        return 1;
+    }
+
     app.popover_open = true;
     app.selected_preset = 1u;
     for (int f = 0; f < 90 && (f < 2 || etch::needs_redraw(ctx)); ++f) {
@@ -1270,10 +1278,14 @@ int run_headless(const char* out_png_path) noexcept {
 
     const etch::FrameStats final_stats = etch::frame_stats(ctx);
     const etch::Vec2 final_scroll = etch::scroll_offset(scroll_id);
-    const bool stats_ok = (final_stats.draw_call_count == 1u) && final_stats.idle_sleeping;
+    const bool stats_ok = (final_stats.draw_call_count == 2u) && final_stats.idle_sleeping;
+    if (!stats_ok) {
+        std::fprintf(stderr, "Headless assert [8b] failed: expected draw_calls=2 and idle=1 with frosted popover, got draw_calls=%u idle=%d\n",
+            final_stats.draw_call_count, final_stats.idle_sleeping ? 1 : 0);
+    }
     const bool ok = png_ok && stats_ok;
     std::printf(
-        "Headless %s -> %s (asserts=7/7, prims=%u, draw_calls=%u, layout_ms=%.3f, gpu_submit_ms=%.3f, arena_used=%zuB, scroll_y=%.1f, focus=0x%08X, idle=%d)\n",
+        "Headless %s -> %s (asserts=8/8, prims=%u, draw_calls=%u, layout_ms=%.3f, gpu_submit_ms=%.3f, arena_used=%zuB, scroll_y=%.1f, focus=0x%08X, idle=%d)\n",
         ok ? "OK" : "FAILED",
         out_png_path,
         final_stats.prim_count,

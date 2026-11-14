@@ -15,6 +15,7 @@ inline constexpr uint32_t kDefaultStateCapacity = 1024u;
 inline constexpr uint32_t kMaxBatches = 256u;
 inline constexpr uint32_t kMaxClipDepth = 64u;
 inline constexpr uint32_t kMaxCachedPipelines = 4u;
+inline constexpr uint32_t kMaxBlurSplits = 2u;
 inline constexpr uint32_t kMaxFocusablePerFrame = 256u;
 inline constexpr uint32_t kCursorCount = 9u;
 inline constexpr uint32_t kMaxTextOpsPerFrame = 32u;
@@ -142,6 +143,17 @@ struct CachedPipeline {
     SDL_GPUGraphicsPipeline* pipeline = nullptr;
 };
 
+struct BlurSplit {
+    uint32_t split_batch = 0; // First batch in this glass layer (prior batches render into scene before blur)
+    float    blur_radius_px = 0.0f;
+    Rect     union_bounds = {};
+};
+
+inline SDL_GPUTexture* blur_tex_sentinel() noexcept {
+    static uint8_t s_blur_tex_tag = 0;
+    return reinterpret_cast<SDL_GPUTexture*>(&s_blur_tex_tag);
+}
+
 struct Context {
     Arena         frame_arena = {};
     void*         clay_mem = nullptr;
@@ -154,27 +166,42 @@ struct Context {
     uint32_t      prim_count = 0;
     DrawBatch     batches[kMaxBatches] = {};
     uint32_t      batch_count = 0;
+    BlurSplit     blur_splits[kMaxBlurSplits] = {};
+    uint32_t      blur_split_count = 0;
+    bool          layer_has_bg_prims = false;
 
     // GPU objects
-    SDL_GPUDevice*         device = nullptr;
-    SDL_Window*            window = nullptr;
-    bool                   owns_video_init = false;
-    bool                   headless = false;
-    SDL_GPUShader*         vs_shader = nullptr;
-    SDL_GPUShader*         ps_shader = nullptr;
-    SDL_GPUSampler*        linear_sampler = nullptr;
-    CachedPipeline         pipelines[kMaxCachedPipelines] = {};
-    uint32_t               pipeline_count = 0;
-    SDL_GPUBuffer*         prim_gpu_buf = nullptr;
-    SDL_GPUTransferBuffer* prim_transfer_buf = nullptr;
-    SDL_GPUTransferBuffer* atlas_transfer_buf = nullptr;
+    SDL_GPUDevice*           device = nullptr;
+    SDL_Window*              window = nullptr;
+    bool                     owns_video_init = false;
+    bool                     headless = false;
+    SDL_GPUShader*           vs_shader = nullptr;
+    SDL_GPUShader*           ps_shader = nullptr;
+    SDL_GPUShader*           kawase_vs_shader = nullptr;
+    SDL_GPUShader*           kawase_ps_shader = nullptr;
+    SDL_GPUSampler*          linear_sampler = nullptr;
+    CachedPipeline           pipelines[kMaxCachedPipelines] = {};
+    uint32_t                 pipeline_count = 0;
+    SDL_GPUGraphicsPipeline* kawase_pipe = nullptr;
+    CachedPipeline           present_pipelines[kMaxCachedPipelines] = {};
+    uint32_t                 present_pipeline_count = 0;
+    SDL_GPUBuffer*           prim_gpu_buf = nullptr;
+    SDL_GPUTransferBuffer*   prim_transfer_buf = nullptr;
+    SDL_GPUTransferBuffer*   atlas_transfer_buf = nullptr;
+
+    // Offscreen scene + dual-Kawase pyramid textures (R8G8B8A8_UNORM_SRGB)
+    SDL_GPUTexture*          scene_tex = nullptr;
+    SDL_GPUTexture*          blur_half_tex = nullptr;
+    SDL_GPUTexture*          blur_quarter_tex = nullptr;
+    uint32_t                 blur_rt_w = 0;
+    uint32_t                 blur_rt_h = 0;
 
     // Reusable offscreen target & readback buffer for render_headless_png
-    SDL_GPUTexture*        headless_tex = nullptr;
-    uint32_t               headless_w = 0;
-    uint32_t               headless_h = 0;
-    SDL_GPUTransferBuffer* headless_dl_buf = nullptr;
-    uint32_t               headless_dl_size = 0;
+    SDL_GPUTexture*          headless_tex = nullptr;
+    uint32_t                 headless_w = 0;
+    uint32_t                 headless_h = 0;
+    SDL_GPUTransferBuffer*   headless_dl_buf = nullptr;
+    uint32_t                 headless_dl_size = 0;
 
     // Per-frame & input tracking
     uint32_t   viewport_w = 1280u;
