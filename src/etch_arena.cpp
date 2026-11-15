@@ -18,15 +18,11 @@ inline constexpr uint32_t kMaxSlugBands = 8u;
 inline constexpr uint32_t kInitialSlugCurveCap = 4096u;
 inline constexpr uint32_t kInitialSlugBandCap = 8192u;
 inline constexpr uint32_t kDefaultStateCapacity = 1024u;
-inline constexpr uint32_t kMaxBatches = 256u;
 inline constexpr uint32_t kMaxClipDepth = 64u;
 inline constexpr uint32_t kMaxCachedPipelines = 4u;
-inline constexpr uint32_t kMaxBlurSplits = 4u;
 inline constexpr uint32_t kMaxSplitDepth = 32u;
 inline constexpr uint32_t kMaxCanvasDepth = 8u;
 inline constexpr uint32_t kHudHistorySamples = 64u;
-inline constexpr uint32_t kMaxFocusablePerFrame = 256u;
-inline constexpr uint32_t kMaxSpanHitsPerFrame = 256u;
 inline constexpr uint32_t kCursorCount = 10u;
 inline constexpr uint32_t kMaxTextOpsPerFrame = 32u;
 inline constexpr uint32_t kMaxPendingTextBytes = 1024u;
@@ -34,13 +30,8 @@ inline constexpr uint32_t kMaxImeCompBytes = 256u;
 inline constexpr uint32_t kMaxKeyEventsPerFrame = 32u;
 inline constexpr uint32_t kMaxDroppedFiles = 16u;
 inline constexpr uint32_t kMaxDroppedPathBytes = 2048u;
-inline constexpr uint32_t kTextUndoSlots = 8u;
-inline constexpr uint32_t kTextUndoMaxEntries = 32u;
-inline constexpr uint32_t kTextUndoByteCap = 8192u;
-inline constexpr uint32_t kMaxClaimedWindows = 8u;
 inline constexpr uint32_t kMaxChromeDragRects = 16u;
 inline constexpr uint32_t kMaxChromeClientRects = 128u;
-inline constexpr uint32_t kMaxDragPayloadBytes = 64u;
 inline constexpr uint32_t kMaxDragLabelBytes = 64u;
 
 struct WidgetState {
@@ -164,11 +155,15 @@ struct ShapedGlyph {
     uint32_t glyph_id = 0;
     uint32_t cluster = 0;
     uint16_t font_slot = 0;
-    uint16_t pad0 = 0;
+    uint8_t is_rtl = 0;
+    uint8_t flags = 0;
+    uint32_t cluster_end = 0;
     float    x_advance_1px = 0.0f;
     float    x_offset_em = 0.0f;
     float    y_offset_em = 0.0f;
 };
+
+static_assert(sizeof(ShapedGlyph) == 28);
 
 struct FontSlot {
     stbtt_fontinfo font_info = {};
@@ -181,6 +176,14 @@ struct FontSlot {
     float          ascent_em = 0.8f;
     float          descent_em = 0.2f;
     float          line_height_em = 1.2f;
+    hb_blob_t* colr_blob = nullptr;
+    hb_blob_t* cpal_blob = nullptr;
+    const uint8_t* colr_data = nullptr;
+    const uint8_t* cpal_data = nullptr;
+    uint32_t colr_len = 0, cpal_len = 0;
+    uint16_t colr_num_base = 0, colr_num_layers = 0, cpal_num_palette_entries = 0;
+    uint32_t colr_base_off = 0, colr_layer_off = 0, cpal_color_records_off = 0;
+    bool has_colr = false;
     hb_blob_t*     hb_blob = nullptr;
     hb_face_t*     hb_face = nullptr;
     hb_font_t*     hb_font = nullptr;
@@ -443,8 +446,8 @@ struct KeyEventEntry {
 };
 
 struct TextUndoRecord {
-    uint16_t offset = 0;
-    uint16_t length = 0;
+    uint32_t offset = 0;
+    uint32_t length = 0;
     uint32_t cursor = 0;
     uint32_t anchor = 0;
     uint32_t hash = 0;
@@ -453,15 +456,15 @@ struct TextUndoRecord {
 struct TextUndoSlot {
     uint32_t       widget_id = 0;
     uint32_t       last_used_frame = 0;
-    TextUndoRecord entries[kTextUndoMaxEntries] = {};
+    TextUndoRecord* entries = nullptr; uint32_t entries_cap = 0;
     uint32_t       head = 0;
     uint32_t       count = 0;
     uint32_t       cur = 0;
-    uint16_t       write_pos = 0;
-    uint16_t       bytes_used = 0;
+    uint32_t       write_pos = 0;
+    uint32_t       bytes_used = 0;
     float          last_coalesce_sec = -10.0f;
     uint8_t        last_op_group = 0; // 0 = none/discrete, 1 = char burst, 2 = delete burst
-    char           bytes[kTextUndoByteCap] = {};
+    char* bytes = nullptr; uint32_t bytes_cap = 0;
 };
 
 inline SDL_GPUTexture* blur_tex_sentinel() noexcept {
@@ -470,10 +473,6 @@ inline SDL_GPUTexture* blur_tex_sentinel() noexcept {
 }
 
 
-inline constexpr uint32_t kMaxDockSpaces = 4u;
-inline constexpr uint32_t kMaxDockNodes = 32u;
-inline constexpr uint32_t kMaxDockTabs = 32u;
-inline constexpr uint32_t kMaxDockTraverseDepth = 32u;
 inline constexpr uint32_t kMaxTreeDepth = 32u;
 struct DockNode {
     bool used = false; uint32_t parent = 0; uint32_t first = 0; uint32_t second = 0;
@@ -482,17 +481,17 @@ struct DockNode {
     uint32_t active = 0;
 };
 struct DockTabSlot {
-    uint32_t id = 0; uint32_t leaf = 0; char title[48] = {};
+    uint32_t id = 0; uint32_t leaf = 0; char title_inline[48] = {}; char* title_heap = nullptr; uint32_t title_cap = 0;
     uint16_t icon_id = kInvalidIcon; bool closable = false; bool open = false;
 };
 struct DockSpaceSlot {
     uint32_t id = 0; uint32_t root = 0; uint32_t split_seq = 0;
-    DockNode nodes[kMaxDockNodes] = {}; DockTabSlot tabs[kMaxDockTabs] = {};
+    DockNode* nodes = nullptr; uint32_t node_cap = 0; DockTabSlot* tabs = nullptr; uint32_t tab_cap = 0;
 };
 struct DockTraverseEntry { uint32_t node_idx = 0; uint8_t phase = 0; };
 struct DockCursor {
     DockSpaceSlot* space = nullptr; DockSpaceDesc desc = {};
-    DockTraverseEntry stack[kMaxDockTraverseDepth] = {}; uint32_t depth = 0;
+    DockTraverseEntry* stack = nullptr; uint32_t traverse_cap = 0; uint32_t depth = 0;
     bool pane_open = false; uint32_t move_pane = 0; uint32_t target = 0; DockZone zone = DockZone::None;
 };
 struct TableMetadata {
@@ -573,9 +572,10 @@ struct WindowUiState {
     uint32_t    right_active_id = 0;
     Vec2        right_press_origin = {-1.0f, -1.0f};
     float       scrollbar_drag_grab_offset = 0.0f;
-    uint32_t    focus_order[kMaxFocusablePerFrame] = {};
+    uint32_t* focus_order = nullptr;
+    uint32_t focus_cap = 0;
     uint32_t    focus_count = 0;
-    uint32_t    prev_focus_order[kMaxFocusablePerFrame] = {};
+    uint32_t* prev_focus_order = nullptr;
     uint32_t    prev_focus_count = 0;
     int32_t     pending_tab_delta = 0;
     Cursor      desired_cursor = Cursor::Arrow;
@@ -583,9 +583,9 @@ struct WindowUiState {
     uint32_t    active_anim_count = 0u;
     float       sim_dt = 0.0f;
 
-    DockSpaceSlot dock_spaces[kMaxDockSpaces] = {};
+    DockSpaceSlot* dock_spaces = nullptr; uint32_t dock_space_cap = 0; uint32_t dock_space_count = 0;
     DockCursor dock_cursor = {};
-    TableMetadata tables[16] = {};
+    TableMetadata* tables = nullptr; uint32_t table_cap = 0; uint32_t table_count = 0;
     TableStackEntry table_stack[8] = {};
     uint32_t table_depth = 0;
     uint32_t tree_depth = 0;
@@ -623,7 +623,7 @@ struct WindowUiState {
     uint32_t      frame_drop_count = 0;
     char          frame_drop_buf[kMaxDroppedPathBytes] = {};
 
-    TextUndoSlot  undo_pool[kTextUndoSlots] = {};
+    TextUndoSlot* undo_pool = nullptr; uint32_t undo_cap = 0;
 
     PendingTextOp pending_text_ops[kMaxTextOpsPerFrame] = {};
     uint32_t      pending_text_op_count = 0;
@@ -652,9 +652,11 @@ struct WindowUiState {
     uint32_t      caret_blink_cycles = 0;
 
     uint32_t      applied_font_revision = 0;
-    SpanHitRegion drop_hits[1024] = {};
+    SpanHitRegion* drop_hits = nullptr;
+    uint32_t drop_hit_cap = 0;
     uint32_t drop_hit_count = 0;
-    SpanHitRegion span_hits[kMaxSpanHitsPerFrame] = {};
+    SpanHitRegion* span_hits = nullptr;
+    uint32_t span_hit_cap = 0;
     uint32_t      span_hit_count = 0;
 
     // Frameless Custom Window Chrome (double-buffered for SDL_HitTest callback safety)
@@ -677,7 +679,8 @@ struct WindowUiState {
     uint64_t         drag_u64 = 0;
     uint32_t         drag_u32 = 0;
     uint32_t         drag_size = 0;
-    uint8_t          drag_data[kMaxDragPayloadBytes] = {};
+    uint8_t drag_inline[64] = {};
+    uint8_t* drag_heap = nullptr; uint32_t drag_heap_cap = 0;
     uint32_t         drag_label_len = 0;
     char             drag_label[kMaxDragLabelBytes] = {};
 
@@ -709,16 +712,20 @@ struct Context {
     Prim*         prims = nullptr;
     uint32_t      max_prims = 0;
     uint32_t      prim_count = 0;
-    DrawBatch     batches[kMaxBatches] = {};
+    DrawBatch* batches = nullptr;
+    uint32_t batch_cap = 0;
     uint32_t      batch_count = 0;
-    BlurSplit     blur_splits[kMaxBlurSplits] = {};
+    BlurSplit* blur_splits = nullptr;
+    uint32_t blur_split_cap = 0;
     uint32_t      blur_split_count = 0;
     bool          layer_has_bg_prims = false;
 
     // GPU objects
     SDL_GPUDevice*           device = nullptr;
     SDL_Window*              window = nullptr;
-    ClaimedWindowSlot        claimed_windows[kMaxClaimedWindows] = {};
+    ClaimedWindowSlot** claimed_windows = nullptr;
+    uint32_t claimed_window_cap = 0;
+    uint32_t max_layout_elements = 16384u;
     uint32_t                 claimed_window_count = 0;
     bool                     owns_video_init = false;
     bool                     headless = false;
@@ -780,12 +787,38 @@ thread_local Context* g_current_context = nullptr;
 
 WindowUiState* window_ui(Context* ctx, SDL_Window* window) noexcept {
     SDL_Window* target = window ? window : ctx->window;
-    for (uint32_t i = 0; i < kMaxClaimedWindows; ++i)
-        if (target && ctx->claimed_windows[i].window == target) return &ctx->claimed_windows[i].ui;
+    for (uint32_t i = 0; i < ctx->claimed_window_cap; ++i)
+        if (target && ctx->claimed_windows[i] && ctx->claimed_windows[i]->window == target) return &ctx->claimed_windows[i]->ui;
     return window ? nullptr : &ctx->headless_ui;
 }
 const WindowUiState* window_ui(const Context* ctx, SDL_Window* window) noexcept {
     return window_ui(const_cast<Context*>(ctx), window);
+}
+bool ensure_batch_cap(Context* ctx) noexcept {
+    if (ctx->batch_count < ctx->batch_cap) return true;
+    if (ctx->batch_cap == 65536u) return false;
+    const uint32_t cap = ctx->batch_cap ? ctx->batch_cap * 2u : 256u;
+    void* p = std::realloc(ctx->batches, size_t(cap) * sizeof(DrawBatch));
+    if (!p) return false;
+    ctx->batches = static_cast<DrawBatch*>(p); ctx->batch_cap = cap; return true;
+}
+bool reserve_span_hits(SpanHitRegion** hits, uint32_t* cap, uint32_t count, uint32_t initial) noexcept {
+    if (count < *cap) return true;
+    const uint32_t next = *cap ? *cap * 2u : initial;
+    void* p = std::realloc(*hits, size_t(next) * sizeof(SpanHitRegion));
+    if (!p) return false;
+    *hits = static_cast<SpanHitRegion*>(p); *cap = next; return true;
+}
+bool reserve_focus(WindowUiState* ui) noexcept {
+    if (ui->focus_count < ui->focus_cap) return true;
+    const uint32_t cap = ui->focus_cap ? ui->focus_cap * 2u : 256u;
+    // Keep both allocations valid even when the second reserve fails.
+    void* p = std::realloc(ui->focus_order, size_t(cap) * sizeof(uint32_t));
+    if (!p) return false;
+    ui->focus_order = static_cast<uint32_t*>(p);
+    p = std::realloc(ui->prev_focus_order, size_t(cap) * sizeof(uint32_t));
+    if (!p) return false;
+    ui->prev_focus_order = static_cast<uint32_t*>(p); ui->focus_cap = cap; return true;
 }
 bool claim_window_swapchain(Context* ctx, SDL_Window* win) noexcept;
 

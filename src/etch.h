@@ -1,4 +1,4 @@
-// Etch v2.0 — Pure-GPU UI Engine
+// Etch v2.1 — Pure-GPU UI Engine
 #ifndef ETCH_H
 #define ETCH_H
 
@@ -12,7 +12,7 @@
 #include <type_traits>
 
 #define ETCH_VERSION_MAJOR 2
-#define ETCH_VERSION_MINOR 0
+#define ETCH_VERSION_MINOR 1
 #define ETCH_VERSION_PATCH 0
 
 #ifndef ETCH_ASSERT
@@ -863,6 +863,7 @@ static_assert(std::is_trivially_copyable_v<GlobalsUniform>);
 struct Context;
 
 struct ContextDesc {
+    uint32_t max_layout_elements = 16384u;
     SDL_Window* window = nullptr;
     size_t frame_arena_bytes = 4u * 1024u * 1024u;
     // Initial reserve, clamped [64..4194304]; doubles on demand up to 4194304 prims.
@@ -1063,6 +1064,10 @@ struct TextDesc {
     uint32_t id = 0;
     bool selectable = false;
     Color selection_color = Color::rgba8(56, 189, 248, 88);
+    float line_height_px = 0.0f;
+    AlignX align_x = AlignX::Left;
+    bool ellipsis = false;
+    uint16_t max_lines = 0;
 };
 
 struct TextSpan {
@@ -1091,6 +1096,8 @@ struct RichTextDesc {
     uint32_t id = 0;
     bool selectable = false;
     Color selection_color = Color::rgba8(56, 189, 248, 88);
+    bool ellipsis = false;
+    uint16_t max_lines = 0;
 };
 
 struct CollapsibleDesc {

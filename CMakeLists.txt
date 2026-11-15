@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(etch VERSION 2.0.0 LANGUAGES C CXX)
+project(etch VERSION 2.1.0 LANGUAGES C CXX)
 
 option(ETCH_BUILD_EXAMPLES "Build Etch sandbox and etch_studio examples" ON)
 
@@ -215,7 +215,7 @@ add_library(etch STATIC
 add_library(Etch::etch ALIAS etch)
 set_source_files_properties(src/etch_unity.cpp PROPERTIES
     OBJECT_DEPENDS
-        "${CMAKE_CURRENT_SOURCE_DIR}/src/etch.h;${CMAKE_CURRENT_SOURCE_DIR}/src/etch_arena.cpp;${CMAKE_CURRENT_SOURCE_DIR}/src/etch_slug.cpp;${CMAKE_CURRENT_SOURCE_DIR}/src/etch_layout.cpp;${CMAKE_CURRENT_SOURCE_DIR}/src/etch_gpu.cpp;${CMAKE_CURRENT_SOURCE_DIR}/third_party/clay.h;${CMAKE_CURRENT_SOURCE_DIR}/third_party/stb_truetype.h;${CMAKE_CURRENT_SOURCE_DIR}/third_party/stb_image_write.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/etch.h;${CMAKE_CURRENT_SOURCE_DIR}/src/etch_arena.cpp;${CMAKE_CURRENT_SOURCE_DIR}/src/etch_slug.cpp;${CMAKE_CURRENT_SOURCE_DIR}/src/etch_bidi.cpp;${CMAKE_CURRENT_SOURCE_DIR}/src/etch_bidi_data.h;${CMAKE_CURRENT_SOURCE_DIR}/src/etch_grapheme_data.h;${CMAKE_CURRENT_SOURCE_DIR}/src/etch_layout.cpp;${CMAKE_CURRENT_SOURCE_DIR}/src/etch_gpu.cpp;${CMAKE_CURRENT_SOURCE_DIR}/third_party/clay.h;${CMAKE_CURRENT_SOURCE_DIR}/third_party/stb_truetype.h;${CMAKE_CURRENT_SOURCE_DIR}/third_party/stb_image_write.h"
 )
 etch_configure_orthodox_cpp(etch)
 target_include_directories(etch

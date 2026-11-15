@@ -515,33 +515,62 @@ bool run_kawase_step(
     return true;
 }
 
+void destroy_window_ui_state(Context*, WindowUiState* ui) noexcept {
+    for (uint32_t i = 0; i < ui->dock_space_count; ++i) {
+        auto& s = ui->dock_spaces[i];
+        for (uint32_t j = 0; j < s.tab_cap; ++j) std::free(s.tabs[j].title_heap);
+        std::free(s.tabs); std::free(s.nodes);
+    }
+    for(uint32_t i=0;i<ui->undo_cap;++i) {std::free(ui->undo_pool[i].entries);std::free(ui->undo_pool[i].bytes);}
+    std::free(ui->undo_pool);
+    std::free(ui->drag_heap);
+    std::free(ui->dock_spaces); std::free(ui->dock_cursor.stack); std::free(ui->tables);
+    std::free(ui->focus_order); std::free(ui->prev_focus_order);
+    std::free(ui->span_hits); std::free(ui->drop_hits);
+    std::free(ui->clay_mem); state_map_destroy(&ui->states);
+}
+
 bool claim_window_swapchain(Context* ctx, SDL_Window* win) noexcept {
     if (!ctx || !ctx->device || !win) {
         return false;
     }
-    for (uint32_t i = 0; i < kMaxClaimedWindows; ++i)
-        if (ctx->claimed_windows[i].window == win) return true;
-    if (ctx->claimed_window_count == kMaxClaimedWindows) return false;
+    for (uint32_t i = 0; i < ctx->claimed_window_cap; ++i)
+        if (ctx->claimed_windows[i] && ctx->claimed_windows[i]->window == win) return true;
+    if (ctx->claimed_window_count == ctx->claimed_window_cap) {
+        const uint32_t cap = ctx->claimed_window_cap ? ctx->claimed_window_cap * 2u : 8u;
+        void* p = std::realloc(ctx->claimed_windows, size_t(cap) * sizeof(ClaimedWindowSlot*));
+        if (!p) return false;
+        ctx->claimed_windows = static_cast<ClaimedWindowSlot**>(p);
+        for (uint32_t i = ctx->claimed_window_cap; i < cap; ++i) ctx->claimed_windows[i] = nullptr;
+        ctx->claimed_window_cap = cap;
+    }
     uint32_t index = 0;
-    while (ctx->claimed_windows[index].window) ++index;
-    ClaimedWindowSlot& slot = ctx->claimed_windows[index];
+    while (ctx->claimed_windows[index]) ++index;
+    auto* allocated = static_cast<ClaimedWindowSlot*>(std::calloc(1, sizeof(ClaimedWindowSlot)));
+    if (!allocated) return false;
+    ClaimedWindowSlot& slot = *allocated;
     WindowUiState& ui = slot.ui;
     ui = WindowUiState{};
-    if (!state_map_init(&ui.states, kDefaultStateCapacity)) return false;
+    if (!state_map_init(&ui.states, kDefaultStateCapacity)) { std::free(allocated); return false; }
+    Clay_Context* saved_clay = Clay_GetCurrentContext();
+    Clay_SetCurrentContext(nullptr);
+    Clay_SetMaxElementCount(static_cast<int32_t>(ctx->max_layout_elements));
+    Clay_SetMaxMeasureTextCacheWordCount(static_cast<int32_t>(ctx->max_layout_elements * 4u));
     const uint32_t size = Clay_MinMemorySize();
     ui.clay_mem = std::malloc(size);
-    if (!ui.clay_mem) { state_map_destroy(&ui.states); return false; }
-    Clay_Context* prev_clay = Clay_GetCurrentContext();
+    if (!ui.clay_mem) { Clay_SetCurrentContext(saved_clay); state_map_destroy(&ui.states); std::free(allocated); return false; }
+    Clay_Context* prev_clay = saved_clay;
     ui.clay_ctx = Clay_Initialize(Clay_CreateArenaWithCapacityAndMemory(size, ui.clay_mem),
         Clay_Dimensions{1280, 720}, Clay_ErrorHandler{etch_clay_error_handler, ctx});
     if (ui.clay_ctx) Clay_SetMeasureTextFunction(etch_measure_text, ctx);
     Clay_SetCurrentContext(prev_clay);
     if (!ui.clay_ctx) {
-        std::free(ui.clay_mem); state_map_destroy(&ui.states); ui = WindowUiState{}; return false;
+        std::free(ui.clay_mem); state_map_destroy(&ui.states); ui = WindowUiState{}; std::free(allocated); return false;
     }
     if (!SDL_ClaimWindowForGPUDevice(ctx->device, win)) {
-        std::free(ui.clay_mem); state_map_destroy(&ui.states); ui = WindowUiState{}; return false;
+        std::free(ui.clay_mem); state_map_destroy(&ui.states); ui = WindowUiState{}; std::free(allocated); return false;
     }
+    ctx->claimed_windows[index] = allocated;
     slot.window = win;
     ++ctx->claimed_window_count;
     if (!ctx->window) ctx->window = win;
@@ -924,6 +953,8 @@ Context* create_context(const ContextDesc& desc) noexcept {
         return nullptr;
     }
 
+    ctx->max_layout_elements = desc.max_layout_elements < 4096u ? 4096u : (desc.max_layout_elements > (1u << 20) ? (1u << 20) : desc.max_layout_elements);
+    if (!ensure_batch_cap(ctx)) { destroy_context(ctx); return nullptr; }
     ctx->arena_epoch = 1u;
     ctx->active_ui = &ctx->headless_ui;
     ctx->headless = desc.headless;
@@ -956,14 +987,19 @@ Context* create_context(const ContextDesc& desc) noexcept {
     ctx->atlas.scratch = &ctx->frame_arena;
 
     // Initialize Clay layout arena cleanly.
+    Clay_Context* saved_clay = Clay_GetCurrentContext();
+    Clay_SetCurrentContext(nullptr);
+    Clay_SetMaxElementCount(static_cast<int32_t>(ctx->max_layout_elements));
+    Clay_SetMaxMeasureTextCacheWordCount(static_cast<int32_t>(ctx->max_layout_elements * 4u));
     const uint32_t clay_min = Clay_MinMemorySize();
     ctx->active_ui->clay_mem = std::malloc(clay_min);
     if (!ctx->active_ui->clay_mem) {
+        Clay_SetCurrentContext(saved_clay);
         destroy_context(ctx);
         return nullptr;
     }
     const Clay_Arena clay_arena = Clay_CreateArenaWithCapacityAndMemory(clay_min, ctx->active_ui->clay_mem);
-    Clay_Context* prev_clay = Clay_GetCurrentContext();
+    Clay_Context* prev_clay = saved_clay;
     ctx->active_ui->clay_ctx = Clay_Initialize(
         clay_arena,
         Clay_Dimensions{ 1280.0f, 720.0f },
@@ -1219,8 +1255,8 @@ void destroy_context(Context* ctx) noexcept {
 
     ctx->in_frame = false;
     if (ctx->device) SDL_WaitForGPUIdle(ctx->device);
-    for (uint32_t i = 0; i < kMaxClaimedWindows; ++i)
-        if (ctx->claimed_windows[i].window) release_window(ctx, ctx->claimed_windows[i].window);
+    for (uint32_t i = 0; i < ctx->claimed_window_cap; ++i)
+        if (ctx->claimed_windows[i]) release_window(ctx, ctx->claimed_windows[i]->window);
     ctx->active_ui = &ctx->headless_ui;
     if (ctx->device) {
         for (uint32_t i = 0u; i < ctx->pipeline_count; ++i) {
@@ -1276,8 +1312,8 @@ void destroy_context(Context* ctx) noexcept {
     std::free(ctx->dyn_slug_curves);
     std::free(ctx->dyn_slug_bands);
     std::free(ctx->prims);
-    std::free(ctx->active_ui->clay_mem);
-    state_map_destroy(&ctx->active_ui->states);
+    destroy_window_ui_state(ctx, &ctx->headless_ui);
+    std::free(ctx->claimed_windows); std::free(ctx->batches); std::free(ctx->blur_splits);
     arena_destroy(&ctx->frame_arena);
 
     if (ctx->owns_video_init) {
@@ -1545,8 +1581,9 @@ LoadedTexture upload_sdl_surface(Context* ctx, SDL_Surface* surf, bool srgb, con
 
 void release_window(Context* ctx, SDL_Window* window) noexcept {
     if (!ctx || !window || ctx->in_frame) return;
-    for (uint32_t i = 0; i < kMaxClaimedWindows; ++i) {
-        ClaimedWindowSlot& slot = ctx->claimed_windows[i];
+    for (uint32_t i = 0; i < ctx->claimed_window_cap; ++i) {
+        if (!ctx->claimed_windows[i]) continue;
+        ClaimedWindowSlot& slot = *ctx->claimed_windows[i];
         if (slot.window != window) continue;
         if (ctx->ime_active_window == window) {
             SDL_StopTextInput(window); ctx->ime_active_window = nullptr;
@@ -1559,19 +1596,18 @@ void release_window(Context* ctx, SDL_Window* window) noexcept {
         ctx->active_ui = &slot.ui;
         release_blur_targets(ctx);
         ctx->active_ui = saved == &slot.ui ? &ctx->headless_ui : saved;
-        std::free(slot.ui.clay_mem);
-        state_map_destroy(&slot.ui.states);
+        destroy_window_ui_state(ctx, &slot.ui);
         SDL_ReleaseWindowFromGPUDevice(ctx->device, window);
         slot.window = nullptr;
         slot.hit_test_attached = false;
-        slot.ui = WindowUiState{};
+        std::free(ctx->claimed_windows[i]); ctx->claimed_windows[i] = nullptr;
         --ctx->claimed_window_count;
         if (ctx->active_window == window) ctx->active_window = nullptr;
         if (ctx->draw_list_window == window) ctx->draw_list_window = nullptr;
         if (ctx->window == window) {
             ctx->window = nullptr;
-            for (uint32_t j = 0; j < kMaxClaimedWindows; ++j)
-                if (ctx->claimed_windows[j].window) { ctx->window = ctx->claimed_windows[j].window; break; }
+            for (uint32_t j = 0; j < ctx->claimed_window_cap; ++j)
+                if (ctx->claimed_windows[j]) { ctx->window = ctx->claimed_windows[j]->window; break; }
         }
         if (current_context() == ctx) Clay_SetCurrentContext(ctx->active_ui->clay_ctx);
         return;

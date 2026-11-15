@@ -585,14 +585,14 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
                         .color = etch::Color::white(),
                     });
                 }
-                etch::text(etch::str_lit("ETCH 2.0"), {
+                etch::text(etch::str_lit("ETCH 2.1"), {
                     .color = etch::Color::white(),
                     .font_size_px = 12.0f,
                     .wrap = false,
                 });
             }
 
-            etch::text(etch::str_lit("Etch Studio 2.0 — GPU Render-Graph & Telemetry"), {
+            etch::text(etch::str_lit("Etch Studio 2.1 — GPU Render-Graph & Telemetry"), {
                 .color = etch::Color::rgb_hex(0xE2E8F0),
                 .font_size_px = 14.0f,
                 .wrap = false,
@@ -603,7 +603,7 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
                     // Destruction occurs after the serialized main build ends.
                     SDL_HideWindow(app->tear_off_window);
                 } else {
-                    app->tear_off_window = SDL_CreateWindow("Etch Studio 2.0 — Tear-Off Preview", 480, 360, SDL_WINDOW_RESIZABLE);
+                    app->tear_off_window = SDL_CreateWindow("Etch Studio 2.1 — Tear-Off Preview", 480, 360, SDL_WINDOW_RESIZABLE);
                 }
             }
             draw_button(tear_id, "Tear-Off Preview", etch::Color::rgb_hex(0x1E293B), etch::Color::rgb_hex(0x475569));
@@ -1119,6 +1119,12 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
                 .id = etch::id("studio_telemetry_selection"),
                 .selectable = true,
             });
+
+            ETCH_BOX({.axis=etch::Axis::Col,.width=etch::Sizing::grow(),.height=etch::Sizing::fixed(72),.padding=etch::Padding::xy(8,4),.gap=3,.background=etch::Color::rgb_hex(0x142032)}) {
+                etch::text(etch::str_lit("Etch v2.1 Showcase Strip"),{.font_size_px=11,.wrap=false});
+                etch::text(etch::str_lit("Inspector label with a deliberately long constrained title that demonstrates trailing ellipsis in this panel"),{.font_size_px=11,.wrap=false,.id=etch::id("studio_v21_label"),.selectable=true,.ellipsis=true});
+                etch::text(etch::str_lit("User שלום 42 End  🚀✨"),{.font_size_px=15,.wrap=false});
+            }
 
             ETCH_COLLAPSIBLE({.id = etch::id("studio_pass_collapsible"),
                 .title = etch::str_lit("Pass Palette (Drag -> Canvas)"), .default_open = true,
@@ -1851,7 +1857,7 @@ void step_headless_frame(
 
 void build_preview_ui(StudioApp* app) noexcept {
     ETCH_BOX({.id = etch::id("tear_preview"), .width = etch::Sizing::grow(), .height = etch::Sizing::grow(), .background = etch::Color::rgb_hex(0x111827), .focusable = true}) {
-        etch::text(etch::str_lit("Etch Studio 2.0 — Preview"));
+        etch::text(etch::str_lit("Etch Studio 2.1 — Preview"));
         etch::image({.texture = app->preview_tex, .width = etch::Sizing::fixed(256), .height = etch::Sizing::fixed(256)});
     }
 }
@@ -2529,7 +2535,7 @@ int run_headless(const char* out_png_path) noexcept {
     }
     step_headless_frame(&app, kW, kH, kDt);
     s11_ok &= app.node_count == before_drop + 2;
-    app.tear_off_window = SDL_CreateWindow("Etch Studio 2.0 — Tear-Off Preview", 480, 360, SDL_WINDOW_HIDDEN);
+    app.tear_off_window = SDL_CreateWindow("Etch Studio 2.1 — Tear-Off Preview", 480, 360, SDL_WINDOW_HIDDEN);
     s11_ok &= app.tear_off_window != nullptr;
     if (app.tear_off_window) {
         etch::begin_window_frame(ctx, app.tear_off_window, kDt);
@@ -2587,8 +2593,15 @@ int run_headless(const char* out_png_path) noexcept {
     s13_ok &= etch::is_collapsible_open(card_id) && etch::element_bounds(etch::id_index(card_id,0xC013u)).h > 1 && etch::frame_stats(ctx).draw_call_count <= 3;
     if (!s13_ok) { std::fprintf(stderr,"Headless Studio [S13] failed: selection/collapsible regression\n"); cleanup_release(); return 1; }
     const char* driver = SDL_GetGPUDeviceDriver(etch::gpu_device(ctx));
+    // [S14] Visible v2.1 strip fits the inspector and settled frames sleep.
+    for(int f=0;f<90 && etch::needs_redraw(ctx);++f)step_headless_frame(&app,kW,kH,kDt);
+    const auto v21_bounds=etch::element_bounds(etch::id("studio_v21_label"));
+    const auto v21_stats=etch::frame_stats(ctx);
+    if(!(v21_bounds.w>0 && v21_bounds.w<400 && v21_stats.draw_call_count<=3 && v21_stats.idle_sleeping)) {
+        std::fprintf(stderr,"Headless Studio [S14] failed: showcase bounds/batching/idle\n");cleanup_release();return 1;
+    }
     std::printf(
-        "Headless Studio OK (%s) -> %s (asserts=13/13, prims=%u, draw_calls=%u, blur_pass=%u, slug_glyphs=%u, grid=%u, wire=%u, layout_us=%.0f, vrows=[%u..%u))\n",
+        "Headless Studio OK (%s) -> %s (asserts=14/14, prims=%u, draw_calls=%u, blur_pass=%u, slug_glyphs=%u, grid=%u, wire=%u, layout_us=%.0f, vrows=[%u..%u))\n",
         driver ? driver : "unknown",
         out_png_path,
         final_stats.prim_count,
@@ -2612,7 +2625,7 @@ int run_interactive() noexcept {
     }
 
     SDL_Window* window = SDL_CreateWindow(
-        "Etch Studio 2.0 — GPU Render-Graph & 1M Trace Workbench",
+        "Etch Studio 2.1 — GPU Render-Graph & 1M Trace Workbench",
         1440,
         900,
         SDL_WINDOW_BORDERLESS | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);

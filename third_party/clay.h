@@ -406,6 +406,8 @@ typedef struct Clay_TextElementConfig {
     // CLAY_TEXT_ALIGN_CENTER - Horizontally aligns wrapped lines of text to the center of their bounding box.
     // CLAY_TEXT_ALIGN_RIGHT - Horizontally aligns wrapped lines of text to the right hand side of their bounding box.
     Clay_TextAlignment textAlignment;
+    uint16_t maxLines;
+    bool ellipsis;
 } Clay_TextElementConfig;
 
 CLAY__WRAPPER_STRUCT(Clay_TextElementConfig);
@@ -659,6 +661,8 @@ typedef struct Clay_TextRenderData {
     uint16_t letterSpacing;
     // The height of the bounding box for this line of text.
     uint16_t lineHeight;
+    float maxWidth;
+    bool truncated;
 } Clay_TextRenderData;
 
 // Render command data when commandType == CLAY_RENDER_COMMAND_TYPE_RECTANGLE
@@ -1196,6 +1200,8 @@ CLAY__ARRAY_DEFINE_FUNCTIONS(Clay_RenderCommand, Clay_RenderCommandArray)
 typedef struct {
     Clay_Dimensions dimensions;
     Clay_String line;
+    float maxWidth;
+    bool truncated;
 } Clay__WrappedTextLine;
 
 CLAY__ARRAY_DEFINE(Clay__WrappedTextLine, Clay__WrappedTextLineArray)
@@ -2115,7 +2121,7 @@ void Clay__OpenTextElement(Clay_String text, Clay_TextElementConfig textConfig) 
     Clay__StringArray_Add(&context->layoutElementIdStrings, elementId.stringId);
     Clay_Dimensions textDimensions = { .width = textMeasured->unwrappedDimensions.width, .height = textConfig.lineHeight > 0 ? (float)textConfig.lineHeight : textMeasured->unwrappedDimensions.height };
     textElement->dimensions = textDimensions;
-    textElement->minDimensions = CLAY__INIT(Clay_Dimensions) { .width = textMeasured->minWidth, .height = textDimensions.height };
+    textElement->minDimensions = CLAY__INIT(Clay_Dimensions) { .width = (textConfig.ellipsis || textConfig.maxLines) ? 0.0f : textMeasured->minWidth, .height = textDimensions.height };
     textElement->textElementData = CLAY__INIT(Clay__TextElementData) { .text = text, .preferredDimensions = textMeasured->unwrappedDimensions };
     parentElement->children.length++;
 }
@@ -2375,7 +2381,7 @@ void Clay__SizeContainersAlongAxis(bool xAxis, float deltaTime, Clay__int32_tArr
 
                 if (childSizing.type != CLAY__SIZING_TYPE_PERCENT
                     && childSizing.type != CLAY__SIZING_TYPE_FIXED
-                    && (!childElement->isTextElement || childElement->textConfig.wrapMode == CLAY_TEXT_WRAP_WORDS)
+                    && (!childElement->isTextElement || (childElement->textConfig.wrapMode == CLAY_TEXT_WRAP_WORDS || childElement->textConfig.ellipsis || childElement->textConfig.maxLines))
 //                    && (xAxis || !Clay__ElementHasConfig(childElement, CLAY__ELEMENT_CONFIG_TYPE_ASPECT))
                 ) {
                     Clay__int32_tArray_Add(&resizableContainerBuffer, childElementIndex);
@@ -2603,6 +2609,18 @@ void Clay__CalculateFinalLayout(float deltaTime, bool useStoredBoundingBoxes, bo
         float lineHeight = containerElement->textConfig.lineHeight > 0 ? (float)containerElement->textConfig.lineHeight : textElementData->preferredDimensions.height;
         int32_t lineLengthChars = 0;
         int32_t lineStartOffset = 0;
+        const bool singleLineMode = containerElement->textConfig.wrapMode == CLAY_TEXT_WRAP_NONE;
+        const uint32_t lineLimit = singleLineMode ? 1u : containerElement->textConfig.maxLines;
+        if (singleLineMode) {
+            int32_t length = 0;
+            while (length < textElementData->text.length && textElementData->text.chars[length] != '\n') ++length;
+            Clay_Dimensions measured = Clay__MeasureText(CLAY__INIT(Clay_StringSlice) { .length = length, .chars = textElementData->text.chars, .baseChars = textElementData->text.chars }, &containerElement->textConfig, context->measureTextUserData);
+            const bool truncated = containerElement->textConfig.ellipsis && (measured.width > containerElement->dimensions.width || length < textElementData->text.length);
+            Clay__WrappedTextLineArray_Add(&context->wrappedTextLines, CLAY__INIT(Clay__WrappedTextLine) { { CLAY__MIN(measured.width, containerElement->dimensions.width), lineHeight }, { .length = length, .chars = textElementData->text.chars }, containerElement->dimensions.width, truncated });
+            textElementData->wrappedLines.length = 1;
+            containerElement->dimensions.height = lineHeight;
+            continue;
+        }
         if (!measureTextCacheItem->containsNewlines && textElementData->preferredDimensions.width <= containerElement->dimensions.width) {
             Clay__WrappedTextLineArray_Add(&context->wrappedTextLines, CLAY__INIT(Clay__WrappedTextLine) { containerElement->dimensions,  textElementData->text });
             textElementData->wrappedLines.length++;
@@ -2611,19 +2629,28 @@ void Clay__CalculateFinalLayout(float deltaTime, bool useStoredBoundingBoxes, bo
         float spaceWidth = Clay__MeasureText(CLAY__INIT(Clay_StringSlice) { .length = 1, .chars = CLAY__SPACECHAR.chars, .baseChars = CLAY__SPACECHAR.chars }, &containerElement->textConfig, context->measureTextUserData).width;
         int32_t wordIndex = measureTextCacheItem->measuredWordsStartIndex;
         while (wordIndex != -1) {
+            if (lineLimit && (uint32_t)textElementData->wrappedLines.length >= lineLimit) {
+                Clay__WrappedTextLine *last = &textElementData->wrappedLines.internalArray[lineLimit - 1u];
+                // A single terminal newline contributes no hidden line content.
+                Clay__MeasuredWord *remaining = Clay__MeasuredWordArray_Get(&context->measuredWords, wordIndex);
+                bool hasMore = remaining->length > 0 || remaining->next != -1;
+                if (containerElement->textConfig.ellipsis && hasMore) last->truncated = true;
+                lineLengthChars = 0;
+                break;
+            }
             if (context->wrappedTextLines.length > context->wrappedTextLines.capacity - 1) {
                 break;
             }
             Clay__MeasuredWord *measuredWord = Clay__MeasuredWordArray_Get(&context->measuredWords, wordIndex);
             // Only word on the line is too large, just render it anyway
-            if (lineLengthChars == 0 && lineWidth + measuredWord->width > containerElement->dimensions.width) {
+            if (lineLengthChars == 0 && (containerElement->textConfig.wrapMode == CLAY_TEXT_WRAP_WORDS && lineWidth + measuredWord->width > containerElement->dimensions.width)) {
                 Clay__WrappedTextLineArray_Add(&context->wrappedTextLines, CLAY__INIT(Clay__WrappedTextLine) { { measuredWord->width, lineHeight }, { .length = measuredWord->length, .chars = &textElementData->text.chars[measuredWord->startOffset] } });
                 textElementData->wrappedLines.length++;
                 wordIndex = measuredWord->next;
                 lineStartOffset = measuredWord->startOffset + measuredWord->length;
             }
             // measuredWord->length == 0 means a newline character
-            else if (measuredWord->length == 0 || lineWidth + measuredWord->width > containerElement->dimensions.width) {
+            else if (measuredWord->length == 0 || (containerElement->textConfig.wrapMode == CLAY_TEXT_WRAP_WORDS && lineWidth + measuredWord->width > containerElement->dimensions.width)) {
                 // Wrapped text lines list has overflowed, just render out the line
                 int32_t lastCharIdx = CLAY__MAX(lineStartOffset + lineLengthChars - 1, 0);
                 bool finalCharIsSpace = (lineLengthChars > 0) && (textElementData->text.chars[lastCharIdx] == ' ');
@@ -2648,6 +2675,17 @@ void Clay__CalculateFinalLayout(float deltaTime, bool useStoredBoundingBoxes, bo
         if (lineLengthChars > 0) {
             Clay__WrappedTextLineArray_Add(&context->wrappedTextLines, CLAY__INIT(Clay__WrappedTextLine) { { lineWidth - containerElement->textConfig.letterSpacing, lineHeight }, {.length = lineLengthChars, .chars = &textElementData->text.chars[lineStartOffset] } });
             textElementData->wrappedLines.length++;
+        }
+        if (lineLimit && (uint32_t)textElementData->wrappedLines.length > lineLimit) {
+            context->wrappedTextLines.length -= textElementData->wrappedLines.length - (int32_t)lineLimit;
+            textElementData->wrappedLines.length = (int32_t)lineLimit;
+            if (containerElement->textConfig.ellipsis) textElementData->wrappedLines.internalArray[lineLimit - 1u].truncated = true;
+        }
+        for (int32_t li = 0; li < textElementData->wrappedLines.length; ++li) {
+            Clay__WrappedTextLine *line = &textElementData->wrappedLines.internalArray[li];
+            line->maxWidth = containerElement->dimensions.width;
+            if (containerElement->textConfig.ellipsis && line->dimensions.width > line->maxWidth) line->truncated = true;
+            if (line->truncated) line->dimensions.width = line->maxWidth;
         }
         containerElement->dimensions.height = lineHeight * (float)textElementData->wrappedLines.length;
     }
@@ -3019,6 +3057,8 @@ void Clay__CalculateFinalLayout(float deltaTime, bool useStoredBoundingBoxes, bo
                                 .fontSize = textElementConfig->fontSize,
                                 .letterSpacing = textElementConfig->letterSpacing,
                                 .lineHeight = textElementConfig->lineHeight,
+                                .maxWidth = wrappedLine->maxWidth,
+                                .truncated = wrappedLine->truncated,
                             }},
                             .userData = textElementConfig->userData,
                             .id = Clay__HashNumber(lineIndex, currentElement->id).id,

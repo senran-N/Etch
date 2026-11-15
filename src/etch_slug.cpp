@@ -53,6 +53,8 @@ void destroy_font_slot(FontSlot* slot) noexcept {
     if (slot->hb_font) hb_font_destroy(slot->hb_font);
     if (slot->hb_face) hb_face_destroy(slot->hb_face);
     if (slot->hb_blob) hb_blob_destroy(slot->hb_blob);
+    if (slot->colr_blob) hb_blob_destroy(slot->colr_blob);
+    if (slot->cpal_blob) hb_blob_destroy(slot->cpal_blob);
     if (slot->font_file_data) SDL_free(slot->font_file_data);
     *slot = {};
 }
@@ -97,6 +99,36 @@ void ensure_fallback_registered(FontAtlas* atlas, uint16_t slot_idx) noexcept {
     }
 }
 
+uint16_t ot_u16(const uint8_t* p) noexcept { return static_cast<uint16_t>((uint16_t(p[0]) << 8) | p[1]); }
+uint32_t ot_u32(const uint8_t* p) noexcept { return (uint32_t(ot_u16(p)) << 16) | ot_u16(p+2); }
+void init_color_tables(FontSlot* s) noexcept {
+    s->colr_blob = hb_face_reference_table(s->hb_face, HB_TAG('C','O','L','R'));
+    s->cpal_blob = hb_face_reference_table(s->hb_face, HB_TAG('C','P','A','L'));
+    s->colr_data = reinterpret_cast<const uint8_t*>(hb_blob_get_data(s->colr_blob, &s->colr_len));
+    s->cpal_data = reinterpret_cast<const uint8_t*>(hb_blob_get_data(s->cpal_blob, &s->cpal_len));
+    if (s->colr_len < 14 || s->cpal_len < 14) return;
+    const auto* c = s->colr_data; const auto* p = s->cpal_data;
+    if (ot_u16(c) > 1 || ot_u16(p) > 1 || !ot_u16(p+4)) return;
+    s->colr_num_base = ot_u16(c+2); s->colr_base_off = ot_u32(c+4);
+    s->colr_layer_off = ot_u32(c+8); s->colr_num_layers = ot_u16(c+12);
+    s->cpal_num_palette_entries = ot_u16(p+2);
+    const uint32_t records = ot_u32(p+8), first = ot_u16(p+12);
+    if (s->colr_base_off > s->colr_len || uint32_t(s->colr_num_base)*6u > s->colr_len-s->colr_base_off ||
+        s->colr_layer_off > s->colr_len || uint32_t(s->colr_num_layers)*4u > s->colr_len-s->colr_layer_off ||
+        records > s->cpal_len || (first+uint32_t(s->cpal_num_palette_entries))*4u > s->cpal_len-records) return;
+    s->cpal_color_records_off = records + first*4u; s->has_colr = true;
+}
+struct SlugColrLayers { uint32_t first = 0, count = 0; };
+SlugColrLayers slug_get_colr_layers(const FontSlot& s, uint32_t glyph) noexcept {
+    if (!s.has_colr) return {};
+    uint32_t lo=0, hi=s.colr_num_base;
+    while(lo<hi) {const uint32_t m=(lo+hi)/2;const auto* p=s.colr_data+s.colr_base_off+m*6u;if(ot_u16(p)<glyph)lo=m+1;else hi=m;}
+    if(lo==s.colr_num_base)return {};
+    const auto* p=s.colr_data+s.colr_base_off+lo*6u;
+    if(ot_u16(p)!=glyph)return {};
+    const uint32_t first=ot_u16(p+2),count=ot_u16(p+4);
+    return first+count<=s.colr_num_layers ? SlugColrLayers{first,count} : SlugColrLayers{};
+}
 bool init_font_slot_from_owned_bytes(
     FontAtlas* atlas,
     uint16_t slot_idx,
@@ -148,6 +180,7 @@ bool init_font_slot_from_owned_bytes(
     next.hb_blob = blob;
     next.hb_face = face;
     next.hb_font = font;
+    init_color_tables(&next);
     next.source_hash = source_hash;
     next.loaded = true;
 
@@ -314,12 +347,15 @@ bool font_atlas_init(FontAtlas* atlas, const char* preferred_font_path) noexcept
     const char* system_fallbacks[] = {
 #if defined(_WIN32)
         "C:/Windows/Fonts/msyh.ttc",
+        "C:/Windows/Fonts/seguiemj.ttf",
         "C:/Windows/Fonts/seguisym.ttf",
 #elif defined(__APPLE__)
         "/System/Library/Fonts/PingFang.ttc",
+        "/System/Library/Fonts/Apple Color Emoji.ttc",
         "/System/Library/Fonts/Apple Symbols.ttf",
 #else
         "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",
         "/usr/share/fonts/truetype/noto/NotoSansSymbols-Regular.ttf",
 #endif
     };
@@ -730,6 +766,11 @@ SlugGlyphEntry slug_get_glyph(FontAtlas* atlas, uint16_t slot_idx, uint32_t glyp
     return entry;
 }
 
+bool wants_emoji(const char* utf8, uint32_t len) noexcept {
+    const char* p=utf8;const char* end=utf8+len;bool emoji=false;
+    while(p<end) {const uint32_t cp=next_utf8_codepoint(p,end);if(cp==0xFE0E)return false;if(cp==0xFE0F||cp==0x20E3||cp>=0x1F000||(cp>=0x2600&&cp<=0x27BF))emoji=true;}
+    return emoji;
+}
 uint16_t pick_fallback_slot_for_cluster(
     const FontAtlas* atlas,
     uint16_t primary_slot,
@@ -738,13 +779,23 @@ uint16_t pick_fallback_slot_for_cluster(
 {
     const char* p = utf8;
     const char* end = utf8 + len;
-    uint32_t cps[16];
+    uint32_t* cps = atlas->scratch->alloc_uninit<uint32_t>(len);
+    if (!cps) return primary_slot;
     uint32_t cp_count = 0u;
-    while (p < end && cp_count < 16u) {
+    while (p < end) {
         cps[cp_count++] = next_utf8_codepoint(p, end);
     }
     if (cp_count == 0u) {
         return primary_slot;
+    }
+    bool emoji = false, text_presentation = false;
+    for (uint32_t i=0;i<cp_count;++i) { const uint32_t cp=cps[i]; if(cp==0xFE0E)text_presentation=true; if(cp==0xFE0F||cp==0x20E3||cp>=0x1F000||(cp>=0x2600&&cp<=0x27BF))emoji=true; }
+    if (emoji && !text_presentation) for (uint32_t fi=0;fi<atlas->fallback_count;++fi) {
+        const uint16_t idx=atlas->fallback_order[fi]; const auto& slot=atlas->slots[idx];
+        if(!slot.has_colr)continue;
+        bool covers=true; hb_codepoint_t glyph=0;
+        for(uint32_t i=0;i<cp_count;++i) if(cps[i]!=0xFE0F&&cps[i]!=0x200D&&!hb_font_get_nominal_glyph(slot.hb_font,cps[i],&glyph)){covers=false;break;}
+        if(covers)return idx;
     }
     hb_codepoint_t dummy = 0u;
     for (uint32_t fi = 0u; fi < atlas->fallback_count; ++fi) {
@@ -791,12 +842,12 @@ std::span<const ShapedGlyph> store_shaped_glyphs(
     return std::span<const ShapedGlyph>(out, count);
 }
 
-std::span<const ShapedGlyph> shape_utf8_run(
+std::span<const ShapedGlyph> shape_directional_run(
     Context* ctx,
     uint16_t font_id,
     const char* utf8,
     uint32_t byte_len,
-    bool* out_is_rtl = nullptr) noexcept
+    bool* out_is_rtl, hb_direction_t direction, hb_script_t script, uint32_t item_start = 0, uint32_t item_end = 0) noexcept
 {
     if (out_is_rtl) {
         *out_is_rtl = false;
@@ -809,12 +860,14 @@ std::span<const ShapedGlyph> shape_utf8_run(
         return {};
     }
 
+    if (!item_end) item_end = byte_len;
     const FontSlot& primary = ctx->atlas.slots[primary_slot];
     hb_buffer_t* buf = ctx->atlas.hb_buf;
     hb_buffer_clear_contents(buf);
     hb_buffer_set_cluster_level(buf, HB_BUFFER_CLUSTER_LEVEL_MONOTONE_GRAPHEMES);
-    hb_buffer_add_utf8(buf, utf8, static_cast<int>(byte_len), 0u, static_cast<int>(byte_len));
-    hb_buffer_guess_segment_properties(buf);
+    hb_buffer_add_utf8(buf, utf8, static_cast<int>(byte_len), item_start, static_cast<int>(item_end - item_start));
+    hb_buffer_set_direction(buf, direction);
+    hb_buffer_set_script(buf, script);
 
     static constexpr hb_feature_t kFeatures[3] = {
         { HB_TAG('k', 'e', 'r', 'n'), 1u, 0u, static_cast<unsigned int>(-1) },
@@ -845,6 +898,7 @@ std::span<const ShapedGlyph> shape_utf8_run(
         }
     }
 
+    has_missing = has_missing || wants_emoji(utf8 + item_start, item_end - item_start);
     if (!has_missing || ctx->atlas.fallback_count <= 1u) {
         ShapedGlyph* out = ctx->frame_arena.alloc_uninit<ShapedGlyph>(count);
         if (!out) {
@@ -855,10 +909,18 @@ std::span<const ShapedGlyph> shape_utf8_run(
                 .glyph_id = infos[i].codepoint,
                 .cluster = infos[i].cluster,
                 .font_slot = primary_slot,
+                .is_rtl = static_cast<uint8_t>(is_rtl),
+                .cluster_end = item_end,
                 .x_advance_1px = static_cast<float>(pos[i].x_advance) * primary.scale_1px,
                 .x_offset_em = static_cast<float>(pos[i].x_offset),
                 .y_offset_em = static_cast<float>(pos[i].y_offset),
             };
+        }
+        for (uint32_t i = 0; i < count;) {
+            uint32_t j = i + 1u; while (j < count && out[j].cluster == out[i].cluster) ++j;
+            const uint32_t end = is_rtl ? (i ? out[i-1].cluster : item_end) : (j < count ? out[j].cluster : item_end);
+            for (uint32_t k = i; k < j; ++k) out[k].cluster_end = end;
+            i = j;
         }
         return std::span<const ShapedGlyph>(out, count);
     }
@@ -897,9 +959,9 @@ std::span<const ShapedGlyph> shape_utf8_run(
         }
         const uint32_t c_end = (step_end < count && infos[logical_idx(step_end)].cluster > c_start)
             ? infos[logical_idx(step_end)].cluster
-            : byte_len;
+            : item_end;
 
-        const uint16_t chosen_slot = cluster_missing
+        const uint16_t chosen_slot = (cluster_missing || wants_emoji(utf8 + c_start, c_end - c_start))
             ? pick_fallback_slot_for_cluster(&ctx->atlas, primary_slot, utf8 + c_start, c_end - c_start)
             : primary_slot;
 
@@ -950,15 +1012,24 @@ std::span<const ShapedGlyph> shape_utf8_run(
             collected = grown;
             out_cap = new_cap;
         }
+        const uint32_t first_out = out_count;
         for (unsigned int j = 0u; j < sub_gcount; ++j) {
             collected[out_count++] = ShapedGlyph{
                 .glyph_id = sub_infos[j].codepoint,
                 .cluster = sub_infos[j].cluster,
                 .font_slot = sr.slot_idx,
+                .is_rtl = static_cast<uint8_t>(is_rtl),
+                .cluster_end = sr.byte_end,
                 .x_advance_1px = static_cast<float>(sub_pos[j].x_advance) * slot.scale_1px,
                 .x_offset_em = static_cast<float>(sub_pos[j].x_offset),
                 .y_offset_em = static_cast<float>(sub_pos[j].y_offset),
             };
+        }
+        for (uint32_t i = first_out; i < out_count;) {
+            uint32_t j = i + 1u; while (j < out_count && collected[j].cluster == collected[i].cluster) ++j;
+            const uint32_t end = is_rtl ? (i > first_out ? collected[i-1].cluster : sr.byte_end) : (j < out_count ? collected[j].cluster : sr.byte_end);
+            for (uint32_t k = i; k < j; ++k) collected[k].cluster_end = end;
+            i = j;
         }
     }
 
@@ -968,6 +1039,8 @@ std::span<const ShapedGlyph> shape_utf8_run(
     }
     return std::span<const ShapedGlyph>(collected, out_count);
 }
+
+#include "etch_bidi.cpp"
 
 const char* svg_skip_ws_comma(const char* p, const char* end) noexcept {
     while (p < end) {
@@ -1101,8 +1174,8 @@ uint16_t load_font_file(
     const bool loaded = try_load_font_file_into_slot(&ctx->atlas, target_slot, path, face_index);
     if (loaded) {
         ctx->headless_ui.redraw_budget = 2u;
-        for (uint32_t i = 0; i < kMaxClaimedWindows; ++i)
-            if (ctx->claimed_windows[i].window) ctx->claimed_windows[i].ui.redraw_budget = 2u;
+        for (uint32_t i = 0; i < ctx->claimed_window_cap; ++i)
+            if (ctx->claimed_windows[i]) ctx->claimed_windows[i]->ui.redraw_budget = 2u;
     }
     return loaded ? target_slot : kInvalidFont;
 }
@@ -1131,8 +1204,8 @@ uint16_t load_font_memory(
     const bool loaded = init_font_slot_from_owned_bytes(&ctx->atlas, target_slot, copy, size_bytes, source_hash, face_index);
     if (loaded) {
         ctx->headless_ui.redraw_budget = 2u;
-        for (uint32_t i = 0; i < kMaxClaimedWindows; ++i)
-            if (ctx->claimed_windows[i].window) ctx->claimed_windows[i].ui.redraw_budget = 2u;
+        for (uint32_t i = 0; i < ctx->claimed_window_cap; ++i)
+            if (ctx->claimed_windows[i]) ctx->claimed_windows[i]->ui.redraw_budget = 2u;
     }
     return loaded ? target_slot : kInvalidFont;
 }
@@ -1556,8 +1629,8 @@ uint16_t register_svg_icon(
         .has_outline = true,
     };
     ctx->headless_ui.redraw_budget = 2u;
-        for (uint32_t i = 0; i < kMaxClaimedWindows; ++i)
-            if (ctx->claimed_windows[i].window) ctx->claimed_windows[i].ui.redraw_budget = 2u;
+        for (uint32_t i = 0; i < ctx->claimed_window_cap; ++i)
+            if (ctx->claimed_windows[i]) ctx->claimed_windows[i]->ui.redraw_budget = 2u;
     return slot;
 }
 

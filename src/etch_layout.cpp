@@ -396,27 +396,12 @@ void measure_line_segment_x(
         return;
     }
 
-    const auto cluster_stop_dx = [&](uint32_t stop, uint32_t abs_c0, uint32_t abs_c1, float cluster_adv, bool is_rtl) noexcept -> float {
-        if (is_rtl) {
-            if (stop <= abs_c0) return cluster_adv;
-            if (stop >= abs_c1) return 0.0f;
-            const uint32_t n_tot = count_utf8_cps(seg + abs_c0, abs_c1 - abs_c0);
-            const uint32_t n_pre = count_utf8_cps(seg + abs_c0, stop - abs_c0);
-            return cluster_adv * (1.0f - static_cast<float>(n_pre) / static_cast<float>(n_tot > 0u ? n_tot : 1u));
-        }
-        if (stop >= abs_c1) return cluster_adv;
-        if (stop <= abs_c0) return 0.0f;
-        const uint32_t n_tot = count_utf8_cps(seg + abs_c0, abs_c1 - abs_c0);
-        const uint32_t n_pre = count_utf8_cps(seg + abs_c0, stop - abs_c0);
-        return cluster_adv * (static_cast<float>(n_pre) / static_cast<float>(n_tot > 0u ? n_tot : 1u));
-    };
-
     uint32_t pos = 0u;
     while (pos < seg_len) {
         if (seg[pos] == '\t') {
             const float adv = 4.0f * primary.space_advance_em * base_px + next_spacing();
-            if (pos < stop_a) xa += adv;
-            if (pos < stop_b) xb += adv;
+            if (pos < stop_a) xa = total_w + adv;
+            if (pos < stop_b) xb = total_w + adv;
             total_w += adv;
             ++pos;
             continue;
@@ -440,13 +425,19 @@ void measure_line_segment_x(
             for (uint32_t k = gi; k < gi_end; ++k) {
                 cluster_adv += glyphs[k].x_advance_1px * base_px + next_spacing();
             }
-            const uint32_t c1 = is_rtl
-                ? ((gi > 0u && glyphs[gi - 1u].cluster > c0) ? glyphs[gi - 1u].cluster : run_len)
-                : ((gi_end < gcount && glyphs[gi_end].cluster > c0) ? glyphs[gi_end].cluster : run_len);
+            is_rtl = glyphs[gi].is_rtl != 0;
+            const uint32_t c1 = glyphs[gi].cluster_end;
             const uint32_t abs_c0 = pos + c0;
             const uint32_t abs_c1 = pos + c1;
-            if (out_xa) xa += cluster_stop_dx(stop_a, abs_c0, abs_c1, cluster_adv, is_rtl);
-            if (out_xb) xb += cluster_stop_dx(stop_b, abs_c0, abs_c1, cluster_adv, is_rtl);
+            const auto stop_x = [&](uint32_t stop, float* x) noexcept {
+                if (stop < abs_c0 || stop > abs_c1) return;
+                const uint32_t count = count_utf8_cps(seg + abs_c0, abs_c1 - abs_c0);
+                const uint32_t before = count_utf8_cps(seg + abs_c0, stop - abs_c0);
+                const float fraction = count ? static_cast<float>(before) / static_cast<float>(count) : 0;
+                *x = total_w + cluster_adv * (is_rtl ? 1.0f-fraction : fraction);
+            };
+            if (out_xa) stop_x(stop_a, &xa);
+            if (out_xb) stop_x(stop_b, &xb);
             total_w += cluster_adv;
             gi = gi_end;
         }
@@ -655,7 +646,7 @@ void push_prim(
                 tex_slot = static_cast<uint16_t>(cur->ext_count + 1u);
                 ++cur->ext_count;
             } else {
-                if (ctx->batch_count >= kMaxBatches) {
+                if (!ensure_batch_cap(ctx)) {
                     return;
                 }
                 cur = &ctx->batches[ctx->batch_count++];
@@ -711,11 +702,15 @@ bool begin_blur_layer(Context* ctx, Rect box_px, float radius_px) noexcept {
             return true;
         }
     }
-    if (ctx->blur_split_count >= kMaxBlurSplits) {
-        return false;
+    if (ctx->blur_split_count == ctx->blur_split_cap) {
+        if (ctx->blur_split_cap == 256u) return false;
+        const uint32_t cap = ctx->blur_split_cap ? ctx->blur_split_cap * 2u : 8u;
+        void* p = std::realloc(ctx->blur_splits, size_t(cap) * sizeof(BlurSplit));
+        if (!p) return false;
+        ctx->blur_splits = static_cast<BlurSplit*>(p); ctx->blur_split_cap = cap;
     }
     if (ctx->batch_count > 0u && ctx->batches[ctx->batch_count - 1u].prim_count > 0u) {
-        if (ctx->batch_count >= kMaxBatches) {
+        if (!ensure_batch_cap(ctx)) {
             return false;
         }
         ctx->batches[ctx->batch_count++] = DrawBatch{
@@ -854,7 +849,7 @@ void emit_box_background_and_shadow(
     }
 }
 
-void emit_slug_glyph_quad(
+void emit_slug_outline_quad(
     Context* ctx,
     uint16_t slot_idx,
     uint32_t glyph_id,
@@ -864,7 +859,7 @@ void emit_slug_glyph_quad(
     float x_offset_em,
     float y_offset_em,
     const ClipEntry& clip_px,
-    Color tint) noexcept
+    Color tint, bool color_layer = false) noexcept
 {
     const SlugGlyphEntry ge = slug_get_glyph(&ctx->atlas, slot_idx, glyph_id);
     if (!ge.has_outline) {
@@ -888,7 +883,51 @@ void emit_slug_glyph_quad(
             ge.num_hbands,
             ge.num_vbands,
             clip_px.radius,
-            PrimFlag_StemDarken));
+            color_layer ? PrimFlag_None : PrimFlag_StemDarken));
+}
+
+void emit_slug_glyph_quad(Context* ctx, uint16_t slot_idx, uint32_t glyph_id, float phys_px, float pen_x_px,
+    float baseline_y_px, float x_offset_em, float y_offset_em, const ClipEntry& clip_px, Color tint) noexcept {
+    const auto& slot=ctx->atlas.slots[slot_idx]; const auto layers=slug_get_colr_layers(slot,glyph_id);
+    if (!layers.count) { emit_slug_outline_quad(ctx,slot_idx,glyph_id,phys_px,pen_x_px,baseline_y_px,x_offset_em,y_offset_em,clip_px,tint); return; }
+    for(uint32_t i=0;i<layers.count;++i) {
+        const auto* p=slot.colr_data+slot.colr_layer_off+(layers.first+i)*4u;
+        const uint16_t glyph=ot_u16(p),palette=ot_u16(p+2); Color color=tint;
+        if(palette!=0xFFFFu) {
+            if(palette>=slot.cpal_num_palette_entries)continue;
+            const auto* c=slot.cpal_data+slot.cpal_color_records_off+uint32_t(palette)*4u;
+            color=Color::rgba8(c[2],c[1],c[0],static_cast<uint8_t>((uint32_t(c[3])*tint.a+127u)/255u));
+        }
+        emit_slug_outline_quad(ctx,slot_idx,glyph,phys_px,pen_x_px,baseline_y_px,x_offset_em,y_offset_em,clip_px,color,true);
+    }
+}
+
+Str ellipsis_text(Context* ctx, uint16_t font) noexcept {
+    hb_codepoint_t glyph=0;
+    const uint16_t slot=resolve_font_slot_idx(&ctx->atlas,font);
+    if(slot!=kInvalidFont && hb_font_get_nominal_glyph(ctx->atlas.slots[slot].hb_font,0x2026,&glyph))return str_lit("…");
+    for(uint32_t i=0;i<ctx->atlas.fallback_count;++i)
+        if(hb_font_get_nominal_glyph(ctx->atlas.slots[ctx->atlas.fallback_order[i]].hb_font,0x2026,&glyph))return str_lit("…");
+    return str_lit("...");
+}
+// Emit whole visual clusters, reserving room for the trailing marker.
+float emit_elided_line(Context* ctx, const char* chars, uint32_t len, uint16_t font, float size, float spacing,
+    float start, float baseline, float max_width, const ClipEntry& clip, Color color, float dpi) noexcept {
+    const Str marker=ellipsis_text(ctx,font);
+    const auto dots=shape_utf8_run(ctx,font,marker.chars,marker.length);
+    float dots_w=0;for(const auto& g:dots)dots_w+=g.x_advance_1px*size;
+    const float available=max_width>dots_w?max_width-dots_w:0;
+    const auto glyphs=shape_utf8_run(ctx,font,chars,len);
+    float pen=start;
+    for(uint32_t i=0;i<glyphs.size();) {
+        uint32_t j=i+1;while(j<glyphs.size()&&glyphs[j].cluster==glyphs[i].cluster)++j;
+        float advance=0;for(uint32_t k=i;k<j;++k)advance+=glyphs[k].x_advance_1px*size+spacing;
+        if(pen-start+advance>available+0.01f)break;
+        for(uint32_t k=i;k<j;++k){const auto& g=glyphs[k];emit_slug_glyph_quad(ctx,g.font_slot,g.glyph_id,size*dpi,pen*dpi,baseline*dpi,g.x_offset_em,g.y_offset_em,clip,color);pen+=g.x_advance_1px*size+spacing;}
+        i=j;
+    }
+    for(const auto& g:dots){emit_slug_glyph_quad(ctx,g.font_slot,g.glyph_id,size*dpi,pen*dpi,baseline*dpi,g.x_offset_em,g.y_offset_em,clip,color);pen+=g.x_advance_1px*size;}
+    return pen;
 }
 
 uint32_t utf8_clamp_boundary(const char*, uint32_t, uint32_t) noexcept;
@@ -918,7 +957,8 @@ SelectionLine selection_line(const Clay_RenderCommand* cmd) noexcept {
 
 // Visit visual cluster edges once; ligatures and RTL runs retain their shaped boundaries.
 void selection_line_geometry(Context* ctx, const Clay_RenderCommand* cmd, const SelectionLine& line,
-    uint32_t a, uint32_t b, float pointer_x, float* xa, float* xb, uint32_t* hit) noexcept {
+    uint32_t a, uint32_t b, float pointer_x, float* xa, float* xb, uint32_t* hit,
+    const ClipEntry* selection_clip = nullptr, float dpi = 1.0f) noexcept {
     float pen = cmd->boundingBox.x;
     float best = 1.0e30f;
     bool has_xa = false;
@@ -938,11 +978,18 @@ void selection_line_geometry(Context* ctx, const Clay_RenderCommand* cmd, const 
         while (pos < end) {
             if (line.base[pos] == '\t' || slot == kInvalidFont) {
                 edge(pos, pen);
+                const float start_pen = pen;
                 const bool tab = line.base[pos] == '\t';
                 const char* cp = line.base + pos;
                 (void)next_utf8_codepoint(cp, line.base + end);
                 pen += (tab ? 4.0f : 1.0f) * (slot == kInvalidFont ? 0.55f : ctx->atlas.slots[slot].space_advance_em) * size + advance_spacing();
-                pos = static_cast<uint32_t>(cp - line.base); edge(pos, pen); continue;
+                const uint32_t next_pos = static_cast<uint32_t>(cp - line.base);
+                if (selection_clip && a < next_pos && b > pos) {
+                    push_prim(ctx, Prim::make_rect({start_pen * dpi, cmd->boundingBox.y * dpi,
+                        (pen - start_pen) * dpi, cmd->boundingBox.height * dpi},
+                        selection_clip->rect, line.color, {}, {}, 0, 1, selection_clip->radius));
+                }
+                pos = next_pos; edge(pos, pen); continue;
             }
             uint32_t run_end = pos;
             while (run_end < end && line.base[run_end] != '\t') ++run_end;
@@ -952,8 +999,8 @@ void selection_line_geometry(Context* ctx, const Clay_RenderCommand* cmd, const 
                 const uint32_t c0 = glyphs[i].cluster;
                 uint32_t j = i + 1u;
                 while (j < glyphs.size() && glyphs[j].cluster == c0) ++j;
-                const uint32_t c1 = rtl ? (i ? glyphs[i-1u].cluster : run_end-pos)
-                    : (j < glyphs.size() ? glyphs[j].cluster : run_end-pos);
+                rtl = glyphs[i].is_rtl != 0;
+                const uint32_t c1 = glyphs[i].cluster_end;
                 const float cluster_x = pen;
                 edge(pos + (rtl ? c1 : c0), pen);
                 for (uint32_t k = i; k < j; ++k) pen += glyphs[k].x_advance_1px * size + advance_spacing();
@@ -966,6 +1013,17 @@ void selection_line_geometry(Context* ctx, const Clay_RenderCommand* cmd, const 
                         *has_x = true;
                     }
                 };
+                if (selection_clip && c1 > c0 && a < pos+c1 && b > pos+c0) {
+                    const uint32_t lo = a > pos+c0 ? a : pos+c0, hi = b < pos+c1 ? b : pos+c1;
+                    const uint32_t count = count_utf8_cps(line.base+pos+c0,c1-c0);
+                    if (count > 0u) {
+                        const float f0 = static_cast<float>(count_utf8_cps(line.base+pos+c0,lo-pos-c0))/static_cast<float>(count);
+                        const float f1 = static_cast<float>(count_utf8_cps(line.base+pos+c0,hi-pos-c0))/static_cast<float>(count);
+                        const float x = cluster_x+(pen-cluster_x)*(rtl ? 1.0f-f1 : f0);
+                        push_prim(ctx,Prim::make_rect({x*dpi,cmd->boundingBox.y*dpi,(pen-cluster_x)*(f1-f0)*dpi,cmd->boundingBox.height*dpi},
+                            selection_clip->rect,line.color,{}, {},0,1,selection_clip->radius));
+                    }
+                }
                 selection_stop(a,xa,&has_xa);
                 selection_stop(b,xb,&has_xb);
                 edge(pos + (rtl ? c0 : c1), pen);
@@ -996,7 +1054,7 @@ void selection_line_geometry(Context* ctx, const Clay_RenderCommand* cmd, const 
 void emit_selection_line(Context* ctx, const Clay_RenderCommand* cmd, const ClipEntry& clip, float dpi) noexcept {
     const SelectionLine line = selection_line(cmd);
     if (!line.id) return;
-    if (ctx->active_ui->span_hit_count < kMaxSpanHitsPerFrame) {
+    if (reserve_span_hits(&ctx->active_ui->span_hits, &ctx->active_ui->span_hit_cap, ctx->active_ui->span_hit_count, 256u)) {
         ctx->active_ui->span_hits[ctx->active_ui->span_hit_count++] = SpanHitRegion{
             .id = line.id, .clay_elem_id = line.clay_id,
             .rect = {cmd->boundingBox.x, cmd->boundingBox.y, cmd->boundingBox.width, cmd->boundingBox.height},
@@ -1009,11 +1067,9 @@ void emit_selection_line(Context* ctx, const Clay_RenderCommand* cmd, const Clip
     if (a == b || a >= line.end || b <= line.start) return;
     float xa, xb; uint32_t hit;
     const size_t mark = ctx->frame_arena.mark();
-    selection_line_geometry(ctx, cmd, line, a < line.start ? line.start : a, b > line.end ? line.end : b, 0, &xa, &xb, &hit);
+    selection_line_geometry(ctx, cmd, line, a < line.start ? line.start : a, b > line.end ? line.end : b, 0, &xa, &xb, &hit, &clip, dpi);
     ctx->frame_arena.rewind(mark);
-    if (xa > xb) { const float t = xa; xa = xb; xb = t; }
-    push_prim(ctx, Prim::make_rect({xa*dpi,cmd->boundingBox.y*dpi,(xb-xa)*dpi,cmd->boundingBox.height*dpi},
-        clip.rect,line.color,Corners::all(2.0f*dpi),{},0,1,clip.radius));
+
 }
 
 void emit_rich_text_command(
@@ -1023,7 +1079,12 @@ void emit_rich_text_command(
     const ClipEntry& clip,
     float dpi) noexcept
 {
-    emit_selection_line(ctx, cmd, clip, dpi);
+    ClipEntry effective_clip = clip;
+    if(cmd->renderData.text.truncated) {
+        const float width=cmd->renderData.text.maxWidth>0?cmd->renderData.text.maxWidth:cmd->boundingBox.width;
+        effective_clip.rect=rect_intersect(clip.rect,Rect{cmd->boundingBox.x*dpi,clip.rect.y,width*dpi,clip.rect.h});
+    }
+    emit_selection_line(ctx, cmd, effective_clip, dpi);
     const Clay_TextRenderData& td = cmd->renderData.text;
     const char* chars = td.stringContents.chars;
     const int32_t len = td.stringContents.length;
@@ -1092,10 +1153,10 @@ void emit_rich_text_command(
 
     const bool can_shape = ctx->atlas.font_valid;
     const Rect clip_logical = {
-        clip.rect.x / dpi,
-        clip.rect.y / dpi,
-        clip.rect.w / dpi,
-        clip.rect.h / dpi,
+        effective_clip.rect.x / dpi,
+        effective_clip.rect.y / dpi,
+        effective_clip.rect.w / dpi,
+        effective_clip.rect.h / dpi,
     };
 
     float pen_logical = cmd->boundingBox.x;
@@ -1192,7 +1253,7 @@ void emit_rich_text_command(
             .has_right_edge = has_right,
         };
 
-        if (sp.id != 0u && seg_x1 > seg_x0 && ctx->active_ui->span_hit_count < kMaxSpanHitsPerFrame) {
+        if (sp.id != 0u && seg_x1 > seg_x0 && reserve_span_hits(&ctx->active_ui->span_hits, &ctx->active_ui->span_hit_cap, ctx->active_ui->span_hit_count, 256u)) {
             ctx->active_ui->span_hits[ctx->active_ui->span_hit_count++] = SpanHitRegion{
                 .id = sp.id,
                 .clay_elem_id = rich->clay_elem_id,
@@ -1237,15 +1298,27 @@ void emit_rich_text_command(
             ctx,
             Prim::make_rect(
                 Rect{ sg.x0_px, top_px, w_px, h_px },
-                clip.rect,
+                effective_clip.rect,
                 sp->background,
                 Corners{ rl, rr, rr, rl },
                 sp->border_color,
                 bw,
                 1.0f,
-                clip.radius));
+                effective_clip.radius));
     }
 
+    float visible_end_px = cmd->boundingBox.x*dpi;
+    const RichSpanInternal* ellipsis_span = &rich->spans[0];
+    float reserved_px=0;
+    if(td.truncated) {
+        for(uint32_t si=0;si<rich->span_count;++si) {
+            const auto& sp=rich->spans[si];const Str dots=ellipsis_text(ctx,sp.font_id);float width=0;
+            for(const auto& g:shape_utf8_run(ctx,sp.font_id,dots.chars,dots.length))width+=g.x_advance_1px*sp.font_size_px*dpi;
+            if(width>reserved_px)reserved_px=width;
+        }
+    }
+    const float text_limit_px=(cmd->boundingBox.x+(td.maxWidth>0?td.maxWidth:cmd->boundingBox.width))*dpi-reserved_px;
+    bool elided=false;
     // Pass 2: Emit Slug glyphs, underline, and strikethrough decorations.
     for (uint32_t i = 0u; i < chunk_count; ++i) {
         const RichLineChunk& ch = chunks[i];
@@ -1255,6 +1328,13 @@ void emit_rich_text_command(
         float gx = ch.start_x_px;
         for (uint32_t gi = 0u; gi < static_cast<uint32_t>(ch.glyphs.size()); ++gi) {
             const ShapedGlyph& g = ch.glyphs[gi];
+            if(td.truncated && (gi==0 || ch.glyphs[gi-1].cluster!=g.cluster)) {
+                float advance=0;
+                for(uint32_t j=gi;j<ch.glyphs.size()&&ch.glyphs[j].cluster==g.cluster;++j)advance+=ch.glyphs[j].x_advance_1px*phys_px+ls_px;
+                if(elided || gx+advance>text_limit_px+0.01f){elided=true;break;}
+            }
+            if(td.truncated && elided)break;
+            ellipsis_span=sp;
             if (ch.trim_last_spacing && (ch.first_glyph_has_ls || gi > 0u)) {
                 gx += ls_px;
             }
@@ -1267,14 +1347,24 @@ void emit_rich_text_command(
                 baseline_y_px,
                 g.x_offset_em,
                 g.y_offset_em,
-                clip,
+                effective_clip,
                 sp->color);
             gx += g.x_advance_1px * phys_px + (ch.trim_last_spacing ? 0.0f : ls_px);
+            visible_end_px=gx;
         }
     }
 
+    if(td.truncated) {
+        const Str dots=ellipsis_text(ctx,ellipsis_span->font_id);
+        float pen=visible_end_px;
+        for(const auto& g:shape_utf8_run(ctx,ellipsis_span->font_id,dots.chars,dots.length)) {
+            emit_slug_glyph_quad(ctx,g.font_slot,g.glyph_id,ellipsis_span->font_size_px*dpi,pen,baseline_y_px,g.x_offset_em,g.y_offset_em,effective_clip,ellipsis_span->color);
+            pen+=g.x_advance_1px*ellipsis_span->font_size_px*dpi;
+        }
+    }
     for (uint32_t i = 0u; i < seg_count; ++i) {
-        const RichLineSeg& sg = segs[i];
+        RichLineSeg sg = segs[i];
+        if(td.truncated && sg.text_x0_px+sg.text_w_px>visible_end_px)sg.text_w_px=visible_end_px-sg.text_x0_px;
         const RichSpanInternal* sp = sg.sp;
         if (sg.text_w_px <= 0.0f) {
             continue;
@@ -1290,7 +1380,7 @@ void emit_rich_text_command(
                 ctx,
                 Prim::make_rect(
                     Rect{ sg.text_x0_px, uy, sg.text_w_px, thick_px },
-                    clip.rect,
+                    effective_clip.rect,
                     sp->color));
         }
         if (sp->strikethrough) {
@@ -1299,7 +1389,7 @@ void emit_rich_text_command(
                 ctx,
                 Prim::make_rect(
                     Rect{ sg.text_x0_px, sy, sg.text_w_px, thick_px },
-                    clip.rect,
+                    effective_clip.rect,
                     sp->color));
         }
     }
@@ -1345,6 +1435,13 @@ void emit_text_command(
         static_cast<uint8_t>(td.textColor.b + 0.5f),
         static_cast<uint8_t>(td.textColor.a + 0.5f));
 
+    if(td.truncated) {
+        ClipEntry local_clip=clip;
+        const float width=td.maxWidth>0?td.maxWidth:cmd->boundingBox.width;
+        local_clip.rect=rect_intersect(clip.rect,Rect{cmd->boundingBox.x*dpi,clip.rect.y,width*dpi,clip.rect.h});
+        emit_elided_line(ctx,chars,static_cast<uint32_t>(len),primary_slot,logical_font_px,static_cast<float>(td.letterSpacing),
+            cmd->boundingBox.x,baseline_y/dpi,width,local_clip,tint,dpi);return;
+    }
     float pen_x = cmd->boundingBox.x * dpi;
     const uint32_t ulen = static_cast<uint32_t>(len);
     uint32_t pos = 0u;
@@ -1630,6 +1727,39 @@ uint32_t utf8_decode_at(const char* s, uint32_t len, uint32_t pos) noexcept {
     return next_utf8_codepoint(p, s + len);
 }
 
+#include "etch_grapheme_data.h"
+uint8_t grapheme_property(uint32_t cp, const GraphemeRange* ranges, uint32_t count) noexcept {
+    uint32_t lo=0,hi=count;
+    while(lo<hi){const uint32_t m=(lo+hi)/2;if(ranges[m].last<cp)lo=m+1;else hi=m;}
+    return lo<count && ranges[lo].first<=cp ? ranges[lo].prop : 0;
+}
+uint32_t utf8_next_grapheme(const char* s, uint32_t len, uint32_t pos) noexcept {
+    if(pos>=len)return len;
+    const uint32_t first=utf8_decode_at(s,len,pos);
+    uint8_t prev=grapheme_property(first,kGraphemeRanges,ETCH_COUNTOF(kGraphemeRanges));
+    uint32_t end=utf8_next_boundary(s,len,pos),ri=prev==6?1u:0u;
+    bool pict=grapheme_property(first,kPictographicRanges,ETCH_COUNTOF(kPictographicRanges))!=0,zwj_pict=false;
+    while(end<len) {
+        const uint32_t cp=utf8_decode_at(s,len,end);
+        const uint8_t cur=grapheme_property(cp,kGraphemeRanges,ETCH_COUNTOF(kGraphemeRanges));
+        const bool ep=grapheme_property(cp,kPictographicRanges,ETCH_COUNTOF(kPictographicRanges))!=0;
+        const bool control=(prev>=1&&prev<=3)||(cur>=1&&cur<=3);
+        const bool join=(prev==1&&cur==2)||(!control&&(
+            (prev==9&&(cur==9||cur==10||cur==12||cur==13))||
+            ((prev==10||prev==12)&&(cur==10||cur==11))||((prev==11||prev==13)&&cur==11)||
+            cur==4||cur==5||cur==8||prev==7||(prev==5&&zwj_pict&&ep)||(prev==6&&cur==6&&(ri&1u))));
+        if(!join)break;
+        if(cur==5)zwj_pict=pict;else if(cur!=4)pict=ep;
+        ri=cur==6?ri+1:0;prev=cur;end=utf8_next_boundary(s,len,end);
+    }
+    return end;
+}
+uint32_t utf8_prev_grapheme(const char* s, uint32_t len, uint32_t pos) noexcept {
+    uint32_t cur = 0;
+    while (cur < pos) { const uint32_t next = utf8_next_grapheme(s, len, cur); if (next >= pos) return cur; cur = next; }
+    return cur;
+}
+
 uint32_t utf8_codepoint_to_byte_offset(const char* s, uint32_t len, int32_t cp_count) noexcept {
     if (!s || len == 0u || cp_count <= 0) {
         return 0u;
@@ -1664,7 +1794,7 @@ uint32_t utf8_word_left(const char* s, uint32_t len, uint32_t pos) noexcept {
     }
     uint32_t cur = pos;
     while (cur > 0u) {
-        const uint32_t prev = utf8_prev_boundary(s, len, cur);
+        const uint32_t prev = utf8_prev_grapheme(s, len, cur);
         if (utf8_char_class(utf8_decode_at(s, len, prev)) != 0u) {
             break;
         }
@@ -1673,11 +1803,11 @@ uint32_t utf8_word_left(const char* s, uint32_t len, uint32_t pos) noexcept {
     if (cur == 0u) {
         return 0u;
     }
-    const uint32_t first_prev = utf8_prev_boundary(s, len, cur);
+    const uint32_t first_prev = utf8_prev_grapheme(s, len, cur);
     const uint8_t target_cls = utf8_char_class(utf8_decode_at(s, len, first_prev));
     cur = first_prev;
     while (cur > 0u) {
-        const uint32_t prev = utf8_prev_boundary(s, len, cur);
+        const uint32_t prev = utf8_prev_grapheme(s, len, cur);
         if (utf8_char_class(utf8_decode_at(s, len, prev)) != target_cls) {
             break;
         }
@@ -1693,14 +1823,14 @@ uint32_t utf8_word_right(const char* s, uint32_t len, uint32_t pos) noexcept {
     }
     uint32_t cur = pos;
     while (cur < len && utf8_char_class(utf8_decode_at(s, len, cur)) == 0u) {
-        cur = utf8_next_boundary(s, len, cur);
+        cur = utf8_next_grapheme(s, len, cur);
     }
     if (cur >= len) {
         return len;
     }
     const uint8_t target_cls = utf8_char_class(utf8_decode_at(s, len, cur));
     while (cur < len && utf8_char_class(utf8_decode_at(s, len, cur)) == target_cls) {
-        cur = utf8_next_boundary(s, len, cur);
+        cur = utf8_next_grapheme(s, len, cur);
     }
     return cur;
 }
@@ -1716,31 +1846,31 @@ void utf8_word_bounds_at(const char* s, uint32_t len, uint32_t pos, uint32_t* ou
     }
     pos = utf8_clamp_boundary(s, len, pos);
     if (pos >= len && pos > 0u) {
-        pos = utf8_prev_boundary(s, len, pos);
+        pos = utf8_prev_grapheme(s, len, pos);
     }
     const uint32_t cp = utf8_decode_at(s, len, pos);
     if (cp == '\n') {
         *out_start = pos;
-        *out_end = utf8_next_boundary(s, len, pos);
+        *out_end = utf8_next_grapheme(s, len, pos);
         return;
     }
     const uint8_t cls = utf8_char_class(cp);
     uint32_t a = pos;
     while (a > 0u) {
-        const uint32_t prev = utf8_prev_boundary(s, len, a);
+        const uint32_t prev = utf8_prev_grapheme(s, len, a);
         const uint32_t pcp = utf8_decode_at(s, len, prev);
         if (pcp == '\n' || utf8_char_class(pcp) != cls) {
             break;
         }
         a = prev;
     }
-    uint32_t b = utf8_next_boundary(s, len, pos);
+    uint32_t b = utf8_next_grapheme(s, len, pos);
     while (b < len) {
         const uint32_t ncp = utf8_decode_at(s, len, b);
         if (ncp == '\n' || utf8_char_class(ncp) != cls) {
             break;
         }
-        b = utf8_next_boundary(s, len, b);
+        b = utf8_next_grapheme(s, len, b);
     }
     *out_start = a;
     *out_end = b;
@@ -2058,9 +2188,8 @@ uint32_t visual_point_to_byte(Context* ctx, const TextInputDesc& desc, Str text,
             for (uint32_t k = gi; k < gi_end; ++k) {
                 cluster_adv += glyphs[k].x_advance_1px * base_px + desc.letter_spacing;
             }
-            const uint32_t c1 = is_rtl
-                ? ((gi > 0u && glyphs[gi - 1u].cluster > c0) ? glyphs[gi - 1u].cluster : run_len)
-                : ((gi_end < gcount && glyphs[gi_end].cluster > c0) ? glyphs[gi_end].cluster : run_len);
+            is_rtl = glyphs[gi].is_rtl != 0;
+            const uint32_t c1 = glyphs[gi].cluster_end;
             if (local_x < pen_x + cluster_adv && c1 > c0) {
                 const uint32_t n_cp = count_utf8_cps(seg + pos + c0, c1 - c0);
                 if (is_rtl) {
@@ -2717,22 +2846,31 @@ void undo_reset_slot(TextUndoSlot* slot) noexcept {
 }
 
 TextUndoSlot* undo_acquire_slot(Context* ctx, uint32_t widget_id, uint32_t frame_index) noexcept {
-    TextUndoSlot* lru = &ctx->active_ui->undo_pool[0];
-    for (uint32_t i = 0u; i < kTextUndoSlots; ++i) {
-        TextUndoSlot* s = &ctx->active_ui->undo_pool[i];
-        if (s->widget_id == widget_id) {
-            s->last_used_frame = frame_index;
-            return s;
-        }
-        if (s->widget_id == 0u) {
-            s->widget_id = widget_id;
-            s->last_used_frame = frame_index;
-            undo_reset_slot(s);
-            return s;
-        }
-        if (s->last_used_frame < lru->last_used_frame) {
-            lru = s;
-        }
+    auto& ui = *ctx->active_ui;
+    TextUndoSlot* lru = nullptr;
+    for (uint32_t i = 0; i < ui.undo_cap; ++i) {
+        auto* slot = &ui.undo_pool[i];
+        if (slot->widget_id == widget_id) { slot->last_used_frame = frame_index; return slot; }
+        if (!slot->widget_id) { lru = slot; break; }
+        if (!lru || slot->last_used_frame < lru->last_used_frame) lru = slot;
+    }
+    if ((!lru || lru->widget_id) && ui.undo_cap < 512u) {
+        const uint32_t cap = ui.undo_cap ? ui.undo_cap * 2u : 16u;
+        void* p = std::realloc(ui.undo_pool, size_t(cap) * sizeof(TextUndoSlot));
+        if (!p) return nullptr;
+        ui.undo_pool = static_cast<TextUndoSlot*>(p);
+        for (uint32_t i = ui.undo_cap; i < cap; ++i) ui.undo_pool[i] = {};
+        lru = &ui.undo_pool[ui.undo_cap]; ui.undo_cap = cap;
+    }
+    if (!lru->entries) {
+        lru->entries = static_cast<TextUndoRecord*>(std::calloc(32u, sizeof(TextUndoRecord)));
+        if (!lru->entries) return nullptr;
+        lru->entries_cap = 32u;
+    }
+    if (!lru->bytes) {
+        lru->bytes = static_cast<char*>(std::calloc(8192u, 1));
+        if (!lru->bytes) return nullptr;
+        lru->bytes_cap = 8192u;
     }
     lru->widget_id = widget_id;
     lru->last_used_frame = frame_index;
@@ -2741,10 +2879,10 @@ TextUndoSlot* undo_acquire_slot(Context* ctx, uint32_t widget_id, uint32_t frame
 }
 
 void undo_pop_tail(TextUndoSlot* slot) noexcept {
-    const uint32_t tail_idx = (slot->head + slot->count - 1u) % kTextUndoMaxEntries;
+    const uint32_t tail_idx = (slot->head + slot->count - 1u) % slot->entries_cap;
     const TextUndoRecord& tail = slot->entries[tail_idx];
     slot->write_pos = tail.offset;
-    slot->bytes_used = static_cast<uint16_t>(slot->bytes_used - tail.length);
+    slot->bytes_used = slot->bytes_used - tail.length;
     --slot->count;
 }
 
@@ -2757,7 +2895,7 @@ void undo_push_snapshot(
     float elapsed_sec,
     uint8_t op_group) noexcept
 {
-    if (len > kTextUndoByteCap) {
+    if (len > 262144u) {
         undo_reset_slot(slot);
         return;
     }
@@ -2770,12 +2908,36 @@ void undo_push_snapshot(
     {
         undo_pop_tail(slot);
     }
+    if (slot->count == slot->entries_cap && slot->entries_cap < 512u) {
+        const uint32_t cap = slot->entries_cap * 2u;
+        auto* entries = static_cast<TextUndoRecord*>(std::calloc(cap, sizeof(TextUndoRecord)));
+        if (entries) {
+            for (uint32_t i=0;i<slot->count;++i) entries[i]=slot->entries[(slot->head+i)%slot->entries_cap];
+            std::free(slot->entries); slot->entries=entries; slot->entries_cap=cap; slot->head=0;
+        }
+    }
+    if (slot->bytes_used + len > slot->bytes_cap && slot->bytes_cap < 262144u) {
+        uint32_t cap=slot->bytes_cap; while(cap<slot->bytes_used+len && cap<262144u)cap*=2u;
+        auto* bytes=static_cast<char*>(std::calloc(cap,1));
+        if(bytes) {
+            uint32_t write=0;
+            for(uint32_t i=0;i<slot->count;++i) {
+                auto& r=slot->entries[(slot->head+i)%slot->entries_cap];
+                const uint32_t first=r.length < slot->bytes_cap-r.offset ? r.length : slot->bytes_cap-r.offset;
+                std::memcpy(bytes+write,slot->bytes+r.offset,first);
+                if(first<r.length)std::memcpy(bytes+write+first,slot->bytes,r.length-first);
+                r.offset=write;write+=r.length;
+            }
+            std::free(slot->bytes);slot->bytes=bytes;slot->bytes_cap=cap;slot->write_pos=write%cap;
+        }
+    }
+    if (len > slot->bytes_cap) { undo_reset_slot(slot); return; }
     while (slot->count > 0u &&
-           (slot->count >= kTextUndoMaxEntries || uint32_t(slot->bytes_used) + len > kTextUndoByteCap))
+           (slot->count >= slot->entries_cap || uint32_t(slot->bytes_used) + len > slot->bytes_cap))
     {
         const TextUndoRecord& oldest = slot->entries[slot->head];
-        slot->bytes_used = static_cast<uint16_t>(slot->bytes_used - oldest.length);
-        slot->head = (slot->head + 1u) % kTextUndoMaxEntries;
+        slot->bytes_used = slot->bytes_used - oldest.length;
+        slot->head = (slot->head + 1u) % slot->entries_cap;
         --slot->count;
     }
     if (slot->count == 0u) {
@@ -2784,9 +2946,9 @@ void undo_push_snapshot(
         slot->bytes_used = 0u;
     }
     const uint32_t hash = (len > 0u && buf) ? fnv1a_32_step(2166136261u, buf, len) : 2166136261u;
-    const uint16_t start_off = slot->write_pos;
+    const uint32_t start_off = slot->write_pos;
     if (len > 0u && buf) {
-        const uint32_t first = kTextUndoByteCap - start_off;
+        const uint32_t first = slot->bytes_cap - start_off;
         if (len <= first) {
             std::memcpy(slot->bytes + start_off, buf, len);
         } else {
@@ -2794,16 +2956,16 @@ void undo_push_snapshot(
             std::memcpy(slot->bytes, buf + first, len - first);
         }
     }
-    const uint32_t ins_idx = (slot->head + slot->count) % kTextUndoMaxEntries;
+    const uint32_t ins_idx = (slot->head + slot->count) % slot->entries_cap;
     slot->entries[ins_idx] = TextUndoRecord{
         .offset = start_off,
-        .length = static_cast<uint16_t>(len),
+        .length = len,
         .cursor = cursor,
         .anchor = anchor,
         .hash = hash,
     };
-    slot->write_pos = static_cast<uint16_t>((uint32_t(start_off) + len) % kTextUndoByteCap);
-    slot->bytes_used = static_cast<uint16_t>(slot->bytes_used + len);
+    slot->write_pos = (start_off + len) % slot->bytes_cap;
+    slot->bytes_used = slot->bytes_used + len;
     slot->cur = slot->count;
     ++slot->count;
     slot->last_coalesce_sec = elapsed_sec;
@@ -2822,11 +2984,11 @@ bool undo_restore(
     if (!slot || !buf || cap == 0u || target_cur >= slot->count) {
         return false;
     }
-    const TextUndoRecord& rec = slot->entries[(slot->head + target_cur) % kTextUndoMaxEntries];
+    const TextUndoRecord& rec = slot->entries[(slot->head + target_cur) % slot->entries_cap];
     const uint32_t max_copy = cap - 1u;
     const uint32_t to_copy = (rec.length <= max_copy) ? rec.length : max_copy;
     if (to_copy > 0u) {
-        const uint32_t first = kTextUndoByteCap - rec.offset;
+        const uint32_t first = slot->bytes_cap - rec.offset;
         if (to_copy <= first) {
             std::memcpy(buf, slot->bytes + rec.offset, to_copy);
         } else {
@@ -3417,8 +3579,9 @@ void emit_draw_list_command(
 bool needs_redraw(const Context* ctx) noexcept {
     if (!ctx) return false;
     if (ctx->headless_ui.redraw_budget || ctx->headless_ui.active_anim_count) return true;
-    for (uint32_t i = 0; i < kMaxClaimedWindows; ++i) {
-        const ClaimedWindowSlot& slot = ctx->claimed_windows[i];
+    for (uint32_t i = 0; i < ctx->claimed_window_cap; ++i) {
+        if (!ctx->claimed_windows[i]) continue;
+        const ClaimedWindowSlot& slot = *ctx->claimed_windows[i];
         if (slot.window && (slot.ui.redraw_budget || slot.ui.active_anim_count)) return true;
     }
     return false;
@@ -4391,7 +4554,7 @@ void begin_box(const BoxDesc& desc_in) noexcept {
                 ? ctx->active_ui->canvas_stack[ctx->active_ui->canvas_depth - 1u].id
                 : 0u;
         }
-        if (desc.focusable && ctx->active_ui->focus_count < kMaxFocusablePerFrame) {
+        if (desc.focusable && reserve_focus(ctx->active_ui)) {
             ctx->active_ui->focus_order[ctx->active_ui->focus_count++] = desc.id;
             if (ctx->active_ui->modal_needs_focus && focus_scope_contains(*ctx->active_ui, ctx->active_ui->modal_scope)) {
                 ctx->active_ui->focus_id = desc.id;
@@ -4503,7 +4666,7 @@ static void register_selectable_text(Context* ctx, uint32_t element_id, const ch
     ws->owner_canvas_id = ui.canvas_depth ? ui.canvas_stack[ui.canvas_depth-1u].id : 0u;
     ws->focus_scope = ui.modal_scope && focus_scope_contains(ui,ui.modal_scope) ? ui.modal_scope : ui.focus_scope;
     const bool allowed = !ui.modal_scope || focus_scope_contains(ui,ui.modal_scope);
-    if (allowed && ui.focus_count < kMaxFocusablePerFrame) ui.focus_order[ui.focus_count++] = element_id;
+    if (allowed && reserve_focus(&ui)) ui.focus_order[ui.focus_count++] = element_id;
     ws->sel_text_ptr = full_utf8; ws->sel_text_len = total_bytes;
     ws->sel_text_epoch = ctx->arena_epoch; ws->sel_text_static = is_static_backing;
     ws->edit_sel_anchor = utf8_clamp_boundary(full_utf8,total_bytes,ws->edit_sel_anchor);
@@ -4528,7 +4691,7 @@ static void register_selectable_text(Context* ctx, uint32_t element_id, const ch
 
 void text(Str content, const TextDesc& desc) noexcept {
     Context* ctx = current_context();
-    if (!ctx || !ctx->in_frame || !content.chars || content.length == 0u) {
+    if (!ctx || !ctx->in_frame || !content.chars || content.length == 0u || !std::isfinite(desc.line_height_px)) {
         return;
     }
 
@@ -4564,8 +4727,11 @@ void text(Str content, const TextDesc& desc) noexcept {
     cfg.fontId = static_cast<uint16_t>((slot_bits & 0x7Fu) | ((frac_px & 0xFFu) << 7));
     cfg.fontSize = static_cast<uint16_t>(int_px);
     cfg.letterSpacing = to_u16_round(desc.letter_spacing * wscale);
-    cfg.lineHeight = 0u;
+    cfg.lineHeight = desc.line_height_px > 0.0f ? to_u16_round(desc.line_height_px * wscale) : 0u;
+    cfg.ellipsis = desc.ellipsis;
+    cfg.maxLines = desc.max_lines;
     cfg.wrapMode = desc.wrap ? CLAY_TEXT_WRAP_WORDS : CLAY_TEXT_WRAP_NONE;
+    cfg.textAlignment = desc.align_x == AlignX::Center ? CLAY_TEXT_ALIGN_CENTER : (desc.align_x == AlignX::Right ? CLAY_TEXT_ALIGN_RIGHT : CLAY_TEXT_ALIGN_LEFT);
 
     SelectableTextExtra* extra = nullptr;
     if (desc.selectable && desc.id) {
@@ -4719,6 +4885,8 @@ void text_spans(std::span<const TextSpan> spans, const RichTextDesc& desc) noexc
     cfg.fontSize = static_cast<uint16_t>(cfg_hash >> 16);
     cfg.letterSpacing = 0u;
     cfg.lineHeight = 0u;
+    cfg.ellipsis = desc.ellipsis;
+    cfg.maxLines = desc.max_lines;
     cfg.wrapMode = desc.wrap ? CLAY_TEXT_WRAP_WORDS : CLAY_TEXT_WRAP_NONE;
     cfg.textAlignment = (desc.align_x == AlignX::Center)
         ? CLAY_TEXT_ALIGN_CENTER
@@ -5057,8 +5225,9 @@ void set_window_chrome(const WindowChromeDesc& desc, SDL_Window* window) noexcep
     ui->chrome_desc = clean;
     ui->redraw_budget = 2;
     if (!ctx->headless) {
-        for (uint32_t i = 0u; i < kMaxClaimedWindows; ++i) {
-            ClaimedWindowSlot& slot = ctx->claimed_windows[i];
+        for (uint32_t i = 0u; i < ctx->claimed_window_cap; ++i) {
+            if (!ctx->claimed_windows[i]) continue;
+            ClaimedWindowSlot& slot = *ctx->claimed_windows[i];
             if (!slot.window || &slot.ui != ui) {
                 continue;
             }
@@ -5218,18 +5387,24 @@ bool begin_drag_payload(
 {
     Context* ctx = current_context();
     if (!ctx || !ctx->in_frame || !ctx->active_ui->prev_pointer_down || kind_hash == 0u ||
-        size > kMaxDragPayloadBytes || (size > 0u && !data))
+        size > (1u << 20) || (size > 0u && !data))
     {
         return false;
     }
 
+    auto& ui = *ctx->active_ui;
+    if (size > 64u && size > ui.drag_heap_cap) {
+        uint32_t cap = ui.drag_heap_cap ? ui.drag_heap_cap : 128u; while(cap < size) cap *= 2u;
+        void* p = std::realloc(ui.drag_heap, cap); if(!p)return false;
+        ui.drag_heap=static_cast<uint8_t*>(p);ui.drag_heap_cap=cap;
+    }
     ctx->active_ui->drag_source_id = source_id;
     ctx->active_ui->drag_kind_hash = kind_hash;
     ctx->active_ui->drag_u64 = u64;
     ctx->active_ui->drag_u32 = u32;
     ctx->active_ui->drag_size = size;
     if (size > 0u) {
-        std::memcpy(ctx->active_ui->drag_data, data, size);
+        std::memcpy((ctx->active_ui->drag_size > 64u ? ctx->active_ui->drag_heap : ctx->active_ui->drag_inline), data, size);
     }
 
     uint32_t copy_len = 0u;
@@ -5271,7 +5446,7 @@ bool peek_drag_payload(DragPayloadView* out_view, uint32_t kind_hash) noexcept {
             .label = (ctx->active_ui->drag_label_len > 0u) ? Str{ ctx->active_ui->drag_label, ctx->active_ui->drag_label_len, false } : Str{},
             .u64 = ctx->active_ui->drag_u64,
             .u32 = ctx->active_ui->drag_u32,
-            .data = (ctx->active_ui->drag_size > 0u) ? ctx->active_ui->drag_data : nullptr,
+            .data = (ctx->active_ui->drag_size > 0u) ? (ctx->active_ui->drag_size > 64u ? ctx->active_ui->drag_heap : ctx->active_ui->drag_inline) : nullptr,
             .size = ctx->active_ui->drag_size,
         };
     }
@@ -5298,7 +5473,7 @@ bool accept_drag_payload(uint32_t target_id, uint32_t kind_hash, DragPayloadView
             .label = (ctx->active_ui->drag_label_len > 0u) ? Str{ ctx->active_ui->drag_label, ctx->active_ui->drag_label_len, false } : Str{},
             .u64 = ctx->active_ui->drag_u64,
             .u32 = ctx->active_ui->drag_u32,
-            .data = (ctx->active_ui->drag_size > 0u) ? ctx->active_ui->drag_data : nullptr,
+            .data = (ctx->active_ui->drag_size > 0u) ? (ctx->active_ui->drag_size > 64u ? ctx->active_ui->drag_heap : ctx->active_ui->drag_inline) : nullptr,
             .size = ctx->active_ui->drag_size,
         };
     }
@@ -5429,7 +5604,7 @@ TextInputResult text_input(const TextInputDesc& desc) noexcept {
                 ? ctx->active_ui->canvas_stack[ctx->active_ui->canvas_depth - 1u].id
                 : 0u;
         }
-        if (ctx->active_ui->focus_count < kMaxFocusablePerFrame) {
+        if (reserve_focus(ctx->active_ui)) {
             ctx->active_ui->focus_order[ctx->active_ui->focus_count++] = desc.id;
             if (ctx->active_ui->modal_needs_focus && focus_scope_contains(*ctx->active_ui, ctx->active_ui->modal_scope)) {
                 ctx->active_ui->focus_id = desc.id;
@@ -5469,18 +5644,18 @@ TextInputResult text_input(const TextInputDesc& desc) noexcept {
     TextUndoSlot* undo_slot = nullptr;
     if (writable && desc.id != 0u) {
         undo_slot = undo_acquire_slot(ctx, desc.id, ctx->active_ui->frame_index);
-        if (len <= kTextUndoByteCap) {
+        if (undo_slot && len <= 262144u) {
             const uint32_t cur_hash = (len > 0u) ? fnv1a_32_step(2166136261u, buf, len) : 2166136261u;
             if (undo_slot->count == 0u) {
                 undo_push_snapshot(undo_slot, buf, len, cursor, anchor, ctx->active_ui->elapsed_seconds, 0u);
             } else {
-                const TextUndoRecord& cur_rec = undo_slot->entries[(undo_slot->head + undo_slot->cur) % kTextUndoMaxEntries];
+                const TextUndoRecord& cur_rec = undo_slot->entries[(undo_slot->head + undo_slot->cur) % undo_slot->entries_cap];
                 if (cur_rec.length != len || cur_rec.hash != cur_hash) {
                     undo_reset_slot(undo_slot);
                     undo_push_snapshot(undo_slot, buf, len, cursor, anchor, ctx->active_ui->elapsed_seconds, 0u);
                 }
             }
-        } else {
+        } else if (undo_slot) {
             undo_reset_slot(undo_slot);
         }
     }
@@ -5510,7 +5685,8 @@ TextInputResult text_input(const TextInputDesc& desc) noexcept {
         if (ws->pressed_this_frame) {
             ctx->active_ui->caret_blink_on = true;
             ctx->active_ui->caret_blink_cycles = 0u;
-            const uint32_t hit_byte = visual_point_to_byte(ctx, desc, cur_text, local_x, local_y);
+            uint32_t hit_byte = visual_point_to_byte(ctx, desc, cur_text, local_x, local_y);
+            if (hit_byte && hit_byte < len) { const uint32_t previous=utf8_prev_grapheme(buf,len,hit_byte); if(utf8_next_grapheme(buf,len,previous)!=hit_byte)hit_byte=previous; }
             if (ctx->active_ui->last_mouse_clicks >= 3u) {
                 if (desc.multiline) {
                     line_bounds_at(buf, len, hit_byte, &anchor, &cursor);
@@ -5530,6 +5706,7 @@ TextInputResult text_input(const TextInputDesc& desc) noexcept {
             ws->edit_preferred_x = -1.0f;
         } else if (ctx->active_ui->active_id == desc.id && ws->pressed_down) {
             cursor = visual_point_to_byte(ctx, desc, cur_text, local_x, local_y);
+            if(cursor && cursor<len){const uint32_t previous=utf8_prev_grapheme(buf,len,cursor);if(utf8_next_grapheme(buf,len,previous)!=cursor)cursor=previous;}
             ws->edit_preferred_x = -1.0f;
             request_redraw(ctx);
         }
@@ -5539,14 +5716,14 @@ TextInputResult text_input(const TextInputDesc& desc) noexcept {
     bool submitted = false;
     if (is_focused) {
         if (undo_slot && undo_slot->count > 0u) {
-            TextUndoRecord& cur_rec = undo_slot->entries[(undo_slot->head + undo_slot->cur) % kTextUndoMaxEntries];
+            TextUndoRecord& cur_rec = undo_slot->entries[(undo_slot->head + undo_slot->cur) % undo_slot->entries_cap];
             cur_rec.cursor = cursor;
             cur_rec.anchor = anchor;
         }
         const auto record_edit = [&](uint8_t op_group) noexcept {
             changed = true;
             if (undo_slot) {
-                if (len <= kTextUndoByteCap) {
+                if (len <= 262144u) {
                     undo_push_snapshot(undo_slot, buf, len, cursor, anchor, ctx->active_ui->elapsed_seconds, op_group);
                 } else {
                     undo_reset_slot(undo_slot);
@@ -5673,7 +5850,7 @@ TextInputResult text_input(const TextInputDesc& desc) noexcept {
                     } else {
                         cursor = word_mod
                             ? utf8_word_left(buf, len, cursor)
-                            : utf8_prev_boundary(buf, len, cursor);
+                            : utf8_prev_grapheme(buf, len, cursor);
                         if (!shift) {
                             anchor = cursor;
                         }
@@ -5689,7 +5866,7 @@ TextInputResult text_input(const TextInputDesc& desc) noexcept {
                     } else {
                         cursor = word_mod
                             ? utf8_word_right(buf, len, cursor)
-                            : utf8_next_boundary(buf, len, cursor);
+                            : utf8_next_grapheme(buf, len, cursor);
                         if (!shift) {
                             anchor = cursor;
                         }
@@ -5752,7 +5929,7 @@ TextInputResult text_input(const TextInputDesc& desc) noexcept {
                         } else if (cursor > 0u) {
                             const uint32_t del_from = word_mod
                                 ? utf8_word_left(buf, len, cursor)
-                                : utf8_prev_boundary(buf, len, cursor);
+                                : utf8_prev_grapheme(buf, len, cursor);
                             if (del_from < cursor) {
                                 cursor = erase_text_range(buf, &len, del_from, cursor);
                                 anchor = cursor;
@@ -5773,7 +5950,7 @@ TextInputResult text_input(const TextInputDesc& desc) noexcept {
                         } else if (cursor < len) {
                             const uint32_t del_to = word_mod
                                 ? utf8_word_right(buf, len, cursor)
-                                : utf8_next_boundary(buf, len, cursor);
+                                : utf8_next_grapheme(buf, len, cursor);
                             if (del_to > cursor) {
                                 cursor = erase_text_range(buf, &len, cursor, del_to);
                                 anchor = cursor;
@@ -7014,22 +7191,31 @@ constexpr uint32_t kTableOuterTag = 0x7400u;
 constexpr uint32_t kTableHeaderTag = 0x7401u;
 constexpr uint32_t kTableColTagBase = 0x7500u;
 constexpr uint32_t kTreeChevronTag = 0x7EE0u;
+Str dock_tab_title(const DockTabSlot& tab) noexcept { return Str{tab.title_heap ? tab.title_heap : tab.title_inline}; }
+bool grow_dock_nodes(DockSpaceSlot* s) noexcept {
+    const uint32_t cap = s->node_cap ? s->node_cap * 2u : 32u;
+    void* p = std::realloc(s->nodes, size_t(cap) * sizeof(DockNode));
+    if (!p) return false;
+    s->nodes = static_cast<DockNode*>(p);
+    for (uint32_t i = s->node_cap; i < cap; ++i) s->nodes[i] = {};
+    s->node_cap = cap; return true;
+}
 DockSpaceSlot* dock_slot(Context* ctx, uint32_t id) noexcept {
-    for (auto& s : ctx->active_ui->dock_spaces) if (s.id == id) return &s;
+    for (auto& s : std::span(ctx->active_ui->dock_spaces, ctx->active_ui->dock_space_count)) if (s.id == id) return &s;
     return nullptr;
 }
 DockTabSlot* dock_tab(DockSpaceSlot* s, uint32_t id) noexcept {
-    for (auto& t : s->tabs) if (t.id == id) return &t;
+    for (auto& t : std::span(s->tabs, s->tab_cap)) if (t.id == id) return &t;
     return nullptr;
 }
 uint32_t dock_visible(DockSpaceSlot* s, uint32_t leaf) noexcept {
     const uint32_t active = s->nodes[leaf - 1u].active;
-    for (auto& t : s->tabs) if (t.leaf == leaf && t.open && t.id == active) return active;
-    for (auto& t : s->tabs) if (t.leaf == leaf && t.open) return t.id;
+    for (auto& t : std::span(s->tabs, s->tab_cap)) if (t.leaf == leaf && t.open && t.id == active) return active;
+    for (auto& t : std::span(s->tabs, s->tab_cap)) if (t.leaf == leaf && t.open) return t.id;
     return 0;
 }
 void dock_reparent(DockSpaceSlot* s, uint32_t from, uint32_t to) noexcept {
-    for (auto& t : s->tabs) if (t.leaf == from) t.leaf = to;
+    for (auto& t : std::span(s->tabs, s->tab_cap)) if (t.leaf == from) t.leaf = to;
     auto& n = s->nodes[to - 1u];
     if (n.first) { s->nodes[n.first - 1u].parent = to; s->nodes[n.second - 1u].parent = to; }
 }
@@ -7043,7 +7229,7 @@ void dock_collapse(DockSpaceSlot* s, uint32_t leaf) noexcept {
     // Closed tabs remain addressable and reopen in the promoted sibling subtree.
     uint32_t destination = sibling;
     while (s->nodes[destination - 1u].first) destination = s->nodes[destination - 1u].first;
-    for (auto& t : s->tabs) if (t.leaf == leaf) t.leaf = destination;
+    for (auto& t : std::span(s->tabs, s->tab_cap)) if (t.leaf == leaf) t.leaf = destination;
     p = s->nodes[sibling - 1u]; p.parent = grand;
     dock_reparent(s, sibling, parent);
     s->nodes[sibling - 1u] = {}; n = {};
@@ -7055,18 +7241,33 @@ bool dock_space_initialized(uint32_t id) noexcept {
 uint32_t dock_reset_root(uint32_t id) noexcept {
     Context* ctx = current_context(); if (!ctx || !id || ctx->active_ui->dock_cursor.space) return 0;
     DockSpaceSlot* s = dock_slot(ctx, id);
-    if (!s) for (auto& slot : ctx->active_ui->dock_spaces) if (!slot.id) { s = &slot; break; }
-    if (!s) return 0;
-    *s = {}; s->id = id; s->root = 1; s->nodes[0].used = true; return 1;
+    auto& ui = *ctx->active_ui;
+    if (!s) {
+        if (ui.dock_space_count == ui.dock_space_cap) {
+            const uint32_t cap = ui.dock_space_cap ? ui.dock_space_cap * 2u : 4u;
+            void* p = std::realloc(ui.dock_spaces, size_t(cap) * sizeof(DockSpaceSlot));
+            if (!p) return 0;
+            ui.dock_spaces = static_cast<DockSpaceSlot*>(p); ui.dock_space_cap = cap;
+        }
+        s = &ui.dock_spaces[ui.dock_space_count++]; *s = {};
+    }
+    for (auto& tab : std::span(s->tabs, s->tab_cap)) { std::free(tab.title_heap); tab = {}; }
+    for (auto& n : std::span(s->nodes, s->node_cap)) n = {};
+    if (!s->node_cap && !grow_dock_nodes(s)) return 0;
+    s->id = id; s->root = 1; s->split_seq = 0; s->nodes[0].used = true; return 1;
 }
 bool dock_split_node(uint32_t id, uint32_t node, Axis axis, float ratio,
     uint32_t* out_a, uint32_t* out_b, uint32_t split_id, float min_a, float min_b) noexcept {
     Context* ctx = current_context();
-    if (!ctx || !id || !node || node > kMaxDockNodes || ctx->active_ui->dock_cursor.space || !std::isfinite(ratio)) return false;
-    auto* s = dock_slot(ctx, id); if (!s || !s->nodes[node - 1u].used || s->nodes[node - 1u].first) return false;
+    if (!ctx || !id || !node || ctx->active_ui->dock_cursor.space || !std::isfinite(ratio)) return false;
+    auto* s = dock_slot(ctx, id); if (!s || node > s->node_cap || !s->nodes[node - 1u].used || s->nodes[node - 1u].first) return false;
     uint32_t free_nodes[2] = {}; uint32_t count = 0;
-    for (uint32_t i = 0; i < kMaxDockNodes && count < 2; ++i) if (!s->nodes[i].used) free_nodes[count++] = i + 1;
-    if (count != 2) return false;
+    for (uint32_t i = 0; i < s->node_cap && count < 2; ++i) if (!s->nodes[i].used) free_nodes[count++] = i + 1;
+    if (count != 2) {
+        const uint32_t old = s->node_cap;
+        if (!grow_dock_nodes(s)) return false;
+        for (uint32_t i = old; count < 2; ++i) free_nodes[count++] = i + 1u;
+    }
     auto& n = s->nodes[node - 1u]; const uint32_t a = free_nodes[0], b = free_nodes[1];
     s->nodes[a - 1u] = n; s->nodes[a - 1u].parent = node;
     s->nodes[b - 1u] = {}; s->nodes[b - 1u].used = true; s->nodes[b - 1u].parent = node;
@@ -7079,24 +7280,39 @@ bool dock_split_node(uint32_t id, uint32_t node, Axis axis, float ratio,
 }
 bool dock_add_pane(uint32_t id, uint32_t leaf, const DockPaneDesc& pane) noexcept {
     Context* ctx = current_context();
-    if (!ctx || !id || !pane.id || !leaf || leaf > kMaxDockNodes || (pane.title.length && !pane.title.chars) || ctx->active_ui->dock_cursor.space) return false;
-    auto* s = dock_slot(ctx, id); if (!s || !s->nodes[leaf - 1u].used || s->nodes[leaf - 1u].first || dock_tab(s, pane.id)) return false;
-    for (auto& t : s->tabs) if (!t.id) {
-        t.id = pane.id; t.leaf = leaf; t.icon_id = pane.icon_id; t.closable = pane.closable; t.open = pane.default_open;
-        uint32_t len = pane.title.length < 47u ? pane.title.length : 47u;
-        if (len < pane.title.length) while (len && (static_cast<uint8_t>(pane.title.chars[len]) & 0xC0u) == 0x80u) --len;
-        if (len) std::memcpy(t.title, pane.title.chars, len); t.title[len] = 0;
-        s->nodes[leaf - 1u].active = dock_visible(s, leaf); return true;
+    if (!ctx || !id || !pane.id || !leaf || (pane.title.length && !pane.title.chars) || ctx->active_ui->dock_cursor.space) return false;
+    auto* s = dock_slot(ctx, id); if (!s || leaf > s->node_cap || !s->nodes[leaf - 1u].used || s->nodes[leaf - 1u].first || dock_tab(s, pane.id)) return false;
+    DockTabSlot* target = nullptr;
+    for (auto& t : std::span(s->tabs, s->tab_cap)) if (!t.id) { target = &t; break; }
+    if (!target) {
+        const uint32_t cap = s->tab_cap ? s->tab_cap * 2u : 32u;
+        void* p = std::realloc(s->tabs, size_t(cap) * sizeof(DockTabSlot));
+        if (!p) return false;
+        s->tabs = static_cast<DockTabSlot*>(p);
+        for (uint32_t i = s->tab_cap; i < cap; ++i) s->tabs[i] = {};
+        target = &s->tabs[s->tab_cap]; s->tab_cap = cap;
     }
-    return false;
+    auto& t = *target;
+    const uint32_t len = pane.title.length;
+    if (len >= sizeof(t.title_inline)) {
+        uint32_t cap = 64; while (cap <= len) cap *= 2u;
+        t.title_heap = static_cast<char*>(std::calloc(cap, 1));
+        if (!t.title_heap) return false;
+        t.title_cap = cap;
+    }
+    char* title = t.title_heap ? t.title_heap : t.title_inline;
+    if (len) std::memcpy(title, pane.title.chars, len); title[len] = 0;
+    t.id = pane.id; t.leaf = leaf; t.icon_id = pane.icon_id; t.closable = pane.closable; t.open = pane.default_open;
+    s->nodes[leaf - 1u].active = dock_visible(s, leaf); return true;
 }
+
 uint32_t dock_find_pane_leaf(uint32_t id, uint32_t pane) noexcept {
     Context* ctx = current_context(); if (!ctx || !id || !pane) return 0;
     auto* s = dock_slot(ctx, id); auto* t = s ? dock_tab(s, pane) : nullptr; return t ? t->leaf : 0;
 }
 uint32_t dock_active_pane(uint32_t id, uint32_t leaf) noexcept {
-    Context* ctx = current_context(); if (!ctx || !id || !leaf || leaf > kMaxDockNodes) return 0;
-    auto* s = dock_slot(ctx, id); return s && s->nodes[leaf - 1u].used ? dock_visible(s, leaf) : 0;
+    Context* ctx = current_context(); if (!ctx || !id || !leaf) return 0;
+    auto* s = dock_slot(ctx, id); return s && leaf <= s->node_cap && s->nodes[leaf - 1u].used ? dock_visible(s, leaf) : 0;
 }
 bool dock_is_pane_open(uint32_t id, uint32_t pane) noexcept {
     Context* ctx = current_context(); if (!ctx || !id || !pane) return false;
@@ -7117,10 +7333,6 @@ bool dock_dock_pane(uint32_t id, uint32_t pane, uint32_t target, DockZone zone, 
     if (!ctx || !id || !pane || !target || pane == target || zone < DockZone::Center || zone > DockZone::Bottom || !std::isfinite(ratio) || ctx->active_ui->dock_cursor.space) return false;
     auto* s = dock_slot(ctx, id); auto* t = s ? dock_tab(s, pane) : nullptr; auto* dst = s ? dock_tab(s, target) : nullptr;
     if (!t || !dst || !dst->open) return false;
-    if (zone != DockZone::Center) {
-        uint32_t count = 0; for (auto& n : s->nodes) if (!n.used) ++count;
-        if (count < 2) return false;
-    }
     const uint32_t source = t->leaf;
     if (zone == DockZone::Center) { t->leaf = dst->leaf; t->open = true; s->nodes[t->leaf - 1u].active = pane; }
     else {
@@ -7129,7 +7341,7 @@ bool dock_dock_pane(uint32_t id, uint32_t pane, uint32_t target, DockZone zone, 
         if (!dock_split_node(id, dst->leaf, (zone == DockZone::Left || zone == DockZone::Right) ? Axis::Row : Axis::Col,
             ratio, &a, &b)) return false;
         // Existing tabs were moved into first; swap leaf contents for a leading insertion.
-        if (before) { for (auto& tab : s->tabs) if (tab.leaf == a) tab.leaf = b; s->nodes[b - 1u].active = target; }
+        if (before) { for (auto& tab : std::span(s->tabs, s->tab_cap)) if (tab.leaf == a) tab.leaf = b; s->nodes[b - 1u].active = target; }
         t->leaf = before ? a : b; t->open = true; s->nodes[t->leaf - 1u].active = pane;
     }
     // The source may have become an internal split if docking within its own leaf.
@@ -7139,7 +7351,13 @@ void begin_dock_space(const DockSpaceDesc& desc) noexcept {
     Context* ctx = current_context(); if (!ctx || !ctx->in_frame || !desc.id || ctx->active_ui->dock_cursor.space) return;
     if (!dock_space_initialized(desc.id)) dock_reset_root(desc.id);
     auto* s = dock_slot(ctx, desc.id); if (!s) return;
-    auto& c = ctx->active_ui->dock_cursor; c = {}; c.space = s; c.desc = desc; c.depth = 1; c.stack[0].node_idx = s->root;
+    auto& c = ctx->active_ui->dock_cursor;
+    if (c.traverse_cap < s->node_cap) {
+        void* p = std::realloc(c.stack, size_t(s->node_cap) * sizeof(DockTraverseEntry));
+        if (!p) return;
+        c.stack = static_cast<DockTraverseEntry*>(p); c.traverse_cap = s->node_cap;
+    }
+    c.space = s; c.desc = desc; c.depth = 1; c.stack[0] = {s->root, 0};
     begin_box({ .id = desc.id, .axis = Axis::Col, .width = desc.width, .height = desc.height, .background = desc.background });
 }
 uint32_t next_dock_pane() noexcept {
@@ -7163,10 +7381,10 @@ uint32_t next_dock_pane() noexcept {
             .background = d.pane_background, .border_color = d.pane_border_color, .border_width = d.pane_border_width,
             .radius = d.pane_radius, .clip_children = true });
         begin_box({ .width = Sizing::grow(), .height = Sizing::fixed(d.tab_bar_height_px), .background = d.tab_bar_bg });
-        for (auto& t : s->tabs) if (t.leaf == leaf && t.open) {
+        for (auto& t : std::span(s->tabs, s->tab_cap)) if (t.leaf == leaf && t.open) {
             const uint32_t tab_id = id_index(t.id, 0xD300u), close_id = id_index(t.id, 0xD301u);
             if (clicked(tab_id)) n.active = t.id;
-            if (dragging(tab_id, 4.0f)) begin_drag_payload(tab_id, kInternalDockDragKind, Str{t.title}, nullptr, 0, 0, t.id);
+            if (dragging(tab_id, 4.0f)) begin_drag_payload(tab_id, kInternalDockDragKind, dock_tab_title(t), nullptr, 0, 0, t.id);
             begin_box({ .id = tab_id, .height = Sizing::grow(), .padding = Padding::xy(10, 0), .gap = 6,
                 .align_y = AlignY::Center, .background = n.active == t.id ? d.tab_active_bg : (hovered(tab_id) ? d.tab_hover_bg : Color{}), .focusable = true });
             if (n.active == t.id) {
@@ -7179,7 +7397,7 @@ uint32_t next_dock_pane() noexcept {
                 });
             }
             if (t.icon_id != kInvalidIcon) icon({ .icon_id = t.icon_id, .size_px = 14 });
-            text(Str{t.title}, { .font_size_px = 12.5f, .wrap = false });
+            text(dock_tab_title(t), { .font_size_px = 12.5f, .wrap = false });
             if (t.closable) {
                 begin_box({ .id = close_id, .width = Sizing::fixed(14), .height = Sizing::fixed(20), .align_y = AlignY::Center });
                 text(str_lit("x"), { .font_size_px = 12 }); end_box();
@@ -7217,13 +7435,13 @@ void end_dock_space() noexcept {
     while (c.depth) { auto& e = c.stack[--c.depth]; if (e.phase) end_split(); }
     end_box();
     const uint32_t id = c.desc.id, pane = c.move_pane, target = c.target; const DockZone zone = c.zone;
-    auto* s = c.space; c = {};
+    auto* s = c.space; c.space = nullptr; c.pane_open = false; c.move_pane = 0; c.target = 0;
     if (pane && target) dock_dock_pane(id, pane, target, zone);
     else if (pane) { auto* t = dock_tab(s, pane); dock_collapse(s, t->leaf); request_redraw(ctx); }
 }
 namespace {
 TableMetadata* table_metadata(Context* ctx, uint32_t id) noexcept {
-    for (auto& m : ctx->active_ui->tables) if (m.id == id) return &m;
+    for (auto& m : std::span(ctx->active_ui->tables, ctx->active_ui->table_count)) if (m.id == id) return &m;
     return nullptr;
 }
 uint32_t table_col_id(const TableDesc& d, uint32_t c) noexcept {
@@ -7240,7 +7458,16 @@ TableResult begin_table(const TableDesc& desc) noexcept {
         !std::isfinite(desc.row_height_px) || desc.row_height_px <= 0) return {};
     for (const auto& col : desc.columns) if (!std::isfinite(col.width) || !std::isfinite(col.min_width) || !std::isfinite(col.max_width) || col.min_width < 0 || col.max_width < col.min_width) return {};
     auto* metadata = table_metadata(ctx, desc.id);
-    if (!metadata) for (auto& slot : ctx->active_ui->tables) if (!slot.id) { metadata = &slot; metadata->id = desc.id; break; }
+    if (!metadata) {
+        auto& ui = *ctx->active_ui;
+        if (ui.table_count == ui.table_cap) {
+            const uint32_t cap = ui.table_cap ? ui.table_cap * 2u : 16u;
+            void* p = std::realloc(ui.tables, size_t(cap) * sizeof(TableMetadata));
+            if (!p) return {};
+            ui.tables = static_cast<TableMetadata*>(p); ui.table_cap = cap;
+        }
+        metadata = &ui.tables[ui.table_count++]; *metadata = {}; metadata->id = desc.id;
+    }
     if (!metadata) return {};
     auto& t = ctx->active_ui->table_stack[ctx->active_ui->table_depth++]; t = {}; t.desc = desc; t.count = static_cast<uint32_t>(desc.columns.size());
     for (uint32_t c = 0; c < t.count; ++c) t.columns[c] = desc.columns[c];
@@ -7578,7 +7805,7 @@ void end_frame(Context* ctx_arg) noexcept {
             case CLAY_RENDER_COMMAND_TYPE_CUSTOM: {
                 const BoxExtra* extra = static_cast<const BoxExtra*>(cmd->renderData.custom.customData);
                 if (extra) {
-                    if (extra->desc.id && ctx->active_ui->drop_hit_count < ETCH_COUNTOF(ctx->active_ui->drop_hits)) {
+                    if (extra->desc.id && reserve_span_hits(&ctx->active_ui->drop_hits, &ctx->active_ui->drop_hit_cap, ctx->active_ui->drop_hit_count, 512u)) {
                         ctx->active_ui->drop_hits[ctx->active_ui->drop_hit_count++] = SpanHitRegion{
                             .id = extra->desc.id, .clay_elem_id = extra->desc.id,
                             .rect = {cmd->boundingBox.x, cmd->boundingBox.y, cmd->boundingBox.width, cmd->boundingBox.height},
@@ -7593,10 +7820,9 @@ void end_frame(Context* ctx_arg) noexcept {
                     } else if (extra->kind == CustomCmdKind::Icon) {
                         emit_vector_icon_quad(ctx, extra->icon_desc.icon_id, box_px, extra->icon_desc.color, cur_clip);
                     } else {
-                        if (extra->desc.attach_to != AttachTo::None && !extra->desc.pointer_passthrough) {
-                            const uint32_t slot = (ctx->active_ui->span_hit_count < kMaxSpanHitsPerFrame)
-                                ? ctx->active_ui->span_hit_count++
-                                : (kMaxSpanHitsPerFrame - 1u);
+                        if (extra->desc.attach_to != AttachTo::None && !extra->desc.pointer_passthrough &&
+                            reserve_span_hits(&ctx->active_ui->span_hits, &ctx->active_ui->span_hit_cap, ctx->active_ui->span_hit_count, 256u)) {
+                            const uint32_t slot = ctx->active_ui->span_hit_count++;
                             ctx->active_ui->span_hits[slot] = SpanHitRegion{
                                 .id = 0u,
                                 .clay_elem_id = extra->desc.id,
@@ -8150,7 +8376,7 @@ void end_frame(Context* ctx_arg) noexcept {
 
         emit_direct_text_px(
             ctx,
-            "ETCH 2.0 INSPECTOR   [F12]",
+            "ETCH 2.1 INSPECTOR   [F12]",
             hud_x + 12.0f,
             hud_y + 10.0f,
             12.0f,
@@ -8306,8 +8532,8 @@ void process_event(Context* ctx, const SDL_Event& event) noexcept {
     if (!ctx) return;
     if (event.type == SDL_EVENT_SYSTEM_THEME_CHANGED || event.type == ctx->wake_event_type) {
         ctx->headless_ui.redraw_budget = 2;
-        for (uint32_t i = 0; i < kMaxClaimedWindows; ++i)
-            if (ctx->claimed_windows[i].window) ctx->claimed_windows[i].ui.redraw_budget = 2;
+        for (uint32_t i = 0; i < ctx->claimed_window_cap; ++i)
+            if (ctx->claimed_windows[i]) ctx->claimed_windows[i]->ui.redraw_budget = 2;
         return;
     }
     SDL_WindowID id = 0;

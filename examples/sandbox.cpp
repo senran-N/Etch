@@ -2684,15 +2684,15 @@ int run_headless(const char* out_png_path) noexcept {
                     checks &= etch::dock_dock_pane(dock,p2,p3,etch::DockZone::Center);
                 }
             }
-            // Capacity failure must preserve both pane locations and the complete topology.
+            // Node storage grows beyond the former 32-node boundary.
             const uint32_t full = etch::id("v14_full"); uint32_t branch = etch::dock_reset_root(full), spare = 0;
             for (uint32_t n = 0; n < 15; ++n) {
                 uint32_t child = 0; checks &= etch::dock_split_node(full,branch,etch::Axis::Row,.5f,&child,&spare); branch = child;
             }
             checks &= etch::dock_add_pane(full,branch,{ .id = p1, .title = etch::str_lit("source") });
             checks &= etch::dock_add_pane(full,spare,{ .id = p2, .title = etch::str_lit("target") });
-            checks &= !etch::dock_dock_pane(full,p1,p2,etch::DockZone::Right);
-            checks &= etch::dock_find_pane_leaf(full,p1) == branch && etch::dock_find_pane_leaf(full,p2) == spare;
+            checks &= etch::dock_dock_pane(full,p1,p2,etch::DockZone::Right);
+            checks &= etch::dock_find_pane_leaf(full,p1) != etch::dock_find_pane_leaf(full,p2);
             early = true; step(); early = false; step();
             const uint32_t col0 = etch::id_index(table_id,0x7500u);
             const auto handle = etch::element_bounds(etch::id_index(col0,0x7600u));
@@ -2902,9 +2902,128 @@ int run_headless(const char* out_png_path) noexcept {
     for (int i=0;i<90 && etch::needs_redraw(ctx);++i) v20_frame();
     v20_ok &= col.open && col.visible && col.anim_t==1 && etch::frame_stats(ctx).idle_sleeping && etch::frame_stats(ctx).draw_call_count<=3;
     if (!v20_ok) std::fprintf(stderr,"Headless assert [17] failed: elastic/selection/collapsible regression\n");
-    const bool ok = v20_ok && v16_ok && v15_ok && png_ok && stats_ok && slug_ok && v10a_ok && v11_ok && v12_ok && v13_ok && v14_ok;
+    // [18] Elastic focus/docking, constrained typography, bidi and grapheme editing.
+    bool v21_ok = true;
+    {
+        auto* test = etch::create_context({.headless=true});
+        if (!test) v21_ok=false;
+        else {
+            etch::set_current_context(test);
+            const uint32_t dock=etch::id("v21_dock"), root=etch::dock_reset_root(dock);
+            for(uint32_t i=0;i<48;++i) {
+                char title[128]={};std::snprintf(title,sizeof(title),"Tab %u with an arbitrary length title exceeding sixty bytes for retention checks",i);
+                if (!(etch::dock_add_pane(dock,root,{.id=etch::id_index(dock,i+1),.title=etch::str_cstr(title)}))) { v21_ok=false; std::fprintf(stderr,"v21 check line %d failed\n",__LINE__); }
+            }
+            for(uint32_t i=0;i<48;++i){const uint32_t pane=etch::id_index(dock,i+1);etch::dock_activate_pane(dock,pane);if (!(etch::dock_active_pane(dock,root)==pane)) { v21_ok=false; std::fprintf(stderr,"v21 check line %d failed\n",__LINE__); }}
+            char edit[128]="a👨‍👩‍👧 b"; etch::TextInputResult result={};
+            const uint32_t field=etch::id("v21_edit"),label=etch::id("v21_label"),mixed=etch::id("v21_bidi");
+            const auto step=[&](uint32_t key=0u, etch::Vec2 pointer=etch::Vec2{-1,-1}, bool down=false) noexcept {
+                etch::begin_frame(test,{.viewport_w=640,.viewport_h=720,.pointer_pos=pointer,.pointer_down=down,.key_pressed_code=key});
+                ETCH_BOX({.axis=etch::Axis::Col,.width=etch::Sizing::fixed(180),.height=etch::Sizing::grow()}) {
+                    etch::text(etch::str_lit("A constrained inspector label with hidden content"),{.wrap=false,.id=label,.selectable=true,.ellipsis=true});
+                    etch::text(etch::str_lit("Words wrap over several lines and stop after exactly two lines with an ellipsis"),{.id=etch::id("v21_wrap"),.selectable=true,.line_height_px=20,.ellipsis=true,.max_lines=2});
+                    etch::text(etch::str_lit("User שלום 42 End"),{.wrap=false,.id=mixed,.selectable=true});
+                    etch::text(etch::str_lit("🚀🔥✨"),{.font_size_px=28});
+                    result=etch::text_input({.id=field,.buffer=edit,.capacity=sizeof(edit)});
+                    for(uint32_t i=0;i<320;++i){etch::begin_box({.id=etch::id_index(dock,1000+i),.width=etch::Sizing::fixed(1),.height=etch::Sizing::fixed(1),.focusable=true});etch::end_box();}
+                }
+                etch::begin_dock_space({.id=dock,.width=etch::Sizing::fixed(640),.height=etch::Sizing::fixed(80)});
+                while(etch::next_dock_pane())etch::text(etch::str_lit("Elastic dock content"));
+                etch::end_dock_space();
+                etch::end_frame(test);
+            };
+            step();step();
+            etch::request_focus(etch::id_index(dock,1298));step(SDLK_TAB);
+            if (!(etch::focused_id()==etch::id_index(dock,1299))) { v21_ok=false; std::fprintf(stderr,"v21 check line %d failed\n",__LINE__); }
+            const auto bounds=etch::element_bounds(label),bidi=etch::element_bounds(mixed);
+            if (!(bounds.w<=180.5f && bounds.w>0 && bidi.w>0)) { v21_ok=false; std::fprintf(stderr,"v21 check line %d failed\n",__LINE__); }
+            const auto wrapped_bounds=etch::element_bounds(etch::id("v21_wrap"));
+            if (!(wrapped_bounds.w<=180.5f && wrapped_bounds.h<=40.5f && wrapped_bounds.h>20)) { v21_ok=false; std::fprintf(stderr,"v21 check line %d failed\n",__LINE__); }
+            // A marker must be present in the single-line label, not merely clipped original glyphs.
+            bool marker=false;
+            const auto reference=etch::measure_text(etch::str_lit("…"));
+            if (!(reference.x>0)) { v21_ok=false; std::fprintf(stderr,"v21 check line %d failed\n",__LINE__); }
+            for(const auto& prim:etch::frame_prims(test)) {
+                if((prim.style.x&15u)==uint32_t(etch::PrimKind::SlugGlyph) && prim.bounds.x<bounds.x+bounds.w && prim.bounds.y>=bounds.y && prim.bounds.y<bounds.y+bounds.h) {
+                    marker |= prim.bounds.x>bounds.x+bounds.w-20;
+                    if (!(prim.clip.z<=180.5f)) { v21_ok=false; std::fprintf(stderr,"v21 check line %d failed\n",__LINE__); }
+                }
+            }
+            if (!(marker)) { v21_ok=false; std::fprintf(stderr,"v21 check line %d failed\n",__LINE__); }
+            etch::request_focus(mixed);etch::set_text_selection(mixed,5,14);step();
+            bool highlight=false;
+            for(const auto& prim:etch::frame_prims(test))highlight|=(prim.style.x&15u)==uint32_t(etch::PrimKind::Rect)&&prim.style.y==etch::Color::rgba8(56,189,248,88).pack_rgba8()&&prim.bounds.z>0.1f;
+            if (!(highlight)) { v21_ok=false; std::fprintf(stderr,"v21 check line %d failed\n",__LINE__); }
+            uint32_t color_count=0,last_color=0;
+            for(const auto& prim:etch::frame_prims(test)) {
+                if((prim.style.x&15u)==uint32_t(etch::PrimKind::SlugGlyph) && prim.style.y!=etch::Color::white().pack_rgba8() && prim.style.y!=last_color) {
+                    ++color_count;last_color=prim.style.y;
+                }
+            }
+#if defined(_WIN32)
+            // Segoe UI Emoji on this host supplies vector COLR v0 layers.
+            std::FILE* emoji_file=std::fopen("C:/Windows/Fonts/seguiemj.ttf","rb");
+            if(emoji_file){std::fclose(emoji_file);if (!(color_count>=3)) { v21_ok=false; std::fprintf(stderr,"v21 check line %d failed\n",__LINE__); }}
+#endif
+            etch::request_focus(field);etch::set_text_selection(field,1,1);step(SDLK_RIGHT);
+            if (!(result.cursor_byte==19)) { v21_ok=false; std::fprintf(stderr,"v21 check line %d failed\n",__LINE__); }
+            step(SDLK_BACKSPACE);if (!(std::strcmp(edit,"a b")==0)) { v21_ok=false; std::fprintf(stderr,"v21 check line %d failed\n",__LINE__); }
+            std::memcpy(edit,"e\xCC\x81z",5);step();etch::set_text_selection(field,0,0);step(SDLK_RIGHT);
+            if (!(result.cursor_byte==3)) { v21_ok=false; std::fprintf(stderr,"v21 check line %d failed\n",__LINE__); }step(SDLK_BACKSPACE);if (!(std::strcmp(edit,"z")==0)) { v21_ok=false; std::fprintf(stderr,"v21 check line %d failed\n",__LINE__); }
+            const char* graphemes[]={"\r\nz","🇨🇳z","각z","✊🏽z"};
+            const uint32_t stops[]={2,8,9,7};
+            for(uint32_t i=0;i<4;++i) {
+                std::snprintf(edit,sizeof(edit),"%s",graphemes[i]);step();etch::set_text_selection(field,0,0);step(SDLK_RIGHT);
+                if (!(result.cursor_byte==stops[i])) { v21_ok=false; std::fprintf(stderr,"v21 check line %d failed\n",__LINE__); }step(SDLK_BACKSPACE);if (!(std::strcmp(edit,"z")==0)) { v21_ok=false; std::fprintf(stderr,"v21 check line %d failed\n",__LINE__); }
+            }
+            // Trailing tabs must retain every preceding glyph advance in the caret and IME edge.
+            std::memcpy(edit, "a\tb\t", 5); step();
+            etch::set_text_selection(field, 4, 4); step();
+            const float tab_width = etch::measure_text(etch::str_lit("\t"), etch::kFontSans, 14).x;
+            const float glyph_width = etch::measure_text(etch::str_lit("a"), etch::kFontSans, 14).x
+                + etch::measure_text(etch::str_lit("b"), etch::kFontSans, 14).x;
+            const float text_width = etch::measure_text(etch::str_lit("a\tb\t"), etch::kFontSans, 14).x;
+            const float text_origin = etch::element_bounds(field).x + etch::TextInputDesc{}.padding.left;
+            const float caret_x = result.ime_cursor_rect.x - text_origin;
+            bool caret_found = false;
+            for (const auto& prim : etch::frame_prims(test)) {
+                if ((prim.style.x & 15u) == uint32_t(etch::PrimKind::Rect)
+                    && prim.style.y == etch::TextInputDesc{}.caret_color.pack_rgba8()
+                    && std::abs(prim.bounds.z - 2.0f) < 0.01f) {
+                    caret_found |= std::abs(prim.bounds.x - std::floor(text_origin + text_width + 0.5f)) < 0.01f;
+                }
+            }
+            if (!(result.cursor_byte == 4 && std::abs(caret_x - text_width) < 0.01f
+                && std::abs(caret_x - (glyph_width + 2.0f * tab_width)) < 0.01f
+                && caret_x > 2.0f * tab_width + 0.01f && caret_found)) {
+                v21_ok = false; std::fprintf(stderr, "v21 trailing-tab caret check failed\n");
+            }
+            const char* tab_deletions[] = {"a\tb", "a\t", "a", ""};
+            for (uint32_t i = 0; i < 4; ++i) {
+                step(SDLK_BACKSPACE);
+                if (!(result.changed && result.cursor_byte == 3u - i && result.byte_length == 3u - i
+                    && std::strcmp(edit, tab_deletions[i]) == 0)) {
+                    v21_ok = false; std::fprintf(stderr, "v21 trailing-tab backspace check %u failed\n", i);
+                }
+            }
+            std::snprintf(edit,sizeof(edit),"User שלום 42 End");step();step();
+            const auto input_bounds=etch::element_bounds(field);
+            const float prefix=etch::measure_text(etch::str_lit("User 42 "),etch::kFontSans,14).x;
+            const etch::Vec2 hebrew_point={input_bounds.x+12+prefix+8,input_bounds.y+14};
+            step(0,hebrew_point,true);step(0,hebrew_point,false);
+            if (!(result.cursor_byte>=5 && result.cursor_byte<=13)) { v21_ok=false; std::fprintf(stderr,"v21 check line %d failed\n",__LINE__); }
+            const etch::Vec2 latin_point={input_bounds.x+16,input_bounds.y+14};
+            step(0,latin_point,true);step(0,latin_point,false);if (!(result.cursor_byte<=4)) { v21_ok=false; std::fprintf(stderr,"v21 check line %d failed\n",__LINE__); }
+            char path[1024]={};std::snprintf(path,sizeof(path),"%s.v21.png",out_png_path);
+            step();if (!(etch::render_headless_png(test,640,720,path))) { v21_ok=false; std::fprintf(stderr,"v21 check line %d failed\n",__LINE__); }
+            const auto stats=etch::frame_stats(test);if (!(stats.draw_call_count<=3)) { v21_ok=false; std::fprintf(stderr,"v21 check line %d failed\n",__LINE__); }
+            std::remove(path);etch::destroy_context(test);etch::set_current_context(ctx);
+        }
+    }
+    if(!v21_ok)std::fprintf(stderr,"Headless assert [18] failed: v2.1 typography/focus/grapheme regression\n");
+    const bool ok = v21_ok && v20_ok && v16_ok && v15_ok && png_ok && stats_ok && slug_ok && v10a_ok && v11_ok && v12_ok && v13_ok && v14_ok;
     std::printf(
-        "Headless %s -> %s (asserts=17/17, prims=%u, draw_calls=%u, slug_glyphs=%u, slug_curves=%u, layout_ms=%.3f, gpu_submit_ms=%.3f, arena_used=%zuB, scroll_y=%.1f, focus=0x%08X, idle=%d)\n",
+        "Headless %s -> %s (asserts=18/18, prims=%u, draw_calls=%u, slug_glyphs=%u, slug_curves=%u, layout_ms=%.3f, gpu_submit_ms=%.3f, arena_used=%zuB, scroll_y=%.1f, focus=0x%08X, idle=%d)\n",
         ok ? "OK" : "FAILED",
         out_png_path,
         final_stats.prim_count,
