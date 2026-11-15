@@ -12,7 +12,7 @@
 #include <type_traits>
 
 #define ETCH_VERSION_MAJOR 2
-#define ETCH_VERSION_MINOR 2
+#define ETCH_VERSION_MINOR 3
 #define ETCH_VERSION_PATCH 0
 
 #ifndef ETCH_ASSERT
@@ -1388,6 +1388,103 @@ struct TextInputResult {
     Rect ime_cursor_rect = {};
 };
 
+// Standard desktop controls. Mutable values remain caller-owned.
+enum class ButtonVariant : uint8_t { Default = 0, Primary = 1, Ghost = 2, Danger = 3 };
+struct ButtonDesc {
+    uint32_t id = 0; Str label = {}; uint16_t icon_id = kInvalidIcon;
+    ButtonVariant variant = ButtonVariant::Default;
+    Sizing width = Sizing::fit(); Sizing height = Sizing::fixed(32);
+    Padding padding = Padding::xy(14, 0); float font_size_px = 13; uint16_t font_id = kFontSans;
+    Corners radius = Corners::all(6); bool disabled = false; Str shortcut_hint = {};
+};
+struct CheckboxDesc {
+    uint32_t id = 0; Str label = {}; bool* checked = nullptr; bool indeterminate = false;
+    bool disabled = false; float box_size_px = 18; float font_size_px = 13;
+    uint16_t font_id = kFontSans; Color accent = Color::rgb_hex(0x38BDF8);
+};
+struct ToggleSwitchDesc {
+    uint32_t id = 0; Str label = {}; bool* value = nullptr; bool disabled = false;
+    float track_width_px = 38; float track_height_px = 20; float font_size_px = 13;
+    uint16_t font_id = kFontSans; Color on_color = Color::rgb_hex(0x38BDF8);
+    Color off_color = Color::rgb_hex(0x334155);
+};
+struct ProgressBarDesc {
+    uint32_t id = 0; float fraction = 0; Str overlay_text = {};
+    Sizing width = Sizing::grow(); Sizing height = Sizing::fixed(10); Corners radius = Corners::all(999);
+    Color track_color = Color::rgb_hex(0x1E293B); Color fill_color = Color::rgb_hex(0x38BDF8);
+    Color text_color = Color::white(); float font_size_px = 11;
+};
+struct TabBarDesc {
+    uint32_t id = 0; uint32_t* active_tab = nullptr; Sizing width = Sizing::grow();
+    float height_px = 32; float font_size_px = 12.5f;
+    Color background = Color::rgb_hex(0x0B101A); Color active_bg = Color::rgb_hex(0x162033);
+    Color hover_bg = Color::rgb_hex(0x111827); Color accent = Color::rgb_hex(0x38BDF8);
+    Color text_color = Color::rgb_hex(0x94A3B8); Color active_text_color = Color::white();
+};
+struct TabItemDesc { uint32_t id = 0; Str label = {}; uint16_t icon_id = kInvalidIcon; bool closable = false; bool disabled = false; };
+struct TabItemResult { bool selected = false; bool clicked = false; bool closed = false; };
+struct SliderDesc {
+    uint32_t id = 0; Str label = {}; float* value = nullptr; float min_value = 0; float max_value = 1;
+    float step = 0; const char* format = "%.2f"; Sizing width = Sizing::grow(); float height_px = 26; bool disabled = false;
+    Color background = Color::rgb_hex(0x1E293B); Color fill_color = Color::rgb_hex(0x38BDF8); Color text_color = Color::white();
+};
+struct DragValueDesc {
+    uint32_t id = 0; Str label = {}; float* value = nullptr; float min_value = -1e9f; float max_value = 1e9f;
+    float speed = .1f; float step = 0; const char* format = "%.2f"; Sizing width = Sizing::fixed(110); float height_px = 26; bool disabled = false;
+    Color background = Color::rgb_hex(0x1E293B); Color fill_color = Color::rgb_hex(0x38BDF8); Color text_color = Color::white();
+};
+struct TooltipDesc { Str text = {}; float delay_seconds = .35f; float max_width_px = 280; float font_size_px = 12; int16_t z_index = 220; };
+struct ModalDesc {
+    uint32_t id = 0; bool* open = nullptr; Str title = {}; float width_px = 420; Sizing height = Sizing::fit();
+    bool dismiss_on_backdrop = true; bool dismiss_on_escape = true;
+    Color backdrop_color = Color::rgba8(0,0,0,150); Color background = Color::rgb_hex(0x111827);
+    Color border_color = Color::rgb_hex(0x334155); Corners radius = Corners::all(10); int16_t z_index = 180;
+};
+struct ComboBoxDesc {
+    uint32_t id = 0; Str label = {}; int* selected_index = nullptr; std::span<const Str> items = {};
+    Sizing width = Sizing::grow(); float height_px = 28; float max_popup_height_px = 220; bool disabled = false;
+    Color background = Color::rgb_hex(0x1E293B); Color hover_bg = Color::rgb_hex(0x334155); Color text_color = Color::white();
+};
+struct PopupDesc {
+    uint32_t id = 0; uint32_t trigger_id = 0; Sizing width = Sizing::fixed(220); Sizing height = Sizing::fit();
+    Padding padding = Padding::all(6); float gap = 2;
+    Color background = Color::rgb_hex(0x111827); Color border_color = Color::rgb_hex(0x334155);
+    Corners radius = Corners::all(6); int16_t z_index = 200;
+};
+struct MenuBarDesc { uint32_t id = 0; Sizing width = Sizing::grow(); float height_px = 28; Color background = Color::rgb_hex(0x0B101A); };
+struct MenuDesc { uint32_t id = 0; Str label = {}; bool disabled = false; };
+struct MenuItemDesc {
+    uint32_t id = 0; Str label = {}; Str shortcut_hint = {}; uint16_t icon_id = kInvalidIcon;
+    bool checked = false; bool disabled = false; bool separator_after = false;
+};
+bool button(const ButtonDesc& desc) noexcept;
+bool checkbox(const CheckboxDesc& desc) noexcept;
+bool toggle_switch(const ToggleSwitchDesc& desc) noexcept;
+void progress_bar(const ProgressBarDesc& desc) noexcept;
+bool begin_tab_bar(const TabBarDesc& desc) noexcept;
+TabItemResult tab_item(const TabItemDesc& desc) noexcept;
+void end_tab_bar() noexcept;
+bool slider(const SliderDesc& desc) noexcept;
+bool drag_value(const DragValueDesc& desc) noexcept;
+void set_tooltip(uint32_t target_id, const TooltipDesc& desc) noexcept;
+void set_tooltip(uint32_t target_id, Str text) noexcept;
+bool begin_modal(const ModalDesc& desc) noexcept;
+void end_modal() noexcept;
+bool combo_box(const ComboBoxDesc& desc) noexcept;
+void open_popup(uint32_t popup_id, Vec2 anchor_pos = {-1,-1}) noexcept;
+void close_popup(uint32_t popup_id = 0) noexcept;
+bool is_popup_open(uint32_t popup_id) noexcept;
+bool begin_popup(const PopupDesc& desc) noexcept;
+void end_popup() noexcept;
+bool begin_context_menu(uint32_t popup_id, uint32_t target_id = 0) noexcept;
+void end_context_menu() noexcept;
+bool begin_menu_bar(const MenuBarDesc& desc) noexcept;
+void end_menu_bar() noexcept;
+bool begin_menu(const MenuDesc& desc) noexcept;
+void end_menu() noexcept;
+bool menu_item(const MenuItemDesc& desc) noexcept;
+void menu_separator() noexcept;
+
 struct SplitDesc {
     uint32_t id = 0;
     Axis axis = Axis::Row; // Row = Left|Right (ResizeEW), Col = Top/Bottom (ResizeNS)
@@ -1460,6 +1557,7 @@ bool dock_split_node(uint32_t dock_id, uint32_t node_idx, Axis axis, float defau
     float min_first_px = 120.0f, float min_second_px = 120.0f) noexcept;
 bool dock_add_pane(uint32_t dock_id, uint32_t leaf_node_idx, const DockPaneDesc& pane) noexcept;
 bool dock_dock_pane(uint32_t dock_id, uint32_t pane_id, uint32_t target_pane_id, DockZone zone, float split_ratio = 0.5f) noexcept;
+bool dock_reorder_pane(uint32_t dock_id, uint32_t pane_id, uint32_t target_pane_id, bool insert_after = false) noexcept;
 void dock_activate_pane(uint32_t dock_id, uint32_t pane_id) noexcept;
 uint32_t dock_active_pane(uint32_t dock_id, uint32_t leaf_node_idx) noexcept;
 uint32_t dock_find_pane_leaf(uint32_t dock_id, uint32_t pane_id) noexcept;

@@ -3876,6 +3876,10 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
     ctx->in_frame = true;
     ctx->draw_list_window = ctx->active_window;
     ctx->active_ui->focus_scope_depth = 0;
+    ctx->active_ui->popup_depth = 0;
+    ctx->active_ui->tab_bar_depth = 0;
+    ctx->active_ui->modal_depth = 0;
+    ctx->active_ui->menu_bar_id = 0;
     ctx->active_ui->focus_scope = 0;
     ctx->layout_start_ticks = SDL_GetPerformanceCounter();
     ++ctx->active_ui->frame_index;
@@ -7541,6 +7545,20 @@ bool dock_dock_pane(uint32_t id, uint32_t pane, uint32_t target, DockZone zone, 
     // The source may have become an internal split if docking within its own leaf.
     dock_collapse(s, source); request_redraw(ctx); return true;
 }
+bool dock_reorder_pane(uint32_t id, uint32_t pane, uint32_t target, bool after) noexcept {
+    Context* ctx = current_context();
+    if (!ctx || !id || !pane || !target || pane == target || ctx->active_ui->dock_cursor.space) return false;
+    auto* s = dock_slot(ctx,id); auto* src = s ? dock_tab(s,pane) : nullptr; auto* dst = s ? dock_tab(s,target) : nullptr;
+    if (!src || !dst || !src->open || !dst->open) return false;
+    const uint32_t old_leaf = src->leaf, new_leaf = dst->leaf;
+    uint32_t from = uint32_t(src-s->tabs), to = uint32_t(dst-s->tabs);
+    if (from < to) { if (!after) --to; } else if (after) ++to;
+    DockTabSlot moving = *src; moving.leaf = new_leaf;
+    if (from < to) std::memmove(s->tabs+from,s->tabs+from+1,size_t(to-from)*sizeof(DockTabSlot));
+    else if (from > to) std::memmove(s->tabs+to+1,s->tabs+to,size_t(from-to)*sizeof(DockTabSlot));
+    s->tabs[to] = moving; s->nodes[new_leaf-1].active = pane;
+    dock_collapse(s,old_leaf); request_redraw(ctx); return true;
+}
 void begin_dock_space(const DockSpaceDesc& desc) noexcept {
     Context* ctx = current_context(); if (!ctx || !ctx->in_frame || !desc.id || ctx->active_ui->dock_cursor.space) return;
     if (!dock_space_initialized(desc.id)) dock_reset_root(desc.id);
@@ -7577,7 +7595,7 @@ uint32_t next_dock_pane() noexcept {
         begin_box({ .width = Sizing::grow(), .height = Sizing::fixed(d.tab_bar_height_px), .background = d.tab_bar_bg });
         for (auto& t : std::span(s->tabs, s->tab_cap)) if (t.leaf == leaf && t.open) {
             const uint32_t tab_id = id_index(t.id, 0xD300u), close_id = id_index(t.id, 0xD301u);
-            if (clicked(tab_id)) n.active = t.id;
+            if (clicked(tab_id) && !clicked(close_id)) n.active = t.id;
             if (dragging(tab_id, 4.0f)) begin_drag_payload(tab_id, kInternalDockDragKind, dock_tab_title(t), nullptr, 0, 0, t.id);
             begin_box({ .id = tab_id, .height = Sizing::grow(), .padding = Padding::xy(10, 0), .gap = 6,
                 .align_y = AlignY::Center, .background = n.active == t.id ? d.tab_active_bg : (hovered(tab_id) ? d.tab_hover_bg : Color{}), .focusable = true });
@@ -7597,23 +7615,55 @@ uint32_t next_dock_pane() noexcept {
                 text(str_lit("x"), { .font_size_px = 12 }); end_box();
                 if (clicked(close_id)) { t.open = false; c.move_pane = t.id; c.target = 0; }
             }
+            DragPayloadView tab_payload = {};
+            if (peek_drag_payload(&tab_payload,kInternalDockDragKind) && tab_payload.u32 != t.id && hovered(tab_id)) {
+                const Rect tr = element_bounds(tab_id); const bool after = pointer_pos().x > tr.x+tr.w*.5f;
+                const float ix = after ? tr.w-1 : 1;
+                draw_line({.from={ix,2},.to={ix,d.tab_bar_height_px-2},.color=d.tab_accent,.thickness=2,.foreground=true});
+                if (accept_drag_payload(tab_id,kInternalDockDragKind,&tab_payload)) {
+                    c.move_pane=tab_payload.u32; c.target=t.id; c.reorder=true; c.insert_after=after;
+                }
+            }
             end_box();
         }
         end_box(); n.active = dock_visible(s, leaf);
         DragPayloadView payload = {};
         const Rect r = element_bounds(leaf_id); const Vec2 p = ctx->active_ui->pointer_pos;
-        if (peek_drag_payload(&payload, kInternalDockDragKind) && p.x >= r.x && p.y >= r.y && p.x < r.x + r.w && p.y < r.y + r.h) {
+        if (!c.reorder && peek_drag_payload(&payload, kInternalDockDragKind) && p.x >= r.x && p.y >= r.y && p.x < r.x + r.w && p.y < r.y + r.h) {
             const float x = (p.x - r.x) / r.w, y = (p.y - r.y) / r.h;
             DockZone z = DockZone::Center;
             if (x < .28f || x > .72f || y < .28f || y > .72f) {
                 const float dx = x < .5f ? x : 1-x, dy = y < .5f ? y : 1-y;
                 z = dx < dy ? (x < .5f ? DockZone::Left : DockZone::Right) : (y < .5f ? DockZone::Top : DockZone::Bottom);
             }
+            uint32_t target = n.active;
+            if (target == payload.u32) {
+                target = 0;
+                for (const auto& tab : std::span(s->tabs,s->tab_cap))
+                    if (tab.open && tab.leaf == leaf && tab.id != payload.u32) { target=tab.id; break; }
+            }
+            if (!target) z=DockZone::Center;
+            const float cx=r.w*.5f, cy=r.h*.5f;
+            const Vec2 centers[]={{cx,cy},{cx-32,cy},{cx+32,cy},{cx,cy-32},{cx,cy+32}};
+            const DockZone zones[]={DockZone::Center,DockZone::Left,DockZone::Right,DockZone::Top,DockZone::Bottom};
+            for (uint32_t j=0;j<5;++j) {
+                if (j && !target) continue;
+                const Rect hit={centers[j].x-13,centers[j].y-13,26,26};
+                if (hit.contains({p.x-r.x,p.y-r.y})) z=zones[j];
+            }
             Rect hi = {0,0,r.w,r.h};
             if (z == DockZone::Left || z == DockZone::Right) { hi.w *= .5f; if (z == DockZone::Right) hi.x = hi.w; }
             if (z == DockZone::Top || z == DockZone::Bottom) { hi.h *= .5f; if (z == DockZone::Bottom) hi.y = hi.h; }
             draw_rect({ .rect = hi, .fill = Color::rgba8(56,189,248,65), .foreground = true });
-            if (accept_drag_payload(leaf_id, kInternalDockDragKind, &payload)) { c.move_pane = payload.u32; c.target = n.active; c.zone = z; }
+            for (uint32_t j=0;j<5;++j) {
+                if (j && !target) continue;
+                draw_rect({.rect={centers[j].x-13,centers[j].y-13,26,26},
+                    .fill=zones[j]==z ? Color::rgba8(56,189,248,220) : Color::rgba8(15,23,42,220),
+                    .radius=Corners::all(3),.border_color=d.tab_accent,.border_width=1,.foreground=true});
+                draw_line({.from={centers[j].x-5,centers[j].y},.to={centers[j].x+5,centers[j].y},.color=Color::white(),.foreground=true});
+                if (j==0 || j>=3) draw_line({.from={centers[j].x,centers[j].y-5},.to={centers[j].x,centers[j].y+5},.foreground=true});
+            }
+            if (target && accept_drag_payload(leaf_id, kInternalDockDragKind, &payload)) { c.move_pane = payload.u32; c.target = target; c.zone = z; }
         }
         const float leaf_h = element_bounds(leaf_id).h;
         begin_box({ .axis = Axis::Col, .width = Sizing::percent(1), .height = Sizing::fixed(leaf_h > d.tab_bar_height_px ? leaf_h-d.tab_bar_height_px : 1) }); c.pane_open = true;
@@ -7630,7 +7680,9 @@ void end_dock_space() noexcept {
     end_box();
     const uint32_t id = c.desc.id, pane = c.move_pane, target = c.target; const DockZone zone = c.zone;
     auto* s = c.space; c.space = nullptr; c.pane_open = false; c.move_pane = 0; c.target = 0;
-    if (pane && target) dock_dock_pane(id, pane, target, zone);
+    const bool reorder=c.reorder, after=c.insert_after; c.reorder=false; c.insert_after=false;
+    if (pane && target && reorder) dock_reorder_pane(id,pane,target,after);
+    else if (pane && target) dock_dock_pane(id, pane, target, zone);
     else if (pane) { auto* t = dock_tab(s, pane); dock_collapse(s, t->leaf); request_redraw(ctx); }
 }
 namespace {
@@ -8588,7 +8640,7 @@ void end_frame(Context* ctx_arg) noexcept {
 
         emit_direct_text_px(
             ctx,
-            "ETCH 2.2 INSPECTOR   [F12]",
+            "ETCH 2.3 INSPECTOR   [F12]",
             hud_x + 12.0f,
             hud_y + 10.0f,
             12.0f,
@@ -8705,6 +8757,11 @@ void end_frame(Context* ctx_arg) noexcept {
         ctx->active_ui->modal_scope = ctx->active_ui->modal_count ? ctx->active_ui->modal_scopes[ctx->active_ui->modal_count - 1].id : 0;
         ctx->active_ui->modal_needs_focus = false;
     }
+    if (ctx->active_ui->drag_edit_id != 0u && ctx->active_ui->drag_edit_seen_frame != ctx->active_ui->frame_index) {
+        ctx->active_ui->drag_edit_id = 0u;
+        ctx->active_ui->drag_edit_len = 0u;
+    }
+    ctx->active_ui->drag_edit_pending_id = 0u;
     ctx->active_ui->frame_drop_count = 0;
     ctx->active_ui->frame_text_drop_count = 0;
     ctx->active_ui->has_delivered_drop_pos = false;

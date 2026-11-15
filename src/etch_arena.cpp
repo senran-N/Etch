@@ -492,7 +492,7 @@ struct DockTraverseEntry { uint32_t node_idx = 0; uint8_t phase = 0; };
 struct DockCursor {
     DockSpaceSlot* space = nullptr; DockSpaceDesc desc = {};
     DockTraverseEntry* stack = nullptr; uint32_t traverse_cap = 0; uint32_t depth = 0;
-    bool pane_open = false; uint32_t move_pane = 0; uint32_t target = 0; DockZone zone = DockZone::None;
+    bool pane_open = false; uint32_t move_pane = 0; uint32_t target = 0; DockZone zone = DockZone::None; bool reorder = false; bool insert_after = false;
 };
 struct TableMetadata {
     uint32_t id = 0; uint32_t count = 0;
@@ -531,7 +531,19 @@ void free_vlist(VarVirtualListCache* c) noexcept {
     *c = {};
 }
 
+struct DesktopPopup { uint32_t id = 0; Vec2 anchor = {}; uint32_t opened_frame = 0; int selection = 0; };
 struct WindowUiState {
+    uint32_t scrub_id = 0; float scrub_value = 0;
+    uint32_t drag_edit_id = 0; uint32_t drag_edit_seen_frame = 0;
+    char drag_edit_buf[64] = {}; uint32_t drag_edit_len = 0;
+    uint32_t drag_edit_pending_id = 0;
+    char drag_edit_pending_buf[64] = {};
+    uint32_t modal_depth = 0;
+    DesktopPopup popups[16] = {}; uint32_t popup_count = 0; uint32_t popup_depth = 0;
+    TabBarDesc tab_bars[8] = {}; uint32_t tab_bar_depth = 0;
+    uint32_t menu_bar_id = 0; uint32_t menu_owner = 0; uint32_t menu_open_id = 0;
+    uint32_t tooltip_target = 0; float tooltip_start = 0;
+
     VarVirtualListCache* vlists = nullptr;
     uint32_t vlist_cap = 0, vlist_count = 0;
     ActiveVarListRecord* active_vlists = nullptr;

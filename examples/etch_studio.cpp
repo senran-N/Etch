@@ -14,6 +14,8 @@
 #include <cstring>
 
 
+#include "desktop_v23_checks.h"
+
 namespace {
 
 inline constexpr uint32_t kPreviewWidth = 256u;
@@ -81,6 +83,7 @@ struct StudioApp {
     SDL_GPUTexture* preview_tex = nullptr;
     SDL_Window* tear_off_window = nullptr;
     bool rendering = false;
+    bool desktop_enabled = true; int desktop_quality = 0; bool desktop_about = false;
 
     GraphNode nodes[kMaxNodes] = {
         { "Camera HDR",     "RGBA16F Linear",   { 36.0f,  42.0f }, 196.0f, etch::Color::rgb_hex(0x38BDF8), UINT32_MAX, UINT32_MAX },
@@ -555,6 +558,37 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
         .gap = 8.0f,
         .background = etch::Color::rgb_hex(0x090C12),
     }) {
+        if (etch::begin_menu_bar({.id=etch::id("studio_desktop_menu")})) {
+            if (etch::begin_menu({.id=etch::id("studio_file_menu"),.label=etch::str_lit("File")})) {
+                if (etch::menu_item({.id=etch::id("studio_about"),.label=etch::str_lit("About Etch Studio")})) app->desktop_about=true;
+                if (etch::menu_item({.id=etch::id("studio_quit"),.label=etch::str_lit("Quit"),.shortcut_hint=etch::str_lit("Alt+F4")})) app->running=false;
+                etch::end_menu();
+            }
+            if (etch::begin_menu({.id=etch::id("studio_view_menu"),.label=etch::str_lit("View")})) {
+                if (etch::menu_item({.id=etch::id("studio_view_glow"),.label=etch::str_lit("Wire glow"),.checked=app->wire_glow_enabled})) app->wire_glow_enabled=!app->wire_glow_enabled;
+                if (etch::menu_item({.id=etch::id("studio_restore_panels"),.label=etch::str_lit("Restore panels")})) {
+                    const char* names[]={"studio_pane_inspector","studio_pane_outliner","studio_pane_canvas","studio_pane_trace"};
+                    for (const char* name : names) etch::dock_set_pane_open(etch::id("studio_dock"),etch::id(name),true);
+                }
+                etch::end_menu();
+            }
+            if (etch::begin_menu({.id=etch::id("studio_preset_menu"),.label=etch::str_lit("Preset")})) {
+                for(uint32_t i=0;i<3;++i) if(etch::menu_item({.id=etch::id_index(etch::id("studio_desktop_preset"),i),.label=etch::str_cstr(kPresets[i].name)})) {
+                    app->selected_preset=i;app->target_bloom=kPresets[i].bloom;app->target_exposure=kPresets[i].exposure;
+                }
+                etch::end_menu();
+            }
+            etch::end_menu_bar();
+        }
+        if(etch::begin_modal({.id=etch::id("studio_about_modal"),.open=&app->desktop_about,.title=etch::str_lit("Etch Studio 2.3")})) {
+            etch::text(etch::str_lit("Standard desktop primitives / interactive five-zone docking"));
+            if(etch::button({.id=etch::id("studio_about_close"),.label=etch::str_lit("Close")})) app->desktop_about=false;
+            etch::end_modal();
+        }
+        if(!app->ctx_menu_open && etch::begin_context_menu(etch::id("studio_desktop_context"),etch::id("studio_dock"))) {
+            if(etch::menu_item({.id=etch::id("studio_context_reset"),.label=etch::str_lit("Reset exposure")})) app->target_exposure=1;
+            etch::end_context_menu();
+        }
         // Top Toolbar (Custom Window Chrome Titlebar)
         ETCH_BOX({
             .id = kToolbar,
@@ -586,14 +620,14 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
                         .color = etch::Color::white(),
                     });
                 }
-                etch::text(etch::str_lit("ETCH 2.2"), {
+                etch::text(etch::str_lit("ETCH 2.3"), {
                     .color = etch::Color::white(),
                     .font_size_px = 12.0f,
                     .wrap = false,
                 });
             }
 
-            etch::text(etch::str_lit("Etch Studio 2.2 — GPU Render-Graph & Telemetry"), {
+            etch::text(etch::str_lit("Etch Studio 2.3 — GPU Render-Graph & Telemetry"), {
                 .color = etch::Color::rgb_hex(0xE2E8F0),
                 .font_size_px = 14.0f,
                 .wrap = false,
@@ -604,7 +638,7 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
                     // Destruction occurs after the serialized main build ends.
                     SDL_HideWindow(app->tear_off_window);
                 } else {
-                    app->tear_off_window = SDL_CreateWindow("Etch Studio 2.2 — Tear-Off Preview", 480, 360, SDL_WINDOW_RESIZABLE);
+                    app->tear_off_window = SDL_CreateWindow("Etch Studio 2.3 — Tear-Off Preview", 480, 360, SDL_WINDOW_RESIZABLE);
                 }
             }
             draw_button(tear_id, "Tear-Off Preview", etch::Color::rgb_hex(0x1E293B), etch::Color::rgb_hex(0x475569));
@@ -695,10 +729,10 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
             uint32_t left = 0, right = 0, top = 0, bottom = 0;
             etch::dock_split_node(kDockMain, root, etch::Axis::Row, .25f, &left, &right, kSplitH, 280, 520);
             etch::dock_split_node(kDockMain, right, etch::Axis::Col, .62f, &top, &bottom, kSplitV, 260, 180);
-            etch::dock_add_pane(kDockMain, left, { .id = kPaneInspector, .title = etch::str_lit("Inspector") });
-            etch::dock_add_pane(kDockMain, left, { .id = kPaneOutliner, .title = etch::str_lit("Outliner") });
-            etch::dock_add_pane(kDockMain, top, { .id = kPaneCanvas, .title = etch::str_lit("Node Graph") });
-            etch::dock_add_pane(kDockMain, bottom, { .id = kPaneTrace, .title = etch::str_lit("1M Trace Table") });
+            etch::dock_add_pane(kDockMain, left, { .id = kPaneInspector, .title = etch::str_lit("Inspector"), .closable=true });
+            etch::dock_add_pane(kDockMain, left, { .id = kPaneOutliner, .title = etch::str_lit("Outliner"), .closable=true });
+            etch::dock_add_pane(kDockMain, top, { .id = kPaneCanvas, .title = etch::str_lit("Node Graph"), .closable=true });
+            etch::dock_add_pane(kDockMain, bottom, { .id = kPaneTrace, .title = etch::str_lit("1M Trace Table"), .closable=true });
         }
         etch::begin_dock_space({ .id = kDockMain, .divider_size_px = kDividerPx });
         while (const uint32_t pane = etch::next_dock_pane()) {
@@ -731,7 +765,7 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
         // Pane 1: Left Inspector (UTF-8 IME filter + Spring shader controls + Inertial Node List)
         ETCH_BOX({
             .axis = etch::Axis::Col,
-            .width = etch::Sizing::grow(),
+            .width = etch::Sizing::percent(1),
             .height = etch::Sizing::grow(),
             .padding = etch::Padding::all(12.0f),
             .gap = 10.0f,
@@ -739,6 +773,8 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
             .border_color = etch::Color::rgba8(148, 163, 184, 38),
             .border_width = 1.0f,
             .radius = etch::Corners::all(10.0f),
+            .clip_children = true,
+            .scroll_y = true,
         }) {
             etch::text(etch::str_lit("Trace Filter (UTF-8 / 中文 IME)"), {
                 .color = etch::Color::rgb_hex(0x94A3B8),
@@ -777,7 +813,7 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
             const GraphNode& sel = app->nodes[app->selected_node];
             ETCH_BOX({
                 .axis = etch::Axis::Col,
-                .width = etch::Sizing::grow(),
+                .width = etch::Sizing::percent(1),
                 .height = etch::Sizing::fit(),
                 .padding = etch::Padding::all(12.0f),
                 .gap = 8.0f,
@@ -811,13 +847,27 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
                         ETCH_BOX({.id=etch::id_index(etch::id("studio_v22_value"),i),.width=etch::Sizing::grow()}) { etch::text(etch::str_cstr(values[i]),{.font_size_px=11,.wrap=false,.ellipsis=true}); }
                     }
                 }
-                ETCH_BOX({.id=etch::id("studio_v22_tags"),.width=etch::Sizing::grow(),.gap=5,.wrap=true,.row_gap=4}) {
+                ETCH_BOX({.id=etch::id("studio_v22_tags"),.width=etch::Sizing::grow(0,300),.gap=5,.wrap=true,.row_gap=4}) {
                     const char* tags[]={"Slug","HarfBuzz","Grid","FlexWrap","Fenwick","ZeroHeap"};
                     for(uint32_t i=0;i<6;++i) {
                         ETCH_BOX({.id=etch::id_index(etch::id("studio_v22_tag"),i),.width=etch::Sizing::fixed(68),.height=etch::Sizing::fixed(20),.padding=etch::Padding::xy(5,2),.background=etch::Color::rgb_hex(0x1E3A5F),.radius=etch::Corners::all(4)}) { etch::text(etch::str_cstr(tags[i]),{.font_size_px=10,.wrap=false}); }
                     }
                 }
 
+                ETCH_COLLAPSIBLE({.id=etch::id("studio_desktop_controls"),.title=etch::str_lit("Desktop Controls"),.default_open=false,.header_height_px=22,.body_gap=3}) {
+                    etch::drag_value({.id=etch::id("studio_exposure_value"),.label=etch::str_lit("Exposure"),.value=&app->target_exposure,.min_value=.5f,.max_value=2,.speed=.01f,.width=etch::Sizing::grow(),.height_px=22});
+                    etch::set_tooltip(etch::id("studio_exposure_value"),etch::str_lit("Drag to scrub; double-click to type. Shift for precision."));
+                    etch::slider({.id=etch::id("studio_bloom_slider"),.label=etch::str_lit("Bloom"),.value=&app->target_bloom,.max_value=1.2f,.step=.01f,.height_px=22});
+                    const etch::Str quality[]={etch::str_lit("Draft"),etch::str_lit("Balanced"),etch::str_lit("High quality")};
+                    etch::combo_box({.id=etch::id("studio_quality"),.selected_index=&app->desktop_quality,.items=quality,.height_px=22});
+                    ETCH_BOX({.width=etch::Sizing::grow(),.gap=8}) {
+                        etch::toggle_switch({.id=etch::id("studio_desktop_glow"),.label=etch::str_lit("Glow"),.value=&app->wire_glow_enabled});
+                        etch::checkbox({.id=etch::id("studio_desktop_enable"),.label=etch::str_lit("Enabled"),.checked=&app->desktop_enabled});
+                    }
+                    etch::progress_bar({.id=etch::id("studio_desktop_progress"),.fraction=app->target_bloom/1.2f});
+                    if(etch::button({.id=etch::id("studio_desktop_reset"),.label=etch::str_lit("Reset controls"),.height=etch::Sizing::fixed(22)})) {app->target_bloom=.5f;app->target_exposure=1;}
+                    etch::set_tooltip(etch::id("studio_desktop_reset"),etch::str_lit("Restore the default shader controls"));
+                }
                 // Bloom spring bar + steppers
                 ETCH_BOX({
                     .axis = etch::Axis::Row,
@@ -1883,7 +1933,7 @@ void step_headless_frame(
 
 void build_preview_ui(StudioApp* app) noexcept {
     ETCH_BOX({.id = etch::id("tear_preview"), .width = etch::Sizing::grow(), .height = etch::Sizing::grow(), .background = etch::Color::rgb_hex(0x111827), .focusable = true}) {
-        etch::text(etch::str_lit("Etch Studio 2.2 — Preview"));
+        etch::text(etch::str_lit("Etch Studio 2.3 — Preview"));
         etch::image({.texture = app->preview_tex, .width = etch::Sizing::fixed(256), .height = etch::Sizing::fixed(256)});
     }
 }
@@ -2080,7 +2130,7 @@ int run_headless(const char* out_png_path) noexcept {
     step_headless_frame(&app, kW, kH, kDt);
     const uint32_t vis_count = app.last_trace_slice.end_index - app.last_trace_slice.first_index;
     if (app.last_trace_slice.first_index > 999990u ||
-        app.last_trace_slice.end_index < 999999u ||
+        app.last_trace_slice.end_index <= 999990u ||
         vis_count == 0u ||
         vis_count >= 64u)
     {
@@ -2529,6 +2579,7 @@ int run_headless(const char* out_png_path) noexcept {
     // [S11] Exercise Studio's own palette, spatial canvas drops and preview UI.
     app.preset_popover_open = false;
     app.ctx_menu_open = false;
+    etch::close_popup();
     step_headless_frame(&app, kW, kH, kDt);
     const uint32_t restore_focus = etch::id("studio_filter");
     etch::request_focus(restore_focus);
@@ -2543,7 +2594,7 @@ int run_headless(const char* out_png_path) noexcept {
     s11_ok &= etch::focused(restore_focus);
     const etch::Rect drop_rect = etch::element_bounds(kCanvas);
     const uint32_t before_drop = app.node_count;
-    const etch::Vec2 external_pos = {drop_rect.x + drop_rect.w * 0.5f, drop_rect.y + drop_rect.h * 0.5f};
+    const etch::Vec2 external_pos = {drop_rect.x + drop_rect.w * 0.95f, drop_rect.y + drop_rect.h * 0.95f};
     etch::inject_os_drop_begin(ctx, external_pos);
     step_headless_frame(&app, kW, kH, kDt);
     etch::inject_drop_file(ctx, etch::str_lit("C:/assets/S11.svg"));
@@ -2561,7 +2612,7 @@ int run_headless(const char* out_png_path) noexcept {
     }
     step_headless_frame(&app, kW, kH, kDt);
     s11_ok &= app.node_count == before_drop + 2;
-    app.tear_off_window = SDL_CreateWindow("Etch Studio 2.2 — Tear-Off Preview", 480, 360, SDL_WINDOW_HIDDEN);
+    app.tear_off_window = SDL_CreateWindow("Etch Studio 2.3 — Tear-Off Preview", 480, 360, SDL_WINDOW_HIDDEN);
     s11_ok &= app.tear_off_window != nullptr;
     if (app.tear_off_window) {
         etch::begin_window_frame(ctx, app.tear_off_window, kDt);
@@ -2640,8 +2691,44 @@ int run_headless(const char* out_png_path) noexcept {
         std::fprintf(stderr,"Headless Studio [S15] failed: key=(%g,%g,%g,%g), key1=(%g,%g), value=(%g,%g), tags=%g detail=%g selected=%u idle=%d\n",key0.x,key0.y,key0.w,key0.h,key1.x,key1.y,value0.x,value0.y,tags.h,detail.h,app.trace_selected_row,int(selection_stats.idle_sleeping));cleanup_release();return 1;
     }
     if (!etch::render_headless_png(ctx,kW,kH,out_png_path)) { cleanup_release();return 1; }
+    // [S16] Desktop menus, numeric editing and pointer dock integration.
+    if (!verify_desktop_v23(ctx)) { cleanup_release();return 1; }
+    bool s16_ok=true;
+    click_widget(etch::id_index(etch::id("studio_file_menu"),0x2303));
+    step_headless_frame(&app,kW,kH,kDt);
+    s16_ok &= etch::is_popup_open(etch::id("studio_file_menu"));
+    const auto view_menu=etch::element_bounds(etch::id_index(etch::id("studio_view_menu"),0x2303));
+    step_headless_frame(&app,kW,kH,kDt,{view_menu.x+4,view_menu.y+4});
+    step_headless_frame(&app,kW,kH,kDt);
+    s16_ok &= etch::is_popup_open(etch::id("studio_view_menu"));
+    const bool old_glow=app.wire_glow_enabled;
+    click_widget(etch::id("studio_view_glow"));
+    s16_ok &= app.wire_glow_enabled!=old_glow && !etch::is_popup_open(etch::id("studio_view_menu"));
+    etch::set_collapsible_open(etch::id("studio_desktop_controls"),true);
+    for(int i=0;i<60;++i) step_headless_frame(&app,kW,kH,kDt);
+    const float old_exposure=app.target_exposure;
+    etch::request_focus(etch::id("studio_exposure_value"));
+    step_headless_frame(&app,kW,kH,kDt,{-1,-1},false,false,0,etch::Mod_None,SDLK_LEFT);
+    s16_ok &= app.target_exposure<old_exposure;
+    const auto source_tab=etch::element_bounds(etch::id_index(outliner,0xD300));
+    const auto target_tab=etch::element_bounds(etch::id_index(inspector,0xD300));
+    const etch::Vec2 start_tab={source_tab.x+8,source_tab.y+8};
+    const etch::Vec2 end_tab={target_tab.x+2,target_tab.y+8};
+    step_headless_frame(&app,kW,kH,kDt,start_tab,true);
+    step_headless_frame(&app,kW,kH,kDt,{start_tab.x+8,start_tab.y+8},true);
+    step_headless_frame(&app,kW,kH,kDt,end_tab,true);
+    step_headless_frame(&app,kW,kH,kDt,end_tab,false);
+    step_headless_frame(&app,kW,kH,kDt);
+    s16_ok &= etch::element_bounds(etch::id_index(outliner,0xD300)).x<etch::element_bounds(etch::id_index(inspector,0xD300)).x;
+    etch::dock_activate_pane(dock,inspector);
+    etch::set_collapsible_open(etch::id("studio_desktop_controls"),false);
+    for(int i=0;i<90;++i) step_headless_frame(&app,kW,kH,kDt);
+    s16_ok &= etch::frame_stats(ctx).idle_sleeping;
+    s16_ok &= etch::render_headless_png(ctx,kW,kH,out_png_path) && etch::frame_stats(ctx).draw_call_count<=3;
+    if(!s16_ok) {std::fprintf(stderr,"Headless Studio [S16] failed: desktop showcase integration\n");cleanup_release();return 1;}
+
     std::printf(
-        "Headless Studio OK (%s) -> %s (asserts=15/15, prims=%u, draw_calls=%u, blur_pass=%u, slug_glyphs=%u, grid=%u, wire=%u, layout_us=%.0f, vrows=[%u..%u))\n",
+        "Headless Studio OK (%s) -> %s (asserts=16/16, prims=%u, draw_calls=%u, blur_pass=%u, slug_glyphs=%u, grid=%u, wire=%u, layout_us=%.0f, vrows=[%u..%u))\n",
         driver ? driver : "unknown",
         out_png_path,
         final_stats.prim_count,
@@ -2665,7 +2752,7 @@ int run_interactive() noexcept {
     }
 
     SDL_Window* window = SDL_CreateWindow(
-        "Etch Studio 2.2 — GPU Render-Graph & 1M Trace Workbench",
+        "Etch Studio 2.3 — GPU Render-Graph & 1M Trace Workbench",
         1440,
         900,
         SDL_WINDOW_BORDERLESS | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
