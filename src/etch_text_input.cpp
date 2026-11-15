@@ -351,7 +351,459 @@ struct TextVisualPos {
     uint32_t line_idx = 0u;
 };
 
-TextVisualPos text_byte_to_visual(Context* ctx, const TextInputDesc& desc, Str text, uint32_t byte_pos) noexcept {
+struct WrappedSubline {
+    uint32_t start = 0u;
+    uint32_t end = 0u;
+    uint32_t sub_idx = 0u;
+    float    width_px = 0.0f;
+};
+
+constexpr bool is_wrap_ideograph(uint32_t cp) noexcept {
+    return (cp >= 0x3000u && cp <= 0x30FFu) ||
+           (cp >= 0x3400u && cp <= 0x4DBFu) ||
+           (cp >= 0x4E00u && cp <= 0x9FFFu) ||
+           (cp >= 0xAC00u && cp <= 0xD7AFu) ||
+           (cp >= 0xF900u && cp <= 0xFAFFu) ||
+           (cp >= 0xFF00u && cp <= 0xFFEFu);
+}
+
+inline float text_input_wrap_width(const TextInputDesc& desc, const TextInnerGeom& geom) noexcept {
+    if (!desc.multiline || !desc.word_wrap || geom.clip_logical.w <= 6.0f) {
+        return 0.0f;
+    }
+    return geom.clip_logical.w - 3.0f;
+}
+
+template <typename Fn>
+void for_each_wrapped_subline(
+    Context* ctx,
+    uint16_t font_id,
+    const char* s,
+    uint32_t len,
+    float font_size_px,
+    float letter_spacing,
+    bool password,
+    uint32_t tab_width,
+    float wrap_w,
+    Fn&& emit) noexcept
+{
+    if (!s || len == 0u) {
+        (void)emit(WrappedSubline{ 0u, 0u, 0u, 0.0f });
+        return;
+    }
+    if (wrap_w <= 0.0f) {
+        float total_w = 0.0f;
+        measure_line_segment_x(
+            ctx, font_id, s, len, 0u, 0u,
+            font_size_px, letter_spacing, password, false, nullptr, nullptr, &total_w, tab_width);
+        (void)emit(WrappedSubline{ 0u, len, 0u, total_w });
+        return;
+    }
+
+    const float base_px = (font_size_px > 0.0f) ? font_size_px : 14.0f;
+    const uint16_t slot_idx = (ctx && ctx->atlas.font_valid) ? resolve_font_slot_idx(&ctx->atlas, font_id) : kInvalidFont;
+    const bool fallback = (!ctx || !ctx->atlas.font_valid || slot_idx == kInvalidFont || password || !ctx->frame_arena.base);
+    const float cp_adv = (!ctx || !ctx->atlas.font_valid || slot_idx == kInvalidFont)
+        ? (base_px * 0.55f)
+        : (ctx->atlas.slots[slot_idx].bullet_advance_em * base_px);
+    const float tab_w_px = (!fallback)
+        ? (static_cast<float>(tab_width) * ctx->atlas.slots[slot_idx].space_advance_em * base_px + letter_spacing)
+        : (static_cast<float>(tab_width) * cp_adv + letter_spacing);
+
+    uint32_t sub_start = 0u;
+    uint32_t sub_idx = 0u;
+
+    while (sub_start < len) {
+        uint32_t pos = sub_start;
+        float pen_x = 0.0f;
+        uint32_t last_break_off = sub_start;
+        float last_break_w = 0.0f;
+        bool prev_was_ws = false;
+        bool broken = false;
+
+        while (pos < len) {
+            if (s[pos] == '\t') {
+                const uint32_t g_end = pos + 1u;
+                if (pos > sub_start && pen_x + tab_w_px > wrap_w + 0.01f) {
+                    if (!prev_was_ws && pen_x <= wrap_w + 0.01f) {
+                        pen_x += tab_w_px;
+                        last_break_off = g_end;
+                        last_break_w = pen_x;
+                        prev_was_ws = true;
+                        pos = g_end;
+                        continue;
+                    }
+                    const uint32_t brk = (last_break_off > sub_start) ? last_break_off : pos;
+                    const float brk_w = (last_break_off > sub_start) ? last_break_w : pen_x;
+                    if (!emit(WrappedSubline{ sub_start, brk, sub_idx++, brk_w })) {
+                        return;
+                    }
+                    sub_start = brk;
+                    broken = true;
+                    break;
+                }
+                pen_x += tab_w_px;
+                last_break_off = g_end;
+                last_break_w = pen_x;
+                prev_was_ws = true;
+                pos = g_end;
+                continue;
+            }
+
+            if (fallback) {
+                const uint32_t g_end = password
+                    ? utf8_next_boundary(s, len, pos)
+                    : utf8_next_grapheme(s, len, pos);
+                const float g_adv = cp_adv + letter_spacing;
+                const uint32_t cp = utf8_decode_at(s, len, pos);
+                const bool is_ws = (cp == ' ');
+                if (pos > sub_start && pen_x + g_adv > wrap_w + 0.01f) {
+                    if (is_ws && !prev_was_ws && pen_x <= wrap_w + 0.01f) {
+                        pen_x += g_adv;
+                        last_break_off = g_end;
+                        last_break_w = pen_x;
+                        prev_was_ws = true;
+                        pos = g_end;
+                        continue;
+                    }
+                    const uint32_t brk = (last_break_off > sub_start) ? last_break_off : pos;
+                    const float brk_w = (last_break_off > sub_start) ? last_break_w : pen_x;
+                    if (!emit(WrappedSubline{ sub_start, brk, sub_idx++, brk_w })) {
+                        return;
+                    }
+                    sub_start = brk;
+                    broken = true;
+                    break;
+                }
+                pen_x += g_adv;
+                prev_was_ws = is_ws;
+                if (is_ws || cp == '-' || cp == '/' || cp == '\\' || is_wrap_ideograph(cp)) {
+                    last_break_off = g_end;
+                    last_break_w = pen_x;
+                }
+                pos = g_end;
+                continue;
+            }
+
+            uint32_t chunk_end = pos;
+            uint32_t last_ws_end = 0u;
+            const uint32_t target_cap = (pos + 256u < len) ? (pos + 256u) : len;
+            while (chunk_end < target_cap && s[chunk_end] != '\t') {
+                const uint32_t g_next = utf8_next_grapheme(s, len, chunk_end);
+                if (g_next <= chunk_end) {
+                    ++chunk_end;
+                    break;
+                }
+                chunk_end = g_next;
+                if (chunk_end - pos >= 128u && s[chunk_end - 1u] == ' ') {
+                    last_ws_end = chunk_end;
+                }
+            }
+            if (chunk_end < len && s[chunk_end] != '\t' && last_ws_end > pos) {
+                chunk_end = last_ws_end;
+            }
+            if (chunk_end <= pos) {
+                chunk_end = utf8_next_grapheme(s, len, pos);
+                if (chunk_end <= pos) {
+                    chunk_end = pos + 1u;
+                }
+            }
+
+            const uint32_t run_len = chunk_end - pos;
+            const size_t run_mark = ctx->frame_arena.mark();
+            bool is_rtl = false;
+            const std::span<const ShapedGlyph> glyphs = shape_utf8_run(ctx, slot_idx, s + pos, run_len, &is_rtl);
+
+            uint32_t ng = 0u;
+            for (uint32_t gp = 0u; gp < run_len; gp = utf8_next_grapheme(s + pos, run_len, gp)) {
+                ++ng;
+            }
+            uint32_t* grp_end = (ng > 0u) ? ctx->frame_arena.alloc_uninit<uint32_t>(ng) : nullptr;
+            float* grp_adv = (ng > 0u) ? ctx->frame_arena.alloc<float>(ng) : nullptr;
+            uint32_t* byte_to_grp = (ng > 0u) ? ctx->frame_arena.alloc_uninit<uint32_t>(run_len) : nullptr;
+            if (!grp_end || !grp_adv || !byte_to_grp) {
+                ctx->frame_arena.rewind(run_mark);
+                return;
+            }
+            {
+                uint32_t k = 0u;
+                for (uint32_t gp = 0u; gp < run_len;) {
+                    const uint32_t gn = utf8_next_grapheme(s + pos, run_len, gp);
+                    grp_end[k] = gn;
+                    for (uint32_t b = gp; b < gn; ++b) {
+                        byte_to_grp[b] = k;
+                    }
+                    ++k;
+                    gp = gn;
+                }
+            }
+
+            const uint32_t gcount = static_cast<uint32_t>(glyphs.size());
+            uint32_t gi = 0u;
+            while (gi < gcount) {
+                const uint32_t c0 = glyphs[gi].cluster;
+                uint32_t c1 = glyphs[gi].cluster_end;
+                uint32_t gi_end = gi + 1u;
+                while (gi_end < gcount && glyphs[gi_end].cluster == c0) {
+                    if (glyphs[gi_end].cluster_end > c1) {
+                        c1 = glyphs[gi_end].cluster_end;
+                    }
+                    ++gi_end;
+                }
+                float cluster_adv = 0.0f;
+                for (uint32_t m = gi; m < gi_end; ++m) {
+                    cluster_adv += glyphs[m].x_advance_1px * base_px + letter_spacing;
+                }
+                if (c0 < run_len) {
+                    const uint32_t c1_clamped = (c1 > c0 && c1 <= run_len) ? c1 : (c0 + 1u);
+                    const uint32_t ga = byte_to_grp[c0];
+                    const uint32_t gb = byte_to_grp[c1_clamped - 1u];
+                    const uint32_t span_g = (gb >= ga) ? (gb - ga + 1u) : 1u;
+                    const float per_g = cluster_adv / static_cast<float>(span_g);
+                    for (uint32_t k = ga; k <= gb; ++k) {
+                        grp_adv[k] += per_g;
+                    }
+                }
+                gi = gi_end;
+            }
+
+            for (uint32_t k = 0u; k < ng; ++k) {
+                const uint32_t g_start = pos + ((k > 0u) ? grp_end[k - 1u] : 0u);
+                const uint32_t g_end = pos + grp_end[k];
+                const float g_adv = grp_adv[k];
+                const uint32_t cp = utf8_decode_at(s, len, g_start);
+                const bool is_ws = (cp == ' ');
+                if (g_start > sub_start && pen_x + g_adv > wrap_w + 0.01f) {
+                    if (is_ws && !prev_was_ws && pen_x <= wrap_w + 0.01f) {
+                        pen_x += g_adv;
+                        last_break_off = g_end;
+                        last_break_w = pen_x;
+                        prev_was_ws = true;
+                        continue;
+                    }
+                    const uint32_t brk = (last_break_off > sub_start) ? last_break_off : g_start;
+                    const float brk_w = (last_break_off > sub_start) ? last_break_w : pen_x;
+                    ctx->frame_arena.rewind(run_mark);
+                    if (!emit(WrappedSubline{ sub_start, brk, sub_idx++, brk_w })) {
+                        return;
+                    }
+                    sub_start = brk;
+                    broken = true;
+                    break;
+                }
+                pen_x += g_adv;
+                prev_was_ws = is_ws;
+                if (is_ws || cp == '-' || cp == '/' || cp == '\\' || is_wrap_ideograph(cp)) {
+                    last_break_off = g_end;
+                    last_break_w = pen_x;
+                }
+            }
+            ctx->frame_arena.rewind(run_mark);
+            if (broken) {
+                break;
+            }
+            pos = chunk_end;
+        }
+
+        if (!broken) {
+            (void)emit(WrappedSubline{ sub_start, len, sub_idx++, pen_x });
+            break;
+        }
+    }
+}
+
+uint32_t count_wrapped_sublines(
+    Context* ctx,
+    uint16_t font_id,
+    const char* s,
+    uint32_t len,
+    float font_size_px,
+    float letter_spacing,
+    bool password,
+    uint32_t tab_width,
+    float wrap_w) noexcept
+{
+    uint32_t count = 0u;
+    for_each_wrapped_subline(ctx, font_id, s, len, font_size_px, letter_spacing, password, tab_width, wrap_w,
+        [&](const WrappedSubline&) noexcept {
+            ++count;
+            return true;
+        });
+    return (count > 0u) ? count : 1u;
+}
+
+WrappedSubline locate_wrapped_offset(
+    Context* ctx,
+    uint16_t font_id,
+    const char* s,
+    uint32_t len,
+    uint32_t rel_offset,
+    bool wrap_affinity,
+    float font_size_px,
+    float letter_spacing,
+    bool password,
+    uint32_t tab_width,
+    float wrap_w,
+    float* out_x = nullptr) noexcept
+{
+    const uint32_t clamped = (rel_offset <= len) ? rel_offset : len;
+    WrappedSubline found = {};
+    bool matched = false;
+    for_each_wrapped_subline(ctx, font_id, s, len, font_size_px, letter_spacing, password, tab_width, wrap_w,
+        [&](const WrappedSubline& sub) noexcept {
+            const bool is_last = (sub.end >= len);
+            if (clamped < sub.end || (clamped == sub.end && (is_last || wrap_affinity))) {
+                found = sub;
+                matched = true;
+                return false;
+            }
+            found = sub;
+            return true;
+        });
+    if (out_x) {
+        if (!matched) {
+            *out_x = found.width_px;
+        } else if (s && found.end > found.start) {
+            float x = 0.0f;
+            measure_line_segment_x(
+                ctx, font_id, s + found.start, found.end - found.start,
+                (clamped > found.start) ? (clamped - found.start) : 0u, 0u,
+                font_size_px, letter_spacing, password, false, &x, nullptr, nullptr, tab_width);
+            *out_x = x;
+        } else {
+            *out_x = 0.0f;
+        }
+    }
+    return found;
+}
+
+uint32_t hit_line_segment_x(
+    Context* ctx,
+    uint16_t font_id,
+    const char* seg,
+    uint32_t seg_len,
+    float font_size_px,
+    float letter_spacing,
+    bool password,
+    uint32_t tab_width,
+    float local_x,
+    bool* out_past_end = nullptr) noexcept
+{
+    if (out_past_end) {
+        *out_past_end = false;
+    }
+    if (!seg || seg_len == 0u || local_x <= 0.0f) {
+        return 0u;
+    }
+    const float base_px = (font_size_px > 0.0f) ? font_size_px : 14.0f;
+    float pen_x = 0.0f;
+    const uint16_t slot_idx = (ctx && ctx->atlas.font_valid) ? resolve_font_slot_idx(&ctx->atlas, font_id) : kInvalidFont;
+    if (!ctx || !ctx->atlas.font_valid || slot_idx == kInvalidFont || password) {
+        const float cp_adv = (!ctx || !ctx->atlas.font_valid || slot_idx == kInvalidFont)
+            ? (base_px * 0.55f)
+            : (ctx->atlas.slots[slot_idx].bullet_advance_em * base_px);
+        uint32_t p = 0u;
+        while (p < seg_len) {
+            const uint32_t next = password ? utf8_next_boundary(seg, seg_len, p) : utf8_next_grapheme(seg, seg_len, p);
+            const uint32_t cp = utf8_decode_at(seg, seg_len, p);
+            const float adv = ((cp == '\t' && !password) ? static_cast<float>(tab_width) * cp_adv : cp_adv) + letter_spacing;
+            if (local_x < pen_x + 0.5f * adv) {
+                return p;
+            }
+            pen_x += adv;
+            p = next;
+        }
+        if (out_past_end) {
+            *out_past_end = (seg_len > 0u && local_x >= pen_x);
+        }
+        return seg_len;
+    }
+
+    const FontSlot& primary = ctx->atlas.slots[slot_idx];
+    bool last_run_rtl = false;
+    uint32_t last_run_start = 0u;
+    uint32_t pos = 0u;
+    while (pos < seg_len) {
+        if (seg[pos] == '\t') {
+            const float adv = static_cast<float>(tab_width) * primary.space_advance_em * base_px + letter_spacing;
+            if (local_x < pen_x + 0.5f * adv) {
+                return pos;
+            }
+            pen_x += adv;
+            last_run_rtl = false;
+            last_run_start = pos;
+            ++pos;
+            continue;
+        }
+        uint32_t run_end = pos;
+        while (run_end < seg_len && seg[run_end] != '\t') {
+            ++run_end;
+        }
+        const uint32_t run_len = run_end - pos;
+        bool is_rtl = false;
+        const size_t run_mark = ctx->frame_arena.mark();
+        const std::span<const ShapedGlyph> glyphs = shape_utf8_run(ctx, slot_idx, seg + pos, run_len, &is_rtl);
+        const uint32_t gcount = static_cast<uint32_t>(glyphs.size());
+        uint32_t gi = 0u;
+        while (gi < gcount) {
+            const uint32_t c0 = glyphs[gi].cluster;
+            uint32_t c1 = glyphs[gi].cluster_end;
+            uint32_t gi_end = gi + 1u;
+            while (gi_end < gcount && glyphs[gi_end].cluster == c0) {
+                if (glyphs[gi_end].cluster_end > c1) {
+                    c1 = glyphs[gi_end].cluster_end;
+                }
+                ++gi_end;
+            }
+            float cluster_adv = 0.0f;
+            for (uint32_t k = gi; k < gi_end; ++k) {
+                cluster_adv += glyphs[k].x_advance_1px * base_px + letter_spacing;
+            }
+            is_rtl = glyphs[gi].is_rtl != 0;
+            if (local_x < pen_x + cluster_adv && c1 > c0) {
+                const uint32_t start = pos + c0;
+                const uint32_t end = pos + c1;
+                uint32_t n_grp = 0u;
+                for (uint32_t p = start; p < end; p = utf8_next_grapheme(seg, end, p)) {
+                    ++n_grp;
+                }
+                uint32_t target = 0u;
+                const float rel_x = local_x - pen_x;
+                while (target < n_grp && rel_x >= ((static_cast<float>(target) + 0.5f) / static_cast<float>(n_grp)) * cluster_adv) {
+                    ++target;
+                }
+                if (is_rtl) {
+                    target = n_grp - target;
+                }
+                uint32_t hit = start;
+                for (uint32_t k = 0u; k < target; ++k) {
+                    hit = utf8_next_grapheme(seg, end, hit);
+                }
+                ctx->frame_arena.rewind(run_mark);
+                return hit;
+            }
+            pen_x += cluster_adv;
+            gi = gi_end;
+        }
+        ctx->frame_arena.rewind(run_mark);
+        last_run_rtl = is_rtl;
+        last_run_start = pos;
+        pos = run_end;
+    }
+    if (out_past_end) {
+        *out_past_end = (seg_len > 0u && local_x >= pen_x);
+    }
+    return last_run_rtl ? last_run_start : seg_len;
+}
+
+TextVisualPos text_byte_to_visual(
+    Context* ctx,
+    const TextInputDesc& desc,
+    Str text,
+    uint32_t byte_pos,
+    float wrap_w = 0.0f,
+    bool wrap_affinity = false) noexcept
+{
     const float base_px = (desc.font_size_px > 0.0f) ? desc.font_size_px : 14.0f;
     const float line_adv = desc.multiline ? std::floor(base_px * 1.35f + 0.5f) : base_px;
     TextVisualPos out = {};
@@ -372,19 +824,59 @@ TextVisualPos text_byte_to_visual(Context* ctx, const TextInputDesc& desc, Str t
         while (line_end < text.length && text.chars[line_end] != '\n') {
             ++line_end;
         }
-        if (clamped <= line_end) {
-            measure_line_segment_x(
-                ctx, desc.font_id, text.chars + line_start, line_end - line_start, clamped - line_start, 0u,
-                base_px, desc.letter_spacing, desc.password, false, &out.x, nullptr, nullptr);
+        const uint32_t line_len = line_end - line_start;
+        if (wrap_w <= 0.0f) {
+            if (clamped <= line_end) {
+                measure_line_segment_x(
+                    ctx, desc.font_id, text.chars + line_start, line_len, clamped - line_start, 0u,
+                    base_px, desc.letter_spacing, desc.password, false, &out.x, nullptr, nullptr);
+                return out;
+            }
+            out.y += line_adv;
+            ++out.line_idx;
+        } else {
+            const uint32_t rel = (clamped <= line_end && clamped >= line_start) ? (clamped - line_start) : 0u;
+            bool found = false;
+            for_each_wrapped_subline(ctx, desc.font_id, text.chars + line_start, line_len, base_px, desc.letter_spacing, desc.password, 4u, wrap_w,
+                [&](const WrappedSubline& sub) noexcept {
+                    if (clamped <= line_end) {
+                        const bool is_last = (sub.end >= line_len);
+                        if (rel < sub.end || (rel == sub.end && (is_last || wrap_affinity))) {
+                            measure_line_segment_x(
+                                ctx, desc.font_id, text.chars + line_start + sub.start, sub.end - sub.start,
+                                (rel > sub.start) ? (rel - sub.start) : 0u, 0u,
+                                base_px, desc.letter_spacing, desc.password, false, &out.x, nullptr, nullptr);
+                            found = true;
+                            return false;
+                        }
+                    }
+                    out.y += line_adv;
+                    ++out.line_idx;
+                    return true;
+                });
+            if (found) {
+                return out;
+            }
+        }
+        if (line_end >= text.length) {
             return out;
         }
-        out.y += line_adv;
-        ++out.line_idx;
         line_start = line_end + 1u;
     }
 }
 
-uint32_t visual_point_to_byte(Context* ctx, const TextInputDesc& desc, Str text, float local_x, float local_y) noexcept {
+uint32_t visual_point_to_byte(
+    Context* ctx,
+    const TextInputDesc& desc,
+    Str text,
+    float local_x,
+    float local_y,
+    float wrap_w = 0.0f,
+    bool* out_affinity = nullptr) noexcept
+{
+    if (out_affinity) {
+        *out_affinity = false;
+    }
     if (!text.chars || text.length == 0u) {
         return 0u;
     }
@@ -394,126 +886,96 @@ uint32_t visual_point_to_byte(Context* ctx, const TextInputDesc& desc, Str text,
         ? static_cast<uint32_t>((local_y > 0.0f) ? std::floor(local_y / line_adv) : 0.0f)
         : 0u;
 
-    uint32_t line_start = 0u;
-    uint32_t line_end = text.length;
-    if (desc.multiline) {
-        uint32_t cur_line = 0u;
-        while (cur_line < target_line && line_start < text.length) {
-            if (text.chars[line_start] == '\n') {
-                ++cur_line;
+    if (!desc.multiline || wrap_w <= 0.0f) {
+        uint32_t line_start = 0u;
+        uint32_t line_end = text.length;
+        if (desc.multiline) {
+            uint32_t cur_line = 0u;
+            while (cur_line < target_line && line_start < text.length) {
+                if (text.chars[line_start] == '\n') {
+                    ++cur_line;
+                }
+                ++line_start;
             }
-            ++line_start;
+            if (cur_line < target_line) {
+                return text.length;
+            }
+            line_end = line_start;
+            while (line_end < text.length && text.chars[line_end] != '\n') {
+                ++line_end;
+            }
         }
-        if (cur_line < target_line) {
-            return text.length;
-        }
-        line_end = line_start;
+        return line_start + hit_line_segment_x(
+            ctx, desc.font_id, text.chars + line_start, line_end - line_start,
+            base_px, desc.letter_spacing, desc.password, 4u, local_x, nullptr);
+    }
+
+    uint32_t line_start = 0u;
+    uint32_t cur_vline = 0u;
+    for (;;) {
+        uint32_t line_end = line_start;
         while (line_end < text.length && text.chars[line_end] != '\n') {
             ++line_end;
         }
-    }
-
-    const char* seg = text.chars + line_start;
-    const uint32_t seg_len = line_end - line_start;
-    float pen_x = 0.0f;
-
-    const uint16_t slot_idx = (ctx && ctx->atlas.font_valid) ? resolve_font_slot_idx(&ctx->atlas, desc.font_id) : kInvalidFont;
-    if (!ctx || !ctx->atlas.font_valid || slot_idx == kInvalidFont || desc.password) {
-        const float cp_adv = (!ctx || !ctx->atlas.font_valid || slot_idx == kInvalidFont)
-            ? (base_px * 0.55f)
-            : (ctx->atlas.slots[slot_idx].bullet_advance_em * base_px);
-        const char* p = seg;
-        const char* end = seg + seg_len;
-        while (p < end) {
-            const char* cp_start = p;
-            const uint32_t cp = next_utf8_codepoint(p, end);
-            const float adv = ((cp == '\t' && !desc.password) ? 4.0f * cp_adv : cp_adv) + desc.letter_spacing;
-            if (local_x < pen_x + 0.5f * adv) {
-                return line_start + static_cast<uint32_t>(cp_start - seg);
-            }
-            pen_x += adv;
-        }
-        return line_end;
-    }
-
-    const FontSlot& primary = ctx->atlas.slots[slot_idx];
-    bool last_run_rtl = false;
-    uint32_t last_run_start = 0u;
-    uint32_t pos = 0u;
-    while (pos < seg_len) {
-        if (seg[pos] == '\t') {
-            const float adv = 4.0f * primary.space_advance_em * base_px + desc.letter_spacing;
-            if (local_x < pen_x + 0.5f * adv) {
-                return line_start + pos;
-            }
-            pen_x += adv;
-            last_run_rtl = false;
-            last_run_start = pos;
-            ++pos;
-            continue;
-        }
-        uint32_t run_end = pos;
-        while (run_end < seg_len && seg[run_end] != '\t') {
-            ++run_end;
-        }
-        const uint32_t run_len = run_end - pos;
-        bool is_rtl = false;
-        const size_t run_mark = ctx->frame_arena.mark();
-        const std::span<const ShapedGlyph> glyphs = shape_utf8_run(ctx, slot_idx, seg + pos, run_len, &is_rtl);
-        const uint32_t gcount = static_cast<uint32_t>(glyphs.size());
-        uint32_t gi = 0u;
-        while (gi < gcount) {
-            const uint32_t c0 = glyphs[gi].cluster;
-            uint32_t gi_end = gi + 1u;
-            while (gi_end < gcount && glyphs[gi_end].cluster == c0) {
-                ++gi_end;
-            }
-            float cluster_adv = 0.0f;
-            for (uint32_t k = gi; k < gi_end; ++k) {
-                cluster_adv += glyphs[k].x_advance_1px * base_px + desc.letter_spacing;
-            }
-            is_rtl = glyphs[gi].is_rtl != 0;
-            const uint32_t c1 = glyphs[gi].cluster_end;
-            if (local_x < pen_x + cluster_adv && c1 > c0) {
-                const uint32_t n_cp = count_utf8_cps(seg + pos + c0, c1 - c0);
-                if (is_rtl) {
-                    const float rel_x = local_x - pen_x;
-                    const uint32_t slot = (cluster_adv > 0.0f && rel_x > 0.0f)
-                        ? static_cast<uint32_t>(std::floor((rel_x / cluster_adv) * static_cast<float>(n_cp) + 0.5f))
-                        : 0u;
-                    const uint32_t clamped_slot = (slot < n_cp) ? slot : n_cp;
-                    const uint32_t target_k = n_cp - clamped_slot;
-                    const char* cp_p = seg + pos + c0;
-                    const char* cl_end = seg + pos + c1;
-                    for (uint32_t k = 0u; k < target_k && cp_p < cl_end; ++k) {
-                        (void)next_utf8_codepoint(cp_p, cl_end);
+        const uint32_t line_len = line_end - line_start;
+        uint32_t found_byte = text.length;
+        bool matched = false;
+        for_each_wrapped_subline(ctx, desc.font_id, text.chars + line_start, line_len, base_px, desc.letter_spacing, desc.password, 4u, wrap_w,
+            [&](const WrappedSubline& sub) noexcept {
+                if (cur_vline == target_line) {
+                    bool past_end = false;
+                    const uint32_t rel = hit_line_segment_x(
+                        ctx, desc.font_id, text.chars + line_start + sub.start, sub.end - sub.start,
+                        base_px, desc.letter_spacing, desc.password, 4u, local_x, &past_end);
+                    found_byte = line_start + sub.start + rel;
+                    if (out_affinity) {
+                        *out_affinity = (sub.start + rel == sub.end) && (sub.end < line_len) && past_end;
                     }
-                    ctx->frame_arena.rewind(run_mark);
-                    return line_start + static_cast<uint32_t>(cp_p - seg);
+                    matched = true;
+                    return false;
                 }
-                const char* cp_p = seg + pos + c0;
-                const char* cl_end = seg + pos + c1;
-                for (uint32_t k = 0u; k < n_cp && cp_p < cl_end; ++k) {
-                    const uint32_t cp_off = static_cast<uint32_t>(cp_p - seg);
-                    (void)next_utf8_codepoint(cp_p, cl_end);
-                    const float mid = pen_x + ((static_cast<float>(k) + 0.5f) / static_cast<float>(n_cp)) * cluster_adv;
-                    if (local_x < mid) {
-                        ctx->frame_arena.rewind(run_mark);
-                        return line_start + cp_off;
-                    }
-                }
-                ctx->frame_arena.rewind(run_mark);
-                return line_start + pos + c1;
-            }
-            pen_x += cluster_adv;
-            gi = gi_end;
+                ++cur_vline;
+                return true;
+            });
+        if (matched) {
+            return found_byte;
         }
-        ctx->frame_arena.rewind(run_mark);
-        last_run_rtl = is_rtl;
-        last_run_start = pos;
-        pos = run_end;
+        if (line_end >= text.length) {
+            return text.length;
+        }
+        line_start = line_end + 1u;
     }
-    return last_run_rtl ? (line_start + last_run_start) : line_end;
+}
+
+void text_wrapped_home_end(
+    Context* ctx,
+    const TextInputDesc& desc,
+    Str text,
+    uint32_t cursor_byte,
+    bool cur_affinity,
+    bool is_end,
+    float wrap_w,
+    uint32_t* out_cursor,
+    bool* out_affinity) noexcept
+{
+    const char* s = text.chars ? text.chars : "";
+    const uint32_t len = text.length;
+    uint32_t ls = 0u;
+    uint32_t le = 0u;
+    line_bounds_at(s, len, cursor_byte, &ls, &le);
+    const uint32_t line_len = le - ls;
+    const uint32_t rel = (cursor_byte > ls) ? (cursor_byte - ls) : 0u;
+    const float base_px = (desc.font_size_px > 0.0f) ? desc.font_size_px : 14.0f;
+    const WrappedSubline sub = locate_wrapped_offset(
+        ctx, desc.font_id, s + ls, line_len, rel, cur_affinity,
+        base_px, desc.letter_spacing, desc.password, 4u, wrap_w, nullptr);
+    if (is_end) {
+        *out_cursor = ls + sub.end;
+        *out_affinity = (sub.end < line_len);
+    } else {
+        *out_cursor = ls + sub.start;
+        *out_affinity = false;
+    }
 }
 
 void move_caret_vertical(
@@ -522,42 +984,53 @@ void move_caret_vertical(
     Str text,
     WidgetState* ws,
     int32_t delta,
-    bool extend_selection) noexcept
+    bool extend_selection,
+    float wrap_w = 0.0f) noexcept
 {
     if (!ws || !desc.multiline) {
         return;
     }
-    const TextVisualPos cur = text_byte_to_visual(ctx, desc, text, ws->edit_cursor);
+    const TextVisualPos cur = text_byte_to_visual(ctx, desc, text, ws->edit_cursor, wrap_w, ws->edit_wrap_affinity);
     if (ws->edit_preferred_x < 0.0f) {
         ws->edit_preferred_x = cur.x;
     }
     const float base_px = (desc.font_size_px > 0.0f) ? desc.font_size_px : 14.0f;
     const float line_adv = std::floor(base_px * 1.35f + 0.5f);
-    const TextVisualPos total_end = text_byte_to_visual(ctx, desc, text, text.length);
+    const TextVisualPos total_end = text_byte_to_visual(ctx, desc, text, text.length, wrap_w, false);
 
     if (delta < 0) {
         if (cur.line_idx == 0u) {
             ws->edit_cursor = 0u;
+            ws->edit_wrap_affinity = false;
         } else {
             const uint32_t target_line = cur.line_idx - 1u;
+            bool aff = false;
             ws->edit_cursor = visual_point_to_byte(
                 ctx,
                 desc,
                 text,
                 ws->edit_preferred_x,
-                (static_cast<float>(target_line) + 0.5f) * line_adv);
+                (static_cast<float>(target_line) + 0.5f) * line_adv,
+                wrap_w,
+                &aff);
+            ws->edit_wrap_affinity = aff;
         }
     } else if (delta > 0) {
         if (cur.line_idx >= total_end.line_idx) {
             ws->edit_cursor = text.length;
+            ws->edit_wrap_affinity = false;
         } else {
             const uint32_t target_line = cur.line_idx + 1u;
+            bool aff = false;
             ws->edit_cursor = visual_point_to_byte(
                 ctx,
                 desc,
                 text,
                 ws->edit_preferred_x,
-                (static_cast<float>(target_line) + 0.5f) * line_adv);
+                (static_cast<float>(target_line) + 0.5f) * line_adv,
+                wrap_w,
+                &aff);
+            ws->edit_wrap_affinity = aff;
         }
     }
     if (!extend_selection) {
@@ -577,7 +1050,9 @@ void measure_text_content_and_ime(
     float* out_comp_y,
     float* out_comp_w,
     float* out_caret_x,
-    float* out_caret_y) noexcept
+    float* out_caret_y,
+    float wrap_w = 0.0f,
+    bool wrap_affinity = false) noexcept
 {
     const float base_px = (desc.font_size_px > 0.0f) ? desc.font_size_px : 14.0f;
     const float line_adv = desc.multiline ? std::floor(base_px * 1.35f + 0.5f) : base_px;
@@ -594,44 +1069,134 @@ void measure_text_content_and_ime(
     float caret_dx = 0.0f;
 
     if (composing && ctx && ctx->active_ui->ime_comp_len > 0u) {
-        const auto walk_slice = [&](const char* beg, uint32_t slice_len, bool mask) noexcept {
-            uint32_t pos = 0u;
-            while (pos <= slice_len) {
-                uint32_t seg_end = pos;
-                while (seg_end < slice_len && !(desc.multiline && beg[seg_end] == '\n')) {
-                    ++seg_end;
+        if (wrap_w > 0.0f && desc.multiline) {
+            const uint32_t comp_len = ctx->active_ui->ime_comp_len;
+            const uint32_t comp_cbyte = utf8_clamp_boundary(ctx->active_ui->ime_comp_utf8, comp_len, ctx->active_ui->ime_comp_cursor_byte);
+            uint32_t line_start = 0u;
+            bool any_line = false;
+            for (;;) {
+                uint32_t line_end = line_start;
+                while (line_end < len && s[line_end] != '\n') {
+                    ++line_end;
                 }
-                if (seg_end > pos) {
-                    float seg_w = 0.0f;
-                    measure_line_segment_x(
-                        ctx, desc.font_id, beg + pos, seg_end - pos, 0u, 0u,
-                        base_px, desc.letter_spacing, mask, false, nullptr, nullptr, &seg_w);
-                    pen_x += seg_w;
+                const uint32_t line_len = line_end - line_start;
+                if (any_line) {
+                    pen_y += line_adv;
                 }
-                if (pen_x > max_w) {
-                    max_w = pen_x;
+                any_line = true;
+                if (c_byte >= line_start && c_byte <= line_end) {
+                    const uint32_t rel_c = c_byte - line_start;
+                    const size_t sp_mark = ctx->frame_arena.mark();
+                    char* spliced = ctx->frame_arena.alloc_uninit<char>(line_len + comp_len + 1u);
+                    if (spliced) {
+                        if (rel_c > 0u) {
+                            std::memcpy(spliced, s + line_start, rel_c);
+                        }
+                        std::memcpy(spliced + rel_c, ctx->active_ui->ime_comp_utf8, comp_len);
+                        if (line_len > rel_c) {
+                            std::memcpy(spliced + rel_c + comp_len, s + line_start + rel_c, line_len - rel_c);
+                        }
+                        const uint32_t spliced_len = line_len + comp_len;
+                        bool first_sub = true;
+                        bool found_caret = false;
+                        for_each_wrapped_subline(ctx, desc.font_id, spliced, spliced_len, base_px, desc.letter_spacing, false, 4u, wrap_w,
+                            [&](const WrappedSubline& sub) noexcept {
+                                if (!first_sub) {
+                                    pen_y += line_adv;
+                                }
+                                first_sub = false;
+                                if (sub.width_px > max_w) {
+                                    max_w = sub.width_px;
+                                }
+                                const uint32_t caret_spliced = rel_c + comp_cbyte;
+                                const bool is_last_spliced = (sub.end >= spliced_len);
+                                if (!found_caret && (caret_spliced < sub.end || (caret_spliced == sub.end && (is_last_spliced || comp_len == 0u)))) {
+                                    found_caret = true;
+                                    cy = pen_y;
+                                    measure_line_segment_x(
+                                        ctx, desc.font_id, spliced + sub.start, sub.end - sub.start,
+                                        (caret_spliced > sub.start) ? (caret_spliced - sub.start) : 0u, 0u,
+                                        base_px, desc.letter_spacing, false, false, &cx, nullptr, nullptr);
+                                    const uint32_t cs = (rel_c > sub.start) ? rel_c : sub.start;
+                                    const uint32_t ce = (rel_c + comp_len < sub.end) ? (rel_c + comp_len) : sub.end;
+                                    if (ce > cs) {
+                                        float c0x = 0.0f;
+                                        float c1x = 0.0f;
+                                        measure_line_segment_x(
+                                            ctx, desc.font_id, spliced + sub.start, sub.end - sub.start,
+                                            cs - sub.start, ce - sub.start,
+                                            base_px, desc.letter_spacing, false, false, &c0x, &c1x, nullptr);
+                                        cw = (c1x > c0x) ? (c1x - c0x) : 0.0f;
+                                        caret_dx = (cx > c0x) ? (cx - c0x) : 0.0f;
+                                        cx = c0x;
+                                    } else {
+                                        cw = 0.0f;
+                                        caret_dx = 0.0f;
+                                    }
+                                }
+                                return true;
+                            });
+                    }
+                    ctx->frame_arena.rewind(sp_mark);
+                } else {
+                    bool first_sub = true;
+                    for_each_wrapped_subline(ctx, desc.font_id, s + line_start, line_len, base_px, desc.letter_spacing, desc.password, 4u, wrap_w,
+                        [&](const WrappedSubline& sub) noexcept {
+                            if (!first_sub) {
+                                pen_y += line_adv;
+                            }
+                            first_sub = false;
+                            if (sub.width_px > max_w) {
+                                max_w = sub.width_px;
+                            }
+                            return true;
+                        });
                 }
-                if (seg_end >= slice_len) {
+                if (line_end >= len) {
                     break;
                 }
-                pen_x = 0.0f;
-                pen_y += line_adv;
-                pos = seg_end + 1u;
+                line_start = line_end + 1u;
             }
-        };
+        } else {
+            const auto walk_slice = [&](const char* beg, uint32_t slice_len, bool mask) noexcept {
+                uint32_t pos = 0u;
+                while (pos <= slice_len) {
+                    uint32_t seg_end = pos;
+                    while (seg_end < slice_len && !(desc.multiline && beg[seg_end] == '\n')) {
+                        ++seg_end;
+                    }
+                    if (seg_end > pos) {
+                        float seg_w = 0.0f;
+                        measure_line_segment_x(
+                            ctx, desc.font_id, beg + pos, seg_end - pos, 0u, 0u,
+                            base_px, desc.letter_spacing, mask, false, nullptr, nullptr, &seg_w);
+                        pen_x += seg_w;
+                    }
+                    if (pen_x > max_w) {
+                        max_w = pen_x;
+                    }
+                    if (seg_end >= slice_len) {
+                        break;
+                    }
+                    pen_x = 0.0f;
+                    pen_y += line_adv;
+                    pos = seg_end + 1u;
+                }
+            };
 
-        walk_slice(s, c_byte, desc.password);
-        cx = pen_x;
-        cy = pen_y;
-        measure_line_segment_x(
-            ctx, desc.font_id, ctx->active_ui->ime_comp_utf8, ctx->active_ui->ime_comp_len, ctx->active_ui->ime_comp_cursor_byte, 0u,
-            base_px, desc.letter_spacing, false, false, &caret_dx, nullptr, &cw);
-        pen_x += cw;
-        if (pen_x > max_w) {
-            max_w = pen_x;
-        }
-        if (c_byte < len) {
-            walk_slice(s + c_byte, len - c_byte, desc.password);
+            walk_slice(s, c_byte, desc.password);
+            cx = pen_x;
+            cy = pen_y;
+            measure_line_segment_x(
+                ctx, desc.font_id, ctx->active_ui->ime_comp_utf8, ctx->active_ui->ime_comp_len, ctx->active_ui->ime_comp_cursor_byte, 0u,
+                base_px, desc.letter_spacing, false, false, &caret_dx, nullptr, &cw);
+            pen_x += cw;
+            if (pen_x > max_w) {
+                max_w = pen_x;
+            }
+            if (c_byte < len) {
+                walk_slice(s + c_byte, len - c_byte, desc.password);
+            }
         }
     } else if (!desc.multiline) {
         measure_line_segment_x(
@@ -639,29 +1204,62 @@ void measure_text_content_and_ime(
             base_px, desc.letter_spacing, desc.password, false, &cx, nullptr, &max_w);
     } else {
         uint32_t line_start = 0u;
+        bool first_visual = true;
         for (;;) {
             uint32_t line_end = line_start;
             while (line_end < len && s[line_end] != '\n') {
                 ++line_end;
             }
-            float line_w = 0.0f;
-            if (c_byte >= line_start && c_byte <= line_end) {
-                cy = pen_y;
-                measure_line_segment_x(
-                    ctx, desc.font_id, s + line_start, line_end - line_start, c_byte - line_start, 0u,
-                    base_px, desc.letter_spacing, desc.password, false, &cx, nullptr, &line_w);
+            const uint32_t line_len = line_end - line_start;
+            if (wrap_w <= 0.0f) {
+                if (!first_visual) {
+                    pen_y += line_adv;
+                }
+                first_visual = false;
+                float line_w = 0.0f;
+                if (c_byte >= line_start && c_byte <= line_end) {
+                    cy = pen_y;
+                    measure_line_segment_x(
+                        ctx, desc.font_id, s + line_start, line_len, c_byte - line_start, 0u,
+                        base_px, desc.letter_spacing, desc.password, false, &cx, nullptr, &line_w);
+                } else {
+                    measure_line_segment_x(
+                        ctx, desc.font_id, s + line_start, line_len, 0u, 0u,
+                        base_px, desc.letter_spacing, desc.password, false, nullptr, nullptr, &line_w);
+                }
+                if (line_w > max_w) {
+                    max_w = line_w;
+                }
             } else {
-                measure_line_segment_x(
-                    ctx, desc.font_id, s + line_start, line_end - line_start, 0u, 0u,
-                    base_px, desc.letter_spacing, desc.password, false, nullptr, nullptr, &line_w);
-            }
-            if (line_w > max_w) {
-                max_w = line_w;
+                const bool caret_in_line = (c_byte >= line_start && c_byte <= line_end);
+                const uint32_t rel = caret_in_line ? (c_byte - line_start) : 0u;
+                bool caret_found = false;
+                for_each_wrapped_subline(ctx, desc.font_id, s + line_start, line_len, base_px, desc.letter_spacing, desc.password, 4u, wrap_w,
+                    [&](const WrappedSubline& sub) noexcept {
+                        if (!first_visual) {
+                            pen_y += line_adv;
+                        }
+                        first_visual = false;
+                        if (sub.width_px > max_w) {
+                            max_w = sub.width_px;
+                        }
+                        if (caret_in_line && !caret_found) {
+                            const bool is_last = (sub.end >= line_len);
+                            if (rel < sub.end || (rel == sub.end && (is_last || wrap_affinity))) {
+                                caret_found = true;
+                                cy = pen_y;
+                                measure_line_segment_x(
+                                    ctx, desc.font_id, s + line_start + sub.start, sub.end - sub.start,
+                                    (rel > sub.start) ? (rel - sub.start) : 0u, 0u,
+                                    base_px, desc.letter_spacing, desc.password, false, &cx, nullptr, nullptr);
+                            }
+                        }
+                        return true;
+                    });
             }
             if (line_end >= len) {
                 break;
             }
-            pen_y += line_adv;
             line_start = line_end + 1u;
         }
     }
@@ -687,6 +1285,8 @@ void update_text_scroll_and_ime(
     float* out_scroll_x,
     float* out_scroll_y) noexcept
 {
+    const float wrap_w = text_input_wrap_width(desc, geom);
+    const bool wrap_aff = (ws && wrap_w > 0.0f) ? ws->edit_wrap_affinity : false;
     float total_w = 0.0f;
     float total_h = 0.0f;
     float comp_x = 0.0f;
@@ -696,14 +1296,16 @@ void update_text_scroll_and_ime(
     float caret_y = 0.0f;
     measure_text_content_and_ime(
         ctx, desc, committed, cursor_byte, composing,
-        &total_w, &total_h, &comp_x, &comp_y, &comp_w, &caret_x, &caret_y);
+        &total_w, &total_h, &comp_x, &comp_y, &comp_w, &caret_x, &caret_y, wrap_w, wrap_aff);
 
     const float view_w = geom.clip_logical.w;
     const float view_h = geom.clip_logical.h;
     float sx = ws ? ws->edit_scroll_x : 0.0f;
     float sy = ws ? ws->edit_scroll_y : 0.0f;
 
-    if (view_w > 0.0f) {
+    if (wrap_w > 0.0f || view_w <= 0.0f) {
+        sx = 0.0f;
+    } else {
         const float max_sx = (total_w + 6.0f > view_w) ? (total_w + 6.0f - view_w) : 0.0f;
         if (is_focused) {
             if (caret_x + 4.0f > sx + view_w) {
@@ -714,8 +1316,6 @@ void update_text_scroll_and_ime(
             }
         }
         sx = clamp_range(sx, 0.0f, max_sx);
-    } else {
-        sx = 0.0f;
     }
 
     if (desc.multiline && view_h > 0.0f) {
@@ -896,6 +1496,19 @@ void emit_text_input_command(
         ctx,
         Prim::make_rect(box_px, outer_clip.rect, desc.background, rad_px, border_col, border_w, 1.0f, outer_clip.radius));
 
+    const float wrap_w = text_input_wrap_width(desc, geom);
+    if (ws) {
+        if (desc.multiline && desc.word_wrap && wrap_w > 0.0f) {
+            if (std::fabs(ws->edit_wrap_width - wrap_w) > 0.5f) {
+                ws->edit_wrap_width = wrap_w;
+                request_redraw(ctx);
+            }
+        } else {
+            ws->edit_wrap_width = 0.0f;
+            ws->edit_wrap_affinity = false;
+        }
+    }
+
     float scroll_x = 0.0f;
     float scroll_y = 0.0f;
     update_text_scroll_and_ime(
@@ -925,6 +1538,7 @@ void emit_text_input_command(
     const uint32_t a_byte = utf8_clamp_boundary(s, len, ti->sel_anchor_byte);
     const uint32_t sel_min = (c_byte < a_byte) ? c_byte : a_byte;
     const uint32_t sel_max = (c_byte < a_byte) ? a_byte : c_byte;
+    const bool wrap_aff = (ws && wrap_w > 0.0f) ? ws->edit_wrap_affinity : false;
 
     // 1. Emit per-line selection highlight quads
     if (sel_max > sel_min && desc.selection_color.a > 0u) {
@@ -942,33 +1556,68 @@ void emit_text_input_command(
                 ls = 0u;
                 le = len;
             }
-            const uint32_t hs = (sel_min > ls) ? sel_min : ls;
-            const uint32_t he = (sel_max < le) ? sel_max : le;
-            const bool spans_nl = desc.multiline && sel_max > le && sel_min <= le;
-            if (he > hs || spans_nl) {
-                float x0 = 0.0f;
-                float x1 = 0.0f;
-                measure_line_segment_x(
-                    ctx, desc.font_id, s + ls, le - ls, hs - ls, he - ls,
-                    base_px, desc.letter_spacing, desc.password, false, &x0, &x1, nullptr);
-                float sx0 = (x0 < x1) ? x0 : x1;
-                float sx1 = (x0 < x1) ? x1 : x0;
-                if (spans_nl) {
-                    sx1 += 6.0f;
+            const uint32_t line_len = le - ls;
+            if (wrap_w <= 0.0f) {
+                const uint32_t hs = (sel_min > ls) ? sel_min : ls;
+                const uint32_t he = (sel_max < le) ? sel_max : le;
+                const bool spans_nl = desc.multiline && sel_max > le && sel_min <= le;
+                if (he > hs || spans_nl) {
+                    float x0 = 0.0f;
+                    float x1 = 0.0f;
+                    measure_line_segment_x(
+                        ctx, desc.font_id, s + ls, line_len, hs - ls, he - ls,
+                        base_px, desc.letter_spacing, desc.password, false, &x0, &x1, nullptr);
+                    float sx0 = (x0 < x1) ? x0 : x1;
+                    float sx1 = (x0 < x1) ? x1 : x0;
+                    if (spans_nl) {
+                        sx1 += 6.0f;
+                    }
+                    const Rect sel_px = {
+                        (geom.origin_x + sx0 - scroll_x) * dpi,
+                        (geom.origin_y + line_y - scroll_y - 1.0f) * dpi,
+                        ((sx1 > sx0) ? (sx1 - sx0) : 2.0f) * dpi,
+                        (geom.line_h + 2.0f) * dpi,
+                    };
+                    push_prim(ctx, Prim::make_rect(sel_px, inner_clip.rect, sel_col, Corners::all(2.0f * dpi), {}, 0.0f, 1.0f, 0.0f));
                 }
-                const Rect sel_px = {
-                    (geom.origin_x + sx0 - scroll_x) * dpi,
-                    (geom.origin_y + line_y - scroll_y - 1.0f) * dpi,
-                    ((sx1 > sx0) ? (sx1 - sx0) : 2.0f) * dpi,
-                    (geom.line_h + 2.0f) * dpi,
-                };
-                push_prim(ctx, Prim::make_rect(sel_px, inner_clip.rect, sel_col, Corners::all(2.0f * dpi), {}, 0.0f, 1.0f, 0.0f));
+                line_y += geom.line_adv;
+            } else {
+                for_each_wrapped_subline(ctx, desc.font_id, s + ls, line_len, base_px, desc.letter_spacing, desc.password, 4u, wrap_w,
+                    [&](const WrappedSubline& sub) noexcept {
+                        const uint32_t sub_abs_s = ls + sub.start;
+                        const uint32_t sub_abs_e = ls + sub.end;
+                        const uint32_t hs = (sel_min > sub_abs_s) ? sel_min : sub_abs_s;
+                        const uint32_t he = (sel_max < sub_abs_e) ? sel_max : sub_abs_e;
+                        const bool is_last = (sub.end >= line_len);
+                        const bool spans_nl = is_last && desc.multiline && sel_max > le && sel_min <= le;
+                        if (he > hs || spans_nl) {
+                            float x0 = 0.0f;
+                            float x1 = 0.0f;
+                            measure_line_segment_x(
+                                ctx, desc.font_id, s + sub_abs_s, sub.end - sub.start,
+                                hs - sub_abs_s, (he > sub_abs_s) ? (he - sub_abs_s) : 0u,
+                                base_px, desc.letter_spacing, desc.password, false, &x0, &x1, nullptr);
+                            float sx0 = (x0 < x1) ? x0 : x1;
+                            float sx1 = (x0 < x1) ? x1 : x0;
+                            if (spans_nl) {
+                                sx1 += 6.0f;
+                            }
+                            const Rect sel_px = {
+                                (geom.origin_x + sx0 - scroll_x) * dpi,
+                                (geom.origin_y + line_y - scroll_y - 1.0f) * dpi,
+                                ((sx1 > sx0) ? (sx1 - sx0) : 2.0f) * dpi,
+                                (geom.line_h + 2.0f) * dpi,
+                            };
+                            push_prim(ctx, Prim::make_rect(sel_px, inner_clip.rect, sel_col, Corners::all(2.0f * dpi), {}, 0.0f, 1.0f, 0.0f));
+                        }
+                        line_y += geom.line_adv;
+                        return true;
+                    });
             }
             if (!desc.multiline || le >= len) {
                 break;
             }
             pos = le + 1u;
-            line_y += geom.line_adv;
         }
     }
 
@@ -977,13 +1626,169 @@ void emit_text_input_command(
     float caret_vy = 0.0f;
     if (len == 0u && !composing) {
         if (desc.placeholder.chars && desc.placeholder.length > 0u) {
-            float px = 0.0f;
-            float py = 0.0f;
-            emit_utf8_glyph_run(
-                ctx, desc.font_id, desc.placeholder.chars, desc.placeholder.length,
-                base_px, desc.letter_spacing, ascender_px, geom.line_adv,
-                desc.placeholder_color, geom.origin_x, geom.origin_y, scroll_x, scroll_y,
-                inner_clip, dpi, desc.multiline, false, &px, &py);
+            if (wrap_w <= 0.0f) {
+                float px = 0.0f;
+                float py = 0.0f;
+                emit_utf8_glyph_run(
+                    ctx, desc.font_id, desc.placeholder.chars, desc.placeholder.length,
+                    base_px, desc.letter_spacing, ascender_px, geom.line_adv,
+                    desc.placeholder_color, geom.origin_x, geom.origin_y, scroll_x, scroll_y,
+                    inner_clip, dpi, desc.multiline, false, &px, &py);
+            } else {
+                uint32_t pos = 0u;
+                float py = 0.0f;
+                while (pos <= desc.placeholder.length) {
+                    uint32_t ls = 0u;
+                    uint32_t le = 0u;
+                    line_bounds_at(desc.placeholder.chars, desc.placeholder.length, pos, &ls, &le);
+                    for_each_wrapped_subline(ctx, desc.font_id, desc.placeholder.chars + ls, le - ls, base_px, desc.letter_spacing, false, 4u, wrap_w,
+                        [&](const WrappedSubline& sub) noexcept {
+                            float px = 0.0f;
+                            float sub_py = py;
+                            emit_utf8_glyph_run(
+                                ctx, desc.font_id, desc.placeholder.chars + ls + sub.start, sub.end - sub.start,
+                                base_px, desc.letter_spacing, ascender_px, geom.line_adv,
+                                desc.placeholder_color, geom.origin_x, geom.origin_y, scroll_x, scroll_y,
+                                inner_clip, dpi, false, false, &px, &sub_py);
+                            py += geom.line_adv;
+                            return true;
+                        });
+                    if (le >= desc.placeholder.length) {
+                        break;
+                    }
+                    pos = le + 1u;
+                }
+            }
+        }
+    } else if (composing && wrap_w > 0.0f && desc.multiline) {
+        const uint32_t comp_len = ctx->active_ui->ime_comp_len;
+        const uint32_t comp_cbyte = utf8_clamp_boundary(ctx->active_ui->ime_comp_utf8, comp_len, ctx->active_ui->ime_comp_cursor_byte);
+        uint32_t cl_end = comp_cbyte + ctx->active_ui->ime_comp_sel_len_byte;
+        if (cl_end > comp_len) {
+            cl_end = comp_len;
+        }
+        uint32_t pos = 0u;
+        float py = 0.0f;
+        bool caret_set = false;
+        while (pos <= len) {
+            uint32_t ls = 0u;
+            uint32_t le = 0u;
+            line_bounds_at(s, len, pos, &ls, &le);
+            const uint32_t line_len = le - ls;
+            if (c_byte >= ls && c_byte <= le) {
+                const uint32_t rel_c = c_byte - ls;
+                const size_t sp_mark = ctx->frame_arena.mark();
+                char* spliced = ctx->frame_arena.alloc_uninit<char>(line_len + comp_len + 1u);
+                if (spliced) {
+                    if (rel_c > 0u) {
+                        std::memcpy(spliced, s + ls, rel_c);
+                    }
+                    std::memcpy(spliced + rel_c, ctx->active_ui->ime_comp_utf8, comp_len);
+                    if (line_len > rel_c) {
+                        std::memcpy(spliced + rel_c + comp_len, s + ls + rel_c, line_len - rel_c);
+                    }
+                    const uint32_t spliced_len = line_len + comp_len;
+                    const uint32_t comp_end_off = rel_c + comp_len;
+                    const uint32_t cl_a = rel_c + comp_cbyte;
+                    const uint32_t cl_b = rel_c + cl_end;
+                    const uint32_t caret_spliced = rel_c + comp_cbyte;
+
+                    for_each_wrapped_subline(ctx, desc.font_id, spliced, spliced_len, base_px, desc.letter_spacing, false, 4u, wrap_w,
+                        [&](const WrappedSubline& sub) noexcept {
+                            float px = 0.0f;
+                            float sub_py = py;
+                            if (sub.start < rel_c && sub.start < sub.end) {
+                                const uint32_t p_end = (sub.end < rel_c) ? sub.end : rel_c;
+                                emit_utf8_glyph_run(
+                                    ctx, desc.font_id, spliced + sub.start, p_end - sub.start,
+                                    base_px, desc.letter_spacing, ascender_px, geom.line_adv,
+                                    desc.text_color, geom.origin_x, geom.origin_y, scroll_x, scroll_y,
+                                    inner_clip, dpi, false, false, &px, &sub_py);
+                            }
+                            const uint32_t cs = (sub.start > rel_c) ? sub.start : rel_c;
+                            const uint32_t ce = (sub.end < comp_end_off) ? sub.end : comp_end_off;
+                            if (ce > cs) {
+                                const float comp_sx = px;
+                                const uint32_t hs = (cl_a > cs) ? cl_a : cs;
+                                const uint32_t he = (cl_b < ce) ? cl_b : ce;
+                                if (he > hs) {
+                                    float c0 = 0.0f;
+                                    float c1 = 0.0f;
+                                    measure_line_segment_x(
+                                        ctx, desc.font_id, spliced + cs, ce - cs, hs - cs, he - cs,
+                                        base_px, desc.letter_spacing, false, false, &c0, &c1, nullptr);
+                                    const float cl_l = (c0 < c1) ? c0 : c1;
+                                    const float cl_w = (c0 < c1) ? (c1 - c0) : (c0 - c1);
+                                    if (cl_w > 0.0f) {
+                                        const Rect clause_bg = {
+                                            (geom.origin_x + comp_sx + cl_l - scroll_x) * dpi,
+                                            (geom.origin_y + py - scroll_y - 1.0f) * dpi,
+                                            cl_w * dpi,
+                                            (geom.line_h + 2.0f) * dpi,
+                                        };
+                                        const Color clause_col = Color::rgba8(
+                                            desc.composition_color.r, desc.composition_color.g, desc.composition_color.b, 48u);
+                                        push_prim(ctx, Prim::make_rect(clause_bg, inner_clip.rect, clause_col, Corners::all(2.0f * dpi)));
+                                    }
+                                }
+                                sub_py = py;
+                                emit_utf8_glyph_run(
+                                    ctx, desc.font_id, spliced + cs, ce - cs,
+                                    base_px, desc.letter_spacing, ascender_px, geom.line_adv,
+                                    desc.composition_color, geom.origin_x, geom.origin_y, scroll_x, scroll_y,
+                                    inner_clip, dpi, false, false, &px, &sub_py);
+                                if (px > comp_sx) {
+                                    const Rect uline = {
+                                        (geom.origin_x + comp_sx - scroll_x) * dpi,
+                                        (geom.origin_y + py + geom.line_h - scroll_y + 0.5f) * dpi,
+                                        (px - comp_sx) * dpi,
+                                        (1.5f * dpi > 1.0f) ? (1.5f * dpi) : 1.0f,
+                                    };
+                                    push_prim(ctx, Prim::make_rect(uline, inner_clip.rect, desc.composition_color));
+                                }
+                            }
+                            if (!caret_set && (caret_spliced < sub.end || (caret_spliced == sub.end && (sub.end >= spliced_len || comp_len == 0u)))) {
+                                caret_set = true;
+                                caret_vy = py;
+                                measure_line_segment_x(
+                                    ctx, desc.font_id, spliced + sub.start, sub.end - sub.start,
+                                    (caret_spliced > sub.start) ? (caret_spliced - sub.start) : 0u, 0u,
+                                    base_px, desc.letter_spacing, false, false, &caret_vx, nullptr, nullptr);
+                            }
+                            if (sub.end > comp_end_off) {
+                                const uint32_t ss = (sub.start > comp_end_off) ? sub.start : comp_end_off;
+                                if (sub.end > ss) {
+                                    sub_py = py;
+                                    emit_utf8_glyph_run(
+                                        ctx, desc.font_id, spliced + ss, sub.end - ss,
+                                        base_px, desc.letter_spacing, ascender_px, geom.line_adv,
+                                        desc.text_color, geom.origin_x, geom.origin_y, scroll_x, scroll_y,
+                                        inner_clip, dpi, false, false, &px, &sub_py);
+                                }
+                            }
+                            py += geom.line_adv;
+                            return true;
+                        });
+                }
+                ctx->frame_arena.rewind(sp_mark);
+            } else {
+                for_each_wrapped_subline(ctx, desc.font_id, s + ls, line_len, base_px, desc.letter_spacing, desc.password, 4u, wrap_w,
+                    [&](const WrappedSubline& sub) noexcept {
+                        float px = 0.0f;
+                        float sub_py = py;
+                        emit_utf8_glyph_run(
+                            ctx, desc.font_id, s + ls + sub.start, sub.end - sub.start,
+                            base_px, desc.letter_spacing, ascender_px, geom.line_adv,
+                            desc.text_color, geom.origin_x, geom.origin_y, scroll_x, scroll_y,
+                            inner_clip, dpi, false, desc.password, &px, &sub_py);
+                        py += geom.line_adv;
+                        return true;
+                    });
+            }
+            if (le >= len) {
+                break;
+            }
+            pos = le + 1u;
         }
     } else if (composing) {
         float pen_x = 0.0f;
@@ -1047,7 +1852,7 @@ void emit_text_input_command(
                 desc.text_color, geom.origin_x, geom.origin_y, scroll_x, scroll_y,
                 inner_clip, dpi, desc.multiline, desc.password, &pen_x, &pen_y);
         }
-    } else {
+    } else if (wrap_w <= 0.0f) {
         float pen_x = 0.0f;
         float pen_y = 0.0f;
         emit_utf8_glyph_run(
@@ -1055,6 +1860,33 @@ void emit_text_input_command(
             desc.text_color, geom.origin_x, geom.origin_y, scroll_x, scroll_y,
             inner_clip, dpi, desc.multiline, desc.password, &pen_x, &pen_y);
         const TextVisualPos cpos = text_byte_to_visual(ctx, desc, ti->committed_text, c_byte);
+        caret_vx = cpos.x;
+        caret_vy = cpos.y;
+    } else {
+        uint32_t pos = 0u;
+        float py = 0.0f;
+        while (pos <= len) {
+            uint32_t ls = 0u;
+            uint32_t le = 0u;
+            line_bounds_at(s, len, pos, &ls, &le);
+            for_each_wrapped_subline(ctx, desc.font_id, s + ls, le - ls, base_px, desc.letter_spacing, desc.password, 4u, wrap_w,
+                [&](const WrappedSubline& sub) noexcept {
+                    float px = 0.0f;
+                    float sub_py = py;
+                    emit_utf8_glyph_run(
+                        ctx, desc.font_id, s + ls + sub.start, sub.end - sub.start,
+                        base_px, desc.letter_spacing, ascender_px, geom.line_adv,
+                        desc.text_color, geom.origin_x, geom.origin_y, scroll_x, scroll_y,
+                        inner_clip, dpi, false, desc.password, &px, &sub_py);
+                    py += geom.line_adv;
+                    return true;
+                });
+            if (le >= len) {
+                break;
+            }
+            pos = le + 1u;
+        }
+        const TextVisualPos cpos = text_byte_to_visual(ctx, desc, ti->committed_text, c_byte, wrap_w, wrap_aff);
         caret_vx = cpos.x;
         caret_vy = cpos.y;
     }

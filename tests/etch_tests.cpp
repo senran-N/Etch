@@ -8,6 +8,7 @@
 #include "checks_editor.h"
 #include "checks_a11y.h"
 #include "checks_media_emoji.h"
+#include "checks_theme_wrap.h"
 #include "etch_uber_vs_msl.h"
 #include "etch_uber_ps_msl.h"
 #include "etch_kawase_vs_msl.h"
@@ -59,6 +60,7 @@ static bool source_ok(const unsigned char* p,size_t size,const char* entry) noex
 }
 static bool gpu_suite() noexcept {
     const bool media_ok=verify_media_emoji_checks();
+    const bool v070_ok=verify_theme_wrap_checks();
     static_assert(sizeof(Prim)==64);
     bool ok=source_ok(g_etch_uber_vs_msl,sizeof(g_etch_uber_vs_msl),"vertex VSOut vs_main(") && source_ok(g_etch_uber_ps_msl,sizeof(g_etch_uber_ps_msl),"fragment float4 ps_main(") && source_ok(g_etch_kawase_vs_msl,sizeof(g_etch_kawase_vs_msl),"vertex VSOut vs_main(") && source_ok(g_etch_kawase_ps_msl,sizeof(g_etch_kawase_ps_msl),"fragment float4 ps_main(");
     const char* vs=reinterpret_cast<const char*>(g_etch_uber_vs_msl);const char* ps=reinterpret_cast<const char*>(g_etch_uber_ps_msl);const char* ks=reinterpret_cast<const char*>(g_etch_kawase_ps_msl);
@@ -79,7 +81,7 @@ static bool gpu_suite() noexcept {
     ok &= gpu_device(c)!=nullptr;
     for(uint32_t i=0;i<4;++i){begin_frame(c,{.viewport_w=320,.viewport_h=200});button({.id=id("gpu"),.label=str_lit("GPU")});end_frame(c);}
     ok &= frame_stats(c).idle_sleeping && render_headless_png(c,320,200,"etch_ctest_gpu.png") && frame_stats(c).draw_call_count<=3;
-    ok &= media_ok;
+    ok &= media_ok && v070_ok;
     std::remove("etch_ctest_gpu.png");destroy_context(c);set_current_context(nullptr);return ok;
 }
 int main(int argc,char** argv) {

@@ -88,6 +88,7 @@ struct StudioApp {
     SDL_Window* tear_off_window = nullptr;
     bool rendering = false;
     bool desktop_enabled = true; int desktop_quality = 0; bool desktop_about = false;
+    bool shader_word_wrap = false;
 
     GraphNode nodes[kMaxNodes] = {
         { "Camera HDR",     "RGBA16F Linear",   { 36.0f,  42.0f }, 196.0f, etch::Color::rgb_hex(0x38BDF8), UINT32_MAX, UINT32_MAX },
@@ -569,7 +570,15 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
                 etch::end_menu();
             }
             if (etch::begin_menu({.id=etch::id("studio_view_menu"),.label=etch::str_lit("View")})) {
+                const etch::ThemeId cur_theme = etch::theme(app->ctx).id;
                 if (etch::menu_item({.id=etch::id("studio_view_glow"),.label=etch::str_lit("Wire glow"),.checked=app->wire_glow_enabled})) app->wire_glow_enabled=!app->wire_glow_enabled;
+                if (etch::menu_item({.id=etch::id("studio_view_wrap"),.label=etch::str_lit("Word wrap shader"),.checked=app->shader_word_wrap})) app->shader_word_wrap=!app->shader_word_wrap;
+                etch::menu_separator();
+                if (etch::menu_item({.id=etch::id("studio_theme_dark"),.label=etch::str_lit("Theme: Dark"),.checked=cur_theme==etch::ThemeId::Dark})) etch::set_theme(etch::Theme::dark(), app->ctx);
+                if (etch::menu_item({.id=etch::id("studio_theme_light"),.label=etch::str_lit("Theme: Light"),.checked=cur_theme==etch::ThemeId::Light})) etch::set_theme(etch::Theme::light(), app->ctx);
+                if (etch::menu_item({.id=etch::id("studio_theme_hc"),.label=etch::str_lit("Theme: High Contrast"),.checked=cur_theme==etch::ThemeId::HighContrast})) etch::set_theme(etch::Theme::high_contrast(), app->ctx);
+                if (etch::menu_item({.id=etch::id("studio_theme_ind"),.label=etch::str_lit("Theme: Industrial"),.checked=cur_theme==etch::ThemeId::Industrial})) etch::set_theme(etch::Theme::industrial(), app->ctx);
+                etch::menu_separator();
                 if (etch::menu_item({.id=etch::id("studio_restore_panels"),.label=etch::str_lit("Restore panels")})) {
                     const char* names[]={"studio_pane_inspector","studio_pane_outliner","studio_pane_canvas","studio_pane_trace","studio_pane_shader"};
                     for (const char* name : names) etch::dock_set_pane_open(etch::id("studio_dock"),etch::id(name),true);
@@ -753,7 +762,7 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
                     "// Analytic coverage stage %u\nfloat4 shade_%u(float2 position, float4 bounds, float4 tint) {\n    float2 center = bounds.xy + bounds.zw * 0.5;\n    float distance = rounded_rect(position - center, bounds.zw * 0.5, 6.0);\n    float coverage = saturate(0.5 - distance);\n    return float4(tint.rgb * coverage, tint.a * coverage);\n}\n\n",pass,pass);used+=static_cast<uint32_t>(written);}
                 etch::init_text_buffer(&app->shader_buf,{source,used});
             }
-            etch::code_editor({.id=etch::id("studio_shader_editor"),.buffer=&app->shader_buf,.font_size_px=12});
+            etch::code_editor({.id=etch::id("studio_shader_editor"),.buffer=&app->shader_buf,.font_size_px=12,.word_wrap=app->shader_word_wrap});
         }
         if (pane == kPaneOutliner) {
             const auto root = etch::begin_tree_node({ .id = etch::id("studio_tree_root"), .label = etch::str_lit("FramePipeline"), .default_open = true });

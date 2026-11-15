@@ -12,7 +12,7 @@
 #include <type_traits>
 
 #define ETCH_VERSION_MAJOR 0
-#define ETCH_VERSION_MINOR 6
+#define ETCH_VERSION_MINOR 7
 #define ETCH_VERSION_PATCH 0
 #define ETCH_VERSION_STR_DETAIL(x) #x
 #define ETCH_VERSION_STR(x) ETCH_VERSION_STR_DETAIL(x)
@@ -144,8 +144,10 @@ struct Color {
     }
 
     static constexpr Color transparent() noexcept { return {0, 0, 0, 0}; }
+    static constexpr Color theme_auto() noexcept { return {0xFEu, 0x00u, 0xFEu, 0x00u}; }
     static constexpr Color white(uint8_t alpha = 255) noexcept { return {255, 255, 255, alpha}; }
     static constexpr Color black(uint8_t alpha = 255) noexcept { return {0, 0, 0, alpha}; }
+    constexpr bool is_theme_auto() const noexcept { return r == 0xFEu && g == 0x00u && b == 0xFEu && a == 0x00u; }
 
     // Little-endian R8G8B8A8 word: R in bits [0..7], G [8..15], B [16..23], A [24..31].
     constexpr uint32_t pack_rgba8() const noexcept {
@@ -180,7 +182,23 @@ struct Corners {
     static constexpr Corners all(float r) noexcept {
         return {r, r, r, r};
     }
+
+    static constexpr Corners theme_auto() noexcept {
+        return {-1.0f, -1.0f, -1.0f, -1.0f};
+    }
+
+    constexpr bool is_theme_auto() const noexcept {
+        return tl < 0.0f && tr < 0.0f && br < 0.0f && bl < 0.0f;
+    }
 };
+
+constexpr Color resolve_theme_color(Color explicit_col, Color token_col) noexcept {
+    return explicit_col.is_theme_auto() ? token_col : explicit_col;
+}
+
+constexpr Corners resolve_theme_corners(Corners explicit_rad, Corners token_rad) noexcept {
+    return explicit_rad.is_theme_auto() ? token_rad : explicit_rad;
+}
 
 struct Padding {
     float left = 0.0f;
@@ -918,6 +936,92 @@ SystemTheme system_theme() noexcept;
 bool system_dark_mode(bool default_when_unknown = true) noexcept;
 bool frame_in_progress(const Context* ctx) noexcept;
 
+enum class ThemeId : uint8_t {
+    Dark = 0,
+    Light = 1,
+    HighContrast = 2,
+    Industrial = 3,
+    Custom = 4,
+};
+
+struct Theme {
+    ThemeId id = ThemeId::Dark;
+    Color bg_canvas = Color::rgb_hex(0x0E1014);
+    Color bg_surface = Color::rgb_hex(0x0F1522);
+    Color bg_elevated = Color::rgb_hex(0x111726);
+    Color bg_chrome = Color::rgb_hex(0x0B101A);
+    Color bg_popup = Color::rgb_hex(0x111827);
+    Color bg_tooltip = Color::rgb_hex(0x0F172A);
+    Color bg_input = Color::rgb_hex(0x0F1420);
+    Color bg_table = Color::rgb_hex(0x090D16);
+    Color bg_node_canvas = Color::rgb_hex(0x090C12);
+    Color surface_control = Color::rgb_hex(0x1E293B);
+    Color surface_hover = Color::rgb_hex(0x334155);
+    Color surface_active = Color::rgb_hex(0x162033);
+    Color surface_disabled = Color::rgb_hex(0x18202C);
+    Color surface_subtle = Color::rgba8(30, 41, 59, 190);
+    Color surface_subtle_hover = Color::rgba8(51, 65, 85, 225);
+    Color surface_subtle_body = Color::rgba8(15, 23, 42, 150);
+    Color surface_selected = Color::rgb_hex(0x1A2942);
+    Color text_primary = Color::white();
+    Color text_secondary = Color::rgb_hex(0xE2E8F0);
+    Color text_body = Color::rgb_hex(0xF1F5F9);
+    Color text_code = Color::rgb_hex(0xCBD5E1);
+    Color text_muted = Color::rgb_hex(0x94A3B8);
+    Color text_disabled = Color::rgb_hex(0x64748B);
+    Color accent = Color::rgb_hex(0x38BDF8);
+    Color accent_secondary = Color::rgb_hex(0x818CF8);
+    Color accent_primary = Color::rgb_hex(0x0369A1);
+    Color focus_ring = Color::rgb_hex(0x60A5FA);
+    Color danger = Color::rgb_hex(0xB91C1C);
+    Color warning = Color::rgb_hex(0xFBBF24);
+    Color border_subtle = Color::rgba8(148, 163, 184, 38);
+    Color border_line = Color::rgba8(148, 163, 184, 34);
+    Color border_input = Color::rgba8(148, 163, 184, 52);
+    Color border_node = Color::rgba8(148, 163, 184, 56);
+    Color border_control = Color::rgb_hex(0x334155);
+    Color border_tooltip = Color::rgb_hex(0x475569);
+    Color selection = Color::rgba8(56, 189, 248, 88);
+    Color selection_hover = Color::rgba8(56, 189, 248, 22);
+    Color zebra_row = Color::rgba8(30, 41, 59, 44);
+    Color active_line = Color::rgba8(148, 163, 184, 16);
+    Color area_fill_top = Color::rgba8(56, 189, 248, 96);
+    Color area_fill_bottom = Color::rgba8(56, 189, 248, 0);
+    Color divider_hover = Color::rgba8(56, 189, 248, 165);
+    Color divider_thumb_hover = Color::rgba8(226, 232, 240, 220);
+    Color grid_minor = Color::rgba8(148, 163, 184, 40);
+    Color grid_major = Color::rgba8(148, 163, 184, 28);
+    Color canvas_border = Color::rgba8(148, 163, 184, 44);
+    Color marquee_fill = Color::rgba(0.28f, 0.56f, 0.96f, 0.16f);
+    Color marquee_border = Color::rgba(0.38f, 0.68f, 1.00f, 0.85f);
+    Color backdrop = Color::rgba8(0, 0, 0, 150);
+    Color shadow = Color::rgba8(0, 0, 0, 130);
+    Color scrollbar_track = Color::rgba8(255, 255, 255, 18);
+    Color scrollbar_thumb = Color::rgba8(148, 163, 184, 125);
+    Color scrollbar_thumb_hover = Color::rgba8(148, 163, 184, 195);
+    Color scrollbar_thumb_drag = Color::rgba8(96, 165, 250, 230);
+    Color syntax_comment = Color::rgb_hex(0x64748B);
+    Color syntax_string = Color::rgb_hex(0xA3BE8C);
+    Color syntax_number = Color::rgb_hex(0xB48EAD);
+    Color syntax_keyword = Color::rgb_hex(0x81A1C1);
+    float radius_small_px = 5.0f;
+    float radius_control_px = 6.0f;
+    float radius_table_px = 8.0f;
+    float radius_input_px = 9.0f;
+    float radius_panel_px = 10.0f;
+    float radius_pill_px = 999.0f;
+
+    static constexpr Theme dark() noexcept { return Theme{}; }
+    static Theme light() noexcept;
+    static Theme high_contrast() noexcept;
+    static Theme industrial() noexcept;
+};
+
+void set_theme(const Theme& t, Context* ctx = nullptr) noexcept;
+const Theme& theme(const Context* ctx = nullptr) noexcept;
+void push_theme(const Theme& t) noexcept;
+void pop_theme() noexcept;
+
 struct FrameDesc {
     uint32_t viewport_w = 1280;
     uint32_t viewport_h = 720;
@@ -1099,14 +1203,14 @@ inline constexpr uint32_t kInvalidSprite = 0u;
 inline constexpr uint16_t kInvalidIcon    = 0xFFFFu;
 
 struct TextDesc {
-    Color color = Color::white();
+    Color color = Color::theme_auto();
     float font_size_px = 16.0f;
     uint16_t font_id = kFontSans;
     float letter_spacing = 0.0f;
     bool wrap = true;
     uint32_t id = 0;
     bool selectable = false;
-    Color selection_color = Color::rgba8(56, 189, 248, 88);
+    Color selection_color = Color::theme_auto();
     float line_height_px = 0.0f;
     AlignX align_x = AlignX::Left;
     bool ellipsis = false;
@@ -1115,7 +1219,7 @@ struct TextDesc {
 
 struct TextSpan {
     Str      text = {};
-    Color    color = Color::white();
+    Color    color = Color::theme_auto();
     Color    background = {};        // Optional inline pill background
     Color    border_color = {};      // Optional 1px border on inline pill
     float    font_size_px = 0.0f;    // 0.0f = inherit RichTextDesc::font_size_px
@@ -1129,7 +1233,7 @@ struct TextSpan {
 };
 
 struct RichTextDesc {
-    Color    color = Color::white();
+    Color    color = Color::theme_auto();
     float    font_size_px = 14.0f;
     uint16_t font_id = kFontSans;
     float    line_height_px = 0.0f;  // 0.0f = auto from max span metrics
@@ -1138,7 +1242,7 @@ struct RichTextDesc {
     bool     wrap = true;
     uint32_t id = 0;
     bool selectable = false;
-    Color selection_color = Color::rgba8(56, 189, 248, 88);
+    Color selection_color = Color::theme_auto();
     bool ellipsis = false;
     uint16_t max_lines = 0;
 };
@@ -1154,14 +1258,14 @@ struct CollapsibleDesc {
     Padding header_padding = Padding::xy(10.0f, 0.0f);
     Padding body_padding = Padding::xy(10.0f, 8.0f);
     float body_gap = 6.0f;
-    Corners radius = Corners::all(6.0f);
-    Color header_bg = Color::rgba8(30, 41, 59, 190);
-    Color header_hover_bg = Color::rgba8(51, 65, 85, 225);
-    Color body_bg = Color::rgba8(15, 23, 42, 150);
-    Color border_color = Color::rgba8(148, 163, 184, 38);
+    Corners radius = Corners::theme_auto();
+    Color header_bg = Color::theme_auto();
+    Color header_hover_bg = Color::theme_auto();
+    Color body_bg = Color::theme_auto();
+    Color border_color = Color::theme_auto();
     float border_width = 1.0f;
-    Color text_color = Color::rgb_hex(0xE2E8F0);
-    Color icon_color = Color::rgb_hex(0x38BDF8);
+    Color text_color = Color::theme_auto();
+    Color icon_color = Color::theme_auto();
     SpringSpec spring_spec = { .response = 0.20f, .damping_ratio = 0.92f };
 };
 struct CollapsibleResult {
@@ -1196,7 +1300,7 @@ struct IconDesc {
     uint32_t id = 0;
     uint16_t icon_id = kInvalidIcon;
     float size_px = 16.0f;
-    Color color = Color::white();
+    Color color = Color::theme_auto();
 };
 
 struct RectDrawDesc {
@@ -1264,9 +1368,9 @@ struct FilledPathDesc {
 struct AreaSeriesDesc {
     std::span<const Vec2> points = {};
     float baseline_y = 0;
-    Color fill_top = Color::rgba8(56, 189, 248, 96);
-    Color fill_bottom = Color::rgba8(56, 189, 248, 0);
-    Color line_color = Color::rgb_hex(0x38BDF8);
+    Color fill_top = Color::theme_auto();
+    Color fill_bottom = Color::theme_auto();
+    Color line_color = Color::theme_auto();
     float line_thickness = 1.75f;
     bool smooth = false;
     bool foreground = false;
@@ -1314,7 +1418,7 @@ struct TextDrawDesc {
     Vec2     pos = {}; // Local to current open box top-left (logical px)
     uint16_t font_id = kFontSans;
     float    size = 14.0f;
-    Color    color = Color::white();
+    Color    color = Color::theme_auto();
     float    letter_spacing = 0.0f;
     AlignX   align_x = AlignX::Left;
     AlignY   align_y = AlignY::Top;
@@ -1409,7 +1513,7 @@ bool text_buffer_undo(TextBuffer*, uint32_t* out_cursor = nullptr, uint32_t* out
 bool text_buffer_redo(TextBuffer*, uint32_t* out_cursor = nullptr, uint32_t* out_anchor = nullptr) noexcept;
 void text_buffer_clear_undo(TextBuffer*) noexcept;
 struct SyntaxToken {
-    uint32_t byte_start = 0, byte_end = 0; Color color = Color::white(); uint16_t font_id = kFontMono;
+    uint32_t byte_start = 0, byte_end = 0; Color color = Color::theme_auto(); uint16_t font_id = kFontMono;
 };
 using SyntaxTokenizeFn = uint32_t (*)(uint32_t, Str, SyntaxToken*, uint32_t, void*) noexcept;
 uint32_t tokenize_cpp_hlsl(uint32_t, Str, SyntaxToken*, uint32_t, void*) noexcept;
@@ -1419,15 +1523,15 @@ struct CodeEditorDesc {
     Padding padding = Padding::xy(10, 8);
     float font_size_px = 14; uint16_t font_id = kFontMono; float line_height_px = 0;
     bool show_line_numbers = true; float gutter_width_px = 0; uint32_t tab_width = 4;
-    bool read_only = false; bool show_scrollbar = true;
+    bool read_only = false; bool show_scrollbar = true; bool word_wrap = false;
     SyntaxTokenizeFn tokenizer = tokenize_cpp_hlsl; void* tokenizer_user_data = nullptr;
-    Color background = Color::rgb_hex(0x0F1420), gutter_background = Color::rgb_hex(0x111827);
-    Color active_line_color = Color::rgba8(148,163,184,16), selection_color = Color::rgba8(56,189,248,88);
-    Color text_color = Color::rgb_hex(0xE2E8F0), gutter_text_color = Color::rgb_hex(0x64748B);
-    Color gutter_active_text_color = Color::rgb_hex(0xCBD5E1), caret_color = Color::rgb_hex(0x38BDF8);
-    Color composition_color = Color::rgb_hex(0xFBBF24), border_color = Color::rgb_hex(0x334155);
-    Color focus_border_color = Color::rgb_hex(0x38BDF8);
-    float border_width = 1, focus_border_width = 1.5f; Corners radius = Corners::all(6);
+    Color background = Color::theme_auto(), gutter_background = Color::theme_auto();
+    Color active_line_color = Color::theme_auto(), selection_color = Color::theme_auto();
+    Color text_color = Color::theme_auto(), gutter_text_color = Color::theme_auto();
+    Color gutter_active_text_color = Color::theme_auto(), caret_color = Color::theme_auto();
+    Color composition_color = Color::theme_auto(), border_color = Color::theme_auto();
+    Color focus_border_color = Color::theme_auto();
+    float border_width = 1, focus_border_width = 1.5f; Corners radius = Corners::theme_auto();
 };
 struct CodeEditorResult {
     bool changed = false, focused = false, composing = false;
@@ -1450,18 +1554,19 @@ struct TextInputDesc {
     float font_size_px = 14.0f;
     uint16_t font_id = 0;
     float letter_spacing = 0.0f;
-    Color text_color = Color::rgb_hex(0xF1F5F9);
-    Color placeholder_color = Color::rgb_hex(0x64748B);
-    Color selection_color = Color::rgba8(56, 189, 248, 88);
-    Color caret_color = Color::rgb_hex(0x38BDF8);
-    Color composition_color = Color::rgb_hex(0xFBBF24);
-    Color background = Color::rgb_hex(0x0F1420);
-    Color border_color = Color::rgba8(148, 163, 184, 52);
-    Color focus_border_color = Color::rgb_hex(0x38BDF8);
+    Color text_color = Color::theme_auto();
+    Color placeholder_color = Color::theme_auto();
+    Color selection_color = Color::theme_auto();
+    Color caret_color = Color::theme_auto();
+    Color composition_color = Color::theme_auto();
+    Color background = Color::theme_auto();
+    Color border_color = Color::theme_auto();
+    Color focus_border_color = Color::theme_auto();
     float border_width = 1.0f;
     float focus_border_width = 1.5f;
-    Corners radius = Corners::all(9.0f);
+    Corners radius = Corners::theme_auto();
     bool multiline = false;
+    bool word_wrap = false;
     bool read_only = false;
     bool password = false;
 };
@@ -1484,63 +1589,63 @@ struct ButtonDesc {
     ButtonVariant variant = ButtonVariant::Default;
     Sizing width = Sizing::fit(); Sizing height = Sizing::fixed(32);
     Padding padding = Padding::xy(14, 0); float font_size_px = 13; uint16_t font_id = kFontSans;
-    Corners radius = Corners::all(6); bool disabled = false; Str shortcut_hint = {};
+    Corners radius = Corners::theme_auto(); bool disabled = false; Str shortcut_hint = {};
 };
 struct CheckboxDesc {
     uint32_t id = 0; Str label = {}; bool* checked = nullptr; bool indeterminate = false;
     bool disabled = false; float box_size_px = 18; float font_size_px = 13;
-    uint16_t font_id = kFontSans; Color accent = Color::rgb_hex(0x38BDF8);
+    uint16_t font_id = kFontSans; Color accent = Color::theme_auto();
 };
 struct ToggleSwitchDesc {
     uint32_t id = 0; Str label = {}; bool* value = nullptr; bool disabled = false;
     float track_width_px = 38; float track_height_px = 20; float font_size_px = 13;
-    uint16_t font_id = kFontSans; Color on_color = Color::rgb_hex(0x38BDF8);
-    Color off_color = Color::rgb_hex(0x334155);
+    uint16_t font_id = kFontSans; Color on_color = Color::theme_auto();
+    Color off_color = Color::theme_auto();
 };
 struct ProgressBarDesc {
     uint32_t id = 0; float fraction = 0; Str overlay_text = {};
-    Sizing width = Sizing::grow(); Sizing height = Sizing::fixed(10); Corners radius = Corners::all(999);
-    Color track_color = Color::rgb_hex(0x1E293B); Color fill_color = Color::rgb_hex(0x38BDF8);
-    Color text_color = Color::white(); float font_size_px = 11;
+    Sizing width = Sizing::grow(); Sizing height = Sizing::fixed(10); Corners radius = Corners::theme_auto();
+    Color track_color = Color::theme_auto(); Color fill_color = Color::theme_auto();
+    Color text_color = Color::theme_auto(); float font_size_px = 11;
 };
 struct TabBarDesc {
     uint32_t id = 0; uint32_t* active_tab = nullptr; Sizing width = Sizing::grow();
     float height_px = 32; float font_size_px = 12.5f;
-    Color background = Color::rgb_hex(0x0B101A); Color active_bg = Color::rgb_hex(0x162033);
-    Color hover_bg = Color::rgb_hex(0x111827); Color accent = Color::rgb_hex(0x38BDF8);
-    Color text_color = Color::rgb_hex(0x94A3B8); Color active_text_color = Color::white();
+    Color background = Color::theme_auto(); Color active_bg = Color::theme_auto();
+    Color hover_bg = Color::theme_auto(); Color accent = Color::theme_auto();
+    Color text_color = Color::theme_auto(); Color active_text_color = Color::theme_auto();
 };
 struct TabItemDesc { uint32_t id = 0; Str label = {}; uint16_t icon_id = kInvalidIcon; bool closable = false; bool disabled = false; };
 struct TabItemResult { bool selected = false; bool clicked = false; bool closed = false; };
 struct SliderDesc {
     uint32_t id = 0; Str label = {}; float* value = nullptr; float min_value = 0; float max_value = 1;
     float step = 0; const char* format = "%.2f"; Sizing width = Sizing::grow(); float height_px = 26; bool disabled = false;
-    Color background = Color::rgb_hex(0x1E293B); Color fill_color = Color::rgb_hex(0x38BDF8); Color text_color = Color::white();
+    Color background = Color::theme_auto(); Color fill_color = Color::theme_auto(); Color text_color = Color::theme_auto();
 };
 struct DragValueDesc {
     uint32_t id = 0; Str label = {}; float* value = nullptr; float min_value = -1e9f; float max_value = 1e9f;
     float speed = .1f; float step = 0; const char* format = "%.2f"; Sizing width = Sizing::fixed(110); float height_px = 26; bool disabled = false;
-    Color background = Color::rgb_hex(0x1E293B); Color fill_color = Color::rgb_hex(0x38BDF8); Color text_color = Color::white();
+    Color background = Color::theme_auto(); Color fill_color = Color::theme_auto(); Color text_color = Color::theme_auto();
 };
 struct TooltipDesc { Str text = {}; float delay_seconds = .35f; float max_width_px = 280; float font_size_px = 12; int16_t z_index = 220; };
 struct ModalDesc {
     uint32_t id = 0; bool* open = nullptr; Str title = {}; float width_px = 420; Sizing height = Sizing::fit();
     bool dismiss_on_backdrop = true; bool dismiss_on_escape = true;
-    Color backdrop_color = Color::rgba8(0,0,0,150); Color background = Color::rgb_hex(0x111827);
-    Color border_color = Color::rgb_hex(0x334155); Corners radius = Corners::all(10); int16_t z_index = 180;
+    Color backdrop_color = Color::theme_auto(); Color background = Color::theme_auto();
+    Color border_color = Color::theme_auto(); Corners radius = Corners::theme_auto(); int16_t z_index = 180;
 };
 struct ComboBoxDesc {
     uint32_t id = 0; Str label = {}; int* selected_index = nullptr; std::span<const Str> items = {};
     Sizing width = Sizing::grow(); float height_px = 28; float max_popup_height_px = 220; bool disabled = false;
-    Color background = Color::rgb_hex(0x1E293B); Color hover_bg = Color::rgb_hex(0x334155); Color text_color = Color::white();
+    Color background = Color::theme_auto(); Color hover_bg = Color::theme_auto(); Color text_color = Color::theme_auto();
 };
 struct PopupDesc {
     uint32_t id = 0; uint32_t trigger_id = 0; Sizing width = Sizing::fixed(220); Sizing height = Sizing::fit();
     Padding padding = Padding::all(6); float gap = 2;
-    Color background = Color::rgb_hex(0x111827); Color border_color = Color::rgb_hex(0x334155);
-    Corners radius = Corners::all(6); int16_t z_index = 200;
+    Color background = Color::theme_auto(); Color border_color = Color::theme_auto();
+    Corners radius = Corners::theme_auto(); int16_t z_index = 200;
 };
-struct MenuBarDesc { uint32_t id = 0; Sizing width = Sizing::grow(); float height_px = 28; Color background = Color::rgb_hex(0x0B101A); };
+struct MenuBarDesc { uint32_t id = 0; Sizing width = Sizing::grow(); float height_px = 28; Color background = Color::theme_auto(); };
 struct MenuDesc { uint32_t id = 0; Str label = {}; bool disabled = false; };
 struct MenuItemDesc {
     uint32_t id = 0; Str label = {}; Str shortcut_hint = {}; uint16_t icon_id = kInvalidIcon;
@@ -1583,9 +1688,9 @@ struct SplitDesc {
     float min_first_px = 120.0f;
     float min_second_px = 120.0f;
     float divider_size_px = 6.0f;
-    Color divider_color = Color::rgba8(148, 163, 184, 34);
-    Color divider_hover_color = Color::rgba8(56, 189, 248, 165);
-    Color divider_active_color = Color::rgb_hex(0x38BDF8);
+    Color divider_color = Color::theme_auto();
+    Color divider_hover_color = Color::theme_auto();
+    Color divider_active_color = Color::theme_auto();
 };
 
 struct SplitResult {
@@ -1633,11 +1738,11 @@ struct DockSpaceDesc {
     uint32_t id = 0;
     Sizing width = Sizing::grow(); Sizing height = Sizing::grow();
     float tab_bar_height_px = 30.0f; float divider_size_px = 6.0f;
-    Color background = {}; Color pane_background = Color::rgb_hex(0x0F1522);
-    Color pane_border_color = Color::rgba8(148, 163, 184, 38);
-    float pane_border_width = 1.0f; Corners pane_radius = Corners::all(10.0f);
-    Color tab_bar_bg = Color::rgb_hex(0x0B101A); Color tab_active_bg = Color::rgb_hex(0x162033);
-    Color tab_hover_bg = Color::rgb_hex(0x111827); Color tab_accent = Color::rgb_hex(0x38BDF8);
+    Color background = {}; Color pane_background = Color::theme_auto();
+    Color pane_border_color = Color::theme_auto();
+    float pane_border_width = 1.0f; Corners pane_radius = Corners::theme_auto();
+    Color tab_bar_bg = Color::theme_auto(); Color tab_active_bg = Color::theme_auto();
+    Color tab_hover_bg = Color::theme_auto(); Color tab_accent = Color::theme_auto();
 };
 bool dock_space_initialized(uint32_t dock_id) noexcept;
 uint32_t dock_reset_root(uint32_t dock_id) noexcept;
@@ -1669,11 +1774,11 @@ struct TableDesc {
     float row_gap_px = 0.0f; uint32_t overscan_rows = 2u;
     uint32_t default_sort_column = 0; bool default_sort_descending = false;
     float cell_padding_x = 10.0f; Sizing width = Sizing::grow(); Sizing height = Sizing::grow();
-    Padding padding = {}; Color background = Color::rgb_hex(0x090D16);
-    Color header_background = Color::rgb_hex(0x111726);
-    Color zebra_color = Color::rgba8(30, 41, 59, 44); Color hover_row_color = Color::rgba8(56, 189, 248, 22);
-    Color border_color = Color::rgba8(148, 163, 184, 34); float border_width = 1.0f;
-    Corners radius = Corners::all(8.0f); bool show_scrollbar = true;
+    Padding padding = {}; Color background = Color::theme_auto();
+    Color header_background = Color::theme_auto();
+    Color zebra_color = Color::theme_auto(); Color hover_row_color = Color::theme_auto();
+    Color border_color = Color::theme_auto(); float border_width = 1.0f;
+    Corners radius = Corners::theme_auto(); bool show_scrollbar = true;
 };
 struct TableResult {
     VirtualListSlice slice = {}; uint32_t sort_column = 0;
@@ -1690,9 +1795,9 @@ void table_scroll_to_row(uint32_t table_id, uint32_t row_index, float row_height
 
 struct TreeNodeDesc {
     uint32_t id = 0; Str label = {}; uint16_t icon_id = kInvalidIcon;
-    Color icon_color = Color::rgb_hex(0x38BDF8); Color text_color = Color::rgb_hex(0xE2E8F0);
-    Color selected_bg = Color::rgb_hex(0x1A2942); Color selected_accent = Color::rgb_hex(0x38BDF8);
-    Color hover_bg = Color::rgb_hex(0x162033);
+    Color icon_color = Color::theme_auto(); Color text_color = Color::theme_auto();
+    Color selected_bg = Color::theme_auto(); Color selected_accent = Color::theme_auto();
+    Color hover_bg = Color::theme_auto();
     float row_height_px = 26.0f; float font_size_px = 12.5f; float indent_px = 16.0f;
     uint16_t font_id = kFontSans; bool default_open = false; bool selected = false;
     bool leaf = false; bool show_indent_guide = true;
@@ -1716,17 +1821,17 @@ struct CanvasDesc {
     float max_zoom = 8.0f;
     float grid_step_world = 24.0f;
     uint32_t major_grid_subdiv = 4u;
-    Color background = Color::rgb_hex(0x090C12);
-    Color minor_grid_color = Color::rgba8(148, 163, 184, 40);
-    Color major_grid_color = Color::rgba8(148, 163, 184, 28);
-    Color border_color = Color::rgba8(148, 163, 184, 44);
+    Color background = Color::theme_auto();
+    Color minor_grid_color = Color::theme_auto();
+    Color major_grid_color = Color::theme_auto();
+    Color border_color = Color::theme_auto();
     float border_width = 1.0f;
-    Corners radius = Corners::all(10.0f);
+    Corners radius = Corners::theme_auto();
     bool show_grid = true;
     bool interactive = true;
     bool marquee_select = false;
-    Color marquee_fill = Color::rgba(0.28f, 0.56f, 0.96f, 0.16f);
-    Color marquee_border = Color::rgba(0.38f, 0.68f, 1.00f, 0.85f);
+    Color marquee_fill = Color::theme_auto();
+    Color marquee_border = Color::theme_auto();
 };
 
 struct CanvasState {
@@ -1749,8 +1854,8 @@ struct CanvasState {
 struct CanvasWireDesc {
     Vec2 from_world = {};
     Vec2 to_world = {};
-    Color color_start = Color::rgb_hex(0x38BDF8);
-    Color color_end = Color::rgb_hex(0x818CF8);
+    Color color_start = Color::theme_auto();
+    Color color_end = Color::theme_auto();
     Color glow_color = {};
     float thickness_world = 2.2f;
     float glow_world = 0.0f;
@@ -1767,13 +1872,13 @@ struct CanvasNodeDesc {
     Padding padding_world = {};
     float gap_world = 0.0f;
     Axis axis = Axis::Col;
-    Color background = Color::rgb_hex(0x111726);
+    Color background = Color::theme_auto();
     Color background_end = {};
     Vec2 gradient_dir = {0.0f, 1.0f};
-    Color border_color = Color::rgba8(148, 163, 184, 56);
+    Color border_color = Color::theme_auto();
     float border_width_world = 1.0f;
-    Corners radius_world = Corners::all(10.0f);
-    Color shadow_color = Color::rgba8(0, 0, 0, 130);
+    Corners radius_world = Corners::theme_auto();
+    Color shadow_color = Color::theme_auto();
     float shadow_blur_world = 14.0f;
     Vec2 shadow_offset_world = {0.0f, 6.0f};
     int16_t z_index = 2;
@@ -1849,7 +1954,7 @@ FrameStats frame_stats(const Context* ctx) noexcept;
 
 bool render_window(
     Context* ctx,
-    Color clear_color = Color::rgb_hex(0x0E1014),
+    Color clear_color = Color::theme_auto(),
     SDL_Window* window_override = nullptr) noexcept;
 void release_window(Context* ctx, SDL_Window* window) noexcept;
 uint32_t claimed_window_count(const Context* ctx) noexcept;
@@ -1868,7 +1973,7 @@ bool render_headless_png(
     uint32_t width,
     uint32_t height,
     const char* out_png_path,
-    Color clear_color = Color::rgb_hex(0x0E1014)) noexcept;
+    Color clear_color = Color::theme_auto()) noexcept;
 
 // Implicit-context declarative UI flow (operates on current_context()).
 void begin_box(const BoxDesc& desc = {}) noexcept;
@@ -2035,6 +2140,14 @@ struct BoxScope {
 #define ETCH_BOX(...) \
     if (::etch::BoxScope ETCH_CONCAT(_etch_box_, __LINE__) = (::etch::begin_box(__VA_ARGS__), ::etch::BoxScope{}); \
         ETCH_CONCAT(_etch_box_, __LINE__).active)
+
+struct ThemeScope {
+    bool active = true;
+    ~ThemeScope() noexcept { pop_theme(); }
+};
+#define ETCH_THEME(...) \
+    if (::etch::ThemeScope ETCH_CONCAT(_etch_theme_, __LINE__) = (::etch::push_theme(__VA_ARGS__), ::etch::ThemeScope{}); \
+        ETCH_CONCAT(_etch_theme_, __LINE__).active)
 
 } // namespace etch
 

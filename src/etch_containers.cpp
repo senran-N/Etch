@@ -72,6 +72,7 @@ SplitResult begin_split(const SplitDesc& desc) noexcept {
         ctx->active_ui->desired_cursor = (desc.axis == Axis::Row) ? Cursor::ResizeEW : Cursor::ResizeNS;
     }
 
+    const Theme& thm = active_theme(ctx);
     const float ratio = ws_split->split_ratio;
     ctx->active_ui->split_stack[ctx->active_ui->split_depth++] = SplitStackEntry{
         .id = desc.id,
@@ -80,9 +81,11 @@ SplitResult begin_split(const SplitDesc& desc) noexcept {
         .divider_size_px = div_sz,
         .min_first_px = desc.min_first_px,
         .min_second_px = desc.min_second_px,
-        .divider_color = desc.divider_color,
-        .divider_hover_color = desc.divider_hover_color,
-        .divider_active_color = desc.divider_active_color,
+        .divider_color = resolve_theme_color(desc.divider_color, thm.border_subtle),
+        .divider_hover_color = resolve_theme_color(desc.divider_hover_color, thm.divider_hover),
+        .divider_active_color = resolve_theme_color(desc.divider_active_color, thm.accent),
+        .grip_hover_color = thm.divider_thumb_hover,
+        .grip_idle_color = thm.scrollbar_thumb,
         .in_second = false,
     };
 
@@ -131,7 +134,7 @@ void split_second() noexcept {
         : (hovered_div ? se.divider_hover_color : se.divider_color);
     const Color grip_col = dragging_div
         ? Color::white()
-        : (hovered_div ? Color::rgba8(226, 232, 240, 220) : Color::rgba8(148, 163, 184, 110));
+        : (hovered_div ? se.grip_hover_color : se.grip_idle_color);
 
     begin_box(BoxDesc{
         .id = div_id,
@@ -217,28 +220,40 @@ void reset_vlist_heights(VarVirtualListCache* c) noexcept {
         fenwick_add(c,i,double(count)*(double(c->default_height)+c->gap_px));
     }
 }
-VarVirtualListCache* prepare_vlist(WindowUiState* ui, const VirtualListDesc& d, float h, float gap) noexcept {
-    auto* c = find_vlist(ui,d.id);
+VarVirtualListCache* prepare_vlist_raw(
+    WindowUiState* ui,
+    uint32_t list_id,
+    uint32_t item_count,
+    float h,
+    float gap,
+    VirtualItemHeightFn measure_fn,
+    void* user_data,
+    bool uncapped = false) noexcept
+{
+    auto* c = find_vlist(ui, list_id);
     if (!c) {
         for (uint32_t i = 0; i < ui->vlist_count; ++i) if (ui->vlists[i].list_id == 0) { c = &ui->vlists[i]; break; }
     }
     if (!c) {
         if (ui->vlist_count == ui->vlist_cap) {
-            uint32_t cap = ui->vlist_cap ? ui->vlist_cap*2 : 4;
-            void* mem = std::realloc(ui->vlists,size_t(cap)*sizeof(VarVirtualListCache)); if (!mem) return nullptr;
+            uint32_t cap = ui->vlist_cap ? ui->vlist_cap * 2 : 4;
+            void* mem = std::realloc(ui->vlists, size_t(cap) * sizeof(VarVirtualListCache)); if (!mem) return nullptr;
             ui->vlists = static_cast<VarVirtualListCache*>(mem); ui->vlist_cap = cap;
         }
         c = &ui->vlists[ui->vlist_count++]; *c = {};
     }
-    if (c->list_id == 0 || c->item_count != d.item_count || c->default_height != h || c->gap_px != gap || c->measure_fn != d.measure_height_fn || c->measure_user_data != d.measure_user_data) {
-        free_vlist(c); c->list_id = d.id; c->item_count = d.item_count; c->chunk_count = d.item_count/256 + (d.item_count%256 != 0);
-        c->default_height = h; c->gap_px = gap; c->measure_fn = d.measure_height_fn; c->measure_user_data = d.measure_user_data;
-        c->chunks = static_cast<float**>(std::calloc(c->chunk_count ? c->chunk_count : 1,sizeof(float*)));
-        c->fenwick = static_cast<double*>(std::calloc(size_t(c->chunk_count)+1,sizeof(double)));
+    if (c->list_id == 0 || c->item_count != item_count || c->default_height != h || c->gap_px != gap || c->measure_fn != measure_fn || c->measure_user_data != user_data || c->uncapped_heights != uncapped) {
+        free_vlist(c); c->list_id = list_id; c->item_count = item_count; c->chunk_count = item_count / 256 + (item_count % 256 != 0);
+        c->default_height = h; c->gap_px = gap; c->measure_fn = measure_fn; c->measure_user_data = user_data; c->uncapped_heights = uncapped;
+        c->chunks = static_cast<float**>(std::calloc(c->chunk_count ? c->chunk_count : 1, sizeof(float*)));
+        c->fenwick = static_cast<double*>(std::calloc(size_t(c->chunk_count) + 1, sizeof(double)));
         if (!c->chunks || !c->fenwick) { std::free(c->chunks); std::free(c->fenwick); *c = {}; return nullptr; }
         reset_vlist_heights(c);
     }
     return c;
+}
+VarVirtualListCache* prepare_vlist(WindowUiState* ui, const VirtualListDesc& d, float h, float gap) noexcept {
+    return prepare_vlist_raw(ui, d.id, d.item_count, h, gap, d.measure_height_fn, d.measure_user_data, false);
 }
 bool vlist_ensure_chunk(VarVirtualListCache* c, uint32_t chunk) noexcept {
     if (c->chunks[chunk]) return true;
@@ -247,7 +262,7 @@ bool vlist_ensure_chunk(VarVirtualListCache* c, uint32_t chunk) noexcept {
     double delta = 0;
     for (uint32_t i = 0; i < count; ++i) {
         float h = c->measure_fn ? c->measure_fn(chunk*256+i,c->measure_user_data) : c->default_height;
-        h = std::isfinite(h) ? clamp_range(h,1,16384) : c->default_height;
+        h = std::isfinite(h) ? (c->uncapped_heights ? std::fmax(h, 1.0f) : clamp_range(h, 1.0f, 16384.0f)) : c->default_height;
         heights[i] = h; delta += double(h)-c->default_height;
     }
     c->chunks[chunk] = heights; fenwick_add(c,chunk,delta); return true;
@@ -300,6 +315,35 @@ void update_vlist_height(Context* ctx, VarVirtualListCache* c, uint32_t row, flo
     }
 }
 } // namespace
+
+// Shared sparse Fenwick list helpers used by both virtual lists and wrapped code editors.
+VarVirtualListCache* editor_vlist_find(WindowUiState* ui, uint32_t id) noexcept { return find_vlist(ui, id); }
+VarVirtualListCache* editor_vlist_prepare(WindowUiState* ui, uint32_t id, uint32_t count, float h, VirtualItemHeightFn fn, void* ud) noexcept {
+    if (auto* existing = find_vlist(ui, id)) {
+        existing->measure_user_data = ud;
+    }
+    return prepare_vlist_raw(ui, id, count, h, 0.0f, fn, ud, true);
+}
+void editor_vlist_free(VarVirtualListCache* c) noexcept { free_vlist(c); }
+void editor_vlist_reset(VarVirtualListCache* c) noexcept { if (c) reset_vlist_heights(c); }
+float editor_vlist_height(VarVirtualListCache* c, uint32_t row) noexcept { return vlist_height(c, row); }
+double editor_vlist_row_top(VarVirtualListCache* c, uint32_t row) noexcept { return vlist_row_top(c, row); }
+double editor_vlist_current_row_top(const VarVirtualListCache* c, uint32_t row) noexcept { return vlist_current_row_top(c, row); }
+float editor_vlist_current_height(const VarVirtualListCache* c, uint32_t row) noexcept {
+    if (!c || row >= c->item_count) return c ? c->default_height : 20.0f;
+    const uint32_t chunk = row / kVarListChunkSize;
+    return (c->chunks && c->chunks[chunk]) ? c->chunks[chunk][row % kVarListChunkSize] : c->default_height;
+}
+uint32_t editor_vlist_find_first_at_y(VarVirtualListCache* c, double y) noexcept { return vlist_find_first_at_y(c, y); }
+void vlist_set_row_height_direct(VarVirtualListCache* c, uint32_t row, float h) noexcept {
+    if (!c || row >= c->item_count || !c->chunks) return;
+    const float clamped = std::isfinite(h) ? (c->uncapped_heights ? std::fmax(h, 1.0f) : clamp_range(h, 1.0f, 16384.0f)) : c->default_height;
+    if (!c->chunks[row / kVarListChunkSize] && !vlist_ensure_chunk(c, row / kVarListChunkSize)) return;
+    const float old = c->chunks[row / kVarListChunkSize][row % kVarListChunkSize];
+    if (std::fabs(clamped - old) <= 0.01f) return;
+    c->chunks[row / kVarListChunkSize][row % kVarListChunkSize] = clamped;
+    fenwick_add(c, row / kVarListChunkSize, double(clamped) - double(old));
+}
 
 void virtual_list_set_item_height(uint32_t id, uint32_t row, float height) noexcept {
     Context* ctx = current_context(); if (!ctx || !id || !std::isfinite(height) || height < 1) return;
@@ -430,10 +474,19 @@ VirtualListSlice begin_virtual_list(const VirtualListDesc& desc) noexcept {
     }
     const float child_offset_y = static_cast<float>(first_row_top - ws->vscroll_pos_y);
 
+    const Theme& thm = active_theme(ctx);
+    const Color eff_bg = resolve_theme_color(desc.background, thm.bg_surface);
+    const Color eff_border = resolve_theme_color(desc.border_color, thm.border_subtle);
+    const Corners eff_radius = resolve_theme_corners(desc.radius, Corners::all(thm.radius_panel_px));
+
     BoxExtra* extra = ctx->frame_arena.alloc<BoxExtra>();
     if (extra) {
         extra->kind = CustomCmdKind::Box;
         extra->is_virtual_list = true;
+        extra->scrollbar_track = thm.scrollbar_track;
+        extra->scrollbar_thumb = thm.scrollbar_thumb;
+        extra->scrollbar_thumb_hover = thm.scrollbar_thumb_hover;
+        extra->scrollbar_thumb_drag = thm.scrollbar_thumb_drag;
         extra->desc = BoxDesc{
             .id = desc.id,
             .axis = Axis::Col,
@@ -441,10 +494,10 @@ VirtualListSlice begin_virtual_list(const VirtualListDesc& desc) noexcept {
             .height = desc.height,
             .padding = desc.padding,
             .gap = gap_px,
-            .background = desc.background,
-            .border_color = desc.border_color,
+            .background = eff_bg,
+            .border_color = eff_border,
             .border_width = desc.border_width,
-            .radius = desc.radius,
+            .radius = eff_radius,
             .clip_children = true,
             .show_scrollbar = desc.show_scrollbar,
         };
@@ -452,8 +505,8 @@ VirtualListSlice begin_virtual_list(const VirtualListDesc& desc) noexcept {
 
     Clay__OpenElementWithId(make_clay_id(desc.id));
 
-    const bool has_border = (desc.border_width > 0.0f && desc.border_color.a > 0u);
-    const bool has_visual = (desc.background.a > 0u) || has_border;
+    const bool has_border = (desc.border_width > 0.0f && eff_border.a > 0u);
+    const bool has_visual = (eff_bg.a > 0u) || has_border;
 
     Clay_ElementDeclaration decl = {};
     decl.layout.sizing.width = to_clay_sizing(desc.width);
@@ -466,7 +519,7 @@ VirtualListSlice begin_virtual_list(const VirtualListDesc& desc) noexcept {
     };
     decl.layout.childGap = gap_u16;
     decl.layout.layoutDirection = CLAY_TOP_TO_BOTTOM;
-    decl.cornerRadius = to_clay_corners(desc.radius);
+    decl.cornerRadius = to_clay_corners(eff_radius);
     decl.userData = extra;
     if (has_visual && extra) {
         decl.custom.customData = extra;
@@ -577,11 +630,21 @@ void virtual_list_scroll_to_row(
     request_redraw(ctx);
 }
 
-CanvasState begin_canvas(const CanvasDesc& desc) noexcept {
+CanvasState begin_canvas(const CanvasDesc& desc_in) noexcept {
     Context* ctx = current_context();
-    if (!ctx || !ctx->in_frame || desc.id == 0u || ctx->active_ui->canvas_depth >= kMaxCanvasDepth) {
+    if (!ctx || !ctx->in_frame || desc_in.id == 0u || ctx->active_ui->canvas_depth >= kMaxCanvasDepth) {
         return CanvasState{};
     }
+    const Theme& thm = active_theme(ctx);
+    CanvasDesc desc = desc_in;
+    desc.background = resolve_theme_color(desc.background, thm.bg_node_canvas);
+    desc.minor_grid_color = resolve_theme_color(desc.minor_grid_color, thm.grid_minor);
+    desc.major_grid_color = resolve_theme_color(desc.major_grid_color, thm.grid_major);
+    desc.border_color = resolve_theme_color(desc.border_color, thm.canvas_border);
+    desc.radius = resolve_theme_corners(desc.radius, Corners::all(thm.radius_panel_px));
+    desc.marquee_fill = resolve_theme_color(desc.marquee_fill, thm.marquee_fill);
+    desc.marquee_border = resolve_theme_color(desc.marquee_border, thm.marquee_border);
+
     WidgetState* ws = state_map_get_or_insert(&ctx->active_ui->states, desc.id, ctx->active_ui->frame_index);
     if (!ws) {
         return CanvasState{};
@@ -732,11 +795,12 @@ void canvas_wire(const CanvasWireDesc& desc) noexcept {
     if (!extra || !cw) {
         return;
     }
+    const Theme& thm = active_theme(ctx);
     cw->canvas_id = ce.id;
     cw->from_world = desc.from_world;
     cw->to_world = desc.to_world;
-    cw->color_start = desc.color_start;
-    cw->color_end = desc.color_end;
+    cw->color_start = resolve_theme_color(desc.color_start, thm.accent);
+    cw->color_end = resolve_theme_color(desc.color_end, thm.accent_secondary);
     cw->glow_color = desc.glow_color;
     cw->thickness_world = desc.thickness_world;
     cw->glow_world = desc.glow_world;
@@ -804,6 +868,13 @@ CanvasNodeResult begin_canvas_node(const CanvasNodeDesc& desc) noexcept {
     const bool clicked_now = ws->clicked_this_frame;
     ce.in_node = false;
 
+    const Theme& thm = active_theme(ctx);
+    const Color eff_bg = resolve_theme_color(desc.background, thm.bg_elevated);
+    const Color eff_bg_end = resolve_theme_color(desc.background_end, thm.bg_surface);
+    const Color eff_border = resolve_theme_color(desc.border_color, thm.border_node);
+    const Corners eff_radius = resolve_theme_corners(desc.radius_world, Corners::all(thm.radius_panel_px));
+    const Color eff_shadow = resolve_theme_color(desc.shadow_color, thm.shadow);
+
     begin_box(BoxDesc{
         .id = desc.id,
         .axis = desc.axis,
@@ -811,13 +882,13 @@ CanvasNodeResult begin_canvas_node(const CanvasNodeDesc& desc) noexcept {
         .height = scale_sizing(desc.height_world, z),
         .padding = scale_padding(desc.padding_world, z),
         .gap = desc.gap_world * z,
-        .background = desc.background,
-        .background_end = desc.background_end,
+        .background = eff_bg,
+        .background_end = eff_bg_end,
         .gradient_dir = desc.gradient_dir,
-        .border_color = desc.border_color,
+        .border_color = eff_border,
         .border_width = desc.border_width_world * z,
-        .radius = scale_corners_uniform(desc.radius_world, z),
-        .shadow_color = desc.shadow_color,
+        .radius = scale_corners_uniform(eff_radius, z),
+        .shadow_color = eff_shadow,
         .shadow_blur = desc.shadow_blur_world * z,
         .shadow_offset = Vec2{ desc.shadow_offset_world.x * z, desc.shadow_offset_world.y * z },
         .attach_to = AttachTo::Parent,
@@ -1086,8 +1157,18 @@ bool dock_reorder_pane(uint32_t id, uint32_t pane, uint32_t target, bool after) 
     s->tabs[to] = moving; s->nodes[new_leaf-1].active = pane;
     dock_collapse(s,old_leaf); request_redraw(ctx); return true;
 }
-void begin_dock_space(const DockSpaceDesc& desc) noexcept {
-    Context* ctx = current_context(); if (!ctx || !ctx->in_frame || !desc.id || ctx->active_ui->dock_cursor.space) return;
+void begin_dock_space(const DockSpaceDesc& desc_in) noexcept {
+    Context* ctx = current_context(); if (!ctx || !ctx->in_frame || !desc_in.id || ctx->active_ui->dock_cursor.space) return;
+    const Theme& thm = active_theme(ctx);
+    DockSpaceDesc desc = desc_in;
+    desc.background = resolve_theme_color(desc.background, thm.bg_canvas);
+    desc.pane_background = resolve_theme_color(desc.pane_background, thm.bg_surface);
+    desc.pane_border_color = resolve_theme_color(desc.pane_border_color, thm.border_subtle);
+    desc.pane_radius = resolve_theme_corners(desc.pane_radius, Corners::all(thm.radius_panel_px));
+    desc.tab_bar_bg = resolve_theme_color(desc.tab_bar_bg, thm.bg_chrome);
+    desc.tab_active_bg = resolve_theme_color(desc.tab_active_bg, thm.surface_active);
+    desc.tab_hover_bg = resolve_theme_color(desc.tab_hover_bg, thm.bg_popup);
+    desc.tab_accent = resolve_theme_color(desc.tab_accent, thm.accent);
     if (!dock_space_initialized(desc.id)) dock_reset_root(desc.id);
     auto* s = dock_slot(ctx, desc.id); if (!s) return;
     auto& c = ctx->active_ui->dock_cursor;
@@ -1182,11 +1263,14 @@ uint32_t next_dock_pane() noexcept {
             Rect hi = {0,0,r.w,r.h};
             if (z == DockZone::Left || z == DockZone::Right) { hi.w *= .5f; if (z == DockZone::Right) hi.x = hi.w; }
             if (z == DockZone::Top || z == DockZone::Bottom) { hi.h *= .5f; if (z == DockZone::Bottom) hi.y = hi.h; }
-            draw_rect({ .rect = hi, .fill = Color::rgba8(56,189,248,65), .foreground = true });
+            const Theme& thm = active_theme(ctx);
+            const Color drop_tint = Color::rgba8(d.tab_accent.r, d.tab_accent.g, d.tab_accent.b, 65u);
+            const Color drop_active = Color::rgba8(d.tab_accent.r, d.tab_accent.g, d.tab_accent.b, 220u);
+            draw_rect({ .rect = hi, .fill = drop_tint, .foreground = true });
             for (uint32_t j=0;j<5;++j) {
                 if (j && !target) continue;
                 draw_rect({.rect={centers[j].x-13,centers[j].y-13,26,26},
-                    .fill=zones[j]==z ? Color::rgba8(56,189,248,220) : Color::rgba8(15,23,42,220),
+                    .fill=zones[j]==z ? drop_active : thm.bg_tooltip,
                     .radius=Corners::all(3),.border_color=d.tab_accent,.border_width=1,.foreground=true});
                 draw_line({.from={centers[j].x-5,centers[j].y},.to={centers[j].x+5,centers[j].y},.color=Color::white(),.foreground=true});
                 if (j==0 || j>=3) draw_line({.from={centers[j].x,centers[j].y-5},.to={centers[j].x,centers[j].y+5},.foreground=true});
@@ -1226,11 +1310,19 @@ void table_close_row(TableStackEntry& t) noexcept {
     if (t.row_open) { end_box(); t.row_open = false; }
 }
 }
-TableResult begin_table(const TableDesc& desc) noexcept {
+TableResult begin_table(const TableDesc& desc_in) noexcept {
     Context* ctx = current_context();
-    if (!ctx || !ctx->in_frame || !desc.id || desc.columns.empty() || desc.columns.size() > kMaxTableColumns || ctx->active_ui->table_depth == 8 ||
-        !std::isfinite(desc.row_height_px) || desc.row_height_px <= 0) return {};
-    for (const auto& col : desc.columns) if (!std::isfinite(col.width) || !std::isfinite(col.min_width) || !std::isfinite(col.max_width) || col.min_width < 0 || col.max_width < col.min_width) return {};
+    if (!ctx || !ctx->in_frame || !desc_in.id || desc_in.columns.empty() || desc_in.columns.size() > kMaxTableColumns || ctx->active_ui->table_depth == 8 ||
+        !std::isfinite(desc_in.row_height_px) || desc_in.row_height_px <= 0) return {};
+    for (const auto& col : desc_in.columns) if (!std::isfinite(col.width) || !std::isfinite(col.min_width) || !std::isfinite(col.max_width) || col.min_width < 0 || col.max_width < col.min_width) return {};
+    const Theme& thm = active_theme(ctx);
+    TableDesc desc = desc_in;
+    desc.background = resolve_theme_color(desc.background, thm.bg_table);
+    desc.header_background = resolve_theme_color(desc.header_background, thm.bg_elevated);
+    desc.zebra_color = resolve_theme_color(desc.zebra_color, thm.zebra_row);
+    desc.hover_row_color = resolve_theme_color(desc.hover_row_color, thm.selection_hover);
+    desc.border_color = resolve_theme_color(desc.border_color, thm.border_line);
+    desc.radius = resolve_theme_corners(desc.radius, Corners::all(thm.radius_table_px));
     auto* metadata = table_metadata(ctx, desc.id);
     if (!metadata) {
         auto& ui = *ctx->active_ui;
@@ -1316,8 +1408,8 @@ TableResult begin_table(const TableDesc& desc) noexcept {
         if (result.sort_column == c) {
             const float x = t.col_widths[c] - 14, y = desc.header_height_px * .5f;
             const float dir = result.sort_descending ? 3.0f : -3.0f;
-            draw_line({ .from = {x-3,y-dir}, .to = {x,y+dir}, .color = Color::rgb_hex(0x38BDF8) });
-            draw_line({ .from = {x,y+dir}, .to = {x+3,y-dir}, .color = Color::rgb_hex(0x38BDF8) });
+            draw_line({ .from = {x-3,y-dir}, .to = {x,y+dir}, .color = thm.accent });
+            draw_line({ .from = {x,y+dir}, .to = {x+3,y-dir}, .color = thm.accent });
         }
         if (col.resizable) box({ .id = rid, .width = Sizing::fixed(6), .height = Sizing::fixed(desc.header_height_px),
             .attach_to = AttachTo::Parent, .anchor_element = Anchor::TopRight, .anchor_parent = Anchor::TopRight, .floating_offset = {0,0} });
@@ -1395,8 +1487,15 @@ void set_tree_open(uint32_t id, bool open) noexcept {
     Context* ctx = current_context(); if (!ctx || !id) return;
     auto* ws = state_map_get_or_insert(&ctx->active_ui->states,id,ctx->active_ui->frame_index); ws->tree_initialized = true; ws->tree_open = open; request_redraw(ctx);
 }
-TreeNodeResult begin_tree_node(const TreeNodeDesc& d) noexcept {
-    Context* ctx = current_context(); if (!ctx || !ctx->in_frame || !d.id || ctx->active_ui->tree_depth >= kMaxTreeDepth) return {};
+TreeNodeResult begin_tree_node(const TreeNodeDesc& d_in) noexcept {
+    Context* ctx = current_context(); if (!ctx || !ctx->in_frame || !d_in.id || ctx->active_ui->tree_depth >= kMaxTreeDepth) return {};
+    const Theme& thm = active_theme(ctx);
+    TreeNodeDesc d = d_in;
+    d.icon_color = resolve_theme_color(d.icon_color, thm.accent);
+    d.text_color = resolve_theme_color(d.text_color, thm.text_secondary);
+    d.selected_bg = resolve_theme_color(d.selected_bg, thm.surface_selected);
+    d.selected_accent = resolve_theme_color(d.selected_accent, thm.accent);
+    d.hover_bg = resolve_theme_color(d.hover_bg, thm.surface_active);
     const uint32_t chev = id_index(d.id,kTreeChevronTag);
     auto* ws = state_map_get_or_insert(&ctx->active_ui->states,d.id,ctx->active_ui->frame_index);
     if (!ws->tree_initialized) { ws->tree_initialized = true; ws->tree_open = d.default_open; }
@@ -1437,7 +1536,7 @@ TreeNodeResult begin_tree_node(const TreeNodeDesc& d) noexcept {
         begin_box({ .id = id_index(d.id,0x7EE1u), .axis = Axis::Col, .width = Sizing::grow(), .height = Sizing::fit() });
         if (d.show_indent_guide) {
             const float x = static_cast<float>(ctx->active_ui->tree_depth)*d.indent_px+8;
-            draw_line({ .from = {x,0}, .to = {x,element_bounds(id_index(d.id,0x7EE1u)).h}, .color = Color::rgba8(148,163,184,40) });
+            draw_line({ .from = {x,0}, .to = {x,element_bounds(id_index(d.id,0x7EE1u)).h}, .color = thm.grid_minor });
         }
         ++ctx->active_ui->tree_depth;
     }
@@ -1462,9 +1561,18 @@ void set_collapsible_open(uint32_t element_id, bool open) noexcept {
         ws->collapsible_initialized = true; ws->collapsible_open = open; request_redraw(ctx);
     }
 }
-CollapsibleResult begin_collapsible(const CollapsibleDesc& d) noexcept {
+CollapsibleResult begin_collapsible(const CollapsibleDesc& d_in) noexcept {
     Context* ctx = current_context();
-    if (!ctx || !ctx->in_frame || !d.id || ctx->active_ui->collapsible_depth >= kMaxCollapsibleDepth) return {};
+    if (!ctx || !ctx->in_frame || !d_in.id || ctx->active_ui->collapsible_depth >= kMaxCollapsibleDepth) return {};
+    const Theme& thm = active_theme(ctx);
+    CollapsibleDesc d = d_in;
+    d.radius = resolve_theme_corners(d.radius, Corners::all(thm.radius_control_px));
+    d.header_bg = resolve_theme_color(d.header_bg, thm.surface_subtle);
+    d.header_hover_bg = resolve_theme_color(d.header_hover_bg, thm.surface_subtle_hover);
+    d.body_bg = resolve_theme_color(d.body_bg, thm.surface_subtle_body);
+    d.border_color = resolve_theme_color(d.border_color, thm.border_subtle);
+    d.text_color = resolve_theme_color(d.text_color, thm.text_secondary);
+    d.icon_color = resolve_theme_color(d.icon_color, thm.accent);
     auto* ws = state_map_get_or_insert(&ctx->active_ui->states,d.id,ctx->active_ui->frame_index);
     if (!ws) return {};
     if (!ws->collapsible_initialized) { ws->collapsible_initialized = true; ws->collapsible_open = d.default_open; }

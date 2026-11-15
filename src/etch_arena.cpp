@@ -60,6 +60,9 @@ struct WidgetState {
     Rect     last_box_logical = {};
     const TextBuffer* edit_text_buffer = nullptr;
     bool editor_reveal = false;
+    bool     editor_scroll_pending = false;
+    uint8_t  editor_scroll_align = 0u;
+    uint32_t editor_scroll_line = 0u;
     bool editor_show_scrollbar = true;
     bool     edit_initialized = false;
     uint32_t edit_cursor = 0;
@@ -67,6 +70,13 @@ struct WidgetState {
     float    edit_scroll_x = 0.0f;
     float    edit_scroll_y = 0.0f;
     float    edit_preferred_x = -1.0f;
+    bool     edit_wrap_affinity = false;
+    float    edit_wrap_width = 0.0f;
+    uint64_t edit_wrap_version = 0u;
+    uint32_t edit_wrap_lines = 0u;
+    uint32_t edit_wrap_tab_width = 0u;
+    float    edit_wrap_font_size = 0.0f;
+    uint16_t edit_wrap_font_id = kInvalidFont;
 
     bool is_selectable_text = false;
     const char* sel_text_ptr = nullptr;
@@ -380,6 +390,12 @@ struct BoxExtra {
     bool             keyboard_focus_ring = false;
     bool             is_virtual_list = false;
     bool             is_canvas = false;
+    Color            focus_ring_color = {};
+    float            focus_ring_radius_px = 0.0f;
+    Color            scrollbar_track = {};
+    Color            scrollbar_thumb = {};
+    Color            scrollbar_thumb_hover = {};
+    Color            scrollbar_thumb_drag = {};
 };
 
 struct SplitStackEntry {
@@ -392,6 +408,8 @@ struct SplitStackEntry {
     Color    divider_color = {};
     Color    divider_hover_color = {};
     Color    divider_active_color = {};
+    Color    grip_hover_color = {};
+    Color    grip_idle_color = {};
     bool     in_second = false;
 };
 
@@ -572,6 +590,7 @@ struct VarVirtualListCache {
     double total_stride_sum = 0;
     uint32_t last_anchor_row = 0;
     bool dirty = false;
+    bool uncapped_heights = false;
     VirtualItemHeightFn measure_fn = nullptr;
     void* measure_user_data = nullptr;
 };
@@ -737,6 +756,8 @@ struct WindowUiState {
     uint32_t      ime_comp_len = 0;
     uint32_t      ime_comp_cursor_byte = 0;
     uint32_t      ime_comp_sel_len_byte = 0;
+    bool          pending_ime_comp_edited = false;
+    bool          frame_ime_comp_edited = false;
     uint32_t      ime_focused_id = 0;
     uint32_t      prev_ime_focused_id = 0;
     bool          ime_focused_password = false;
@@ -885,6 +906,11 @@ struct Context {
     SDL_GPUTransferBuffer* dyn_slug_band_tbuf = nullptr;
     uint32_t dyn_slug_band_tbuf_cap = 0;
     FrameStats stats = {};
+    static constexpr uint32_t kMaxThemeStack = 16u;
+    Theme base_theme = {};
+    Theme theme_stack[kMaxThemeStack] = {};
+    uint32_t theme_depth = 0u;
+    uint32_t theme_overflow = 0u;
 };
 
 namespace {

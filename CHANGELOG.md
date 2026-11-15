@@ -4,6 +4,12 @@ All notable changes to Etch are documented here. This file follows
 [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-11-15
+
+### Added
+- **Semantic Theme & Design Tokens**: Added `Theme`, `ThemeId`, built-in presets `Theme::dark()`, `Theme::light()`, `Theme::high_contrast()`, and `Theme::industrial()`, context/scoped APIs (`set_theme()`, `theme()`, `push_theme()`, `pop_theme()`, `ETCH_THEME`), sentinel tokens `Color::theme_auto()` and `Corners::theme_auto()`, and `resolve_theme_color()` / `resolve_theme_corners()` across widgets, containers, scrollbars, selection highlights, syntax colors, and window clear color.
+- **Editable Soft Word-Wrap (`word_wrap`)**: Added `word_wrap` to `TextInputDesc` (when `multiline = true`) and `CodeEditorDesc`, supporting UTF-8 cluster-safe word/CJK/emergency line breaking, visual-line navigation (`Up`/`Down`/`Home`/`End`/`PageUp`/`PageDown`) with boundary affinity, pointer hit-testing and drag selection across wrapped lines, inline IME composition placement, and sparse Fenwick-cached O(log N) scrolling for 1,000,000-line `code_editor` buffers.
+
 ## [0.6.0] - 2026-11-15
 
 ### Added

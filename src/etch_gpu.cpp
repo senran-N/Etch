@@ -611,6 +611,7 @@ bool record_frame_commands(
     if (!ctx || !cmd || !target_tex || target_w == 0u || target_h == 0u) {
         return false;
     }
+    clear_color = resolve_theme_color(clear_color, active_theme(ctx).bg_canvas);
 
     SDL_GPUGraphicsPipeline* pipeline = get_or_create_pipeline(ctx, target_fmt);
     if (!pipeline) {
@@ -1241,6 +1242,7 @@ Context* create_context(const ContextDesc& desc) noexcept {
     ctx->max_layout_elements = desc.max_layout_elements < 4096u ? 4096u : (desc.max_layout_elements > (1u << 20) ? (1u << 20) : desc.max_layout_elements);
     if (!ensure_batch_cap(ctx)) { destroy_context(ctx); return nullptr; }
     ctx->arena_epoch = 1u;
+    ctx->base_theme = Theme::dark();
     ctx->active_ui = &ctx->headless_ui;
     ctx->headless = desc.headless;
     ctx->enable_gpu_debug = desc.enable_gpu_debug;

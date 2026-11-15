@@ -8,6 +8,8 @@ void end_frame(Context* ctx_arg) noexcept {
     if (!ctx || !ctx->in_frame || !ctx->active_ui->clay_ctx) {
         return;
     }
+    ctx->theme_depth = 0u;
+    ctx->theme_overflow = 0u;
     Clay_SetCurrentContext(ctx->active_ui->clay_ctx);
 
     while (ctx->active_ui->collapsible_depth) end_collapsible();
@@ -107,9 +109,10 @@ void end_frame(Context* ctx_arg) noexcept {
                             };
                         }
                         emit_box_background_and_shadow(ctx, extra, box_px, cur_clip, dpi);
-                        if (extra->keyboard_focus_ring)
-                            push_prim(ctx, Prim::make_rect(box_px, cur_clip.rect, {}, scale_corners_uniform(Corners::all(4), dpi),
-                                Color::rgb_hex(0x60A5FA), 2 * dpi, 1, cur_clip.radius));
+                        if (extra->keyboard_focus_ring) {
+                            push_prim(ctx, Prim::make_rect(box_px, cur_clip.rect, {}, scale_corners_uniform(Corners::all(extra->focus_ring_radius_px), dpi),
+                                extra->focus_ring_color, 2 * dpi, 1, cur_clip.radius));
+                        }
                         if (extra->draw_head) {
                             ClipEntry draw_clip = cur_clip;
                             const bool box_clips =
@@ -240,10 +243,10 @@ void end_frame(Context* ctx_arg) noexcept {
                                 Clay_PointerOver(make_clay_id(d.id));
                             const Rect track_px = { sb.track.x * dpi, sb.track.y * dpi, sb.track.w * dpi, sb.track.h * dpi };
                             const Rect thumb_px = { sb.thumb.x * dpi, sb.thumb.y * dpi, sb.thumb.w * dpi, sb.thumb.h * dpi };
-                            const Color track_col = Color::rgba8(255, 255, 255, 18);
+                            const Color track_col = extra->scrollbar_track;
                             const Color thumb_col = sb_active
-                                ? Color::rgba8(96, 165, 250, 230)
-                                : (sb_hover ? Color::rgba8(148, 163, 184, 195) : Color::rgba8(148, 163, 184, 125));
+                                ? extra->scrollbar_thumb_drag
+                                : (sb_hover ? extra->scrollbar_thumb_hover : extra->scrollbar_thumb);
                             push_prim(
                                 ctx,
                                 Prim::make_rect(

@@ -699,6 +699,7 @@ static void process_window_event(Context* ctx, const SDL_Event& event) noexcept 
                     event.edit.length);
             ctx->active_ui->caret_blink_on = true;
             ctx->active_ui->caret_blink_cycles = 0u;
+            ctx->active_ui->pending_ime_comp_edited = true;
             request_redraw(ctx);
             break;
         }
@@ -862,6 +863,8 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
     Clay_SetCurrentContext(ctx->active_ui->clay_ctx);
     set_current_context(ctx);
     ctx->in_frame = true;
+    ctx->theme_depth = 0u;
+    ctx->theme_overflow = 0u;
     ctx->draw_list_window = ctx->active_window;
     ctx->active_ui->focus_scope_depth = 0;
     ctx->active_ui->popup_depth = 0;
@@ -899,6 +902,8 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
     ctx->active_ui->frame_key_mods = kmods;
     ctx->active_ui->frame_escape_consumed_by_ime = ctx->active_ui->pending_escape_consumed_by_ime;
     ctx->active_ui->pending_escape_consumed_by_ime = false;
+    ctx->active_ui->frame_ime_comp_edited = ctx->active_ui->pending_ime_comp_edited;
+    ctx->active_ui->pending_ime_comp_edited = false;
 
     ctx->active_ui->frame_key_count = ctx->active_ui->pending_key_count;
     if (ctx->active_ui->frame_key_count > 0u) {
@@ -1574,26 +1579,40 @@ void begin_box(const BoxDesc& desc_in) noexcept {
             request_redraw(ctx);
         }
     }
-    const bool focus_ring = desc.focusable && keyboard_focus_visible(desc.id);
-    const bool is_scroll = desc.scroll_x || desc.scroll_y;
-    const bool any_clip = desc.clip_children || is_scroll;
-    const bool is_floating_blocker = (desc.attach_to != AttachTo::None && !desc.pointer_passthrough);
-    const bool has_border = (desc.border_width > 0.0f && desc.border_color.a > 0u);
-    const bool has_scrollbar = is_scroll && desc.show_scrollbar;
+    const Theme& thm = active_theme(ctx);
+    BoxDesc eff_desc = desc;
+    eff_desc.background = resolve_theme_color(eff_desc.background, thm.bg_surface);
+    eff_desc.background_end = resolve_theme_color(eff_desc.background_end, thm.bg_elevated);
+    eff_desc.border_color = resolve_theme_color(eff_desc.border_color, thm.border_subtle);
+    eff_desc.shadow_color = resolve_theme_color(eff_desc.shadow_color, thm.shadow);
+    eff_desc.radius = resolve_theme_corners(eff_desc.radius, Corners::all(thm.radius_panel_px));
+
+    const bool focus_ring = eff_desc.focusable && keyboard_focus_visible(eff_desc.id);
+    const bool is_scroll = eff_desc.scroll_x || eff_desc.scroll_y;
+    const bool any_clip = eff_desc.clip_children || is_scroll;
+    const bool is_floating_blocker = (eff_desc.attach_to != AttachTo::None && !eff_desc.pointer_passthrough);
+    const bool has_border = (eff_desc.border_width > 0.0f && eff_desc.border_color.a > 0u);
+    const bool has_scrollbar = is_scroll && eff_desc.show_scrollbar;
     const bool has_visual =
-        desc.background.a > 0u ||
-        desc.background_end.a > 0u ||
-        desc.radial_gradient ||
-        (desc.shadow_color.a > 0u && desc.shadow_blur > 0.0f) ||
-        desc.backdrop_blur > 0.0f ||
+        eff_desc.background.a > 0u ||
+        eff_desc.background_end.a > 0u ||
+        eff_desc.radial_gradient ||
+        (eff_desc.shadow_color.a > 0u && eff_desc.shadow_blur > 0.0f) ||
+        eff_desc.backdrop_blur > 0.0f ||
         has_border || focus_ring;
 
     BoxExtra* extra = nullptr;
-    if (has_visual || any_clip || is_floating_blocker || desc.id) {
+    if (has_visual || any_clip || is_floating_blocker || eff_desc.id) {
         extra = ctx->frame_arena.alloc<BoxExtra>();
         if (extra) {
-            extra->desc = desc;
+            extra->desc = eff_desc;
             extra->keyboard_focus_ring = focus_ring;
+            extra->focus_ring_color = thm.focus_ring;
+            extra->focus_ring_radius_px = thm.radius_small_px * 0.8f;
+            extra->scrollbar_track = thm.scrollbar_track;
+            extra->scrollbar_thumb = thm.scrollbar_thumb;
+            extra->scrollbar_thumb_hover = thm.scrollbar_thumb_hover;
+            extra->scrollbar_thumb_drag = thm.scrollbar_thumb_drag;
         }
     }
 
@@ -1754,8 +1773,12 @@ void text(Str content, const TextDesc& desc) noexcept {
         frac_px = 0xFFu;
     }
 
+    const Theme& thm = active_theme(ctx);
+    const Color eff_color = resolve_theme_color(desc.color, thm.text_primary);
+    const Color eff_sel_color = resolve_theme_color(desc.selection_color, thm.selection);
+
     Clay_TextElementConfig cfg = {};
-    cfg.textColor = to_clay_color(desc.color);
+    cfg.textColor = to_clay_color(eff_color);
     const uint16_t slot_bits = (desc.font_id < kMaxFontSlots) ? desc.font_id : kFontSans;
     cfg.fontId = static_cast<uint16_t>((slot_bits & 0x7Fu) | ((frac_px & 0xFFu) << 7));
     cfg.fontSize = static_cast<uint16_t>(int_px);
@@ -1771,7 +1794,7 @@ void text(Str content, const TextDesc& desc) noexcept {
         extra = ctx->frame_arena.alloc<SelectableTextExtra>();
         if (!extra) return;
         extra->full_utf8 = clay_str.chars; extra->total_bytes = content.length;
-        extra->selectable_id = desc.id; extra->selection_color = desc.selection_color;
+        extra->selectable_id = desc.id; extra->selection_color = eff_sel_color;
         cfg.userData = extra;
         register_selectable_text(ctx,desc.id,clay_str.chars,content.length,content.is_static);
     }
@@ -1813,6 +1836,10 @@ void text_spans(std::span<const TextSpan> spans, const RichTextDesc& desc) noexc
     if (!full_utf8 || !int_spans || !rich) {
         return;
     }
+
+    const Theme& thm = active_theme(ctx);
+    const Color base_color = resolve_theme_color(desc.color, thm.text_primary);
+    const Color eff_sel_color = resolve_theme_color(desc.selection_color, thm.selection);
 
     const float wscale = current_world_scale(ctx);
     const float base_px = clamp_range(
@@ -1883,7 +1910,7 @@ void text_spans(std::span<const TextSpan> spans, const RichTextDesc& desc) noexc
         int_spans[out_idx++] = RichSpanInternal{
             .byte_start = b0,
             .byte_end = b1,
-            .color = sp.color,
+            .color = resolve_theme_color(sp.color, base_color),
             .background = sp.background,
             .border_color = sp.border_color,
             .font_size_px = sp_px,
@@ -1911,13 +1938,13 @@ void text_spans(std::span<const TextSpan> spans, const RichTextDesc& desc) noexc
     rich->align_x = desc.align_x;
     rich->config_hash = cfg_hash;
     if (desc.selectable && desc.id) {
-        rich->selectable_id = desc.id; rich->selection_color = desc.selection_color;
+        rich->selectable_id = desc.id; rich->selection_color = eff_sel_color;
         register_selectable_text(ctx,desc.id,full_utf8,total_bytes,false);
     }
 
     Clay_TextElementConfig cfg = {};
     cfg.userData = rich;
-    cfg.textColor = to_clay_color(desc.color);
+    cfg.textColor = to_clay_color(base_color);
     cfg.fontId = static_cast<uint16_t>((cfg_hash & 0x7FFFu) | 0x8000u);
     cfg.fontSize = static_cast<uint16_t>(cfg_hash >> 16);
     cfg.letterSpacing = 0u;
@@ -2003,6 +2030,7 @@ void icon(const IconDesc& desc_in) noexcept {
     }
     const float wscale = current_world_scale(ctx);
     IconDesc desc = desc_in;
+    desc.color = resolve_theme_color(desc.color, active_theme(ctx).text_primary);
     const float layout_sz = ((desc.size_px > 0.0f) ? desc.size_px : 16.0f) * wscale;
 
     if (desc.id != 0u) {
@@ -2038,8 +2066,14 @@ void draw_rect(const RectDrawDesc& desc) noexcept {
     }
     Context* ctx = current_context();
     if (DrawCmdNode* node = append_open_box_draw_cmd(ctx, desc.foreground)) {
+        const Theme& thm = active_theme(ctx);
+        RectDrawDesc eff = desc;
+        eff.fill = resolve_theme_color(eff.fill, thm.bg_surface);
+        eff.fill_end = resolve_theme_color(eff.fill_end, thm.bg_elevated);
+        eff.border_color = resolve_theme_color(eff.border_color, thm.border_subtle);
+        eff.radius = resolve_theme_corners(eff.radius, Corners::all(thm.radius_panel_px));
         node->kind = DrawCmdKind::Rect;
-        node->rect = desc;
+        node->rect = eff;
     }
 }
 
@@ -2116,19 +2150,23 @@ void draw_area_series(const AreaSeriesDesc& desc) noexcept {
     cmds[n] = {.verb = PathVerb::LineTo, .p1 = {desc.points[n-1].x, desc.baseline_y}};
     cmds[n+1] = {.verb = PathVerb::LineTo, .p1 = {desc.points[0].x, desc.baseline_y}};
     cmds[n+2] = {.verb = PathVerb::Close};
-    if (desc.fill_top.a > 0u || desc.fill_bottom.a > 0u) {
+    const Theme& thm = active_theme(ctx);
+    const Color eff_fill_top = resolve_theme_color(desc.fill_top, thm.area_fill_top);
+    const Color eff_fill_bottom = resolve_theme_color(desc.fill_bottom, thm.area_fill_bottom);
+    const Color eff_line_color = resolve_theme_color(desc.line_color, thm.accent);
+    if (eff_fill_top.a > 0u || eff_fill_bottom.a > 0u) {
         if (DrawCmdNode* node = append_open_box_draw_cmd(ctx, desc.foreground)) {
             node->kind = DrawCmdKind::Fill;
-            node->fill_cmd = {.commands = {cmds,n+3}, .fill = desc.fill_top, .fill_end = desc.fill_bottom};
+            node->fill_cmd = {.commands = {cmds,n+3}, .fill = eff_fill_top, .fill_end = eff_fill_bottom};
         }
     }
     // Stroke only the data series, sharing the exact interpolation controls with the fill.
-    if (desc.line_thickness > 0.0f && desc.line_color.a > 0u) {
+    if (desc.line_thickness > 0.0f && eff_line_color.a > 0u) {
         for (size_t i = 1; i < n; ++i) {
             if (desc.smooth) draw_bezier({.p0 = desc.points[i-1], .p1 = cmds[i].p1, .p2 = cmds[i].p2,
-                .p3 = cmds[i].p3, .cubic = true, .color_start = desc.line_color,
+                .p3 = cmds[i].p3, .cubic = true, .color_start = eff_line_color,
                 .thickness = desc.line_thickness, .foreground = desc.foreground});
-            else draw_line({.from = desc.points[i-1], .to = desc.points[i], .color = desc.line_color,
+            else draw_line({.from = desc.points[i-1], .to = desc.points[i], .color = eff_line_color,
                 .thickness = desc.line_thickness, .foreground = desc.foreground});
         }
     }
@@ -2183,14 +2221,19 @@ void draw_ring(const RingDesc& desc) noexcept {
 }
 
 void draw_icon(const IconDrawDesc& desc) noexcept {
-    if (!std::isfinite(desc.angle_rad) || desc.icon_id >= kMaxVectorIcons || desc.color.a == 0u || desc.rect.w <= 0.0f || desc.rect.h <= 0.0f) {
+    Context* ctx = current_context();
+    if (!ctx || !std::isfinite(desc.angle_rad) || desc.icon_id >= kMaxVectorIcons || desc.rect.w <= 0.0f || desc.rect.h <= 0.0f) {
         return;
     }
-    Context* ctx = current_context();
-    if (DrawCmdNode* node = append_open_box_draw_cmd(ctx, desc.foreground)) {
+    IconDrawDesc eff = desc;
+    eff.color = resolve_theme_color(eff.color, active_theme(ctx).text_primary);
+    if (eff.color.a == 0u) {
+        return;
+    }
+    if (DrawCmdNode* node = append_open_box_draw_cmd(ctx, eff.foreground)) {
         node->kind = DrawCmdKind::Icon;
-        node->icon = desc;
-        if (std::fabs(desc.angle_rad) <= 1e-5f) node->icon.angle_rad = 0;
+        node->icon = eff;
+        if (std::fabs(node->icon.angle_rad) <= 1e-5f) node->icon.angle_rad = 0;
     }
 }
 
@@ -2204,11 +2247,15 @@ Vec2 measure_text(Str text, uint16_t font_id, float size, float letter_spacing) 
 
 void draw_text(const TextDrawDesc& desc) noexcept {
     Context* ctx = current_context();
-    if (!ctx || !desc.text.chars || desc.text.length == 0u || desc.size <= 0.0f || desc.color.a == 0u) {
+    if (!ctx || !desc.text.chars || desc.text.length == 0u || desc.size <= 0.0f) {
         return;
     }
-    if (DrawCmdNode* node = append_open_box_draw_cmd(ctx, desc.foreground)) {
-        TextDrawDesc copied = desc;
+    TextDrawDesc copied = desc;
+    copied.color = resolve_theme_color(desc.color, active_theme(ctx).text_primary);
+    if (copied.color.a == 0u) {
+        return;
+    }
+    if (DrawCmdNode* node = append_open_box_draw_cmd(ctx, copied.foreground)) {
         if (!desc.text.is_static) {
             copied.text = ctx->frame_arena.push_str(desc.text.chars, desc.text.length);
             if (!copied.text.chars) {
@@ -2643,11 +2690,22 @@ Rect ime_cursor_rect(const Context* ctx_arg) noexcept {
     return ctx ? ctx->active_ui->ime_cursor_logical : Rect{};
 }
 
-TextInputResult text_input(const TextInputDesc& desc) noexcept {
+TextInputResult text_input(const TextInputDesc& desc_in) noexcept {
     Context* ctx = current_context();
     if (!ctx || !ctx->in_frame) {
         return TextInputResult{};
     }
+    const Theme& thm = active_theme(ctx);
+    TextInputDesc desc = desc_in;
+    desc.text_color = resolve_theme_color(desc.text_color, thm.text_body);
+    desc.placeholder_color = resolve_theme_color(desc.placeholder_color, thm.text_disabled);
+    desc.selection_color = resolve_theme_color(desc.selection_color, thm.selection);
+    desc.caret_color = resolve_theme_color(desc.caret_color, thm.accent);
+    desc.composition_color = resolve_theme_color(desc.composition_color, thm.warning);
+    desc.background = resolve_theme_color(desc.background, thm.bg_input);
+    desc.border_color = resolve_theme_color(desc.border_color, thm.border_input);
+    desc.focus_border_color = resolve_theme_color(desc.focus_border_color, thm.accent);
+    desc.radius = resolve_theme_corners(desc.radius, Corners::all(thm.radius_input_px));
 
     WidgetState* ws = nullptr;
     if (desc.id != 0u) {
@@ -2734,18 +2792,40 @@ TextInputResult text_input(const TextInputDesc& desc) noexcept {
         }
     }
 
+    const float active_wrap_w = (desc.multiline && desc.word_wrap)
+        ? ((ws && ws->edit_wrap_width > 0.0f)
+            ? ws->edit_wrap_width
+            : ((ws && ws->last_box_logical.w > 0.0f)
+                ? text_input_wrap_width(desc, compute_text_inner_geom(ws->last_box_logical, desc))
+                : ((desc.width.kind == SizingKind::Fixed && desc.width.value > 0.0f)
+                    ? text_input_wrap_width(desc, compute_text_inner_geom(Rect{ 0.0f, 0.0f, desc.width.value, 100.0f }, desc))
+                    : 0.0f)))
+        : 0.0f;
+    if (ws && active_wrap_w <= 0.0f) {
+        ws->edit_wrap_affinity = false;
+    }
+
     // Pointer click / double-word / triple-line / drag selection
     if (ws && ws->last_box_logical.w > 0.0f && desc.id != 0u) {
         const TextInnerGeom prev_geom = compute_text_inner_geom(ws->last_box_logical, desc);
-        const float local_x = ctx->active_ui->pointer_pos.x - prev_geom.origin_x + ws->edit_scroll_x;
+        const float ptr_wrap_w = (active_wrap_w > 0.0f) ? active_wrap_w : text_input_wrap_width(desc, prev_geom);
+        const float local_x = ctx->active_ui->pointer_pos.x - prev_geom.origin_x +
+            ((ptr_wrap_w > 0.0f) ? 0.0f : ws->edit_scroll_x);
         const float local_y = ctx->active_ui->pointer_pos.y - prev_geom.origin_y + ws->edit_scroll_y;
         const Str cur_text = { buf ? buf : "", len };
 
         if (ws->pressed_this_frame) {
             ctx->active_ui->caret_blink_on = true;
             ctx->active_ui->caret_blink_cycles = 0u;
-            uint32_t hit_byte = visual_point_to_byte(ctx, desc, cur_text, local_x, local_y);
-            if (hit_byte && hit_byte < len) { const uint32_t previous=utf8_prev_grapheme(buf,len,hit_byte); if(utf8_next_grapheme(buf,len,previous)!=hit_byte)hit_byte=previous; }
+            bool hit_aff = false;
+            uint32_t hit_byte = visual_point_to_byte(ctx, desc, cur_text, local_x, local_y, ptr_wrap_w, &hit_aff);
+            if (hit_byte && hit_byte < len) {
+                const uint32_t previous = utf8_prev_grapheme(buf, len, hit_byte);
+                if (utf8_next_grapheme(buf, len, previous) != hit_byte) {
+                    hit_byte = previous;
+                    hit_aff = false;
+                }
+            }
             if (ctx->active_ui->last_mouse_clicks >= 3u) {
                 if (desc.multiline) {
                     line_bounds_at(buf, len, hit_byte, &anchor, &cursor);
@@ -2753,19 +2833,30 @@ TextInputResult text_input(const TextInputDesc& desc) noexcept {
                     anchor = 0u;
                     cursor = len;
                 }
+                ws->edit_wrap_affinity = false;
             } else if (ctx->active_ui->last_mouse_clicks == 2u) {
                 utf8_word_bounds_at(buf, len, hit_byte, &anchor, &cursor);
+                ws->edit_wrap_affinity = false;
             } else {
                 const bool shift_held = (ctx->active_ui->frame_key_mods & Mod_Shift) != 0u;
                 if (!shift_held) {
                     anchor = hit_byte;
                 }
                 cursor = hit_byte;
+                ws->edit_wrap_affinity = (ptr_wrap_w > 0.0f) && hit_aff;
             }
             ws->edit_preferred_x = -1.0f;
         } else if (ctx->active_ui->active_id == desc.id && ws->pressed_down) {
-            cursor = visual_point_to_byte(ctx, desc, cur_text, local_x, local_y);
-            if(cursor && cursor<len){const uint32_t previous=utf8_prev_grapheme(buf,len,cursor);if(utf8_next_grapheme(buf,len,previous)!=cursor)cursor=previous;}
+            bool drag_aff = false;
+            cursor = visual_point_to_byte(ctx, desc, cur_text, local_x, local_y, ptr_wrap_w, &drag_aff);
+            if (cursor && cursor < len) {
+                const uint32_t previous = utf8_prev_grapheme(buf, len, cursor);
+                if (utf8_next_grapheme(buf, len, previous) != cursor) {
+                    cursor = previous;
+                    drag_aff = false;
+                }
+            }
+            ws->edit_wrap_affinity = (ptr_wrap_w > 0.0f) && drag_aff;
             ws->edit_preferred_x = -1.0f;
             request_redraw(ctx);
         }
@@ -2787,7 +2878,10 @@ TextInputResult text_input(const TextInputDesc& desc) noexcept {
     while (writable && a11y_take(desc.id, A11yAction::SetValue, &command)) {
         cursor = anchor = insert_utf8_filtered(buf, cap, &len, 0u, len, Str{command.text, command.length}, desc.multiline);
         record_edit(0u);
-        if (ws) ws->edit_preferred_x = -1.0f;
+        if (ws) {
+            ws->edit_preferred_x = -1.0f;
+            ws->edit_wrap_affinity = false;
+        }
         replaced_by_a11y = true;
     }
     if (replaced_by_a11y && is_focused) {
@@ -2819,6 +2913,7 @@ TextInputResult text_input(const TextInputDesc& desc) noexcept {
                     }
                     if (ws) {
                         ws->edit_preferred_x = -1.0f;
+                        ws->edit_wrap_affinity = false;
                     }
                 }
                 continue;
@@ -2839,6 +2934,7 @@ TextInputResult text_input(const TextInputDesc& desc) noexcept {
                     cursor = len;
                     if (ws) {
                         ws->edit_preferred_x = -1.0f;
+                        ws->edit_wrap_affinity = false;
                     }
                     continue;
                 }
@@ -2849,6 +2945,7 @@ TextInputResult text_input(const TextInputDesc& desc) noexcept {
                                 changed = true;
                                 if (ws) {
                                     ws->edit_preferred_x = -1.0f;
+                                    ws->edit_wrap_affinity = false;
                                 }
                             }
                         } else if (shift && (undo_slot->cur + 1u) < undo_slot->count) {
@@ -2856,6 +2953,7 @@ TextInputResult text_input(const TextInputDesc& desc) noexcept {
                                 changed = true;
                                 if (ws) {
                                     ws->edit_preferred_x = -1.0f;
+                                    ws->edit_wrap_affinity = false;
                                 }
                             }
                         }
@@ -2868,6 +2966,7 @@ TextInputResult text_input(const TextInputDesc& desc) noexcept {
                             changed = true;
                             if (ws) {
                                 ws->edit_preferred_x = -1.0f;
+                                ws->edit_wrap_affinity = false;
                             }
                         }
                     }
@@ -2887,6 +2986,7 @@ TextInputResult text_input(const TextInputDesc& desc) noexcept {
                         record_edit(0u);
                         if (ws) {
                             ws->edit_preferred_x = -1.0f;
+                            ws->edit_wrap_affinity = false;
                         }
                     }
                     continue;
@@ -2905,6 +3005,7 @@ TextInputResult text_input(const TextInputDesc& desc) noexcept {
                             }
                             if (ws) {
                                 ws->edit_preferred_x = -1.0f;
+                                ws->edit_wrap_affinity = false;
                             }
                         }
                     }
@@ -2927,6 +3028,7 @@ TextInputResult text_input(const TextInputDesc& desc) noexcept {
                     }
                     if (ws) {
                         ws->edit_preferred_x = -1.0f;
+                        ws->edit_wrap_affinity = false;
                     }
                     break;
                 case SDLK_RIGHT:
@@ -2943,12 +3045,18 @@ TextInputResult text_input(const TextInputDesc& desc) noexcept {
                     }
                     if (ws) {
                         ws->edit_preferred_x = -1.0f;
+                        ws->edit_wrap_affinity = false;
                     }
                     break;
                 case SDLK_HOME: {
-                    uint32_t ls = 0u;
-                    uint32_t le = 0u;
-                    if (desc.multiline && !primary) {
+                    bool new_aff = false;
+                    if (desc.multiline && !primary && active_wrap_w > 0.0f) {
+                        text_wrapped_home_end(
+                            ctx, desc, Str{ buf ? buf : "", len }, cursor,
+                            ws ? ws->edit_wrap_affinity : false, false, active_wrap_w, &cursor, &new_aff);
+                    } else if (desc.multiline && !primary) {
+                        uint32_t ls = 0u;
+                        uint32_t le = 0u;
                         line_bounds_at(buf, len, cursor, &ls, &le);
                         cursor = ls;
                     } else {
@@ -2959,13 +3067,19 @@ TextInputResult text_input(const TextInputDesc& desc) noexcept {
                     }
                     if (ws) {
                         ws->edit_preferred_x = -1.0f;
+                        ws->edit_wrap_affinity = new_aff;
                     }
                     break;
                 }
                 case SDLK_END: {
-                    uint32_t ls = 0u;
-                    uint32_t le = 0u;
-                    if (desc.multiline && !primary) {
+                    bool new_aff = false;
+                    if (desc.multiline && !primary && active_wrap_w > 0.0f) {
+                        text_wrapped_home_end(
+                            ctx, desc, Str{ buf ? buf : "", len }, cursor,
+                            ws ? ws->edit_wrap_affinity : false, true, active_wrap_w, &cursor, &new_aff);
+                    } else if (desc.multiline && !primary) {
+                        uint32_t ls = 0u;
+                        uint32_t le = 0u;
                         line_bounds_at(buf, len, cursor, &ls, &le);
                         cursor = le;
                     } else {
@@ -2976,6 +3090,7 @@ TextInputResult text_input(const TextInputDesc& desc) noexcept {
                     }
                     if (ws) {
                         ws->edit_preferred_x = -1.0f;
+                        ws->edit_wrap_affinity = new_aff;
                     }
                     break;
                 }
@@ -2985,7 +3100,7 @@ TextInputResult text_input(const TextInputDesc& desc) noexcept {
                         ws->edit_cursor = cursor;
                         ws->edit_sel_anchor = anchor;
                         move_caret_vertical(
-                            ctx, desc, Str{ buf ? buf : "", len }, ws, (op.key == SDLK_UP) ? -1 : 1, shift);
+                            ctx, desc, Str{ buf ? buf : "", len }, ws, (op.key == SDLK_UP) ? -1 : 1, shift, active_wrap_w);
                         cursor = ws->edit_cursor;
                         anchor = ws->edit_sel_anchor;
                     }
@@ -3008,6 +3123,7 @@ TextInputResult text_input(const TextInputDesc& desc) noexcept {
                         }
                         if (ws) {
                             ws->edit_preferred_x = -1.0f;
+                            ws->edit_wrap_affinity = false;
                         }
                     }
                     break;
@@ -3029,6 +3145,7 @@ TextInputResult text_input(const TextInputDesc& desc) noexcept {
                         }
                         if (ws) {
                             ws->edit_preferred_x = -1.0f;
+                            ws->edit_wrap_affinity = false;
                         }
                     }
                     break;
@@ -3046,6 +3163,7 @@ TextInputResult text_input(const TextInputDesc& desc) noexcept {
                             }
                             if (ws) {
                                 ws->edit_preferred_x = -1.0f;
+                                ws->edit_wrap_affinity = false;
                             }
                         }
                     } else {
@@ -3056,6 +3174,9 @@ TextInputResult text_input(const TextInputDesc& desc) noexcept {
                     if (has_sel) {
                         anchor = cursor;
                     }
+                    if (ws) {
+                        ws->edit_wrap_affinity = false;
+                    }
                     break;
                 default:
                     break;
@@ -3063,11 +3184,18 @@ TextInputResult text_input(const TextInputDesc& desc) noexcept {
         }
     }
 
-    cursor = utf8_clamp_boundary(buf, len, cursor);
+    const uint32_t clamped_cursor = utf8_clamp_boundary(buf, len, cursor);
+    if (ws && clamped_cursor != cursor) {
+        ws->edit_wrap_affinity = false;
+    }
+    cursor = clamped_cursor;
     anchor = utf8_clamp_boundary(buf, len, anchor);
     if (ws) {
         ws->edit_cursor = cursor;
         ws->edit_sel_anchor = anchor;
+        if (active_wrap_w > 0.0f) {
+            ws->edit_scroll_x = 0.0f;
+        }
     }
 
     const Str committed_slice = (buf && len > 0u) ? ctx->frame_arena.push_str(buf, len) : Str{};
