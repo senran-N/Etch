@@ -228,7 +228,8 @@ VarVirtualListCache* prepare_vlist_raw(
     float gap,
     VirtualItemHeightFn measure_fn,
     void* user_data,
-    bool uncapped = false) noexcept
+    bool uncapped = false,
+    EtchCVirtualItemHeightFn c_measure_fn = nullptr) noexcept
 {
     auto* c = find_vlist(ui, list_id);
     if (!c) {
@@ -242,9 +243,9 @@ VarVirtualListCache* prepare_vlist_raw(
         }
         c = &ui->vlists[ui->vlist_count++]; *c = {};
     }
-    if (c->list_id == 0 || c->item_count != item_count || c->default_height != h || c->gap_px != gap || c->measure_fn != measure_fn || c->measure_user_data != user_data || c->uncapped_heights != uncapped) {
+    if (c->list_id == 0 || c->item_count != item_count || c->default_height != h || c->gap_px != gap || c->measure_fn != measure_fn || c->c_measure_fn != c_measure_fn || c->measure_user_data != user_data || c->uncapped_heights != uncapped) {
         free_vlist(c); c->list_id = list_id; c->item_count = item_count; c->chunk_count = item_count / 256 + (item_count % 256 != 0);
-        c->default_height = h; c->gap_px = gap; c->measure_fn = measure_fn; c->measure_user_data = user_data; c->uncapped_heights = uncapped;
+        c->default_height = h; c->gap_px = gap; c->measure_fn = measure_fn; c->c_measure_fn = c_measure_fn; c->measure_user_data = user_data; c->uncapped_heights = uncapped;
         c->chunks = static_cast<float**>(std::calloc(c->chunk_count ? c->chunk_count : 1, sizeof(float*)));
         c->fenwick = static_cast<double*>(std::calloc(size_t(c->chunk_count) + 1, sizeof(double)));
         if (!c->chunks || !c->fenwick) { std::free(c->chunks); std::free(c->fenwick); *c = {}; return nullptr; }
@@ -252,8 +253,14 @@ VarVirtualListCache* prepare_vlist_raw(
     }
     return c;
 }
-VarVirtualListCache* prepare_vlist(WindowUiState* ui, const VirtualListDesc& d, float h, float gap) noexcept {
-    return prepare_vlist_raw(ui, d.id, d.item_count, h, gap, d.measure_height_fn, d.measure_user_data, false);
+VarVirtualListCache* prepare_vlist(
+    WindowUiState* ui,
+    const VirtualListDesc& d,
+    float h,
+    float gap,
+    EtchCVirtualItemHeightFn c_measure_fn = nullptr) noexcept
+{
+    return prepare_vlist_raw(ui, d.id, d.item_count, h, gap, d.measure_height_fn, d.measure_user_data, false, c_measure_fn);
 }
 bool vlist_ensure_chunk(VarVirtualListCache* c, uint32_t chunk) noexcept {
     if (c->chunks[chunk]) return true;
@@ -261,7 +268,9 @@ bool vlist_ensure_chunk(VarVirtualListCache* c, uint32_t chunk) noexcept {
     uint32_t count = c->item_count - chunk*256; if (count > 256) count = 256;
     double delta = 0;
     for (uint32_t i = 0; i < count; ++i) {
-        float h = c->measure_fn ? c->measure_fn(chunk*256+i,c->measure_user_data) : c->default_height;
+        float h = c->measure_fn
+            ? c->measure_fn(chunk*256+i,c->measure_user_data)
+            : (c->c_measure_fn ? c->c_measure_fn(chunk*256+i,c->measure_user_data) : c->default_height);
         h = std::isfinite(h) ? (c->uncapped_heights ? std::fmax(h, 1.0f) : clamp_range(h, 1.0f, 16384.0f)) : c->default_height;
         heights[i] = h; delta += double(h)-c->default_height;
     }
@@ -362,7 +371,13 @@ void virtual_list_invalidate_heights(uint32_t id) noexcept {
     c->dirty = true; request_redraw(ctx);
 }
 
+VirtualListSlice begin_virtual_list_with_c_measure(const VirtualListDesc& desc, EtchCVirtualItemHeightFn c_measure_fn) noexcept;
+
 VirtualListSlice begin_virtual_list(const VirtualListDesc& desc) noexcept {
+    return begin_virtual_list_with_c_measure(desc, nullptr);
+}
+
+VirtualListSlice begin_virtual_list_with_c_measure(const VirtualListDesc& desc, EtchCVirtualItemHeightFn c_measure_fn) noexcept {
     Context* ctx = current_context();
     if (!ctx || !ctx->in_frame || desc.id == 0u) {
         return VirtualListSlice{};
@@ -377,8 +392,8 @@ VirtualListSlice begin_virtual_list(const VirtualListDesc& desc) noexcept {
     const float gap_px = static_cast<float>(gap_u16);
     const double stride = static_cast<double>(item_h) + static_cast<double>(gap_px);
 
-    auto* cache = (desc.variable_height || desc.measure_height_fn) ? prepare_vlist(ctx->active_ui,desc,item_h,gap_px) : nullptr;
-    if (!desc.variable_height && !desc.measure_height_fn) { auto* stale = find_vlist(ctx->active_ui,desc.id); if (stale) free_vlist(stale); }
+    auto* cache = (desc.variable_height || desc.measure_height_fn || c_measure_fn) ? prepare_vlist(ctx->active_ui,desc,item_h,gap_px,c_measure_fn) : nullptr;
+    if (!desc.variable_height && !desc.measure_height_fn && !c_measure_fn) { auto* stale = find_vlist(ctx->active_ui,desc.id); if (stale) free_vlist(stale); }
 
     ws->is_user_element = true;
     ws->is_scroll_x = false;

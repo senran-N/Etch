@@ -1,21 +1,31 @@
-# Etch v0.5.0
+# Etch v0.9.0
 
 Etch is a Pure-GPU UI Engine for desktop applications on Windows, Linux, and
 macOS. It combines immediate UI construction, Clay layout, Unicode text
-handling, and SDL3 GPU rendering. The sandbox is the regression harness;
-Etch Studio demonstrates docking, tables, trees, and a virtual editor.
+handling, a pure C99 ABI facade (`<etch/etch_c.h>`), and SDL3 GPU rendering. The
+sandbox is the regression harness; Etch Studio demonstrates docking, tables,
+trees, themes, and a virtual editor.
 
 ## Architecture
 
-- Orthodox C++20, without exceptions or RTTI. The engine compiles as one
-  translation unit, [src/etch_unity.cpp](src/etch_unity.cpp).
-- GPU geometry uses 64-byte, `alignas(16)` `etch::Prim` records. UI geometry
-  and glyphs batch into 1–3 draw calls per window UI pass through
+- Orthodox C++20, without exceptions or RTTI, plus a zero-heap pure C99 ABI
+  header ([include/etch/etch_c.h](include/etch/etch_c.h)). The engine compiles as
+  one translation unit, [src/etch_unity.cpp](src/etch_unity.cpp), keeping total
+  core source under 30,000 lines.
+- GPU geometry uses 64-byte, `alignas(16)` `etch::Prim` (`EtchPrim`) records.
+  UI geometry, glyphs, and small sprite thumbnails/images packed into the
+  dynamic sprite atlas batch into 1–3 draw calls per window UI pass through
   [etch_uber.hlsl](shaders/etch_uber.hlsl); [etch_kawase.hlsl](shaders/etch_kawase.hlsl)
-  handles backdrop blur and presentation. Blur adds downsample/upsample passes.
+  handles backdrop blur and presentation. Native RGBA/PNG/JPEG/GIF/TGA/BMP
+  decoding feeds both sprites and zero-copy `SDL_GPUTexture*` slots.
 - HarfBuzz shapes text; [src/etch_slug.cpp](src/etch_slug.cpp) extracts Slug
-  GPU Bezier contours and bands. Scalable glyphs use contours rather than
-  bitmap font atlases. Built-in bold and monospace fonts load on demand.
+  GPU Bezier contours and bands, [src/etch_emoji.cpp](src/etch_emoji.cpp) provides
+  color emoji fallbacks (`COLR v0`, `CBDT`, `sbix`), and multiline `text_input` /
+  `code_editor` support soft word-wrapping plus semantic `Theme` tokens.
+- [src/etch_a11y.cpp](src/etch_a11y.cpp) and [src/etch_a11y_os.cpp](src/etch_a11y_os.cpp)
+  expose zero-heap A11y snapshots/actions, smooth live window resize,
+  multi-monitor DPI sync, and optional OS accessibility bridges (Windows UIA,
+  macOS NSAccessibility, Linux AT-SPI).
 - `etch::Arena` supplies frame temporaries with O(1) reset and zero steady-state
   per-frame heap churn. Initialization and explicit/geometric capacity growth
   may allocate.
@@ -75,17 +85,18 @@ ETCH_GPU_DRIVER=metal ./build/sandbox --headless
 
 ## Verification
 
-CI builds all targets and runs these six suites without requiring a GPU:
+CI builds all targets and runs these seven suites without requiring a GPU:
 
 ```sh
-ctest --test-dir build --output-on-failure -R "^(repo_guardrails|downstream_consumers|arena_and_elasticity|unicode_bidi_grapheme|layout_clay_flex_grid|fenwick_virtual_list_1m)$"
+ctest --test-dir build --output-on-failure -R "^(repo_guardrails|downstream_consumers|arena_and_elasticity|unicode_bidi_grapheme|layout_clay_flex_grid|fenwick_virtual_list_1m|c99_abi_smoke)$"
 ```
 
-With tests and installation enabled, full CTest runs ten suites, including GPU
-invariants. `repo_guardrails` checks architecture, versions, artifacts and OSS
-notices; `downstream_consumers` installs Etch and builds/runs strict public-API
-consumers using both `find_package` and `add_subdirectory`. The four core CPU
-suites have a 5s timeout, guardrails 10s, and downstream consumers 120s.
+With tests and installation enabled, full CTest runs eleven suites, including GPU
+invariants. `repo_guardrails` checks architecture, 30,000-line core LOC ceiling,
+versions, pure C99 header includes, artifacts and OSS notices;
+`downstream_consumers` installs Etch and builds/runs strict C++20 and pure C99
+public-API consumers using both `find_package` and `add_subdirectory`. The five
+core CPU suites have a 5s timeout, guardrails 10s, and downstream consumers 120s.
 CI also requires a clean working tree and zero PNG files in the repository root.
 `--headless` renders
 offscreen and writes `frame_check.png` in the working directory; it still
@@ -104,14 +115,18 @@ Remove-Item Env:ETCH_GPU_DRIVER
 
 ## Consume with CMake
 
-Add Etch as a subdirectory and include `<etch/etch.h>`:
+Add Etch as a subdirectory and include `<etch/etch.h>` (C++20) or `<etch/etch_c.h>` (pure C99):
 
 ```cmake
 cmake_minimum_required(VERSION 3.24)
-project(my_app LANGUAGES CXX)
+project(my_app LANGUAGES C CXX)
 add_subdirectory(external/Etch)
 add_executable(my_app main.cpp)
 target_link_libraries(my_app PRIVATE Etch::etch)
+
+add_executable(my_c_app main.c)
+set_target_properties(my_c_app PROPERTIES C_STANDARD 99 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
+target_link_libraries(my_c_app PRIVATE Etch::etch)
 ```
 
 `ETCH_BUILD_EXAMPLES` and `ETCH_BUILD_TESTS` default to OFF for subprojects
@@ -138,8 +153,8 @@ configuring the consumer. If installation was disabled, reconfigure Etch with
 
 ```cmake
 cmake_minimum_required(VERSION 3.24)
-project(my_app LANGUAGES CXX)
-find_package(Etch 0.5 CONFIG REQUIRED)
+project(my_app LANGUAGES C CXX)
+find_package(Etch 0.9 CONFIG REQUIRED)
 add_executable(my_app main.cpp)
 target_link_libraries(my_app PRIVATE Etch::etch)
 ```

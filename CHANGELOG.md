@@ -4,6 +4,15 @@ All notable changes to Etch are documented here. This file follows
 [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-11-16
+
+### Added
+- **Pure C99 ABI (`<etch/etch_c.h>` & `src/etch_c.cpp`)**: Added zero-allocation, strict ISO C99 public ABI header `include/etch/etch_c.h` (coexisting cleanly with C++20 `<etch/etch.h>`, restricted strictly to `<stdbool.h>`, `<stddef.h>`, `<stdint.h>`) and unity implementation `src/etch_c.cpp`, exposing `EtchContext`, `EtchArena`, `EtchTheme`, layout containers, widgets, sprites/textures, 2D vector drawing, `EtchTextBuffer`/`etch_code_editor`, 1M-row virtual lists, `DockSpace`/`Table`/`Tree`/`Canvas`, multi-window chrome/refresh callbacks, and A11y inspection/action APIs for C, Rust, Zig, Go, C#, Python, and Lua bindings.
+- **C99 Conformance & Core Size Lock**: Added strict C99 verification executable `tests/etch_c_abi_tests.c` (CTest `c99_abi_smoke`), C99 downstream consumer verification `tests/consumer_smoke/main_c.c` under both `find_package(Etch)` and `add_subdirectory(...)`, `etch_c.h` version/header-purity checks, and a hard `<= 30,000` line total core engine ceiling in `cmake/check_repo_guardrails.cmake`.
+
+### Changed
+- **Pre-1.0 Governance Sync**: Updated `README.md`, `CLAUDE.md`, `AGENTS.md`, and `.github/workflows/ci.yml` to reflect `v0.6.0`–`v0.9.0` capabilities, 11 CTest verification suites, and the `<= 30,000` core LOC lock.
+
 ## [0.8.0] - 2026-11-16
 
 ### Added

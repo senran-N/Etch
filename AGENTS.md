@@ -24,14 +24,14 @@ You are valued for C++ systems precision, NOT defensive boilerplate. Apply rigor
 
 ## 3. Verification Discipline
 - All fixes must compile with `/W4 /permissive- /GR- /EHs-c- /utf-8` (0 warnings) and pass `sandbox.exe --headless` visual & assertion checks on both D3D12 and Vulkan.
-- Run `ctest --test-dir build --output-on-failure`, including `repo_guardrails` and, when installation is enabled, `downstream_consumers`. The four core CPU suites have a 5s timeout; repository checks have 10s and downstream consumer checks have 120s.
+- Run `ctest --test-dir build --output-on-failure`, including `c99_abi_smoke`, `repo_guardrails` and, when installation is enabled, `downstream_consumers` (11 suites total). The five core CPU suites (`arena_and_elasticity`, `unicode_bidi_grapheme`, `layout_clay_flex_grid`, `fenwick_virtual_list_1m`, `c99_abi_smoke`) have a 5s timeout; repository checks have 10s and downstream consumer checks (covering both C++20 `main.cpp` and C99 `main_c.c`) have 120s.
 - Before committing, run `codex review --uncommitted` and FlowGuard `flow_verify`. After committing verified work, `git status --porcelain` must be empty; remove transient screenshots from the repository root even if ignored.
 
 ## 4. Architecture, Packaging & Anti-Toy Guardrails
-- File ceilings: `src/*.cpp <= 4000` lines, `include/etch/*.h <= 2500` lines, `examples/*.cpp <= 3200` lines. Split cohesive modules before exceeding these caps.
+- Ceilings: total core engine LOC (`include/etch/*.h`, `src/*.cpp`, `src/*.h`, `shaders/*.hlsl`) `<= 30000` lines; per-file caps `src/*.cpp <= 4000` lines, `include/etch/*.h <= 2500` lines, `examples/*.cpp <= 3200` lines. Split cohesive modules before exceeding these caps.
 - Keep zero `.h`/`.hpp` files in `examples/`; shared regression checks belong in `tests/` and engine internals in `src/`.
-- Public headers expose only the public API: no `inject_` hooks, internal testing headers, Clay/stb/HarfBuzz includes, or forbidden STL headers. Keep private include paths private in both installed and `add_subdirectory` consumers.
-- Follow SemVer 2.0.0. `project(etch VERSION ...)` and public `ETCH_VERSION_*` macros are the matching Single Source of Truth, with a matching changelog heading. Compose runtime version labels from `ETCH_VERSION_STRING`; never hardcode version literals in source/tests.
+- Public headers expose only the public API: no `inject_` hooks, internal testing headers, Clay/stb/HarfBuzz includes, or forbidden STL headers. `include/etch/etch_c.h` must remain strict C99 and include only `<stdbool.h>`, `<stddef.h>`, and `<stdint.h>`. Keep private include paths private in both installed and `add_subdirectory` consumers.
+- Follow SemVer 2.0.0. `project(etch VERSION ...)` and public `ETCH_VERSION_*` macros in both `include/etch/etch.h` and `include/etch/etch_c.h` are the matching Single Source of Truth, with a matching changelog heading. Compose runtime version labels from `ETCH_VERSION_STRING`; never hardcode version literals in source/tests.
 - Use out-of-source builds. Builds, installs, tests and reviews must preserve worktree cleanliness: no root PNGs, no source-tree `*.vectors.png`, no tracked build artifacts. Keep local CI caches in ignored `/.ci/`.
 - Keep `LICENSE`, `THIRD_PARTY_NOTICES.md`, `README.md`, `CHANGELOG.md`, `CLAUDE.md`, and `AGENTS.md` nonempty. Cover every `third_party/*` dependency in `THIRD_PARTY_NOTICES.md` (dotfiles and the local `dxc` tool directory are excluded).
 - Verify positive and negative cases: valid repositories and both downstream consumption paths must pass, while deliberate rule violations in isolated temporary fixtures must fail with the offending file and rule. Never inject failures into tracked source files.

@@ -81,3 +81,4 @@
 #include "etch_a11y.cpp"
 #include "etch_a11y_os.cpp"
 #include "etch_gpu.cpp"
+#include "etch_c.cpp"

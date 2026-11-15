@@ -61,11 +61,16 @@ endif ()
 cmake_path(IS_ABSOLUTE _incdir _incdir_absolute)
 if (_incdir_absolute)
     set(_installed_header "${_incdir}/etch/etch.h")
+    set(_installed_c_header "${_incdir}/etch/etch_c.h")
 else ()
     set(_installed_header "${WORK_DIR}/install/${_incdir}/etch/etch.h")
+    set(_installed_c_header "${WORK_DIR}/install/${_incdir}/etch/etch_c.h")
 endif ()
 if (NOT EXISTS "${_installed_header}")
     message(FATAL_ERROR "Installed public header missing: ${_installed_header}")
+endif ()
+if (NOT EXISTS "${_installed_c_header}")
+    message(FATAL_ERROR "Installed public C99 header missing: ${_installed_c_header}")
 endif ()
 file(GLOB_RECURSE _private_headers "${WORK_DIR}/install/*etch_testing.h")
 if (_private_headers)
@@ -109,6 +114,31 @@ if (WIN32)
                 $<$<BOOL:$<TARGET_RUNTIME_DLLS:@TARGET@>>:$<TARGET_FILE_DIR:@TARGET@>>
         COMMAND_EXPAND_LISTS VERBATIM)
 endif ()
+
+add_executable(@TARGET@_c "@ETCH_TEST_REPO_ROOT@/tests/consumer_smoke/main_c.c")
+set_target_properties(@TARGET@_c PROPERTIES
+    C_STANDARD 99
+    C_STANDARD_REQUIRED ON
+    C_EXTENSIONS OFF)
+if (CMAKE_C_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC" OR (NOT CMAKE_C_COMPILER_FRONTEND_VARIANT AND MSVC))
+    target_compile_options(@TARGET@_c PRIVATE /W4 /WX /permissive- /utf-8)
+else ()
+    target_compile_options(@TARGET@_c PRIVATE -Wall -Wextra -Wpedantic -Werror)
+endif ()
+target_link_libraries(@TARGET@_c PRIVATE Etch::etch)
+set_target_properties(@TARGET@_c PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "@BIN_DIR@"
+    RUNTIME_OUTPUT_DIRECTORY_RELEASE "@BIN_DIR@"
+    RUNTIME_OUTPUT_DIRECTORY_DEBUG "@BIN_DIR@"
+    RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO "@BIN_DIR@"
+    RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL "@BIN_DIR@")
+if (WIN32)
+    add_custom_command(TARGET @TARGET@_c POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E $<IF:$<BOOL:$<TARGET_RUNTIME_DLLS:@TARGET@_c>>,copy_if_different,true>
+                $<TARGET_RUNTIME_DLLS:@TARGET@_c>
+                $<$<BOOL:$<TARGET_RUNTIME_DLLS:@TARGET@_c>>:$<TARGET_FILE_DIR:@TARGET@_c>>
+        COMMAND_EXPAND_LISTS VERBATIM)
+endif ()
 ]=])
 set(_find_prelude [=[
 cmake_minimum_required(VERSION 3.24)
@@ -126,7 +156,7 @@ foreach(_option ETCH_BUILD_EXAMPLES ETCH_BUILD_TESTS ETCH_INSTALL)
         message(FATAL_ERROR "${_option} must default to OFF for subprojects")
     endif ()
 endforeach()
-if (TARGET sandbox OR TARGET etch_studio OR TARGET etch_tests)
+if (TARGET sandbox OR TARGET etch_studio OR TARGET etch_tests OR TARGET etch_c_abi_tests)
     message(FATAL_ERROR "Etch subproject created example/test targets by default")
 endif ()
 ]=])
@@ -150,6 +180,7 @@ foreach(_phase find_pkg add_sub)
     run_checked("${CMAKE_COMMAND}" -S "${WORK_DIR}/${_phase}" -B "${WORK_DIR}/${_phase}/build" ${_configure_args})
     run_checked("${CMAKE_COMMAND}" --build "${WORK_DIR}/${_phase}/build" --parallel ${_config_args})
     run_checked("${BIN_DIR}/${TARGET}${_exe}")
+    run_checked("${BIN_DIR}/${TARGET}_c${_exe}")
 endforeach()
 file(REMOVE_RECURSE "${WORK_DIR}")
 message(STATUS "Installed and add_subdirectory consumers passed")

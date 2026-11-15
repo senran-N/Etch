@@ -1,13 +1,14 @@
-# CLAUDE.md — Etch Architecture Constitution (v0.5.0)
+# CLAUDE.md — Etch Architecture Constitution (v0.9.0)
 
 ## 1. Project Identity & End-State Goals
-- **Codename**: `Etch` (Namespace `etch::`, Macro prefix `ETCH_`, Library `etch` / `libetch`)
+- **Codename**: `Etch` (Namespace `etch::`, C ABI prefix `etch_` / `Etch`, Macro prefix `ETCH_`, Library `etch` / `libetch`)
 - **Permanent architectural invariants**:
-  - Orthodox C++20 zero-overhead purity, built as the single translation unit `etch_unity.cpp`.
+  - Orthodox C++20 zero-overhead core with a zero-heap pure C99 ABI facade (`include/etch/etch_c.h` + `src/etch_c.cpp`), built as the single translation unit `etch_unity.cpp`.
+  - Total core engine LOC (`include/etch/*.h`, `src/*.cpp`, `src/*.h`, `shaders/*.hlsl`) permanently locked at **<= 30,000 lines**.
   - Steady-state zero per-frame heap allocation: `etch::Arena` has O(1) reset; explicit/geometric capacity reserve occurs only at documented overflow boundaries.
-  - 64-byte `alignas(16)` `etch::Prim`; 1–3 GPU draw calls per window UI pass, exactly 1 at idle without blur/external textures.
+  - 64-byte `alignas(16)` `etch::Prim` (`EtchPrim`); 1–3 GPU draw calls per window UI pass, exactly 1 at idle without blur/external textures.
   - 0% CPU/GPU at idle and < 0.2 ms layout.
-  - HarfBuzz + Slug GPU Bezier text/vector rendering, zero scalable font bitmap atlases, zero-copy `SDL_GPUTexture*` viewports, and mechanism-first anti-over-defensive rigor.
+  - HarfBuzz + Slug GPU Bezier text/vector rendering, dynamic sprite atlas + decoded image loading, zero scalable font bitmap atlases, zero-copy `SDL_GPUTexture*` viewports, optional OS accessibility bridges, and mechanism-first anti-over-defensive rigor.
 - **Non-Goals ("Three Don'ts")**:
   1. No HTML/CSS parser.
   2. No bloated kitchen-sink business widget library.
@@ -43,7 +44,10 @@ etch/
 |   |-- check_downstream_consumers.cmake # Installed/subproject consumer checks
 |   |-- embed_msl.cmake       # Embed offline Metal source as C byte arrays
 |   `-- EtchConfig.cmake.in   # Installed dependency discovery and targets
-|-- include/etch/etch.h       # Public API: Arena, Prim and declarative UI
+|-- include/
+|   `-- etch/
+|       |-- etch.h            # Public C++20 API: Arena, Prim, Theme and declarative UI
+|       `-- etch_c.h          # Public pure C99 ABI header (<stdbool.h>, <stddef.h>, <stdint.h> only)
 |-- third_party/              # Clay/stb headers, SDL3, HarfBuzz, Slug notices/code
 |-- shaders/
 |   |-- etch_kawase.hlsl      # Kawase blur and presentation
@@ -51,17 +55,22 @@ etch/
 |-- src/
 |   |-- etch_testing.h        # Internal regression hooks, excluded from public API
 |   |-- etch_arena.cpp        # Arena, shared internal state and POD definitions
+|   |-- etch_theme.cpp        # Semantic Theme tokens and system theme probe
+|   |-- etch_image.cpp        # Dynamic sprite atlas and PNG/JPEG/GIF/TGA/BMP decoder
 |   |-- etch_bidi.cpp         # Unicode UAX #9 bidi and grapheme itemization
 |   |-- etch_slug.cpp         # HarfBuzz shaping and Slug contours/bands
+|   |-- etch_emoji.cpp        # COLR v0, CBDT and sbix color emoji fallbacks
 |   |-- etch_render_cmd.cpp   # Render command generation and clipping
-|   |-- etch_text_input.cpp   # UTF-8 editing, selection and IME handling
+|   |-- etch_text_input.cpp   # UTF-8 editing, soft word-wrap, selection and IME
 |   |-- etch_layout.cpp       # Clay integration and core layout API
-|   |-- etch_containers.cpp   # Virtual lists, grids and container behavior
+|   |-- etch_containers.cpp   # Virtual lists, grids, table, tree and canvas
 |   |-- etch_frame.cpp        # Frame lifecycle, input, focus and interaction
 |   |-- etch_widgets.cpp      # Desktop widgets and docking
 |   |-- etch_editor.cpp       # Text buffer and virtual code editor
 |   |-- etch_a11y.cpp         # Accessibility snapshots and automation
+|   |-- etch_a11y_os.cpp      # Live resize, multi-monitor DPI and OS A11y bridges
 |   |-- etch_gpu.cpp          # Lazy SDL GPU setup, backend selection and rendering
+|   |-- etch_c.cpp            # Pure C99 ABI implementation facade
 |   |-- shaders_gen/          # Checked-in fallback shader headers
 |   `-- etch_unity.cpp        # Only engine translation unit; includes modules
 |-- examples/
@@ -71,9 +80,14 @@ etch/
     |-- checks_desktop.h      # Shared desktop/widget regressions
     |-- checks_editor.h       # Shared editor regressions
     |-- checks_a11y.h         # Shared accessibility regressions
+    |-- checks_media_emoji.h  # Dynamic sprite cache and color emoji checks
+    |-- checks_theme_wrap.h   # Semantic theme and soft word-wrap checks
+    |-- checks_os_window_a11y.h # Live resize, DPI and OS A11y bridge checks
     |-- checks_sandbox_headless.h # Shared sandbox offscreen assertions
-    |-- consumer_smoke/main.cpp # Public-API-only CPU consumer
-    `-- etch_tests.cpp        # Eight C++ suites; ten CTest suites with guardrails/consumers
+    |-- consumer_smoke/main.cpp # Public C++20 consumer smoke
+    |-- consumer_smoke/main_c.c # Public C99 consumer smoke
+    |-- etch_c_abi_tests.c    # Standalone C99 ABI suite (`c99_abi_smoke`)
+    `-- etch_tests.cpp        # Eight C++ suites; eleven CTest suites total
 ```
 
 The former layout implementation is split across `etch_render_cmd.cpp`,
@@ -81,8 +95,8 @@ The former layout implementation is split across `etch_render_cmd.cpp`,
 `etch_frame.cpp`; these remain part of the single unity translation unit.
 Examples, tests, and installation default to OFF in subprojects. Generated
 shader headers live in the build directory; checked-in headers are fallbacks.
-With tests and installation enabled, CTest runs ten suites, including repository
-guardrails and installed/add_subdirectory downstream consumer smoke checks.
+With tests and installation enabled, CTest runs eleven suites (eight C++ suites,
+pure C99 `c99_abi_smoke`, `repo_guardrails`, and C++/C99 `downstream_consumers`).
 
 ---
 
@@ -131,4 +145,4 @@ guardrails and installed/add_subdirectory downstream consumer smoke checks.
 ## 7. Semantic Versioning Discipline (SemVer 2.0.0)
 - **Pre-1.0 (`0.y.z`)**: Etch remains in `0.y.z` until external production adoption and real-hardware CI sign-off across Windows (D3D12/Vulkan), macOS (Metal), and Linux (Vulkan Wayland/X11). New subsystems or breaking refinements increment `MINOR` (`0.y.0`); backward-compatible fixes and optimizations increment `PATCH` (`0.y.z`).
 - **Post-1.0 (`1.0.0+`)**: `MAJOR` increments **exclusively** on incompatible public API/ABI changes in `include/etch/etch.h`; backward-compatible features increment `MINOR`; bugfixes increment `PATCH`. Never use `MAJOR` bumps as internal milestone codenames.
-- **Single Source of Truth**: `CMakeLists.txt` (`project(etch VERSION ...)`) and `include/etch/etch.h` (`ETCH_VERSION_*`) must always match (verified at compile time by `tests/etch_tests.cpp`), and formal releases carry an annotated `vX.Y.Z` Git tag.
+- **Single Source of Truth**: `CMakeLists.txt` (`project(etch VERSION ...)`), `include/etch/etch.h`, and `include/etch/etch_c.h` (`ETCH_VERSION_*`) must always match (verified by `repo_guardrails` and compile-time/CTest checks in `tests/etch_tests.cpp` and `tests/etch_c_abi_tests.c`), and formal releases carry an annotated `vX.Y.Z` Git tag.

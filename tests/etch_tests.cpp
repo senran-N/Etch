@@ -1,4 +1,5 @@
 #include "etch/etch.h"
+#include "etch/etch_c.h"
 #include <SDL3/SDL.h>
 #include <cstdio>
 #include <cstdlib>
@@ -22,12 +23,16 @@ static_assert(ETCH_VERSION_MAJOR == ETCH_CMAKE_VERSION_MAJOR && ETCH_VERSION_MIN
 #define ETCH_EXPECTED_VERSION_STRING ETCH_VERSION_STRING
 #endif
 static bool arena_suite() noexcept {
+    static_assert(sizeof(EtchPrim) == sizeof(Prim) && sizeof(EtchGlobalsUniform) == sizeof(GlobalsUniform));
     Arena a=arena_create(128);if(!a.base)return false;
-    auto* p=a.alloc<uint32_t>(8);const bool ok=p && (reinterpret_cast<uintptr_t>(p)%alignof(uint32_t)==0) && a.remaining()==96 && std::strcmp(ETCH_VERSION_STRING, ETCH_EXPECTED_VERSION_STRING) == 0;
+    auto* p=a.alloc<uint32_t>(8);const bool ok=p && (reinterpret_cast<uintptr_t>(p)%alignof(uint32_t)==0) && a.remaining()==96 && std::strcmp(ETCH_VERSION_STRING, ETCH_EXPECTED_VERSION_STRING) == 0 && etch_id("x") == id("x");
     a.reset();const bool reset=a.offset==0 && a.alloc<uint32_t>(8)==p;arena_destroy(&a);
+    EtchArena ca = etch_arena_create(64);
+    const bool ca_ok = ca.base && etch_arena_alloc_bytes(&ca, 16, 8) != nullptr;
+    etch_arena_destroy(&ca);
     Context* c=create_context({.max_prims_per_frame=64,.headless=true});if(!c)return false;
     begin_frame(c,{.viewport_w=800,.viewport_h=500});for(uint32_t i=0;i<256;++i)box({.width=Sizing::fixed(1),.height=Sizing::fixed(1),.background=Color::white()});end_frame(c);
-    const bool elastic=frame_stats(c).prim_capacity>64;destroy_context(c);set_current_context(nullptr);return ok && reset && elastic;
+    const bool elastic=frame_stats(c).prim_capacity>64;destroy_context(c);set_current_context(nullptr);return ok && reset && ca_ok && elastic;
 }
 static bool unicode_suite() noexcept {
     Context* c=create_context({.headless=true});if(!c)return false;set_current_context(c);

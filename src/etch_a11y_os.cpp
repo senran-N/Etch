@@ -1604,6 +1604,8 @@ void set_window_refresh_callback(Context* ctx_arg, WindowRefreshFn fn, void* use
     if (!ctx) {
         return;
     }
+    ctx->c_refresh_fn = nullptr;
+    ctx->c_refresh_user_data = nullptr;
     ctx->refresh_fn = fn;
     ctx->refresh_user_data = fn ? user_data : nullptr;
     sync_window_event_watch(ctx);

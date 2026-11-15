@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(etch VERSION 0.8.0 LANGUAGES C CXX)
+project(etch VERSION 0.9.0 LANGUAGES C CXX)
 
 option(ETCH_BUILD_EXAMPLES "Build Etch sandbox and etch_studio examples" ${PROJECT_IS_TOP_LEVEL})
 option(ETCH_BUILD_TESTS "Build Etch CTest suite" ${PROJECT_IS_TOP_LEVEL})
@@ -219,7 +219,9 @@ file(GLOB _etch_engine_dependencies CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/third_party/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders_gen/*.h")
 file(GLOB _etch_check_dependencies CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tests/checks_*.h")
-set(_etch_common_dependencies "${CMAKE_CURRENT_SOURCE_DIR}/include/etch/etch.h"
+set(_etch_common_dependencies
+    "${CMAKE_CURRENT_SOURCE_DIR}/include/etch/etch.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/include/etch/etch_c.h"
     ${_etch_engine_dependencies} ${ETCH_GENERATED_SHADER_HEADERS})
 set_source_files_properties(src/etch_unity.cpp PROPERTIES OBJECT_DEPENDS "${_etch_common_dependencies}")
 set_source_files_properties(examples/sandbox.cpp examples/etch_studio.cpp tests/etch_tests.cpp
@@ -287,7 +289,36 @@ if (ETCH_BUILD_TESTS)
     foreach(suite arena_and_elasticity unicode_bidi_grapheme layout_clay_flex_grid fenwick_virtual_list_1m widgets_and_dockspace text_buffer_and_code_editor a11y_semantic_tree headless_gpu_invariants)
         add_test(NAME ${suite} COMMAND etch_tests --suite=${suite})
     endforeach()
-    set_tests_properties(arena_and_elasticity unicode_bidi_grapheme layout_clay_flex_grid fenwick_virtual_list_1m
+
+    add_executable(etch_c_abi_tests tests/etch_c_abi_tests.c)
+    set_target_properties(etch_c_abi_tests PROPERTIES
+        C_STANDARD 99
+        C_STANDARD_REQUIRED ON
+        C_EXTENSIONS OFF
+        OBJECT_DEPENDS "${_etch_common_dependencies}"
+    )
+    if (CMAKE_C_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC" OR (NOT CMAKE_C_COMPILER_FRONTEND_VARIANT AND MSVC))
+        target_compile_options(etch_c_abi_tests PRIVATE /W4 /WX /permissive- /utf-8)
+    else ()
+        target_compile_options(etch_c_abi_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    endif ()
+    target_link_libraries(etch_c_abi_tests PRIVATE etch)
+    target_compile_definitions(etch_c_abi_tests PRIVATE
+        ETCH_CMAKE_VERSION_MAJOR=${PROJECT_VERSION_MAJOR}
+        ETCH_CMAKE_VERSION_MINOR=${PROJECT_VERSION_MINOR}
+        ETCH_CMAKE_VERSION_PATCH=${PROJECT_VERSION_PATCH}
+    )
+    if (WIN32)
+        target_link_libraries(etch_c_abi_tests PRIVATE user32 ole32 oleaut32)
+        add_custom_command(TARGET etch_c_abi_tests POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E $<IF:$<BOOL:$<TARGET_RUNTIME_DLLS:etch_c_abi_tests>>,copy_if_different,true>
+                    $<TARGET_RUNTIME_DLLS:etch_c_abi_tests>
+                    $<$<BOOL:$<TARGET_RUNTIME_DLLS:etch_c_abi_tests>>:$<TARGET_FILE_DIR:etch_c_abi_tests>>
+            COMMAND_EXPAND_LISTS)
+    endif ()
+    add_test(NAME c99_abi_smoke COMMAND etch_c_abi_tests)
+
+    set_tests_properties(arena_and_elasticity unicode_bidi_grapheme layout_clay_flex_grid fenwick_virtual_list_1m c99_abi_smoke
         PROPERTIES TIMEOUT 5)
     add_test(NAME repo_guardrails COMMAND "${CMAKE_COMMAND}" "-DREPO_ROOT=${CMAKE_CURRENT_SOURCE_DIR}"
         -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/check_repo_guardrails.cmake")

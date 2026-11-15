@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 env:
-  CPU_SUITES: '^(repo_guardrails|downstream_consumers|arena_and_elasticity|unicode_bidi_grapheme|layout_clay_flex_grid|fenwick_virtual_list_1m)$'
+  CPU_SUITES: '^(repo_guardrails|downstream_consumers|arena_and_elasticity|unicode_bidi_grapheme|layout_clay_flex_grid|fenwick_virtual_list_1m|c99_abi_smoke)$'
 
 jobs:
   windows:

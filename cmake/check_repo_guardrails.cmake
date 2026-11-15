@@ -22,6 +22,25 @@ check_lines("src/*.cpp" 4000)
 check_lines("include/etch/*.h" 2500)
 check_lines("examples/*.cpp" 3200)
 
+set(_total_core_loc 0)
+file(GLOB _core_loc_files
+    "${REPO_ROOT}/include/etch/*.h"
+    "${REPO_ROOT}/src/*.cpp"
+    "${REPO_ROOT}/src/*.h"
+    "${REPO_ROOT}/shaders/*.hlsl")
+foreach(_file IN LISTS _core_loc_files)
+    file(READ "${_file}" _content)
+    string(REGEX MATCHALL "\n" _nls "${_content}")
+    list(LENGTH _nls _lines)
+    if (NOT _content STREQUAL "" AND NOT _content MATCHES "\n$")
+        math(EXPR _lines "${_lines} + 1")
+    endif ()
+    math(EXPR _total_core_loc "${_total_core_loc} + ${_lines}")
+endforeach()
+if (_total_core_loc GREATER 30000)
+    message(FATAL_ERROR "${REPO_ROOT}: total core engine LOC ceiling 30000 exceeded (${_total_core_loc})")
+endif ()
+
 file(GLOB_RECURSE _example_headers "${REPO_ROOT}/examples/*.h" "${REPO_ROOT}/examples/*.hpp")
 file(GLOB _root_pngs "${REPO_ROOT}/*.png")
 file(GLOB_RECURSE _vectors "${REPO_ROOT}/include/*.vectors.png" "${REPO_ROOT}/src/*.vectors.png"
@@ -45,7 +64,9 @@ foreach(_file IN LISTS _public)
 endforeach()
 
 file(GLOB _cpp_files "${REPO_ROOT}/src/*.cpp" "${REPO_ROOT}/examples/*.cpp"
-    "${REPO_ROOT}/tests/*.cpp" "${REPO_ROOT}/tests/*.h")
+    "${REPO_ROOT}/tests/*.cpp" "${REPO_ROOT}/tests/*.h"
+    "${REPO_ROOT}/tests/*.c" "${REPO_ROOT}/tests/consumer_smoke/*.c"
+    "${REPO_ROOT}/tests/consumer_smoke/*.cpp")
 file(GLOB _orthodox ${_public} "${REPO_ROOT}/src/*.cpp" "${REPO_ROOT}/src/*.h"
     "${REPO_ROOT}/examples/*.cpp" "${REPO_ROOT}/tests/*.cpp" "${REPO_ROOT}/tests/*.h"
     "${REPO_ROOT}/tests/consumer_smoke/*.cpp")
@@ -72,6 +93,27 @@ endforeach()
 if (NOT "${_maj}.${_min}.${_pat}" STREQUAL "${_header_MAJOR}.${_header_MINOR}.${_header_PATCH}")
     message(FATAL_ERROR "include/etch/etch.h: ETCH_VERSION_* disagrees with CMakeLists.txt project VERSION ${_maj}.${_min}.${_pat}")
 endif ()
+
+set(_c_header_path "${REPO_ROOT}/include/etch/etch_c.h")
+if (NOT EXISTS "${_c_header_path}")
+    message(FATAL_ERROR "include/etch/etch_c.h: pure C99 public header is missing")
+endif ()
+file(READ "${_c_header_path}" _c_header)
+foreach(_part MAJOR MINOR PATCH)
+    if (NOT _c_header MATCHES "#define[ \t]+ETCH_VERSION_${_part}[ \t]+([0-9]+)")
+        message(FATAL_ERROR "include/etch/etch_c.h: missing ETCH_VERSION_${_part}")
+    endif ()
+    set(_c_header_${_part} "${CMAKE_MATCH_1}")
+endforeach()
+if (NOT "${_maj}.${_min}.${_pat}" STREQUAL "${_c_header_MAJOR}.${_c_header_MINOR}.${_c_header_PATCH}")
+    message(FATAL_ERROR "include/etch/etch_c.h: ETCH_VERSION_* disagrees with CMakeLists.txt project VERSION ${_maj}.${_min}.${_pat}")
+endif ()
+string(REGEX MATCHALL "#[ \t]*include[^\r\n]*" _c_includes "${_c_header}")
+foreach(_inc IN LISTS _c_includes)
+    if (NOT "${_inc}" MATCHES "^#[ \t]*include[ \t]*<(stdbool|stddef|stdint)\\.h>[ \t]*$")
+        message(FATAL_ERROR "include/etch/etch_c.h: pure C99 header may only include <stdbool.h>, <stddef.h>, <stdint.h>; offending line: ${_inc}")
+    endif ()
+endforeach()
 
 foreach(_name LICENSE THIRD_PARTY_NOTICES.md README.md CHANGELOG.md CLAUDE.md AGENTS.md)
     if (NOT EXISTS "${REPO_ROOT}/${_name}")

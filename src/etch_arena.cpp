@@ -7,6 +7,12 @@
 #    include <cstdlib>
 #endif
 
+extern "C" {
+typedef struct EtchContext EtchContext;
+typedef float (*EtchCVirtualItemHeightFn)(uint32_t index, void* user_data);
+typedef void (*EtchCWindowRefreshFn)(EtchContext* ctx, struct SDL_Window* window, float dt_seconds, void* user_data);
+}
+
 namespace etch {
 
 inline constexpr uint32_t kMinPrimCap = 64u;
@@ -592,6 +598,7 @@ struct VarVirtualListCache {
     bool dirty = false;
     bool uncapped_heights = false;
     VirtualItemHeightFn measure_fn = nullptr;
+    EtchCVirtualItemHeightFn c_measure_fn = nullptr;
     void* measure_user_data = nullptr;
 };
 struct ActiveVarListRecord {
@@ -918,6 +925,8 @@ struct Context {
     uint32_t theme_overflow = 0u;
     WindowRefreshFn refresh_fn = nullptr;
     void* refresh_user_data = nullptr;
+    EtchCWindowRefreshFn c_refresh_fn = nullptr;
+    void* c_refresh_user_data = nullptr;
     uint64_t last_refresh_ns = 0u;
     bool event_watch_attached = false;
     bool in_refresh_callback = false;
