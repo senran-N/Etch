@@ -844,9 +844,40 @@ static void process_window_event(Context* ctx, const SDL_Event& event) noexcept 
             }
             request_redraw(ctx);
             break;
-        case SDL_EVENT_WINDOW_EXPOSED:
-        case SDL_EVENT_WINDOW_RESIZED:
+        case SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED:
+        case SDL_EVENT_WINDOW_DISPLAY_CHANGED:
         case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
+        case SDL_EVENT_WINDOW_METAL_VIEW_RESIZED:
+        case SDL_EVENT_WINDOW_RESIZED:
+        case SDL_EVENT_WINDOW_SAFE_AREA_CHANGED:
+        case SDL_EVENT_WINDOW_ENTER_FULLSCREEN:
+        case SDL_EVENT_WINDOW_LEAVE_FULLSCREEN:
+        case SDL_EVENT_WINDOW_MAXIMIZED:
+        case SDL_EVENT_WINDOW_RESTORED: {
+            if (ctx->active_window && !ctx->headless) {
+                sync_window_metrics_from_os(ctx->active_ui, ctx->active_window);
+            } else if ((event.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED ||
+                        event.type == SDL_EVENT_WINDOW_METAL_VIEW_RESIZED) &&
+                       event.window.data1 > 0 && event.window.data2 > 0)
+            {
+                ctx->active_ui->viewport_w = static_cast<uint32_t>(event.window.data1);
+                ctx->active_ui->viewport_h = static_cast<uint32_t>(event.window.data2);
+            }
+            if (event.type == SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED ||
+                event.type == SDL_EVENT_WINDOW_DISPLAY_CHANGED ||
+                event.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED ||
+                event.type == SDL_EVENT_WINDOW_METAL_VIEW_RESIZED)
+            {
+                ctx->active_ui->applied_ime_rect = {-1, -1, 0, 0};
+                ctx->active_ui->applied_ime_cursor = -1;
+            }
+            if (ctx->active_ui->redraw_budget < 2u) {
+                ctx->active_ui->redraw_budget = 2u;
+            }
+            request_redraw(ctx);
+            break;
+        }
+        case SDL_EVENT_WINDOW_EXPOSED:
         case SDL_EVENT_WINDOW_FOCUS_GAINED:
         case SDL_EVENT_WINDOW_MOUSE_ENTER:
             request_redraw(ctx);
@@ -1031,6 +1062,14 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
     ctx->active_ui->viewport_w = (desc.viewport_w > 0u) ? desc.viewport_w : 1u;
     ctx->active_ui->viewport_h = (desc.viewport_h > 0u) ? desc.viewport_h : 1u;
     ctx->active_ui->dpi_scale = dpi;
+    if (std::fabs(dpi - ctx->active_ui->applied_dpi_scale) > 1e-4f) {
+        ctx->active_ui->applied_dpi_scale = dpi;
+        ctx->active_ui->applied_ime_rect = {-1, -1, 0, 0};
+        ctx->active_ui->applied_ime_cursor = -1;
+        if (ctx->active_ui->redraw_budget < 1u) {
+            ctx->active_ui->redraw_budget = 1u;
+        }
+    }
 
     const Clay_Dimensions logical_dims = {
         .width = static_cast<float>(ctx->active_ui->viewport_w) / dpi,
@@ -2313,6 +2352,9 @@ void set_window_chrome(const WindowChromeDesc& desc, SDL_Window* window) noexcep
     if (clean.corner_size < clean.border_thickness) {
         clean.corner_size = clean.border_thickness;
     }
+    if (!std::isfinite(clean.traffic_light_inset_px) || clean.traffic_light_inset_px < 0.0f) {
+        clean.traffic_light_inset_px = 0.0f;
+    }
     WindowUiState* ui = window_ui(ctx, window ? window : ctx->active_window);
     if (!ui) return;
     ui->chrome_desc = clean;
@@ -2332,6 +2374,7 @@ void set_window_chrome(const WindowChromeDesc& desc, SDL_Window* window) noexcep
                 SDL_SetWindowHitTest(slot.window, nullptr, nullptr);
                 slot.hit_test_attached = false;
             }
+            apply_platform_window_chrome(ctx, &slot);
         }
     }
     request_redraw(ctx);
@@ -2370,15 +2413,20 @@ WindowHit evaluate_window_hit(const Context* ctx, Vec2 logical_pos, SDL_Window* 
     float w = 0.0f;
     float h = 0.0f;
     bool maximized = false;
-    if (target && !ctx->headless) {
+    bool fullscreen = false;
+    if (target && (!ctx->headless || window != nullptr)) {
         int iw = 0;
         int ih = 0;
         SDL_GetWindowSize(target, &iw, &ih);
-        const float scale = SDL_GetWindowPixelDensity(target) / ui->dpi_scale;
+        const float density = SDL_GetWindowPixelDensity(target);
+        const float dpi = (ui->dpi_scale > 0.0f) ? ui->dpi_scale : 1.0f;
+        const float scale = ((density > 0.0f) ? density : 1.0f) / dpi;
         const Vec2 win_sz = {static_cast<float>(iw) * scale, static_cast<float>(ih) * scale};
         w = win_sz.x;
         h = win_sz.y;
-        maximized = (SDL_GetWindowFlags(target) & SDL_WINDOW_MAXIMIZED) != 0u;
+        const SDL_WindowFlags wflags = SDL_GetWindowFlags(target);
+        maximized = (wflags & SDL_WINDOW_MAXIMIZED) != 0u;
+        fullscreen = (wflags & SDL_WINDOW_FULLSCREEN) != 0u;
     } else {
         const float dpi = (ui->dpi_scale > 0.0f) ? ui->dpi_scale : 1.0f;
         w = static_cast<float>(ui->viewport_w) / dpi;
@@ -2389,6 +2437,9 @@ WindowHit evaluate_window_hit(const Context* ctx, Vec2 logical_pos, SDL_Window* 
         logical_pos.x >= w || logical_pos.y >= h)
     {
         return WindowHit::Normal;
+    }
+    if (fullscreen) {
+        return WindowHit::Client;
     }
 
     if (ui->chrome_desc.resizable && !maximized) {

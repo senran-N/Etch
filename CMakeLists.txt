@@ -1,10 +1,11 @@
 cmake_minimum_required(VERSION 3.24)
-project(etch VERSION 0.7.0 LANGUAGES C CXX)
+project(etch VERSION 0.8.0 LANGUAGES C CXX)
 
 option(ETCH_BUILD_EXAMPLES "Build Etch sandbox and etch_studio examples" ${PROJECT_IS_TOP_LEVEL})
 option(ETCH_BUILD_TESTS "Build Etch CTest suite" ${PROJECT_IS_TOP_LEVEL})
 option(ETCH_INSTALL "Enable Etch install and package export targets" ${PROJECT_IS_TOP_LEVEL})
 option(ETCH_COMPILE_SHADERS "Compile HLSL shaders offline when DXC/shadercross are available" ON)
+option(ETCH_ENABLE_OS_A11Y "Enable optional native OS accessibility bridge" ON)
 
 include(GNUInstallDirs)
 
@@ -200,6 +201,13 @@ target_include_directories(etch
             "${CMAKE_CURRENT_SOURCE_DIR}/third_party"
             ${ETCH_HB_INCLUDE_DIRS})
 target_link_libraries(etch PUBLIC SDL3::SDL3 PRIVATE ${ETCH_HB_LIB_TARGET})
+target_compile_definitions(etch PRIVATE ETCH_ENABLE_OS_A11Y=$<BOOL:${ETCH_ENABLE_OS_A11Y}>)
+if (WIN32 AND ETCH_ENABLE_OS_A11Y)
+    target_link_libraries(etch PRIVATE user32 oleaut32)
+endif ()
+if (APPLE)
+    target_link_libraries(etch PRIVATE objc)
+endif ()
 if (TARGET etch_shaders)
     add_dependencies(etch etch_shaders)
 endif ()
@@ -266,8 +274,10 @@ if (ETCH_BUILD_TESTS)
         ETCH_CMAKE_VERSION_MAJOR=${PROJECT_VERSION_MAJOR}
         ETCH_CMAKE_VERSION_MINOR=${PROJECT_VERSION_MINOR}
         ETCH_CMAKE_VERSION_PATCH=${PROJECT_VERSION_PATCH}
+        ETCH_ENABLE_OS_A11Y=$<BOOL:${ETCH_ENABLE_OS_A11Y}>
     )
     if (WIN32)
+        target_link_libraries(etch_tests PRIVATE user32 ole32 oleaut32)
         add_custom_command(TARGET etch_tests POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E $<IF:$<BOOL:$<TARGET_RUNTIME_DLLS:etch_tests>>,copy_if_different,true>
                     $<TARGET_RUNTIME_DLLS:etch_tests>

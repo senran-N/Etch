@@ -4,6 +4,16 @@ All notable changes to Etch are documented here. This file follows
 [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-11-16
+
+### Added
+- **Smooth Live Resize**: Added `WindowRefreshFn`, `ContextDesc::on_window_refresh` / `refresh_user_data`, and `set_window_refresh_callback()` backed by an engine-managed `SDL_AddEventWatch` hook with main-thread and re-entrancy guards so modal OS edge-dragging renders continuously without black borders or jitter across primary and tear-off windows.
+- **Fullscreen, Safe Area & macOS Chrome**: Added `set_window_fullscreen()`, `is_window_fullscreen()`, `window_safe_insets()`, `WindowChromeDesc::macos_traffic_lights`, and `traffic_light_inset_px` with fullscreen border/caption hit suppression and native Cocoa titlebar/traffic-light styling on macOS.
+- **Optional Native OS Accessibility Bridge (`ETCH_ENABLE_OS_A11Y`)**: Added `src/etch_a11y_os.cpp` and public controls (`ContextDesc::enable_os_a11y`, `set_os_a11y_enabled()`, `os_a11y_enabled()`, `os_a11y_active()`) bridging `A11yNode` trees and `perform_a11y_action()` to Win32 UI Automation COM providers (`WM_GETOBJECT`) with `UIAutomationCore.dll` dynamic loading and zero virtual inheritance.
+
+### Fixed
+- **Multi-Monitor DPI & Swapchain Sync**: Immediately resynchronized `viewport_w`, `viewport_h`, `dpi_scale`, and IME cursor rects on `SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED`, `DISPLAY_CHANGED`, `PIXEL_SIZE_CHANGED`, and `METAL_VIEW_RESIZED`, initialized claimed swapchain metrics per window, converted root `A11yRole::Window` bounds to logical pixels, and bound `target_ui` cleanly inside `render_window()` with swapchain size settlement redraws.
+
 ## [0.7.0] - 2026-11-15
 
 ### Added

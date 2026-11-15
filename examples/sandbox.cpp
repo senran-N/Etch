@@ -1382,19 +1382,14 @@ void render_window_frame(AppState* app, float dt_seconds) noexcept {
     app->rendering = false;
 }
 
-bool SDLCALL window_event_watch(void* userdata, SDL_Event* event) noexcept {
+void sandbox_on_window_refresh(etch::Context* ctx, SDL_Window* win, float dt_seconds, void* userdata) noexcept {
     AppState* app = static_cast<AppState*>(userdata);
-    if (!app || !event || etch::frame_in_progress(app->ctx) || !app->window || app->rendering) {
-        return true;
+    if (!app || app->rendering || !app->window || win != app->window) {
+        return;
     }
-    if ((event->type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED ||
-         event->type == SDL_EVENT_WINDOW_EXPOSED) &&
-        event->window.windowID == SDL_GetWindowID(app->window))
-    {
-        etch::request_window_redraw(app->ctx, app->window);
-        render_window_frame(app, 0.0f);
-    }
-    return true;
+    (void)ctx;
+    etch::request_window_redraw(app->ctx, app->window);
+    render_window_frame(app, dt_seconds);
 }
 
 #include "checks_sandbox_headless.h"
@@ -1435,7 +1430,7 @@ int run_interactive() noexcept {
     };
     init_sandbox_icons(&app);
 
-    SDL_AddEventWatch(window_event_watch, &app);
+    etch::set_window_refresh_callback(ctx, sandbox_on_window_refresh, &app);
     render_window_frame(&app, 0.0f);
 
     Uint64 prev_ns = SDL_GetTicksNS();
@@ -1474,7 +1469,7 @@ int run_interactive() noexcept {
         }
     }
 
-    SDL_RemoveEventWatch(window_event_watch, &app);
+    etch::set_window_refresh_callback(ctx, nullptr, nullptr);
 
     SDL_GPUDevice* dev = etch::gpu_device(ctx);
     if (dev) {

@@ -658,8 +658,11 @@ struct WindowUiState {
     uint32_t   viewport_w = 1280u;
     uint32_t   viewport_h = 720u;
     float      dpi_scale = 1.0f;
+    float      min_dpi_scale = 0.0f;
+    float      applied_dpi_scale = 1.0f;
     float      elapsed_seconds = 0.0f;
     uint32_t   frame_index = 0;
+    uint32_t   prev_a11y_focus_id = 0u;
 
     Vec2       event_pointer_pos = {-1.0f, -1.0f};
     bool       has_event_pointer = false;
@@ -810,6 +813,8 @@ struct WindowUiState {
 struct ClaimedWindowSlot {
     SDL_Window* window = nullptr;
     bool hit_test_attached = false;
+    bool macos_chrome_applied = false;
+    void* os_a11y = nullptr;
     WindowUiState ui = {};
 };
 
@@ -911,6 +916,12 @@ struct Context {
     Theme theme_stack[kMaxThemeStack] = {};
     uint32_t theme_depth = 0u;
     uint32_t theme_overflow = 0u;
+    WindowRefreshFn refresh_fn = nullptr;
+    void* refresh_user_data = nullptr;
+    uint64_t last_refresh_ns = 0u;
+    bool event_watch_attached = false;
+    bool in_refresh_callback = false;
+    bool enable_os_a11y = true;
 };
 
 namespace {
@@ -1248,4 +1259,11 @@ void a11y_semantic(uint32_t id, A11yRole role, Str label = {}, uint32_t states =
 bool a11y_take_any(uint32_t id, uint32_t mask, PendingA11yAction* out = nullptr) noexcept;
 bool a11y_take(uint32_t id, A11yAction action, PendingA11yAction* out = nullptr) noexcept;
 void a11y_toggle(uint32_t id, bool* open) noexcept;
+void os_a11y_attach_window(Context* ctx, ClaimedWindowSlot* slot) noexcept;
+void os_a11y_detach_window(Context* ctx, ClaimedWindowSlot* slot) noexcept;
+void os_a11y_notify_commit(Context* ctx) noexcept;
+void apply_platform_window_chrome(Context* ctx, ClaimedWindowSlot* slot) noexcept;
+void sync_window_event_watch(Context* ctx) noexcept;
+void detach_window_event_watch(Context* ctx) noexcept;
+bool sync_window_metrics_from_os(WindowUiState* ui, SDL_Window* window) noexcept;
 } }

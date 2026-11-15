@@ -79,4 +79,5 @@
 #include "etch_widgets.cpp"
 #include "etch_editor.cpp"
 #include "etch_a11y.cpp"
+#include "etch_a11y_os.cpp"
 #include "etch_gpu.cpp"

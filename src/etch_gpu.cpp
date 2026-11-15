@@ -556,6 +556,14 @@ bool claim_window_swapchain(Context* ctx, SDL_Window* win) noexcept {
     ClaimedWindowSlot& slot = *allocated;
     WindowUiState& ui = slot.ui;
     ui = WindowUiState{};
+    int init_pw = 0, init_ph = 0;
+    if (SDL_GetWindowSizeInPixels(win, &init_pw, &init_ph) && init_pw > 0 && init_ph > 0) {
+        ui.viewport_w = static_cast<uint32_t>(init_pw);
+        ui.viewport_h = static_cast<uint32_t>(init_ph);
+    }
+    const float init_dpi = SDL_GetWindowDisplayScale(win);
+    ui.dpi_scale = (init_dpi > 0.0f) ? init_dpi : 1.0f;
+    ui.applied_dpi_scale = ui.dpi_scale;
     if (!state_map_init(&ui.states, kDefaultStateCapacity)) { std::free(allocated); return false; }
     Clay_Context* saved_clay = Clay_GetCurrentContext();
     Clay_SetCurrentContext(nullptr);
@@ -566,7 +574,8 @@ bool claim_window_swapchain(Context* ctx, SDL_Window* win) noexcept {
     if (!ui.clay_mem) { Clay_SetCurrentContext(saved_clay); state_map_destroy(&ui.states); std::free(allocated); return false; }
     Clay_Context* prev_clay = saved_clay;
     ui.clay_ctx = Clay_Initialize(Clay_CreateArenaWithCapacityAndMemory(size, ui.clay_mem),
-        Clay_Dimensions{1280, 720}, Clay_ErrorHandler{etch_clay_error_handler, ctx});
+        Clay_Dimensions{static_cast<float>(ui.viewport_w) / ui.dpi_scale, static_cast<float>(ui.viewport_h) / ui.dpi_scale},
+        Clay_ErrorHandler{etch_clay_error_handler, ctx});
     if (ui.clay_ctx) Clay_SetMeasureTextFunction(etch_measure_text, ctx);
     Clay_SetCurrentContext(prev_clay);
     if (!ui.clay_ctx) {
@@ -596,6 +605,8 @@ bool claim_window_swapchain(Context* ctx, SDL_Window* win) noexcept {
     get_or_create_pipeline(ctx, swap_fmt);
     if (ui.chrome_desc.enabled && SDL_SetWindowHitTest(win, etch_sdl_hit_test, ctx))
         slot.hit_test_attached = true;
+    apply_platform_window_chrome(ctx, &slot);
+    os_a11y_attach_window(ctx, &slot);
     return true;
 }
 
@@ -1246,6 +1257,9 @@ Context* create_context(const ContextDesc& desc) noexcept {
     ctx->active_ui = &ctx->headless_ui;
     ctx->headless = desc.headless;
     ctx->enable_gpu_debug = desc.enable_gpu_debug;
+    ctx->enable_os_a11y = desc.enable_os_a11y;
+    ctx->refresh_fn = desc.on_window_refresh;
+    ctx->refresh_user_data = desc.on_window_refresh ? desc.refresh_user_data : nullptr;
     if (desc.gpu_driver) {
         std::strncpy(ctx->gpu_driver, desc.gpu_driver, sizeof(ctx->gpu_driver) - 1u);
         ctx->gpu_driver[sizeof(ctx->gpu_driver) - 1u] = '\0';
@@ -1326,6 +1340,8 @@ Context* create_context(const ContextDesc& desc) noexcept {
         ctx->wake_event_type = SDL_RegisterEvents(1);
     }
 
+    set_os_a11y_enabled(ctx, desc.enable_os_a11y);
+    sync_window_event_watch(ctx);
     set_current_context(ctx);
     return ctx;
 }
@@ -1346,6 +1362,7 @@ void destroy_context(Context* ctx) noexcept {
     }
 
     ctx->in_frame = false;
+    detach_window_event_watch(ctx);
     if (ctx->device) SDL_WaitForGPUIdle(ctx->device);
     for (uint32_t i = 0; i < ctx->claimed_window_cap; ++i)
         if (ctx->claimed_windows[i]) release_window(ctx, ctx->claimed_windows[i]->window);
@@ -1444,8 +1461,23 @@ bool render_window(Context* ctx, Color clear_color, SDL_Window* window_override)
         return true;
     }
 
+    WindowUiState* target_ui = window_ui(ctx, target_win);
+    if (target_ui && (swap_w != target_ui->viewport_w || swap_h != target_ui->viewport_h)) {
+        target_ui->viewport_w = swap_w;
+        target_ui->viewport_h = swap_h;
+        if (target_ui->redraw_budget < 2u) {
+            target_ui->redraw_budget = 2u;
+        }
+    }
+    WindowUiState* saved_ui = ctx->active_ui;
+    SDL_Window* saved_win = ctx->active_window;
+    if (target_ui) ctx->active_ui = target_ui;
+    ctx->active_window = target_win;
     const SDL_GPUTextureFormat swap_fmt = SDL_GetGPUSwapchainTextureFormat(ctx->device, target_win);
-    if (!record_frame_commands(ctx, cmd, swap_tex, swap_fmt, swap_w, swap_h, clear_color)) {
+    const bool recorded = record_frame_commands(ctx, cmd, swap_tex, swap_fmt, swap_w, swap_h, clear_color);
+    ctx->active_ui = saved_ui;
+    ctx->active_window = saved_win;
+    if (!recorded) {
         SDL_SubmitGPUCommandBuffer(cmd);
         return false;
     }
@@ -1656,6 +1688,7 @@ void release_window(Context* ctx, SDL_Window* window) noexcept {
             SDL_CaptureMouse(false); ctx->mouse_capture_window = nullptr;
         }
         if (slot.hit_test_attached) SDL_SetWindowHitTest(window, nullptr, nullptr);
+        os_a11y_detach_window(ctx, &slot);
         WindowUiState* saved = ctx->active_ui;
         ctx->active_ui = &slot.ui;
         release_blur_targets(ctx);

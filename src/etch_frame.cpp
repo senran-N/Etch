@@ -864,11 +864,12 @@ void begin_window_frame(Context* ctx, SDL_Window* window, float dt) noexcept {
 void begin_window_frame(Context* ctx, SDL_Window* window, const WindowFrameDesc& desc) noexcept {
     if (!ctx || !window || ctx->in_frame || !claim_window_swapchain(ctx, window)) return;
     ctx->active_window = window; ctx->active_ui = window_ui(ctx, window);
+    ctx->active_ui->min_dpi_scale = (desc.min_scale > 0.0f && std::isfinite(desc.min_scale)) ? desc.min_scale : 0.0f;
     int w = 0, h = 0;
     SDL_GetWindowSizeInPixels(window, &w, &h);
     float scale = SDL_GetWindowDisplayScale(window);
     if (scale <= 0) scale = 1;
-    if (scale < desc.min_scale) scale = desc.min_scale;
+    if (scale < ctx->active_ui->min_dpi_scale) scale = ctx->active_ui->min_dpi_scale;
     begin_bound_frame(ctx, FrameDesc{.viewport_w = static_cast<uint32_t>(w > 0 ? w : 1),
         .viewport_h = static_cast<uint32_t>(h > 0 ? h : 1), .dpi_scale = scale, .dt_seconds = desc.dt});
 }

@@ -9,6 +9,7 @@
 #include "checks_a11y.h"
 #include "checks_media_emoji.h"
 #include "checks_theme_wrap.h"
+#include "checks_os_window_a11y.h"
 #include "etch_uber_vs_msl.h"
 #include "etch_uber_ps_msl.h"
 #include "etch_kawase_vs_msl.h"
@@ -89,7 +90,7 @@ int main(int argc,char** argv) {
     const char* selected=argc==2 && std::strncmp(argv[1],"--suite=",8)==0?argv[1]+8:nullptr;
     if(argc>1 && !selected)return 2;bool found=false,ok=true;
     for(uint32_t i=0;i<8;++i)if(!selected || std::strcmp(selected,names[i])==0){found=true;bool pass=false;
-        switch(i){case 0:pass=arena_suite();break;case 1:pass=unicode_suite();break;case 2:pass=layout_suite();break;case 3:pass=list_suite();break;case 4:pass=verify_desktop_checks(nullptr);break;case 5:pass=verify_editor_checks(nullptr);break;case 6:pass=verify_a11y_checks(nullptr);break;case 7:pass=gpu_suite();break;}
+        switch(i){case 0:pass=arena_suite();break;case 1:pass=unicode_suite();break;case 2:pass=layout_suite();break;case 3:pass=list_suite();break;case 4:pass=verify_desktop_checks(nullptr);break;case 5:pass=verify_editor_checks(nullptr);break;case 6:pass=verify_a11y_checks(nullptr) && verify_os_window_a11y_checks();break;case 7:pass=gpu_suite();break;}
         std::printf("%s: %s\n",names[i],pass?"PASS":"FAIL");ok &= pass;
     }return !found?2:ok?0:1;
 }

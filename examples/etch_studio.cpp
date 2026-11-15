@@ -573,6 +573,10 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
                 const etch::ThemeId cur_theme = etch::theme(app->ctx).id;
                 if (etch::menu_item({.id=etch::id("studio_view_glow"),.label=etch::str_lit("Wire glow"),.checked=app->wire_glow_enabled})) app->wire_glow_enabled=!app->wire_glow_enabled;
                 if (etch::menu_item({.id=etch::id("studio_view_wrap"),.label=etch::str_lit("Word wrap shader"),.checked=app->shader_word_wrap})) app->shader_word_wrap=!app->shader_word_wrap;
+                const bool fs = etch::is_window_fullscreen(app->ctx, app->window);
+                if (etch::menu_item({.id=etch::id("studio_view_fullscreen"),.label=etch::str_lit("Fullscreen (F11)"),.checked=fs})) etch::set_window_fullscreen(!fs, app->window);
+                const bool os_a11y = etch::os_a11y_enabled(app->ctx);
+                if (etch::menu_item({.id=etch::id("studio_view_os_a11y"),.label=etch::str_lit("OS Accessibility"),.checked=os_a11y})) etch::set_os_a11y_enabled(app->ctx, !os_a11y);
                 etch::menu_separator();
                 if (etch::menu_item({.id=etch::id("studio_theme_dark"),.label=etch::str_lit("Theme: Dark"),.checked=cur_theme==etch::ThemeId::Dark})) etch::set_theme(etch::Theme::dark(), app->ctx);
                 if (etch::menu_item({.id=etch::id("studio_theme_light"),.label=etch::str_lit("Theme: Light"),.checked=cur_theme==etch::ThemeId::Light})) etch::set_theme(etch::Theme::light(), app->ctx);
@@ -2035,19 +2039,24 @@ void render_window_frame(StudioApp* app, float dt_seconds) noexcept {
     app->rendering = false;
 }
 
-bool SDLCALL window_event_watch(void* userdata, SDL_Event* event) noexcept {
+void studio_on_window_refresh(etch::Context* ctx, SDL_Window* win, float dt_seconds, void* userdata) noexcept {
     StudioApp* app = static_cast<StudioApp*>(userdata);
-    if (!app || !event || etch::frame_in_progress(app->ctx) || !app->window || app->rendering) {
-        return true;
+    if (!app || app->rendering || !win) {
+        return;
     }
-    if ((event->type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED ||
-         event->type == SDL_EVENT_WINDOW_EXPOSED) &&
-        event->window.windowID == SDL_GetWindowID(app->window))
-    {
+    if (win == app->window) {
         etch::request_window_redraw(app->ctx, app->window);
-        render_window_frame(app, 0.0f);
+        render_window_frame(app, dt_seconds);
+    } else if (app->tear_off_window && win == app->tear_off_window) {
+        if ((SDL_GetWindowFlags(app->tear_off_window) & SDL_WINDOW_HIDDEN) != 0u) return;
+        app->rendering = true;
+        etch::request_window_redraw(ctx, app->tear_off_window);
+        etch::begin_window_frame(ctx, app->tear_off_window, dt_seconds);
+        build_preview_ui(app);
+        etch::end_window_frame(ctx);
+        etch::render_window(ctx, etch::Color::rgb_hex(0x090C12), app->tear_off_window);
+        app->rendering = false;
     }
-    return true;
 }
 
 int run_headless(const char* out_png_path) noexcept {
@@ -2829,7 +2838,7 @@ int run_interactive() noexcept {
         .corner_size = 12.0f,
     });
 
-    SDL_AddEventWatch(window_event_watch, &app);
+    etch::set_window_refresh_callback(ctx, studio_on_window_refresh, &app);
     render_window_frame(&app, 0.0f);
 
     Uint64 prev_ns = SDL_GetTicksNS();
@@ -2844,6 +2853,8 @@ int run_interactive() noexcept {
                 } else if (ev.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED) {
                     if (app.tear_off_window && ev.window.windowID == SDL_GetWindowID(app.tear_off_window)) SDL_HideWindow(app.tear_off_window);
                     else if (ev.window.windowID == SDL_GetWindowID(app.window)) app.running = false;
+                } else if (ev.type == SDL_EVENT_KEY_DOWN && !ev.key.repeat && ev.key.windowID == SDL_GetWindowID(app.window) && ev.key.key == SDLK_F11) {
+                    etch::set_window_fullscreen(!etch::is_window_fullscreen(ctx, app.window), app.window);
                 } else if (ev.type == SDL_EVENT_KEY_DOWN && ev.key.windowID == SDL_GetWindowID(app.window) && ev.key.key == SDLK_ESCAPE) {
                     if (was_dragging) {
                         etch::request_redraw(ctx);
@@ -2883,7 +2894,7 @@ int run_interactive() noexcept {
         }
     }
 
-    SDL_RemoveEventWatch(window_event_watch, &app);
+    etch::set_window_refresh_callback(ctx, nullptr, nullptr);
     if (app.tear_off_window) { etch::release_window(ctx, app.tear_off_window); SDL_DestroyWindow(app.tear_off_window); }
 
     if (app.preview_tex) {

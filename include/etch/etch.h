@@ -12,7 +12,7 @@
 #include <type_traits>
 
 #define ETCH_VERSION_MAJOR 0
-#define ETCH_VERSION_MINOR 7
+#define ETCH_VERSION_MINOR 8
 #define ETCH_VERSION_PATCH 0
 #define ETCH_VERSION_STR_DETAIL(x) #x
 #define ETCH_VERSION_STR(x) ETCH_VERSION_STR_DETAIL(x)
@@ -898,6 +898,7 @@ struct A11yOverrideDesc {
  bool has_role = false, has_label = false, has_value_text = false, has_actions_mask = false;
 };
 struct Context;
+using WindowRefreshFn = void (*)(Context* ctx, SDL_Window* window, float dt_seconds, void* user_data) noexcept;
 
 struct ContextDesc {
     uint32_t max_layout_elements = 16384u;
@@ -911,6 +912,9 @@ struct ContextDesc {
     bool headless = false;
     // Optional SDL GPU backend name (vulkan, direct3d12, metal).
     const char* gpu_driver = nullptr;
+    WindowRefreshFn on_window_refresh = nullptr;
+    void* refresh_user_data = nullptr;
+    bool enable_os_a11y = true;
 };
 
 enum KeyMod : uint16_t {
@@ -1472,6 +1476,8 @@ struct WindowChromeDesc {
     bool  resizable = true;
     float border_thickness = 6.0f;
     float corner_size = 12.0f;
+    bool  macos_traffic_lights = true;
+    float traffic_light_inset_px = 76.0f;
 };
 
 struct DragPayloadView {
@@ -1942,6 +1948,9 @@ std::span<const A11yNode> frame_a11y_nodes(const Context* ctx = nullptr, SDL_Win
 const A11yNode* find_a11y_node(uint32_t element_id, const Context* ctx = nullptr, SDL_Window* window = nullptr) noexcept;
 bool perform_a11y_action(uint32_t element_id, A11yAction action, float numeric_value = 0, Str text_value = {}, Context* ctx = nullptr, SDL_Window* window = nullptr) noexcept;
 const char* a11y_role_name(A11yRole role) noexcept;
+void set_os_a11y_enabled(Context* ctx, bool enabled) noexcept;
+bool os_a11y_enabled(const Context* ctx = nullptr) noexcept;
+bool os_a11y_active(const Context* ctx = nullptr, SDL_Window* window = nullptr) noexcept;
 void end_frame(Context* ctx = nullptr) noexcept;
 void begin_window_frame(Context* ctx, SDL_Window* window, float dt) noexcept;
 void begin_window_frame(Context* ctx, SDL_Window* window, const WindowFrameDesc& desc) noexcept;
@@ -1959,6 +1968,7 @@ bool render_window(
 void release_window(Context* ctx, SDL_Window* window) noexcept;
 uint32_t claimed_window_count(const Context* ctx) noexcept;
 
+void set_window_refresh_callback(Context* ctx, WindowRefreshFn fn, void* user_data = nullptr) noexcept;
 void set_window_chrome(const WindowChromeDesc& desc, SDL_Window* window = nullptr) noexcept;
 void window_drag_region(Rect rect_logical) noexcept;
 void window_client_region(Rect rect_logical) noexcept;
@@ -1967,6 +1977,9 @@ void minimize_window(SDL_Window* window = nullptr) noexcept;
 void maximize_window(SDL_Window* window = nullptr) noexcept;
 void restore_window(SDL_Window* window = nullptr) noexcept;
 bool is_window_maximized(const Context* ctx = nullptr, SDL_Window* window = nullptr) noexcept;
+bool set_window_fullscreen(bool fullscreen, SDL_Window* window = nullptr) noexcept;
+bool is_window_fullscreen(const Context* ctx = nullptr, SDL_Window* window = nullptr) noexcept;
+Padding window_safe_insets(const Context* ctx = nullptr, SDL_Window* window = nullptr) noexcept;
 
 bool render_headless_png(
     Context* ctx,

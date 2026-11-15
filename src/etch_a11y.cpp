@@ -29,7 +29,8 @@ void a11y_begin(Context* ctx) noexcept {
     }
     ctx->a11y_first=ctx->a11y_last=ctx->a11y_parent=nullptr;ctx->a11y_patches=nullptr;ctx->a11y_count=0;
     const uint32_t root=id_index(id("etch_a11y_window"),ctx->active_window?SDL_GetWindowID(ctx->active_window):0u);
-    ctx->a11y_parent=a11y_emit(ctx,root,A11yRole::Window);
+    const char* title=ctx->active_window?SDL_GetWindowTitle(ctx->active_window):nullptr;
+    ctx->a11y_parent=a11y_emit(ctx,root,A11yRole::Window,str_cstr(title));
 }
 void a11y_finish_actions(Context* ctx,bool snapshot_updated) noexcept {
     auto& ui=*ctx->active_ui;
@@ -84,14 +85,19 @@ void a11y_commit(Context* ctx) noexcept {
             const uint32_t pi=b->parent->index;n.parent_id=b->parent->node.id;
             if(tails[pi]==0xFFFFFFFFu)ui.a11y_nodes[pi].first_child_idx=b->index;else ui.a11y_nodes[tails[pi]].next_sibling_idx=b->index;
             tails[pi]=b->index;
-        }else n.bounds={0,0,float(ui.viewport_w),float(ui.viewport_h)};
+        }else {
+            const float dpi=(ui.dpi_scale>0.0f)?ui.dpi_scale:1.0f;
+            n.bounds={0.0f,0.0f,static_cast<float>(ui.viewport_w)/dpi,static_cast<float>(ui.viewport_h)/dpi};
+        }
         if(ui.focus_id==n.id)n.state_flags|=A11yState_Focused;
         if(hovered(n.id))n.state_flags|=A11yState_Hovered;
         if(active(n.id))n.state_flags|=A11yState_Pressed;
         for(auto* p=ctx->a11y_patches;p;p=p->next)if(p->desc.element_id==n.id)
             n.state_flags=(n.state_flags|p->desc.add_states)&~(p->desc.clear_states&~A11yState_Password);
     }
-    a11y_finish_actions(ctx,true);ctx->stats.a11y_node_count=ui.a11y_node_count;
+    ctx->stats.a11y_node_count=ui.a11y_node_count;
+    os_a11y_notify_commit(ctx);
+    a11y_finish_actions(ctx,true);
 }
 bool a11y_take_any(uint32_t id,uint32_t mask,PendingA11yAction* out) noexcept {
     if(!id || !mask)return false;
@@ -146,7 +152,8 @@ bool perform_a11y_action(uint32_t id,A11yAction action,float number,Str text,Con
     if(!ui || !n || (n->state_flags&A11yState_Disabled) || !(n->actions_mask&a11y_action_bit(action)) || ui->a11y_action_count==16)return false;
     auto& c=ui->a11y_actions[ui->a11y_action_count++];c={};c.id=id;c.action=action;c.number=number;
     c.length=utf8_clamp_boundary(text.chars,text.length,text.length<1023?text.length:1023);if(c.length)std::memcpy(c.text,text.chars,c.length);
-    ui->redraw_budget=2;request_redraw(ctx);wake_up(ctx);return true;
+    ui->redraw_budget=2;request_redraw(ctx);wake_up(ctx);
+    return true;
 }
 const char* a11y_role_name(A11yRole role) noexcept {
     static constexpr const char* names[]={"None","Window","Group","Region","Toolbar","MenuBar","Menu","MenuItem","TabList","Tab","Dialog","ScrollArea","List","ListItem","Table","Tree","TreeItem","StaticText","Button","Checkbox","Switch","Slider","SpinButton","ProgressBar","ComboBox","TextInput","CodeEditor","Canvas","Tooltip"};
