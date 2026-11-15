@@ -4,6 +4,14 @@ All notable changes to Etch are documented here. This file follows
 [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-11-15
+
+### Added
+
+- Added the Slot 0 Dynamic Sprite Cache GPU atlas with generational handles and extruded borders.
+- Added static JPEG (baseline and progressive), GIF and TGA decoding alongside PNG/BMP.
+- Added cross-platform OpenType sbix and CBDT/CBLC color emoji, including outline-less fonts.
+
 ## [0.5.0] - 2026-11-15
 
 ### Added

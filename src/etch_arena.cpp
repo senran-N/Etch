@@ -187,6 +187,15 @@ struct FontSlot {
     uint16_t colr_num_base = 0, colr_num_layers = 0, cpal_num_palette_entries = 0;
     uint32_t colr_base_off = 0, colr_layer_off = 0, cpal_color_records_off = 0;
     bool has_colr = false;
+    uint32_t upem = 0, num_glyphs = 0;
+    bool has_outlines = false, has_sbix = false, has_cbdt = false, has_color_emoji = false;
+    hb_blob_t* sbix_blob = nullptr;
+    hb_blob_t* cblc_blob = nullptr;
+    hb_blob_t* cbdt_blob = nullptr;
+    const uint8_t* sbix_data = nullptr;
+    const uint8_t* cblc_data = nullptr;
+    const uint8_t* cbdt_data = nullptr;
+    uint32_t sbix_len = 0, cblc_len = 0, cbdt_len = 0;
     hb_blob_t*     hb_blob = nullptr;
     hb_face_t*     hb_face = nullptr;
     hb_font_t*     hb_font = nullptr;
@@ -208,6 +217,18 @@ struct VectorIconEntry {
     bool     has_outline = false;
 };
 
+struct SpriteSlot {
+    uint32_t x = 0, y = 0, width = 0, height = 0, alloc_w = 0, alloc_h = 0;
+    uint32_t next_free = 0;
+    uint16_t generation = 1;
+    bool live = false, srgb = true, premultiplied = false;
+};
+struct EmojiBitmapEntry {
+    uint64_t key = 0;
+    uint32_t sprite_id = kInvalidSprite, ppem = 0, width_px = 0, height_px = 0;
+    float bearing_x = 0, bearing_y_top = 0;
+    bool has_bitmap = false;
+};
 struct FontAtlas {
     Arena* scratch = nullptr;
     SlugGlyphEntry*   slug_glyphs = nullptr; // Open-addressed table (power-of-2 capacity)
@@ -224,7 +245,14 @@ struct FontAtlas {
 
     uint8_t*          pixels = nullptr; // kAtlasSize * kAtlasSize * 4 solid white fallback
     SDL_GPUTexture*   gpu_tex = nullptr;
-    bool              dirty = false;
+    uint32_t width = kAtlasSize, height = kAtlasSize, gpu_w = 0, gpu_h = 0;
+    uint32_t dirty_y0 = 0, dirty_y1 = kAtlasSize;
+    bool dirty = true;
+    uint32_t shelf_x = 0, shelf_y = 8, shelf_h = 0;
+    SpriteSlot* sprites = nullptr;
+    uint32_t sprite_cap = 0, sprite_used = 1, sprite_live = 0, sprite_free = 0;
+    EmojiBitmapEntry* emoji_bitmaps = nullptr;
+    uint32_t emoji_cap = 0, emoji_count = 0;
 
     FontSlot          slots[kMaxFontSlots] = {};
     uint16_t          fallback_order[kMaxFontSlots] = {};
@@ -821,6 +849,7 @@ struct Context {
     SDL_GPUBuffer*           prim_gpu_buf = nullptr;
     SDL_GPUTransferBuffer*   prim_transfer_buf = nullptr;
     SDL_GPUTransferBuffer*   atlas_transfer_buf = nullptr;
+    uint32_t atlas_tbuf_size = 0;
     SDL_GPUBuffer*           slug_curve_gpu_buf = nullptr;
     uint32_t                 slug_curve_gpu_cap = 0;
     SDL_GPUBuffer*           slug_band_gpu_buf = nullptr;

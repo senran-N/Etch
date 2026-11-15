@@ -16,6 +16,7 @@
 #include "checks_desktop.h"
 #include "checks_editor.h"
 #include "checks_a11y.h"
+#include "checks_media_emoji.h"
 
 namespace {
 

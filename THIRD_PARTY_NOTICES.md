@@ -33,6 +33,8 @@ source versions and preserve the notice in source distributions.
 
 ## stb headers
 
+- [stb_image.h](third_party/stb_image.h) v2.32, Copyright (c) 2017 Sean Barrett. MIT / Public Domain. Used for static JPEG/GIF/TGA image decoding.
+
 Sean Barrett's [stb_truetype.h](third_party/stb_truetype.h) v1.28 and
 [stb_image_write.h](third_party/stb_image_write.h) v1.18 each include their
 full license at the end of the header. Choose either Alternative A (MIT,

@@ -295,23 +295,25 @@ void end_frame(Context* ctx_arg) noexcept {
             }
             case CLAY_RENDER_COMMAND_TYPE_IMAGE: {
                 const ImageExtra* extra = static_cast<const ImageExtra*>(cmd->renderData.image.imageData);
-                if (extra && extra->desc.texture != nullptr) {
+                if (extra && (extra->desc.sprite_id != kInvalidSprite || extra->desc.texture != nullptr)) {
                     const ImageDesc& idesc = extra->desc;
+                    Vec2 uv0=idesc.uv_min, uv1=idesc.uv_max;
+                    if (idesc.sprite_id != kInvalidSprite && !resolve_sprite_uv_rect(ctx,idesc.sprite_id,uv0,uv1,&uv0,&uv1)) break;
                     push_prim(
                         ctx,
                         Prim::make_texture(
                             box_px,
                             cur_clip.rect,
-                            idesc.uv_min,
-                            idesc.uv_max,
+                            uv0,
+                            uv1,
                             0u,
                             scale_corners(idesc.radius, dpi),
                             idesc.tint,
                             idesc.border_color,
                             idesc.border_width * dpi,
-                            PrimFlag_None,
+                            idesc.sprite_id != kInvalidSprite ? PrimFlag_Premultiplied : PrimFlag_None,
                             cur_clip.radius),
-                        idesc.texture);
+                        idesc.sprite_id != kInvalidSprite ? nullptr : idesc.texture);
                 }
                 break;
             }
@@ -780,6 +782,8 @@ void end_frame(Context* ctx_arg) noexcept {
     if (!ctx->headless && ctx->active_window == ctx->window) ctx->headless_ui.redraw_budget = 0;
     a11y_commit(ctx);
     ctx->in_frame = false;
+    ctx->stats.sprite_count = ctx->atlas.sprite_live;
+    ctx->stats.sprite_atlas_size = ctx->atlas.width;
     ctx->stats.prim_count = ctx->prim_count;
     ctx->stats.prim_capacity = ctx->max_prims;
     ctx->stats.draw_call_count = ctx->batch_count;

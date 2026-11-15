@@ -53,6 +53,9 @@ void destroy_font_slot(FontSlot* slot) noexcept {
     if (slot->hb_font) hb_font_destroy(slot->hb_font);
     if (slot->hb_face) hb_face_destroy(slot->hb_face);
     if (slot->hb_blob) hb_blob_destroy(slot->hb_blob);
+    if (slot->sbix_blob) hb_blob_destroy(slot->sbix_blob);
+    if (slot->cblc_blob) hb_blob_destroy(slot->cblc_blob);
+    if (slot->cbdt_blob) hb_blob_destroy(slot->cbdt_blob);
     if (slot->colr_blob) hb_blob_destroy(slot->colr_blob);
     if (slot->cpal_blob) hb_blob_destroy(slot->cpal_blob);
     if (slot->font_file_data) SDL_free(slot->font_file_data);
@@ -61,6 +64,7 @@ void destroy_font_slot(FontSlot* slot) noexcept {
 
 void ensure_bold_loaded(FontAtlas* atlas) noexcept;
 void ensure_mono_loaded(FontAtlas* atlas) noexcept;
+void evict_font_slot_emoji_bitmaps(FontAtlas* atlas, uint16_t slot_idx) noexcept;
 
 uint16_t resolve_font_slot_idx(FontAtlas* atlas, uint16_t font_id) noexcept {
     if (font_id == kFontBold && !atlas->slots[kFontBold].loaded && !atlas->bold_probed)
@@ -109,7 +113,7 @@ void ensure_fallback_registered(FontAtlas* atlas, uint16_t slot_idx) noexcept {
 
 uint16_t ot_u16(const uint8_t* p) noexcept { return static_cast<uint16_t>((uint16_t(p[0]) << 8) | p[1]); }
 uint32_t ot_u32(const uint8_t* p) noexcept { return (uint32_t(ot_u16(p)) << 16) | ot_u16(p+2); }
-void init_color_tables(FontSlot* s) noexcept {
+void init_colr_tables(FontSlot* s) noexcept {
     s->colr_blob = hb_face_reference_table(s->hb_face, HB_TAG('C','O','L','R'));
     s->cpal_blob = hb_face_reference_table(s->hb_face, HB_TAG('C','P','A','L'));
     s->colr_data = reinterpret_cast<const uint8_t*>(hb_blob_get_data(s->colr_blob, &s->colr_len));
@@ -125,6 +129,26 @@ void init_color_tables(FontSlot* s) noexcept {
         s->colr_layer_off > s->colr_len || uint32_t(s->colr_num_layers)*4u > s->colr_len-s->colr_layer_off ||
         records > s->cpal_len || (first+uint32_t(s->cpal_num_palette_entries))*4u > s->cpal_len-records) return;
     s->cpal_color_records_off = records + first*4u; s->has_colr = true;
+}
+void init_color_tables(FontSlot* s) noexcept {
+    init_colr_tables(s);
+    s->sbix_blob=hb_face_reference_table(s->hb_face,HB_TAG('s','b','i','x'));
+    s->cblc_blob=hb_face_reference_table(s->hb_face,HB_TAG('C','B','L','C'));
+    s->cbdt_blob=hb_face_reference_table(s->hb_face,HB_TAG('C','B','D','T'));
+    s->sbix_data=reinterpret_cast<const uint8_t*>(hb_blob_get_data(s->sbix_blob,&s->sbix_len));
+    s->cblc_data=reinterpret_cast<const uint8_t*>(hb_blob_get_data(s->cblc_blob,&s->cblc_len));
+    s->cbdt_data=reinterpret_cast<const uint8_t*>(hb_blob_get_data(s->cbdt_blob,&s->cbdt_len));
+    if(s->sbix_len>=8 && ot_u16(s->sbix_data)>=1) {
+        const uint32_t n=ot_u32(s->sbix_data+4);
+        if(n && n<=(s->sbix_len-8)/4)for(uint32_t i=0;i<n;++i) {
+            const uint32_t off=ot_u32(s->sbix_data+8+i*4);
+            if(uint64_t(off)+4+(uint64_t(s->num_glyphs)+1)*4<=s->sbix_len){s->has_sbix=true;break;}
+        }
+    }
+    if(s->cblc_len>=8 && s->cbdt_len>=4 && (ot_u16(s->cblc_data)==2 || ot_u16(s->cblc_data)==3)) {
+        const uint32_t n=ot_u32(s->cblc_data+4);s->has_cbdt=n && n<=(s->cblc_len-8)/48;
+    }
+    s->has_color_emoji=s->has_colr || s->has_sbix || s->has_cbdt;
 }
 struct SlugColrLayers { uint32_t first = 0, count = 0; };
 SlugColrLayers slug_get_colr_layers(const FontSlot& s, uint32_t glyph) noexcept {
@@ -147,12 +171,6 @@ bool init_font_slot_from_owned_bytes(
 {
     const unsigned char* bytes = static_cast<const unsigned char*>(raw);
     stbtt_fontinfo new_info = {};
-    const int offset = stbtt_GetFontOffsetForIndex(bytes, face_index);
-    if (offset < 0 || !stbtt_InitFont(&new_info, bytes, offset)) {
-        SDL_free(raw);
-        return false;
-    }
-
     hb_blob_t* blob = hb_blob_create(
         reinterpret_cast<const char*>(raw),
         static_cast<unsigned int>(sz),
@@ -174,21 +192,29 @@ bool init_font_slot_from_owned_bytes(
     hb_font_set_scale(font, static_cast<int>(upem), static_cast<int>(upem));
 
     FontSlot next = {};
-    next.font_info = new_info;
     next.font_file_data = static_cast<uint8_t*>(raw);
     next.font_file_size = sz;
-    stbtt_GetFontVMetrics(&next.font_info, &next.font_ascent, &next.font_descent, &next.font_line_gap);
-    next.scale_1px = stbtt_ScaleForPixelHeight(&next.font_info, 1.0f);
-    if (next.scale_1px <= 0.0f) {
-        next.scale_1px = 1.0f / static_cast<float>(upem);
-    }
-    next.ascent_em = static_cast<float>(next.font_ascent) * next.scale_1px;
-    next.descent_em = static_cast<float>(next.font_descent) * next.scale_1px;
-    next.line_height_em = static_cast<float>(next.font_ascent - next.font_descent + next.font_line_gap) * next.scale_1px;
-    next.hb_blob = blob;
-    next.hb_face = face;
-    next.hb_font = font;
+    next.hb_blob=blob;next.hb_face=face;next.hb_font=font;
+    next.upem=upem;next.num_glyphs=hb_face_get_glyph_count(face);
     init_color_tables(&next);
+    const int offset=stbtt_GetFontOffsetForIndex(bytes,face_index);
+    next.has_outlines=offset>=0 && stbtt_InitFont(&new_info,bytes,offset)!=0;
+    if(next.has_outlines) {
+        next.font_info=new_info;
+        stbtt_GetFontVMetrics(&next.font_info,&next.font_ascent,&next.font_descent,&next.font_line_gap);
+        next.scale_1px=stbtt_ScaleForPixelHeight(&next.font_info,1.0f);
+    } else {
+        if(!next.has_color_emoji){destroy_font_slot(&next);return false;}
+        hb_font_extents_t ext{};
+        if(hb_font_get_h_extents(font,&ext) && ext.ascender>ext.descender) {
+            next.font_ascent=ext.ascender;next.font_descent=ext.descender;next.font_line_gap=ext.line_gap;
+        } else {next.font_ascent=int32_t(upem*4/5);next.font_descent=-int32_t(upem/5);}
+        next.scale_1px=1.0f/float(next.font_ascent-next.font_descent);
+    }
+    if(next.scale_1px<=0)next.scale_1px=1.0f/float(upem);
+    next.ascent_em=float(next.font_ascent)*next.scale_1px;
+    next.descent_em=float(next.font_descent)*next.scale_1px;
+    next.line_height_em=float(next.font_ascent-next.font_descent+next.font_line_gap)*next.scale_1px;
     next.source_hash = source_hash;
     next.loaded = true;
 
@@ -208,6 +234,9 @@ bool init_font_slot_from_owned_bytes(
 
     FontSlot* dst = &atlas->slots[slot_idx];
     const uint8_t prev_gen = dst->generation;
+    if (prev_gen != 0u) {
+        evict_font_slot_emoji_bitmaps(atlas, slot_idx);
+    }
     destroy_font_slot(dst);
     if (prev_gen == 255u && atlas->slug_glyphs && atlas->slug_glyph_cap > 0u) {
         // Rare 255th slot reload: flush glyph hash table so wrapped generation 1 cannot hit stale glyphs.
@@ -456,6 +485,8 @@ void font_atlas_destroy(FontAtlas* atlas) noexcept {
     for (uint16_t i = 0u; i < kMaxFontSlots; ++i) {
         destroy_font_slot(&atlas->slots[i]);
     }
+    std::free(atlas->sprites);
+    std::free(atlas->emoji_bitmaps);
     std::free(atlas->pixels);
     std::free(atlas->slug_bands);
     std::free(atlas->slug_curves);
@@ -672,6 +703,7 @@ SlugGlyphEntry slug_get_glyph(FontAtlas* atlas, uint16_t slot_idx, uint32_t glyp
     }
 
     FontSlot& slot = atlas->slots[slot_idx];
+    if (!slot.has_outlines) return {};
     const uint64_t key =
         (static_cast<uint64_t>(slot_idx + 1u) << 40) |
         (static_cast<uint64_t>(slot.generation) << 32) |
@@ -845,7 +877,7 @@ uint16_t pick_fallback_slot_for_cluster(
     for (uint32_t i=0;i<cp_count;++i) { const uint32_t cp=cps[i]; if(cp==0xFE0E)text_presentation=true; if(cp==0xFE0F||cp==0x20E3||cp>=0x1F000||(cp>=0x2600&&cp<=0x27BF))emoji=true; }
     if (emoji && !text_presentation) for (uint32_t fi=0;fi<atlas->fallback_count;++fi) {
         const uint16_t idx=atlas->fallback_order[fi]; const auto& slot=atlas->slots[idx];
-        if(!slot.has_colr)continue;
+        if(!slot.has_color_emoji)continue;
         bool covers=true; hb_codepoint_t glyph=0;
         for(uint32_t i=0;i<cp_count;++i) if(cps[i]!=0xFE0F&&cps[i]!=0x200D&&!hb_font_get_nominal_glyph(slot.hb_font,cps[i],&glyph)){covers=false;break;}
         if(covers)return idx;
@@ -951,7 +983,7 @@ std::span<const ShapedGlyph> shape_directional_run(
         }
     }
 
-    has_missing = has_missing || wants_emoji(utf8 + item_start, item_end - item_start);
+    has_missing = has_missing || (!primary.has_color_emoji && wants_emoji(utf8 + item_start, item_end - item_start));
     if (has_missing && !ctx->atlas.fallbacks_probed) ensure_system_fallbacks_loaded(&ctx->atlas);
     if (!has_missing || ctx->atlas.fallback_count <= 1u) {
         ShapedGlyph* out = ctx->frame_arena.alloc_uninit<ShapedGlyph>(count);
@@ -1015,7 +1047,7 @@ std::span<const ShapedGlyph> shape_directional_run(
             ? infos[logical_idx(step_end)].cluster
             : item_end;
 
-        const uint16_t chosen_slot = (cluster_missing || wants_emoji(utf8 + c_start, c_end - c_start))
+        const uint16_t chosen_slot = (cluster_missing || (!primary.has_color_emoji && wants_emoji(utf8 + c_start, c_end - c_start)))
             ? pick_fallback_slot_for_cluster(&ctx->atlas, primary_slot, utf8 + c_start, c_end - c_start)
             : primary_slot;
 

@@ -659,6 +659,30 @@ bool record_frame_commands(
     if (ctx->prim_count > ctx->prim_gpu_cap || ctx->prim_count > ctx->prim_tbuf_cap) {
         if (!ensure_prim_buffers(ctx, ctx->prim_count)) return false;
     }
+    auto& atlas = ctx->atlas;
+    if (!atlas.gpu_tex || atlas.gpu_w != atlas.width || atlas.gpu_h != atlas.height) {
+        SDL_WaitForGPUIdle(ctx->device);
+        if (atlas.gpu_tex) SDL_ReleaseGPUTexture(ctx->device, atlas.gpu_tex);
+        const SDL_GPUTextureCreateInfo info = {
+            .type=SDL_GPU_TEXTURETYPE_2D, .format=SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB,
+            .usage=SDL_GPU_TEXTUREUSAGE_SAMPLER, .width=atlas.width, .height=atlas.height,
+            .layer_count_or_depth=1u, .num_levels=1u, .sample_count=SDL_GPU_SAMPLECOUNT_1,
+        };
+        atlas.gpu_tex=SDL_CreateGPUTexture(ctx->device,&info);
+        if (!atlas.gpu_tex) return false;
+        atlas.gpu_w=atlas.width; atlas.gpu_h=atlas.height;
+        atlas.dirty=true; atlas.dirty_y0=0; atlas.dirty_y1=atlas.height;
+    }
+    if (atlas.dirty && atlas.dirty_y1>atlas.dirty_y0) {
+        const uint32_t bytes=atlas.width*(atlas.dirty_y1-atlas.dirty_y0)*4u;
+        if (ctx->atlas_tbuf_size<bytes) {
+            if (ctx->atlas_transfer_buf) SDL_ReleaseGPUTransferBuffer(ctx->device,ctx->atlas_transfer_buf);
+            const SDL_GPUTransferBufferCreateInfo info={.usage=SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD,.size=bytes};
+            ctx->atlas_transfer_buf=SDL_CreateGPUTransferBuffer(ctx->device,&info);
+            ctx->atlas_tbuf_size=ctx->atlas_transfer_buf?bytes:0;
+            if (!ctx->atlas_transfer_buf) return false;
+        }
+    }
     if (ctx->atlas.dirty || ctx->prim_count > 0u || slug_curves_pending || slug_bands_pending ||
         ctx->dyn_slug_curve_count > 0u || ctx->dyn_slug_band_count > 0u) {
         SDL_GPUCopyPass* copy_pass = SDL_BeginGPUCopyPass(cmd);
@@ -666,32 +690,16 @@ bool record_frame_commands(
             return false;
         }
 
-        if (ctx->atlas.dirty && ctx->atlas.gpu_tex && ctx->atlas_transfer_buf) {
-            void* mapped = SDL_MapGPUTransferBuffer(ctx->device, ctx->atlas_transfer_buf, true);
-            if (mapped) {
-                std::memcpy(mapped, ctx->atlas.pixels, size_t(kAtlasSize) * kAtlasSize * 4u);
-                SDL_UnmapGPUTransferBuffer(ctx->device, ctx->atlas_transfer_buf);
-
-                const SDL_GPUTextureTransferInfo src = {
-                    .transfer_buffer = ctx->atlas_transfer_buf,
-                    .offset = 0u,
-                    .pixels_per_row = kAtlasSize,
-                    .rows_per_layer = kAtlasSize,
-                };
-                const SDL_GPUTextureRegion dst = {
-                    .texture = ctx->atlas.gpu_tex,
-                    .mip_level = 0u,
-                    .layer = 0u,
-                    .x = 0u,
-                    .y = 0u,
-                    .z = 0u,
-                    .w = kAtlasSize,
-                    .h = kAtlasSize,
-                    .d = 1u,
-                };
-                SDL_UploadToGPUTexture(copy_pass, &src, &dst, false);
-            }
-            ctx->atlas.dirty = false;
+        if (atlas.dirty && atlas.dirty_y1>atlas.dirty_y0) {
+            const uint32_t rows=atlas.dirty_y1-atlas.dirty_y0;
+            void* mapped=SDL_MapGPUTransferBuffer(ctx->device,ctx->atlas_transfer_buf,true);
+            if (!mapped) { SDL_EndGPUCopyPass(copy_pass); return false; }
+            std::memcpy(mapped,atlas.pixels+size_t(atlas.dirty_y0)*atlas.width*4u,size_t(atlas.width)*rows*4u);
+            SDL_UnmapGPUTransferBuffer(ctx->device,ctx->atlas_transfer_buf);
+            const SDL_GPUTextureTransferInfo src={.transfer_buffer=ctx->atlas_transfer_buf,.pixels_per_row=atlas.width,.rows_per_layer=rows};
+            const SDL_GPUTextureRegion dst={.texture=atlas.gpu_tex,.y=atlas.dirty_y0,.w=atlas.width,.h=rows,.d=1u};
+            SDL_UploadToGPUTexture(copy_pass,&src,&dst,false);
+            atlas.dirty=false;atlas.dirty_y0=UINT32_MAX;atlas.dirty_y1=0;
         }
 
         upload_slug_delta(
@@ -1167,10 +1175,10 @@ bool ensure_gpu_device(Context* ctx) noexcept {
 
     const SDL_GPUTextureCreateInfo atlas_tex_info = {
         .type = SDL_GPU_TEXTURETYPE_2D,
-        .format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,
+        .format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB,
         .usage = SDL_GPU_TEXTUREUSAGE_SAMPLER,
-        .width = kAtlasSize,
-        .height = kAtlasSize,
+        .width = ctx->atlas.width,
+        .height = ctx->atlas.height,
         .layer_count_or_depth = 1u,
         .num_levels = 1u,
         .sample_count = SDL_GPU_SAMPLECOUNT_1,
@@ -1180,11 +1188,13 @@ bool ensure_gpu_device(Context* ctx) noexcept {
 
     const SDL_GPUTransferBufferCreateInfo atlas_tbuf_info = {
         .usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD,
-        .size = kAtlasSize * kAtlasSize * 4u,
+        .size = ctx->atlas.width * ctx->atlas.height * 4u,
         .props = 0u,
     };
     ctx->atlas_transfer_buf = SDL_CreateGPUTransferBuffer(ctx->device, &atlas_tbuf_info);
 
+    ctx->atlas.gpu_w = ctx->atlas.width; ctx->atlas.gpu_h = ctx->atlas.height;
+    ctx->atlas_tbuf_size = ctx->atlas.width * ctx->atlas.height * 4u;
     ctx->slug_curve_gpu_cap = kInitialSlugCurveCap;
     const SDL_GPUBufferCreateInfo slug_curve_info = {
         .usage = SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ,
@@ -1628,34 +1638,6 @@ bool upload_rgba_rows(
     return ok;
 }
 
-LoadedTexture upload_sdl_surface(Context* ctx, SDL_Surface* surf, bool srgb, const char* debug_name) noexcept {
-    if (!surf || surf->w <= 0 || surf->h <= 0 || !surf->pixels) {
-        return {};
-    }
-
-    SDL_Surface* rgba_surf = surf;
-    if (surf->format != SDL_PIXELFORMAT_RGBA32) {
-        rgba_surf = SDL_ConvertSurface(surf, SDL_PIXELFORMAT_RGBA32);
-        if (!rgba_surf) {
-            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "SDL_ConvertSurface RGBA32 failed: %s", SDL_GetError());
-            return {};
-        }
-    }
-
-    const LoadedTexture res = create_texture_rgba(ctx, TextureDesc{
-        .rgba_pixels = rgba_surf->pixels,
-        .width = static_cast<uint32_t>(rgba_surf->w),
-        .height = static_cast<uint32_t>(rgba_surf->h),
-        .row_pitch_bytes = static_cast<uint32_t>(rgba_surf->pitch),
-        .srgb = srgb,
-        .debug_name = debug_name,
-    });
-
-    if (rgba_surf != surf) {
-        SDL_DestroySurface(rgba_surf);
-    }
-    return res;
-}
 
 } // namespace
 
@@ -1757,43 +1739,18 @@ bool update_texture_rgba(
 }
 
 LoadedTexture load_texture_file(Context* ctx, const char* path, bool srgb) noexcept {
-    if (!ensure_gpu_device(ctx) || !path || path[0] == '\0') {
-        return {};
-    }
-    SDL_Surface* surf = SDL_LoadPNG(path);
-    if (!surf) {
-        surf = SDL_LoadBMP(path);
-    }
-    if (!surf) {
-        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "load_texture_file('%s') failed: %s", path, SDL_GetError());
-        return {};
-    }
-    const LoadedTexture res = upload_sdl_surface(ctx, surf, srgb, path);
-    SDL_DestroySurface(surf);
-    return res;
+    if (!ctx) return {};
+    DecodedImage image{};
+    if (!decode_image_file(path, &image)) return {};
+    const auto result = create_texture_rgba(ctx, {.rgba_pixels=image.rgba, .width=image.width, .height=image.height, .srgb=srgb});
+    free_decoded_image(&image); return result;
 }
-
 LoadedTexture load_texture_memory(Context* ctx, const void* data, size_t size_bytes, bool srgb) noexcept {
-    if (!ensure_gpu_device(ctx) || !data || size_bytes == 0u) {
-        return {};
-    }
-    SDL_IOStream* io = SDL_IOFromConstMem(data, size_bytes);
-    if (!io) {
-        return {};
-    }
-    SDL_Surface* surf = SDL_LoadPNG_IO(io, false);
-    if (!surf) {
-        SDL_SeekIO(io, 0, SDL_IO_SEEK_SET);
-        surf = SDL_LoadBMP_IO(io, false);
-    }
-    SDL_CloseIO(io);
-    if (!surf) {
-        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "load_texture_memory failed: %s", SDL_GetError());
-        return {};
-    }
-    const LoadedTexture res = upload_sdl_surface(ctx, surf, srgb, nullptr);
-    SDL_DestroySurface(surf);
-    return res;
+    if (!ctx) return {};
+    DecodedImage image{};
+    if (!decode_image_memory(data, size_bytes, &image)) return {};
+    const auto result = create_texture_rgba(ctx, {.rgba_pixels=image.rgba, .width=image.width, .height=image.height, .srgb=srgb});
+    free_decoded_image(&image); return result;
 }
 
 void destroy_texture(Context* ctx, LoadedTexture* tex) noexcept {

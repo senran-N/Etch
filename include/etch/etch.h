@@ -12,7 +12,7 @@
 #include <type_traits>
 
 #define ETCH_VERSION_MAJOR 0
-#define ETCH_VERSION_MINOR 5
+#define ETCH_VERSION_MINOR 6
 #define ETCH_VERSION_PATCH 0
 #define ETCH_VERSION_STR_DETAIL(x) #x
 #define ETCH_VERSION_STR(x) ETCH_VERSION_STR_DETAIL(x)
@@ -948,6 +948,8 @@ struct FrameStats {
     uint32_t active_animations = 0;
     bool idle_sleeping = false;
     int32_t ime_cursor_offset_win = 0; // Cursor within the IME area, in window pixels.
+    uint32_t sprite_count = 0;
+    uint32_t sprite_atlas_size = 0;
 };
 
 enum class SizingKind : uint8_t {
@@ -1093,6 +1095,7 @@ inline constexpr uint16_t kFontMono       = 2u;
 inline constexpr uint16_t kMaxFontSlots   = 16u;
 inline constexpr uint16_t kInvalidFont    = 0xFFFFu;
 inline constexpr uint16_t kMaxVectorIcons = 256u;
+inline constexpr uint32_t kInvalidSprite = 0u;
 inline constexpr uint16_t kInvalidIcon    = 0xFFFFu;
 
 struct TextDesc {
@@ -1176,6 +1179,7 @@ void set_collapsible_open(uint32_t element_id, bool open) noexcept;
 struct ImageDesc {
     uint32_t id = 0;
     SDL_GPUTexture* texture = nullptr; // Zero-copy external GPU texture slot
+    uint32_t sprite_id = kInvalidSprite;
     Sizing width = Sizing::fit();
     Sizing height = Sizing::fit();
     Vec2 uv_min = {0.0f, 0.0f};
@@ -1319,6 +1323,7 @@ struct TextDrawDesc {
 
 struct ImageDrawDesc {
     SDL_GPUTexture* texture = nullptr;
+    uint32_t sprite_id = kInvalidSprite;
     Rect            rect = {}; // Local to current open box (logical px)
     Rect            uv_rect = {0.0f, 0.0f, 1.0f, 1.0f};
     Color           tint = Color::white();
@@ -1333,6 +1338,7 @@ struct TextureDesc {
     uint32_t    row_pitch_bytes = 0; // 0 = width * 4
     bool        srgb = true;
     const char* debug_name = nullptr;
+    bool premultiplied_alpha = false;
 };
 
 struct LoadedTexture {
@@ -1889,6 +1895,15 @@ void draw_icon(const IconDrawDesc& desc) noexcept;
 Vec2 measure_text(Str text, uint16_t font_id = kFontSans, float size = 14.0f, float letter_spacing = 0.0f) noexcept;
 void draw_text(const TextDrawDesc& desc) noexcept;
 void draw_image(const ImageDrawDesc& desc) noexcept;
+
+uint32_t create_sprite_rgba(Context* ctx, const TextureDesc& desc) noexcept;
+bool update_sprite_rgba(Context* ctx, uint32_t sprite_id, uint32_t width, uint32_t height,
+    const void* rgba_pixels, uint32_t row_pitch_bytes = 0) noexcept;
+uint32_t load_sprite_file(Context* ctx, const char* path, bool srgb = true) noexcept;
+uint32_t load_sprite_memory(Context* ctx, const void* data, size_t size_bytes, bool srgb = true) noexcept;
+void destroy_sprite(Context* ctx, uint32_t sprite_id) noexcept;
+Vec2 sprite_size(const Context* ctx, uint32_t sprite_id) noexcept;
+uint32_t sprite_count(const Context* ctx) noexcept;
 
 LoadedTexture create_texture_rgba(Context* ctx, const TextureDesc& desc) noexcept;
 bool update_texture_rgba(

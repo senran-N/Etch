@@ -45,6 +45,16 @@
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
 
+#define STB_IMAGE_IMPLEMENTATION
+#define STBI_NO_STDIO
+#define STBI_NO_FAILURE_STRINGS
+#define STBI_NO_HDR
+#define STBI_NO_LINEAR
+#define STBI_ONLY_JPEG
+#define STBI_ONLY_GIF
+#define STBI_ONLY_TGA
+#include "stb_image.h"
+
 #if defined(_MSC_VER)
 #    pragma warning(pop)
 #elif defined(__clang__)
@@ -57,7 +67,9 @@
 #include <hb-ot.h>
 
 #include "etch_arena.cpp"
+#include "etch_image.cpp"
 #include "etch_slug.cpp"
+#include "etch_emoji.cpp"
 #include "etch_render_cmd.cpp"
 #include "etch_text_input.cpp"
 #include "etch_layout.cpp"

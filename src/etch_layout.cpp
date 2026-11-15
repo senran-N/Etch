@@ -528,7 +528,7 @@ void emit_draw_list_command(
             }
             case DrawCmdKind::Image: {
                 const ImageDrawDesc& im = node->image_cmd;
-                if (!im.texture || im.tint.a == 0u || im.rect.w <= 0.0f || im.rect.h <= 0.0f) {
+                if ((!im.texture && im.sprite_id == kInvalidSprite) || im.tint.a == 0u || im.rect.w <= 0.0f || im.rect.h <= 0.0f) {
                     break;
                 }
                 const Rect target_px = {
@@ -537,8 +537,9 @@ void emit_draw_list_command(
                     .w = im.rect.w * scale,
                     .h = im.rect.h * scale,
                 };
-                const Vec2 uv_min = { im.uv_rect.x, im.uv_rect.y };
-                const Vec2 uv_max = { im.uv_rect.x + im.uv_rect.w, im.uv_rect.y + im.uv_rect.h };
+                Vec2 uv_min = { im.uv_rect.x, im.uv_rect.y };
+                Vec2 uv_max = { im.uv_rect.x + im.uv_rect.w, im.uv_rect.y + im.uv_rect.h };
+                if (im.sprite_id != kInvalidSprite && !resolve_sprite_uv_rect(ctx, im.sprite_id, uv_min, uv_max, &uv_min, &uv_max)) break;
                 push_prim(
                     ctx,
                     Prim::make_texture(
@@ -551,9 +552,9 @@ void emit_draw_list_command(
                         im.tint,
                         Color{},
                         0.0f,
-                        PrimFlag_None,
+                        im.sprite_id != kInvalidSprite ? PrimFlag_Premultiplied : PrimFlag_None,
                         clip.radius),
-                    im.texture);
+                    im.sprite_id != kInvalidSprite ? nullptr : im.texture);
                 break;
             }
         }
@@ -1950,6 +1951,12 @@ void image(const ImageDesc& desc_in) noexcept {
 
     const float wscale = current_world_scale(ctx);
     ImageDesc desc = desc_in;
+    if (desc.sprite_id != kInvalidSprite && desc_in.aspect_ratio <= 0.0f &&
+        desc_in.width.kind == SizingKind::Fit && desc_in.width.min == 0 && desc_in.width.max == 0 &&
+        desc_in.height.kind == SizingKind::Fit && desc_in.height.min == 0 && desc_in.height.max == 0) {
+        const Vec2 sz = sprite_size(ctx, desc.sprite_id);
+        desc.width = Sizing::fixed(sz.x); desc.height = Sizing::fixed(sz.y);
+    }
     if (wscale != 1.0f) {
         desc.width = scale_sizing(desc.width, wscale);
         desc.height = scale_sizing(desc.height, wscale);
@@ -2215,7 +2222,7 @@ void draw_text(const TextDrawDesc& desc) noexcept {
 
 void draw_image(const ImageDrawDesc& desc) noexcept {
     Context* ctx = current_context();
-    if (!ctx || !desc.texture || desc.tint.a == 0u || desc.rect.w <= 0.0f || desc.rect.h <= 0.0f) {
+    if (!ctx || (!desc.texture && desc.sprite_id == kInvalidSprite) || desc.tint.a == 0u || desc.rect.w <= 0.0f || desc.rect.h <= 0.0f) {
         return;
     }
     if (DrawCmdNode* node = append_open_box_draw_cmd(ctx, desc.foreground)) {

@@ -893,7 +893,23 @@ void emit_slug_outline_quad(
 void emit_slug_glyph_quad(Context* ctx, uint16_t slot_idx, uint32_t glyph_id, float phys_px, float pen_x_px,
     float baseline_y_px, float x_offset_em, float y_offset_em, const ClipEntry& clip_px, Color tint) noexcept {
     const auto& slot=ctx->atlas.slots[slot_idx]; const auto layers=slug_get_colr_layers(slot,glyph_id);
-    if (!layers.count) { emit_slug_outline_quad(ctx,slot_idx,glyph_id,phys_px,pen_x_px,baseline_y_px,x_offset_em,y_offset_em,clip_px,tint); return; }
+    if (!layers.count) {
+        if(slot.has_sbix || slot.has_cbdt) {
+            const auto entry=get_or_cache_bitmap_emoji(ctx,slot_idx,glyph_id,phys_px);
+            if(entry.has_bitmap && entry.sprite_id!=kInvalidSprite) {
+                const float scale_px=slot.scale_1px*phys_px;
+                const float strike_scale=float(slot.upem)*scale_px/float(entry.ppem);
+                const Rect quad={pen_x_px+x_offset_em*scale_px+entry.bearing_x*strike_scale,
+                    baseline_y_px-y_offset_em*scale_px-entry.bearing_y_top*strike_scale,
+                    float(entry.width_px)*strike_scale,float(entry.height_px)*strike_scale};
+                Vec2 uv0{},uv1{};
+                if(resolve_sprite_uv_rect(ctx,entry.sprite_id,{0,0},{1,1},&uv0,&uv1))
+                    push_prim(ctx,Prim::make_texture(quad,clip_px.rect,uv0,uv1,0u,{},Color::rgba8(255,255,255,tint.a),{},0.0f,PrimFlag_Premultiplied,clip_px.radius),nullptr);
+                return;
+            }
+        }
+        emit_slug_outline_quad(ctx,slot_idx,glyph_id,phys_px,pen_x_px,baseline_y_px,x_offset_em,y_offset_em,clip_px,tint);return;
+    }
     for(uint32_t i=0;i<layers.count;++i) {
         const auto* p=slot.colr_data+slot.colr_layer_off+(layers.first+i)*4u;
         const uint16_t glyph=ot_u16(p),palette=ot_u16(p+2); Color color=tint;
