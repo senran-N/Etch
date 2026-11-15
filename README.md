@@ -75,13 +75,19 @@ ETCH_GPU_DRIVER=metal ./build/sandbox --headless
 
 ## Verification
 
-CI builds all targets and runs these four CPU suites without requiring a GPU:
+CI builds all targets and runs these six suites without requiring a GPU:
 
 ```sh
-ctest --test-dir build --output-on-failure -R "^(arena_and_elasticity|unicode_bidi_grapheme|layout_clay_flex_grid|fenwick_virtual_list_1m)$"
+ctest --test-dir build --output-on-failure -R "^(repo_guardrails|downstream_consumers|arena_and_elasticity|unicode_bidi_grapheme|layout_clay_flex_grid|fenwick_virtual_list_1m)$"
 ```
 
-Full CTest runs eight suites, including GPU invariants. `--headless` renders
+With tests and installation enabled, full CTest runs ten suites, including GPU
+invariants. `repo_guardrails` checks architecture, versions, artifacts and OSS
+notices; `downstream_consumers` installs Etch and builds/runs strict public-API
+consumers using both `find_package` and `add_subdirectory`. The four core CPU
+suites have a 5s timeout, guardrails 10s, and downstream consumers 120s.
+CI also requires a clean working tree and zero PNG files in the repository root.
+`--headless` renders
 offscreen and writes `frame_check.png` in the working directory; it still
 requires a supported GPU device/driver. Check the image as well as assertions.
 For Windows backend verification in PowerShell:

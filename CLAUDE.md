@@ -39,6 +39,8 @@ etch/
 |-- CLAUDE.md                 # Architecture constitution
 |-- CMakeLists.txt            # Out-of-source build, Etch::etch, install/export
 |-- cmake/
+|   |-- check_repo_guardrails.cmake # Architecture, version and OSS checks
+|   |-- check_downstream_consumers.cmake # Installed/subproject consumer checks
 |   |-- embed_msl.cmake       # Embed offline Metal source as C byte arrays
 |   `-- EtchConfig.cmake.in   # Installed dependency discovery and targets
 |-- include/etch/etch.h       # Public API: Arena, Prim and declarative UI
@@ -70,7 +72,8 @@ etch/
     |-- checks_editor.h       # Shared editor regressions
     |-- checks_a11y.h         # Shared accessibility regressions
     |-- checks_sandbox_headless.h # Shared sandbox offscreen assertions
-    `-- etch_tests.cpp        # Eight standalone CTest suites
+    |-- consumer_smoke/main.cpp # Public-API-only CPU consumer
+    `-- etch_tests.cpp        # Eight C++ suites; ten CTest suites with guardrails/consumers
 ```
 
 The former layout implementation is split across `etch_render_cmd.cpp`,
@@ -78,6 +81,8 @@ The former layout implementation is split across `etch_render_cmd.cpp`,
 `etch_frame.cpp`; these remain part of the single unity translation unit.
 Examples, tests, and installation default to OFF in subprojects. Generated
 shader headers live in the build directory; checked-in headers are fallbacks.
+With tests and installation enabled, CTest runs ten suites, including repository
+guardrails and installed/add_subdirectory downstream consumer smoke checks.
 
 ---
 

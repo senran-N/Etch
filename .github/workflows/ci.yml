@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 env:
-  CPU_SUITES: '^(arena_and_elasticity|unicode_bidi_grapheme|layout_clay_flex_grid|fenwick_virtual_list_1m)$'
+  CPU_SUITES: '^(repo_guardrails|downstream_consumers|arena_and_elasticity|unicode_bidi_grapheme|layout_clay_flex_grid|fenwick_virtual_list_1m)$'
 
 jobs:
   windows:
@@ -53,6 +53,18 @@ jobs:
       - name: CPU tests
         shell: pwsh
         run: ctest --test-dir build --output-on-failure -R "$env:CPU_SUITES"
+      - name: Verify clean working tree
+        shell: pwsh
+        run: |
+          $status = git status --porcelain
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $pngs = Get-ChildItem -LiteralPath . -Filter '*.png' -File -Force
+          if ($status -or $pngs) {
+            Write-Output 'Working tree must be clean and repository root must contain zero PNG files.'
+            $status
+            $pngs | ForEach-Object { $_.FullName }
+            exit 1
+          }
 
   linux:
     runs-on: ubuntu-latest
@@ -104,6 +116,16 @@ jobs:
         run: cmake --build build --parallel
       - name: CPU tests
         run: ctest --test-dir build --output-on-failure -R "$CPU_SUITES"
+      - name: Verify clean working tree
+        shell: bash
+        run: |
+          status=$(git status --porcelain)
+          pngs=$(find . -maxdepth 1 -type f -name '*.png' -print)
+          if [ -n "$status" ] || [ -n "$pngs" ]; then
+            echo 'Working tree must be clean and repository root must contain zero PNG files.'
+            printf '%s\n' "$status" "$pngs"
+            exit 1
+          fi
 
   macos:
     runs-on: macos-latest
@@ -120,3 +142,13 @@ jobs:
         run: cmake --build build --parallel
       - name: CPU tests
         run: ctest --test-dir build --output-on-failure -R "$CPU_SUITES"
+      - name: Verify clean working tree
+        shell: bash
+        run: |
+          status=$(git status --porcelain)
+          pngs=$(find . -maxdepth 1 -type f -name '*.png' -print)
+          if [ -n "$status" ] || [ -n "$pngs" ]; then
+            echo 'Working tree must be clean and repository root must contain zero PNG files.'
+            printf '%s\n' "$status" "$pngs"
+            exit 1
+          fi

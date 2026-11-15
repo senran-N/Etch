@@ -277,6 +277,36 @@ if (ETCH_BUILD_TESTS)
     foreach(suite arena_and_elasticity unicode_bidi_grapheme layout_clay_flex_grid fenwick_virtual_list_1m widgets_and_dockspace text_buffer_and_code_editor a11y_semantic_tree headless_gpu_invariants)
         add_test(NAME ${suite} COMMAND etch_tests --suite=${suite})
     endforeach()
+    set_tests_properties(arena_and_elasticity unicode_bidi_grapheme layout_clay_flex_grid fenwick_virtual_list_1m
+        PROPERTIES TIMEOUT 5)
+    add_test(NAME repo_guardrails COMMAND "${CMAKE_COMMAND}" "-DREPO_ROOT=${CMAKE_CURRENT_SOURCE_DIR}"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/check_repo_guardrails.cmake")
+    set_tests_properties(repo_guardrails PROPERTIES TIMEOUT 10)
+    if (ETCH_INSTALL)
+        set(_etch_consumer_cfg "${CMAKE_CURRENT_BINARY_DIR}/etch_consumer_test_cfg.cmake")
+        file(WRITE "${_etch_consumer_cfg}"
+            "set(ETCH_TEST_REPO_ROOT [=[${CMAKE_CURRENT_SOURCE_DIR}]=])\n"
+            "set(ETCH_TEST_BUILD_DIR [=[${CMAKE_CURRENT_BINARY_DIR}]=])\n"
+            "set(ETCH_TEST_INSTALL_INCLUDEDIR [=[${CMAKE_INSTALL_INCLUDEDIR}]=])\n"
+            "set(ETCH_TEST_GENERATOR [=[${CMAKE_GENERATOR}]=])\n"
+            "set(ETCH_TEST_GENERATOR_PLATFORM [=[${CMAKE_GENERATOR_PLATFORM}]=])\n"
+            "set(ETCH_TEST_GENERATOR_TOOLSET [=[${CMAKE_GENERATOR_TOOLSET}]=])\n"
+            "set(ETCH_TEST_MAKE_PROGRAM [=[${CMAKE_MAKE_PROGRAM}]=])\n"
+            "set(ETCH_TEST_C_COMPILER [=[${CMAKE_C_COMPILER}]=])\n"
+            "set(ETCH_TEST_CXX_COMPILER [=[${CMAKE_CXX_COMPILER}]=])\n"
+            "set(ETCH_TEST_TOOLCHAIN_FILE [=[${CMAKE_TOOLCHAIN_FILE}]=])\n"
+            "set(ETCH_TEST_VCPKG_TRIPLET [=[${VCPKG_TARGET_TRIPLET}]=])\n"
+            "set(ETCH_TEST_PREFIX_PATH [=[${CMAKE_PREFIX_PATH}]=])\n"
+            "set(ETCH_TEST_SDL3_DIR [=[${SDL3_DIR}]=])\n"
+            "set(ETCH_TEST_HARFBUZZ_DIR [=[${harfbuzz_DIR}]=])\n"
+            "set(ETCH_TEST_OSX_ARCHITECTURES [=[${CMAKE_OSX_ARCHITECTURES}]=])\n"
+            "set(ETCH_TEST_OSX_SYSROOT [=[${CMAKE_OSX_SYSROOT}]=])\n"
+            "set(ETCH_TEST_OSX_DEPLOYMENT_TARGET [=[${CMAKE_OSX_DEPLOYMENT_TARGET}]=])\n"
+            "set(ETCH_TEST_VERSION_MM [=[${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}]=])\n")
+        add_test(NAME downstream_consumers COMMAND "${CMAKE_COMMAND}" "-DCFG_FILE=${_etch_consumer_cfg}"
+            "-DCONFIG=$<CONFIG>" -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/check_downstream_consumers.cmake")
+        set_tests_properties(downstream_consumers PROPERTIES TIMEOUT 120)
+    endif ()
 endif()
 
 if (ETCH_INSTALL)

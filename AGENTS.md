@@ -11,7 +11,7 @@ Read `CLAUDE.md` first. Every code change, review, or algorithm prototype in thi
 ## 2. Anti-Over-Defensive Programming Mandate (Strict)
 You are valued for C++ systems precision, NOT defensive boilerplate. Apply rigor selectively:
 1. **Validate untrusted caller inputs ONCE at public `etch::` API boundaries** (`create_context`, `text`, `text_input`, `begin_frame`, etc.).
-2. **Inside anonymous-namespace helpers** in `src/etch_arena.cpp`, `src/etch_layout.cpp`, and `src/etch_gpu.cpp`, **trust established caller invariants** — do NOT add redundant `if (!ptr)` or repetitive clamping where the caller already guarantees validity.
+2. **Inside anonymous-namespace helpers** in `src/etch_*.cpp`, **trust established caller invariants** — do NOT add redundant `if (!ptr)` or repetitive clamping where the caller already guarantees validity.
 3. **NEVER propose or insert**:
    - `uint64_t` overflow-checking ceremonies for GPU-bounded viewport/texture dimensions,
    - RAII wrapper classes, `std::optional`/`std::variant`/`std::expected`, or verbose helper layers,
@@ -24,3 +24,14 @@ You are valued for C++ systems precision, NOT defensive boilerplate. Apply rigor
 
 ## 3. Verification Discipline
 - All fixes must compile with `/W4 /permissive- /GR- /EHs-c- /utf-8` (0 warnings) and pass `sandbox.exe --headless` visual & assertion checks on both D3D12 and Vulkan.
+- Run `ctest --test-dir build --output-on-failure`, including `repo_guardrails` and, when installation is enabled, `downstream_consumers`. The four core CPU suites have a 5s timeout; repository checks have 10s and downstream consumer checks have 120s.
+- Before committing, run `codex review --uncommitted` and FlowGuard `flow_verify`. After committing verified work, `git status --porcelain` must be empty; remove transient screenshots from the repository root even if ignored.
+
+## 4. Architecture, Packaging & Anti-Toy Guardrails
+- File ceilings: `src/*.cpp <= 4000` lines, `include/etch/*.h <= 2500` lines, `examples/*.cpp <= 3200` lines. Split cohesive modules before exceeding these caps.
+- Keep zero `.h`/`.hpp` files in `examples/`; shared regression checks belong in `tests/` and engine internals in `src/`.
+- Public headers expose only the public API: no `inject_` hooks, internal testing headers, Clay/stb/HarfBuzz includes, or forbidden STL headers. Keep private include paths private in both installed and `add_subdirectory` consumers.
+- Follow SemVer 2.0.0. `project(etch VERSION ...)` and public `ETCH_VERSION_*` macros are the matching Single Source of Truth, with a matching changelog heading. Compose runtime version labels from `ETCH_VERSION_STRING`; never hardcode version literals in source/tests.
+- Use out-of-source builds. Builds, installs, tests and reviews must preserve worktree cleanliness: no root PNGs, no source-tree `*.vectors.png`, no tracked build artifacts. Keep local CI caches in ignored `/.ci/`.
+- Keep `LICENSE`, `THIRD_PARTY_NOTICES.md`, `README.md`, `CHANGELOG.md`, `CLAUDE.md`, and `AGENTS.md` nonempty. Cover every `third_party/*` dependency in `THIRD_PARTY_NOTICES.md` (dotfiles and the local `dxc` tool directory are excluded).
+- Verify positive and negative cases: valid repositories and both downstream consumption paths must pass, while deliberate rule violations in isolated temporary fixtures must fail with the offending file and rule. Never inject failures into tracked source files.

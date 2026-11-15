@@ -1,4 +1,5 @@
 # Build directories & compiled binaries
+/.ci/
 /build*/
 /out/
 CMakeFiles/

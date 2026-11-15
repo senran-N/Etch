@@ -988,8 +988,8 @@ int run_headless(const char* out_png_path) noexcept {
             const bool tex_ok = dyn_tex && upd_ok && file_tex && file_tex.width == 4u && mem_tex && mem_tex.height == 4u;
 
             // 13b. Multi-window swapchains + release_window lifecycle
-            SDL_Window* win_a = SDL_CreateWindow("Etch v1.3 Win A", 320, 240, SDL_WINDOW_HIDDEN | SDL_WINDOW_RESIZABLE);
-            SDL_Window* win_b = SDL_CreateWindow("Etch v1.3 Win B", 320, 240, SDL_WINDOW_HIDDEN | SDL_WINDOW_RESIZABLE);
+            SDL_Window* win_a = SDL_CreateWindow("Etch Win A", 320, 240, SDL_WINDOW_HIDDEN | SDL_WINDOW_RESIZABLE);
+            SDL_Window* win_b = SDL_CreateWindow("Etch Win B", 320, 240, SDL_WINDOW_HIDDEN | SDL_WINDOW_RESIZABLE);
             bool multi_win_ok = false;
             if (win_a && win_b) {
                 etch::begin_frame(v13ctx, etch::FrameDesc{ .viewport_w = 320u, .viewport_h = 240u, .dpi_scale = 1.0f, .dt_seconds = kStepDt });

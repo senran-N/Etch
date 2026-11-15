@@ -151,8 +151,8 @@ bool check_v15_window_ui() noexcept {
     modal_ime_ok &= ime_step({10, 10}, false);
     ok &= modal_ime_ok;
     if (!modal_ime_ok) std::fprintf(stderr, "Headless assert [15] failed: rejected modal focus dropped IME preedit\n");
-    SDL_Window* a = SDL_CreateWindow("Etch v1.5 A", 400, 300, SDL_WINDOW_HIDDEN);
-    SDL_Window* b = SDL_CreateWindow("Etch v1.5 B", 500, 350, SDL_WINDOW_HIDDEN);
+    SDL_Window* a = SDL_CreateWindow("Etch Window A", 400, 300, SDL_WINDOW_HIDDEN);
+    SDL_Window* b = SDL_CreateWindow("Etch Window B", 500, 350, SDL_WINDOW_HIDDEN);
     ok &= a && b;
     if (a && b) {
         for (SDL_Window* win : {a,b}) {
