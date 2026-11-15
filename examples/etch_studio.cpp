@@ -97,6 +97,7 @@ struct StudioApp {
     uint32_t node_count = kInitialNodes;
     uint32_t trace_sort_column = 0;
     uint32_t trace_first_row = 0;
+    uint32_t trace_selected_row = 0;
     bool trace_sort_descending = false;
     bool trace_sort_changed = false;
     uint32_t selected_node = 2u;
@@ -585,14 +586,14 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
                         .color = etch::Color::white(),
                     });
                 }
-                etch::text(etch::str_lit("ETCH 2.1"), {
+                etch::text(etch::str_lit("ETCH 2.2"), {
                     .color = etch::Color::white(),
                     .font_size_px = 12.0f,
                     .wrap = false,
                 });
             }
 
-            etch::text(etch::str_lit("Etch Studio 2.1 — GPU Render-Graph & Telemetry"), {
+            etch::text(etch::str_lit("Etch Studio 2.2 — GPU Render-Graph & Telemetry"), {
                 .color = etch::Color::rgb_hex(0xE2E8F0),
                 .font_size_px = 14.0f,
                 .wrap = false,
@@ -603,7 +604,7 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
                     // Destruction occurs after the serialized main build ends.
                     SDL_HideWindow(app->tear_off_window);
                 } else {
-                    app->tear_off_window = SDL_CreateWindow("Etch Studio 2.1 — Tear-Off Preview", 480, 360, SDL_WINDOW_RESIZABLE);
+                    app->tear_off_window = SDL_CreateWindow("Etch Studio 2.2 — Tear-Off Preview", 480, 360, SDL_WINDOW_RESIZABLE);
                 }
             }
             draw_button(tear_id, "Tear-Off Preview", etch::Color::rgb_hex(0x1E293B), etch::Color::rgb_hex(0x475569));
@@ -800,6 +801,22 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
                     .font_size_px = 11.5f,
                     .wrap = false,
                 });
+
+                const etch::GridTrack property_tracks[]={etch::GridTrack::px(88),etch::GridTrack::fr()};
+                ETCH_BOX({.id=etch::id("studio_v22_grid"),.width=etch::Sizing::grow(),.gap=4,.row_gap=3,.grid_tracks=property_tracks}) {
+                    const char* labels[]={"Node","Shader","Passes","Memory"};
+                    const char* values[]={sel.title,sel.subtitle,"1–3 GPU draws","Sparse / arena"};
+                    for(uint32_t i=0;i<4;++i) {
+                        ETCH_BOX({.id=etch::id_index(etch::id("studio_v22_key"),i),.width=etch::Sizing::grow()}) { etch::text(etch::str_cstr(labels[i]),{.font_size_px=11,.wrap=false}); }
+                        ETCH_BOX({.id=etch::id_index(etch::id("studio_v22_value"),i),.width=etch::Sizing::grow()}) { etch::text(etch::str_cstr(values[i]),{.font_size_px=11,.wrap=false,.ellipsis=true}); }
+                    }
+                }
+                ETCH_BOX({.id=etch::id("studio_v22_tags"),.width=etch::Sizing::grow(),.gap=5,.wrap=true,.row_gap=4}) {
+                    const char* tags[]={"Slug","HarfBuzz","Grid","FlexWrap","Fenwick","ZeroHeap"};
+                    for(uint32_t i=0;i<6;++i) {
+                        ETCH_BOX({.id=etch::id_index(etch::id("studio_v22_tag"),i),.width=etch::Sizing::fixed(68),.height=etch::Sizing::fixed(20),.padding=etch::Padding::xy(5,2),.background=etch::Color::rgb_hex(0x1E3A5F),.radius=etch::Corners::all(4)}) { etch::text(etch::str_cstr(tags[i]),{.font_size_px=10,.wrap=false}); }
+                    }
+                }
 
                 // Bloom spring bar + steppers
                 ETCH_BOX({
@@ -1121,7 +1138,12 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
             });
 
             ETCH_BOX({.axis=etch::Axis::Col,.width=etch::Sizing::grow(),.height=etch::Sizing::fixed(72),.padding=etch::Padding::xy(8,4),.gap=3,.background=etch::Color::rgb_hex(0x142032)}) {
-                etch::text(etch::str_lit("Etch v2.1 Showcase Strip"),{.font_size_px=11,.wrap=false});
+            char trace_detail[160] = {};
+            const uint32_t selected_trace = app->trace_selected_row;
+            std::snprintf(trace_detail,sizeof(trace_detail),"Selected #%07u   %s   |   %.2f us   |   %u prims",selected_trace,kTracePassNames[selected_trace%6],18.0+static_cast<double>((selected_trace*37u)%kTraceRowCount)*.0001,920u+(selected_trace*13u)%kTraceRowCount);
+            ETCH_BOX({.id=etch::id("studio_v22_trace_detail"),.width=etch::Sizing::grow(),.height=etch::Sizing::fixed(24),.padding=etch::Padding::xy(8,5),.background=etch::Color::rgb_hex(0x14283D),.radius=etch::Corners::all(4)}) {
+                etch::text(etch::str_cstr(trace_detail),{.font_size_px=11,.wrap=false,.ellipsis=true});
+            }
                 etch::text(etch::str_lit("Inspector label with a deliberately long constrained title that demonstrates trailing ellipsis in this panel"),{.font_size_px=11,.wrap=false,.id=etch::id("studio_v21_label"),.selectable=true,.ellipsis=true});
                 etch::text(etch::str_lit("User שלום 42 End  🚀✨"),{.font_size_px=15,.wrap=false});
             }
@@ -1567,6 +1589,7 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
                 const uint32_t row = table.sort_column == 2 ? static_cast<uint32_t>((static_cast<uint64_t>(ordered)*972973u)%kTraceRowCount) :
                     (table.sort_column == 3 ? static_cast<uint32_t>((static_cast<uint64_t>(ordered)*230769u)%kTraceRowCount) : ordered);
                 if (rank == table.slice.first_index) app->trace_first_row = row;
+                if (etch::clicked(etch::id_index(kTraceList,0x100000u+rank))) { app->trace_selected_row = row; etch::request_redraw(app->ctx); }
                 char cells[5][64] = {};
                 std::snprintf(cells[0],sizeof(cells[0]),"#%07u",row);
                 std::snprintf(cells[1],sizeof(cells[1]),"%s",kTracePassNames[row%6]);
@@ -1574,7 +1597,10 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
                 std::snprintf(cells[3],sizeof(cells[3]),"%u",920u+(row*13u)%kTraceRowCount);
                 std::snprintf(cells[4],sizeof(cells[4]),"GPU / Slug");
                 uint32_t col = 0;
-                while (etch::table_next_column()) etch::text(etch::Str{cells[col++]},{ .font_size_px = 11.5f, .font_id = etch::kFontMono, .wrap = false });
+                while (etch::table_next_column()) {
+                    if (etch::clicked(etch::id_index(etch::id_index(kTraceList,0x100000u+rank),col))) { app->trace_selected_row = row; etch::request_redraw(app->ctx); }
+                    etch::text(etch::Str{cells[col++]},{ .font_size_px = 11.5f, .font_id = etch::kFontMono, .wrap = false });
+                }
             }
             etch::end_table();
         }
@@ -1857,7 +1883,7 @@ void step_headless_frame(
 
 void build_preview_ui(StudioApp* app) noexcept {
     ETCH_BOX({.id = etch::id("tear_preview"), .width = etch::Sizing::grow(), .height = etch::Sizing::grow(), .background = etch::Color::rgb_hex(0x111827), .focusable = true}) {
-        etch::text(etch::str_lit("Etch Studio 2.1 — Preview"));
+        etch::text(etch::str_lit("Etch Studio 2.2 — Preview"));
         etch::image({.texture = app->preview_tex, .width = etch::Sizing::fixed(256), .height = etch::Sizing::fixed(256)});
     }
 }
@@ -2535,7 +2561,7 @@ int run_headless(const char* out_png_path) noexcept {
     }
     step_headless_frame(&app, kW, kH, kDt);
     s11_ok &= app.node_count == before_drop + 2;
-    app.tear_off_window = SDL_CreateWindow("Etch Studio 2.1 — Tear-Off Preview", 480, 360, SDL_WINDOW_HIDDEN);
+    app.tear_off_window = SDL_CreateWindow("Etch Studio 2.2 — Tear-Off Preview", 480, 360, SDL_WINDOW_HIDDEN);
     s11_ok &= app.tear_off_window != nullptr;
     if (app.tear_off_window) {
         etch::begin_window_frame(ctx, app.tear_off_window, kDt);
@@ -2600,8 +2626,22 @@ int run_headless(const char* out_png_path) noexcept {
     if(!(v21_bounds.w>0 && v21_bounds.w<400 && v21_stats.draw_call_count<=3 && v21_stats.idle_sleeping)) {
         std::fprintf(stderr,"Headless Studio [S14] failed: showcase bounds/batching/idle\n");cleanup_release();return 1;
     }
+    // [S15] Visible grid properties and multi-line pass tags settle without extra draws.
+    const uint32_t selected_rank=app.last_trace_slice.first_index+3;
+    click_widget(etch::id_index(etch::id_index(kTraceList,0x100000u+selected_rank),0));
+    for(int f=0;f<8;++f)step_headless_frame(&app,kW,kH,kDt);
+    const auto detail=etch::element_bounds(etch::id("studio_v22_trace_detail"));
+    const auto selection_stats=etch::frame_stats(ctx);
+    const auto key0=etch::element_bounds(etch::id_index(etch::id("studio_v22_key"),0));
+    const auto key1=etch::element_bounds(etch::id_index(etch::id("studio_v22_key"),1));
+    const auto value0=etch::element_bounds(etch::id_index(etch::id("studio_v22_value"),0));
+    const auto tags=etch::element_bounds(etch::id("studio_v22_tags"));
+    if (!(std::fabs(key0.w-88)<.2f && std::fabs(key0.x-key1.x)<.2f && std::fabs(value0.y-key0.y)<.2f && tags.h>=44 && detail.h==24 && app.trace_selected_row!=0 && selection_stats.draw_call_count<=3 && selection_stats.idle_sleeping)) {
+        std::fprintf(stderr,"Headless Studio [S15] failed: key=(%g,%g,%g,%g), key1=(%g,%g), value=(%g,%g), tags=%g detail=%g selected=%u idle=%d\n",key0.x,key0.y,key0.w,key0.h,key1.x,key1.y,value0.x,value0.y,tags.h,detail.h,app.trace_selected_row,int(selection_stats.idle_sleeping));cleanup_release();return 1;
+    }
+    if (!etch::render_headless_png(ctx,kW,kH,out_png_path)) { cleanup_release();return 1; }
     std::printf(
-        "Headless Studio OK (%s) -> %s (asserts=14/14, prims=%u, draw_calls=%u, blur_pass=%u, slug_glyphs=%u, grid=%u, wire=%u, layout_us=%.0f, vrows=[%u..%u))\n",
+        "Headless Studio OK (%s) -> %s (asserts=15/15, prims=%u, draw_calls=%u, blur_pass=%u, slug_glyphs=%u, grid=%u, wire=%u, layout_us=%.0f, vrows=[%u..%u))\n",
         driver ? driver : "unknown",
         out_png_path,
         final_stats.prim_count,
@@ -2625,7 +2665,7 @@ int run_interactive() noexcept {
     }
 
     SDL_Window* window = SDL_CreateWindow(
-        "Etch Studio 2.1 — GPU Render-Graph & 1M Trace Workbench",
+        "Etch Studio 2.2 — GPU Render-Graph & 1M Trace Workbench",
         1440,
         900,
         SDL_WINDOW_BORDERLESS | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);

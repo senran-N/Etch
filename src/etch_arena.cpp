@@ -509,7 +509,33 @@ struct TableStackEntry {
 };
 struct ModalFocusScope { uint32_t id = 0; uint32_t restore = 0; uint32_t seen = 0; };
 
+inline constexpr uint32_t kVarListChunkSize = 256u;
+struct VarVirtualListCache {
+    uint32_t list_id = 0, item_count = 0, chunk_count = 0;
+    float default_height = 28, gap_px = 0;
+    float** chunks = nullptr;
+    double* fenwick = nullptr;
+    double total_stride_sum = 0;
+    uint32_t last_anchor_row = 0;
+    bool dirty = false;
+    VirtualItemHeightFn measure_fn = nullptr;
+    void* measure_user_data = nullptr;
+};
+struct ActiveVarListRecord {
+    uint32_t list_id, first_index, end_index;
+    ActiveVarListRecord* next;
+};
+void free_vlist(VarVirtualListCache* c) noexcept {
+    for (uint32_t i = 0; i < c->chunk_count; ++i) std::free(c->chunks[i]);
+    std::free(c->chunks); std::free(c->fenwick);
+    *c = {};
+}
+
 struct WindowUiState {
+    VarVirtualListCache* vlists = nullptr;
+    uint32_t vlist_cap = 0, vlist_count = 0;
+    ActiveVarListRecord* active_vlists = nullptr;
+    uint32_t active_vlist_count = 0;
     ModalFocusScope modal_scopes[32] = {};
     uint32_t modal_count = 0;
     void* clay_mem = nullptr;

@@ -3021,9 +3021,107 @@ int run_headless(const char* out_png_path) noexcept {
         }
     }
     if(!v21_ok)std::fprintf(stderr,"Headless assert [18] failed: v2.1 typography/focus/grapheme regression\n");
-    const bool ok = v21_ok && v20_ok && v16_ok && v15_ok && png_ok && stats_ok && slug_ok && v10a_ok && v11_ok && v12_ok && v13_ok && v14_ok;
+    // [19] Grid/wrap geometry and sparse million-row height reconciliation.
+    bool v22_ok = true;
+    {
+        auto* test = etch::create_context({.headless=true});
+        if (!test) v22_ok = false;
+        else {
+            etch::set_current_context(test);
+            const uint32_t wrap=etch::id("v22_wrap"), grid=etch::id("v22_grid"), list=etch::id("v22_list");
+            etch::VirtualListSlice slice = {};
+            bool tall_first = false;
+            const auto measure = [](uint32_t i, void*) noexcept -> float { return i%3 == 0 ? 24.0f : i%3 == 1 ? 52.0f : 88.0f; };
+            const auto step = [&]() noexcept {
+                etch::begin_frame(test,{.viewport_w=900,.viewport_h=900});
+                etch::begin_box({.axis=etch::Axis::Col,.width=etch::Sizing::fixed(900),.height=etch::Sizing::fixed(900),.gap=8});
+                etch::begin_box({.id=wrap,.width=etch::Sizing::fixed(260),.gap=6,.wrap=true,.row_gap=8});
+                for(uint32_t i=0;i<7;++i) etch::box({.id=etch::id_index(wrap,i+1),.width=i==1?etch::Sizing::grow(80):etch::Sizing::fixed(80),.height=i==1?etch::Sizing::grow(24):etch::Sizing::fixed(24),.background=etch::Color::rgb_hex(0x2563EB)});
+                etch::end_box();
+                const etch::GridTrack tracks[]={etch::GridTrack::px(80),etch::GridTrack::fr(1),etch::GridTrack::fr(2)};
+                etch::begin_box({.id=grid,.width=etch::Sizing::fixed(320),.gap=8,.row_gap=6,.grid_tracks=tracks});
+                etch::box({.id=etch::id_index(grid,1),.width=etch::Sizing::grow(),.height=etch::Sizing::fixed(24),.grid_col_span=2});
+                etch::box({.id=etch::id_index(grid,2),.width=etch::Sizing::grow(),.height=etch::Sizing::fixed(24)});
+                for(uint32_t i=0;i<3;++i) {
+                    etch::begin_box({.id=etch::id_index(grid,i+3),.width=etch::Sizing::grow(),.height=etch::Sizing::fit()});
+                    etch::text(etch::str_lit("Grid cell wraps text within its track width."));etch::end_box();
+                }
+                etch::end_box();
+                const etch::GridTrack bounded_tracks[]={etch::GridTrack::fr(1,80),etch::GridTrack::fr(1,0,40)};
+                etch::begin_box({.width=etch::Sizing::fixed(100),.grid_tracks=bounded_tracks});
+                etch::box({.id=etch::id("v22_bounded0"),.width=etch::Sizing::grow(),.height=etch::Sizing::fixed(8)});
+                etch::box({.id=etch::id("v22_bounded1"),.width=etch::Sizing::grow(),.height=etch::Sizing::fixed(8)});
+                etch::end_box();
+                etch::box({.id=etch::id("v22_aspect"),.width=etch::Sizing::fixed(160),.aspect_ratio=16.0f/9});
+                etch::image({.id=etch::id("v22_image"),.width=etch::Sizing::fit(),.height=etch::Sizing::fixed(90),.aspect_ratio=16.0f/9});
+                slice=etch::begin_virtual_list({.id=list,.item_count=1000000,.item_height_px=28,.width=etch::Sizing::fixed(400),.height=etch::Sizing::fixed(240),.measure_height_fn=measure,.variable_height=true});
+                for(uint32_t i=slice.first_index;i<slice.end_index;++i) etch::box({.id=etch::id_index(list,i+1),.width=etch::Sizing::grow(),.height=etch::Sizing::fixed(tall_first && i==0?64:i==499990?120:measure(i,nullptr)),.background=etch::Color::rgb_hex(0x164E63)});
+                etch::end_virtual_list();etch::end_box();etch::end_frame(test);
+            };
+            const auto check=[&](bool value,int line) noexcept { if(!value){v22_ok=false;std::fprintf(stderr,"v22 check line %d failed\n",line);} };
+            step();step();
+            auto w=etch::element_bounds(wrap); auto a=etch::element_bounds(etch::id_index(wrap,1)); auto b=etch::element_bounds(etch::id_index(wrap,4)); auto c=etch::element_bounds(etch::id_index(wrap,7));
+            check(std::fabs(w.h-88)<.2f && std::fabs(b.y-a.y-32)<.2f && std::fabs(c.y-a.y-64)<.2f && std::fabs(b.x-a.x)<.2f,__LINE__);
+            check(etch::element_bounds(etch::id_index(wrap,2)).w>80,__LINE__);
+            auto g0=etch::element_bounds(etch::id_index(grid,3)),g1=etch::element_bounds(etch::id_index(grid,4)),g2=etch::element_bounds(etch::id_index(grid,5));
+            check(std::fabs(g0.w-80)<.2f && std::fabs(g2.w-2*g1.w)<.2f && std::fabs(g0.y-g2.y)<.2f,__LINE__);
+            check(std::fabs(etch::element_bounds(etch::id_index(grid,1)).w-(80+g1.w+8))<.2f,__LINE__);
+            check(std::fabs(etch::element_bounds(etch::id("v22_aspect")).h-90)<.2f && std::fabs(etch::element_bounds(etch::id("v22_image")).w-160)<.2f,__LINE__);
+            check(std::fabs(etch::element_bounds(etch::id("v22_bounded0")).w-80)<.2f && std::fabs(etch::element_bounds(etch::id("v22_bounded1")).w-20)<.2f,__LINE__);
+            check(slice.end_index-slice.first_index<=32,__LINE__);
+            etch::virtual_list_scroll_to_row(list,500000,0);step();step();
+            check(slice.first_index<=500000 && slice.end_index>500000 && std::fabs(etch::element_bounds(etch::id_index(list,500001)).y-etch::element_bounds(list).y)<.2f,__LINE__);
+            const float before_y=etch::element_bounds(etch::id_index(list,500001)).y;
+            const double before=etch::virtual_list_scroll_offset(list);
+            etch::virtual_list_set_item_height(list,499990,120);
+            check(std::fabs(etch::virtual_list_scroll_offset(list)-before-(120-measure(499990,nullptr)))<.01,__LINE__);
+            step();step();check(std::fabs(etch::element_bounds(etch::id_index(list,500001)).y-before_y)<.2f,__LINE__);
+            etch::virtual_list_scroll_to_row(list,999995,0);step();step();
+            check(slice.end_index==1000000 && slice.scroll_y<=slice.max_scroll_y,__LINE__);
+            for(int i=0;i<8;++i)step();
+            char path[1024]={};std::snprintf(path,sizeof(path),"%s.v22.png",out_png_path);
+            check(etch::render_headless_png(test,900,900,path),__LINE__);
+            auto stats=etch::frame_stats(test);check(stats.draw_call_count<=3 && stats.idle_sleeping,__LINE__);
+            etch::set_virtual_list_scroll_offset(list,0);tall_first=true;step();step();
+            etch::virtual_list_scroll_to_row(list,1,0);
+            check(std::fabs(etch::virtual_list_scroll_offset(list)-64)<.01,__LINE__);
+            tall_first=false;etch::virtual_list_invalidate_heights(list);etch::virtual_list_scroll_to_row(list,1,0);
+            check(std::fabs(etch::virtual_list_scroll_offset(list)-24)<.01,__LINE__);
+            step();step();
+            const uint32_t anchor_list = etch::id("v22_anchor_list");
+            etch::VirtualListSlice anchor_slice = {};
+            const auto anchor_step = [&]() noexcept {
+                etch::begin_frame(test, {.viewport_w=900, .viewport_h=900});
+                etch::begin_box({.axis=etch::Axis::Col, .width=etch::Sizing::fixed(900), .height=etch::Sizing::fixed(900)});
+                for (uint32_t mode = 0; mode < 2; ++mode) {
+                    etch::begin_box({.width=etch::Sizing::fixed(100), .height=etch::Sizing::fixed(100), .wrap=mode == 0, .grid_columns=static_cast<uint16_t>(mode == 1 ? 1 : 0)});
+                    etch::box({.id=etch::id_index(etch::id("v22_percent"), mode), .width=etch::Sizing::fixed(50), .height=etch::Sizing::percent(0.5f)});
+                    etch::end_box();
+                }
+                anchor_slice = etch::begin_virtual_list({.id=anchor_list, .item_count=2000, .item_height_px=28, .overscan_rows=2,
+                    .width=etch::Sizing::fixed(400), .height=etch::Sizing::fixed(300),
+                    .measure_height_fn=[](uint32_t, void*) noexcept -> float { return 100.0f; }, .variable_height=true});
+                for (uint32_t i=anchor_slice.first_index; i<anchor_slice.end_index; ++i)
+                    etch::box({.id=etch::id_index(anchor_list, i+1), .width=etch::Sizing::grow(), .height=etch::Sizing::fixed(100)});
+                etch::end_virtual_list();
+                etch::end_box();
+                etch::end_frame(test);
+            };
+            anchor_step();
+            for (uint32_t mode = 0; mode < 2; ++mode)
+                check(std::fabs(etch::element_bounds(etch::id_index(etch::id("v22_percent"), mode)).h - 50.0f) < .2f, __LINE__);
+            etch::virtual_list_scroll_to_row(anchor_list, 512, 0);
+            for (uint32_t frame = 0; frame < 2; ++frame) {
+                anchor_step();
+                check(anchor_slice.first_index <= 512 && anchor_slice.end_index > 512, __LINE__);
+                check(std::fabs(etch::element_bounds(etch::id_index(anchor_list, 513)).y - etch::element_bounds(anchor_list).y) < .2f, __LINE__);
+            }
+            std::remove(path);etch::destroy_context(test);etch::set_current_context(ctx);
+        }
+    }
+    const bool ok = v22_ok && v21_ok && v20_ok && v16_ok && v15_ok && png_ok && stats_ok && slug_ok && v10a_ok && v11_ok && v12_ok && v13_ok && v14_ok;
     std::printf(
-        "Headless %s -> %s (asserts=18/18, prims=%u, draw_calls=%u, slug_glyphs=%u, slug_curves=%u, layout_ms=%.3f, gpu_submit_ms=%.3f, arena_used=%zuB, scroll_y=%.1f, focus=0x%08X, idle=%d)\n",
+        "Headless %s -> %s (asserts=19/19, prims=%u, draw_calls=%u, slug_glyphs=%u, slug_curves=%u, layout_ms=%.3f, gpu_submit_ms=%.3f, arena_used=%zuB, scroll_y=%.1f, focus=0x%08X, idle=%d)\n",
         ok ? "OK" : "FAILED",
         out_png_path,
         final_stats.prim_count,

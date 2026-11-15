@@ -516,6 +516,8 @@ bool run_kawase_step(
 }
 
 void destroy_window_ui_state(Context*, WindowUiState* ui) noexcept {
+    for (uint32_t i = 0; i < ui->vlist_count; ++i) free_vlist(&ui->vlists[i]);
+    std::free(ui->vlists);
     for (uint32_t i = 0; i < ui->dock_space_count; ++i) {
         auto& s = ui->dock_spaces[i];
         for (uint32_t j = 0; j < s.tab_cap; ++j) std::free(s.tabs[j].title_heap);

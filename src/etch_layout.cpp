@@ -4003,6 +4003,8 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
     }
 
     ctx->frame_arena.reset();
+    ctx->active_ui->active_vlists = nullptr;
+    ctx->active_ui->active_vlist_count = 0;
     ++ctx->arena_epoch;
     ctx->dyn_slug_curve_count = 0;
     ctx->dyn_slug_band_count = 0;
@@ -4531,6 +4533,7 @@ void begin_box(const BoxDesc& desc_in) noexcept {
         desc.height = scale_sizing(desc.height, wscale);
         desc.padding = scale_padding(desc.padding, wscale);
         desc.gap *= wscale;
+        if (desc.row_gap >= 0) desc.row_gap *= wscale;
         desc.border_width *= wscale;
         desc.radius = scale_corners_uniform(desc.radius, wscale);
         desc.shadow_blur *= wscale;
@@ -4599,6 +4602,27 @@ void begin_box(const BoxDesc& desc_in) noexcept {
         .top = to_u16_round(desc.padding.top),
         .bottom = to_u16_round(desc.padding.bottom),
     };
+    decl.aspectRatio.aspectRatio = std::isfinite(desc.aspect_ratio) && desc.aspect_ratio > 0 ? desc.aspect_ratio : 0;
+    decl.layout.wrap = desc.wrap;
+    decl.layout.crossChildGap = to_u16_round(std::isfinite(desc.row_gap) && desc.row_gap >= 0 ? desc.row_gap : desc.gap);
+    decl.layout.gridColumns = desc.grid_columns > 128 ? 128 : desc.grid_columns;
+    decl.layout.gridColSpan = desc.grid_col_span > 0 ? desc.grid_col_span : 1;
+    const size_t track_count = desc.grid_tracks.size() > 128 ? 128 : desc.grid_tracks.size();
+    if (track_count) {
+        auto* tracks = ctx->frame_arena.alloc<Clay__GridTrack>(track_count);
+        if (tracks) {
+            for (size_t i = 0; i < track_count; ++i) {
+                const GridTrack& t = desc.grid_tracks[i];
+                const uint8_t kind = t.kind == SizingKind::Fixed ? 2 : t.kind == SizingKind::Percent ? 3 : t.kind == SizingKind::Fit ? 0 : 1;
+                const float lo = std::isfinite(t.min_px) && t.min_px > 0 ? t.min_px * wscale : 0;
+                const float hi = std::isfinite(t.max_px) && t.max_px > 0 ? ((lo > t.max_px * wscale) ? lo : t.max_px * wscale) : 0;
+                const float value = std::isfinite(t.value) && t.value >= 0 ? t.value : 0;
+                tracks[i] = {kind, kind == 2 ? value * wscale : value, lo, hi};
+            }
+            decl.layout.gridTracks = tracks;
+            decl.layout.gridTrackCount = static_cast<uint16_t>(track_count);
+        }
+    }
     decl.layout.childGap = to_u16_round(desc.gap);
     decl.layout.childAlignment = Clay_ChildAlignment{
         .x = to_clay_align_x(desc.align_x),
@@ -4942,6 +4966,8 @@ void image(const ImageDesc& desc_in) noexcept {
     Clay_ElementDeclaration decl = {};
     decl.layout.sizing.width = to_clay_sizing(desc.width);
     decl.layout.sizing.height = to_clay_sizing(desc.height);
+    decl.aspectRatio.aspectRatio = std::isfinite(desc.aspect_ratio) && desc.aspect_ratio > 0 ? desc.aspect_ratio : 0;
+    decl.layout.gridColSpan = desc.grid_col_span > 0 ? desc.grid_col_span : 1;
     decl.cornerRadius = to_clay_corners(desc.radius);
     decl.image.imageData = extra;
     decl.userData = extra;
@@ -6649,6 +6675,127 @@ void set_split_ratio(uint32_t split_id, float ratio) noexcept {
     }
 }
 
+namespace {
+VarVirtualListCache* find_vlist(WindowUiState* ui, uint32_t id) noexcept {
+    for (uint32_t i = 0; i < ui->vlist_count; ++i) if (ui->vlists[i].list_id == id) return &ui->vlists[i];
+    return nullptr;
+}
+void fenwick_add(VarVirtualListCache* c, uint32_t chunk, double delta) noexcept {
+    for (uint32_t i = chunk + 1; i <= c->chunk_count; i += i & (0u-i)) c->fenwick[i] += delta;
+    c->total_stride_sum += delta;
+}
+double fenwick_prefix(const VarVirtualListCache* c, uint32_t count) noexcept {
+    double v = 0; for (uint32_t i = count; i; i -= i & (0u-i)) v += c->fenwick[i]; return v;
+}
+void reset_vlist_heights(VarVirtualListCache* c) noexcept {
+    for (uint32_t i = 0; i < c->chunk_count; ++i) { std::free(c->chunks[i]); c->chunks[i] = nullptr; }
+    std::memset(c->fenwick, 0, (size_t(c->chunk_count)+1)*sizeof(double)); c->total_stride_sum = 0;
+    for (uint32_t i = 0; i < c->chunk_count; ++i) {
+        uint32_t count = c->item_count - i*kVarListChunkSize; if (count > kVarListChunkSize) count = kVarListChunkSize;
+        fenwick_add(c,i,double(count)*(double(c->default_height)+c->gap_px));
+    }
+}
+VarVirtualListCache* prepare_vlist(WindowUiState* ui, const VirtualListDesc& d, float h, float gap) noexcept {
+    auto* c = find_vlist(ui,d.id);
+    if (!c) {
+        for (uint32_t i = 0; i < ui->vlist_count; ++i) if (ui->vlists[i].list_id == 0) { c = &ui->vlists[i]; break; }
+    }
+    if (!c) {
+        if (ui->vlist_count == ui->vlist_cap) {
+            uint32_t cap = ui->vlist_cap ? ui->vlist_cap*2 : 4;
+            void* mem = std::realloc(ui->vlists,size_t(cap)*sizeof(VarVirtualListCache)); if (!mem) return nullptr;
+            ui->vlists = static_cast<VarVirtualListCache*>(mem); ui->vlist_cap = cap;
+        }
+        c = &ui->vlists[ui->vlist_count++]; *c = {};
+    }
+    if (c->list_id == 0 || c->item_count != d.item_count || c->default_height != h || c->gap_px != gap || c->measure_fn != d.measure_height_fn || c->measure_user_data != d.measure_user_data) {
+        free_vlist(c); c->list_id = d.id; c->item_count = d.item_count; c->chunk_count = d.item_count/256 + (d.item_count%256 != 0);
+        c->default_height = h; c->gap_px = gap; c->measure_fn = d.measure_height_fn; c->measure_user_data = d.measure_user_data;
+        c->chunks = static_cast<float**>(std::calloc(c->chunk_count ? c->chunk_count : 1,sizeof(float*)));
+        c->fenwick = static_cast<double*>(std::calloc(size_t(c->chunk_count)+1,sizeof(double)));
+        if (!c->chunks || !c->fenwick) { std::free(c->chunks); std::free(c->fenwick); *c = {}; return nullptr; }
+        reset_vlist_heights(c);
+    }
+    return c;
+}
+bool vlist_ensure_chunk(VarVirtualListCache* c, uint32_t chunk) noexcept {
+    if (c->chunks[chunk]) return true;
+    auto* heights = static_cast<float*>(std::malloc(256*sizeof(float))); if (!heights) return false;
+    uint32_t count = c->item_count - chunk*256; if (count > 256) count = 256;
+    double delta = 0;
+    for (uint32_t i = 0; i < count; ++i) {
+        float h = c->measure_fn ? c->measure_fn(chunk*256+i,c->measure_user_data) : c->default_height;
+        h = std::isfinite(h) ? clamp_range(h,1,16384) : c->default_height;
+        heights[i] = h; delta += double(h)-c->default_height;
+    }
+    c->chunks[chunk] = heights; fenwick_add(c,chunk,delta); return true;
+}
+float vlist_height(VarVirtualListCache* c, uint32_t row) noexcept {
+    return vlist_ensure_chunk(c,row/256) ? c->chunks[row/256][row%256] : c->default_height;
+}
+// Read the current estimates without materializing any sparse chunks.
+double vlist_current_row_top(const VarVirtualListCache* c, uint32_t row) noexcept {
+    if (row >= c->item_count) return c->total_stride_sum;
+    const uint32_t chunk = row / 256;
+    double y = fenwick_prefix(c, chunk);
+    for (uint32_t i = chunk * 256; i < row; ++i)
+        y += double(c->chunks[chunk] ? c->chunks[chunk][i % 256] : c->default_height) + c->gap_px;
+    return y;
+}
+double vlist_row_top(VarVirtualListCache* c, uint32_t row) noexcept {
+    if (row == c->item_count) return c->total_stride_sum;
+    vlist_height(c,row);
+    double y = fenwick_prefix(c,row/256);
+    for (uint32_t i = row/256*256; i < row; ++i) y += double(vlist_height(c,i))+c->gap_px;
+    return y;
+}
+uint32_t vlist_find_first_at_y(VarVirtualListCache* c, double y) noexcept {
+    uint32_t chunk = 0;
+    double prefix = 0;
+    for (;;) {
+        chunk = 0; prefix = 0; uint32_t bit = 1;
+        while (bit <= c->chunk_count/2) bit *= 2;
+        for (; bit; bit >>= 1) { uint32_t next = chunk+bit; if (next <= c->chunk_count && prefix+c->fenwick[next] <= y) { chunk = next; prefix += c->fenwick[next]; } }
+        if (chunk == c->chunk_count) return c->item_count-1;
+        if (c->chunks[chunk] || !vlist_ensure_chunk(c,chunk)) break;
+    }
+    uint32_t row = chunk*256, end = row+256; if (end > c->item_count) end = c->item_count;
+    vlist_height(c,row);
+    while (row+1 < end && prefix+double(vlist_height(c,row))+c->gap_px <= y) { prefix += double(vlist_height(c,row))+c->gap_px; ++row; }
+    return row;
+}
+void update_vlist_height(Context* ctx, VarVirtualListCache* c, uint32_t row, float h) noexcept {
+    auto* ws = state_map_find(&ctx->active_ui->states,c->list_id);
+    const double anchor_before = (ws && c->last_anchor_row < c->item_count) ? vlist_current_row_top(c, c->last_anchor_row) : 0.0;
+    const double previous_total = c->total_stride_sum;
+    float old = vlist_height(c,row); if (!c->chunks[row/256]) return;
+    const double measured_delta = c->total_stride_sum-previous_total;
+    double delta = double(h)-old; c->chunks[row/256][row%256] = h; fenwick_add(c,row/256,delta);
+    if (ws) {
+        ws->vscroll_total_h += measured_delta+delta; ws->vscroll_max_y = ws->vscroll_total_h > ws->viewport_dim.y ? ws->vscroll_total_h-ws->viewport_dim.y : 0;
+        if (row < c->last_anchor_row && ws->vscroll_pos_y > 0.0 && c->last_anchor_row < c->item_count)
+            ws->vscroll_pos_y = clamp_double(ws->vscroll_pos_y + (vlist_current_row_top(c, c->last_anchor_row) - anchor_before), 0.0, ws->vscroll_max_y);
+    }
+}
+} // namespace
+
+void virtual_list_set_item_height(uint32_t id, uint32_t row, float height) noexcept {
+    Context* ctx = current_context(); if (!ctx || !id || !std::isfinite(height) || height < 1) return;
+    auto* c = find_vlist(ctx->active_ui,id); if (!c || row >= c->item_count) return;
+    update_vlist_height(ctx,c,row,clamp_range(height,1,16384)); request_redraw(ctx);
+}
+void virtual_list_invalidate_heights(uint32_t id) noexcept {
+    Context* ctx = current_context(); if (!ctx || !id) return;
+    auto* c = find_vlist(ctx->active_ui,id); if (!c) return;
+    const double previous_total = c->total_stride_sum;
+    reset_vlist_heights(c);
+    if (auto* ws = state_map_find(&ctx->active_ui->states,id)) {
+        ws->vscroll_total_h += c->total_stride_sum-previous_total;
+        ws->vscroll_max_y = ws->vscroll_total_h > ws->viewport_dim.y ? ws->vscroll_total_h-ws->viewport_dim.y : 0;
+    }
+    c->dirty = true; request_redraw(ctx);
+}
+
 VirtualListSlice begin_virtual_list(const VirtualListDesc& desc) noexcept {
     Context* ctx = current_context();
     if (!ctx || !ctx->in_frame || desc.id == 0u) {
@@ -6659,10 +6806,13 @@ VirtualListSlice begin_virtual_list(const VirtualListDesc& desc) noexcept {
         return VirtualListSlice{};
     }
 
-    const float item_h = (desc.item_height_px > 1.0f) ? desc.item_height_px : 1.0f;
-    const uint16_t gap_u16 = to_u16_round((desc.row_gap_px > 0.0f) ? desc.row_gap_px : 0.0f);
+    const float item_h = std::isfinite(desc.item_height_px) ? clamp_range(desc.item_height_px,1,16384) : 28;
+    const uint16_t gap_u16 = to_u16_round((std::isfinite(desc.row_gap_px) && desc.row_gap_px > 0.0f) ? desc.row_gap_px : 0.0f);
     const float gap_px = static_cast<float>(gap_u16);
     const double stride = static_cast<double>(item_h) + static_cast<double>(gap_px);
+
+    auto* cache = (desc.variable_height || desc.measure_height_fn) ? prepare_vlist(ctx->active_ui,desc,item_h,gap_px) : nullptr;
+    if (!desc.variable_height && !desc.measure_height_fn) { auto* stale = find_vlist(ctx->active_ui,desc.id); if (stale) free_vlist(stale); }
 
     ws->is_user_element = true;
     ws->is_scroll_x = false;
@@ -6674,7 +6824,7 @@ VirtualListSlice begin_virtual_list(const VirtualListDesc& desc) noexcept {
         : 0u;
 
     const double pad_v = static_cast<double>(desc.padding.top) + static_cast<double>(desc.padding.bottom);
-    const double items_h = (desc.item_count > 0u)
+    const double items_h = cache ? cache->total_stride_sum - (desc.item_count ? gap_px : 0) : (desc.item_count > 0u)
         ? (static_cast<double>(desc.item_count) * static_cast<double>(item_h) +
            static_cast<double>(desc.item_count - 1u) * static_cast<double>(gap_px))
         : 0.0;
@@ -6714,7 +6864,43 @@ VirtualListSlice begin_virtual_list(const VirtualListDesc& desc) noexcept {
         end_idx = static_cast<uint32_t>(ei);
     }
 
-    const double first_row_top = static_cast<double>(first_idx) * stride;
+    double first_row_top = static_cast<double>(first_idx) * stride;
+    if (cache && desc.item_count) {
+        double adj_content_scroll_y = content_scroll_y;
+        for (uint32_t pass = 0; pass < 2; ++pass) {
+            uint32_t anchor = vlist_find_first_at_y(cache, adj_content_scroll_y);
+            cache->last_anchor_row = anchor;
+            const double anchor_top_before = vlist_current_row_top(cache, anchor);
+            first_idx = anchor > desc.overscan_rows ? anchor - desc.overscan_rows : 0;
+            for (uint32_t chunk = first_idx / 256; chunk <= anchor / 256; ++chunk)
+                vlist_ensure_chunk(cache, chunk);
+            const double shift = (adj_content_scroll_y > 0.0) ? (vlist_current_row_top(cache, anchor) - anchor_top_before) : 0.0;
+            if (shift != 0.0) {
+                adj_content_scroll_y = (adj_content_scroll_y + shift > 0.0) ? (adj_content_scroll_y + shift) : 0.0;
+                ws->vscroll_pos_y = (ws->vscroll_pos_y + shift > 0.0) ? (ws->vscroll_pos_y + shift) : 0.0;
+            }
+            first_row_top = vlist_row_top(cache, first_idx);
+            double y = first_row_top;
+            end_idx = first_idx;
+            while (end_idx < desc.item_count && y < adj_content_scroll_y + inner_view_h) {
+                y += double(vlist_height(cache, end_idx)) + gap_px;
+                ++end_idx;
+            }
+            uint32_t extra = desc.item_count - end_idx;
+            if (extra > desc.overscan_rows) extra = desc.overscan_rows;
+            end_idx += extra;
+            ws->vscroll_total_h = cache->total_stride_sum - (desc.item_count ? gap_px : 0) + pad_v;
+            ws->vscroll_max_y = ws->vscroll_total_h > view_h ? ws->vscroll_total_h - view_h : 0;
+            const double before_clamp = ws->vscroll_pos_y;
+            ws->vscroll_pos_y = clamp_double(ws->vscroll_pos_y, 0.0, ws->vscroll_max_y);
+            // Shrinking estimates near the bottom can move the viewport before this slice.
+            if (ws->vscroll_pos_y == before_clamp || ws->vscroll_pos_y - desc.padding.top >= first_row_top) break;
+            adj_content_scroll_y = ws->vscroll_pos_y > desc.padding.top ? ws->vscroll_pos_y - desc.padding.top : 0.0;
+        }
+        auto* rec = ctx->frame_arena.alloc<ActiveVarListRecord>();
+        if (rec) { *rec = {desc.id,first_idx,end_idx,ctx->active_ui->active_vlists}; ctx->active_ui->active_vlists = rec; ++ctx->active_ui->active_vlist_count; }
+        cache->dirty = false;
+    }
     const float child_offset_y = static_cast<float>(first_row_top - ws->vscroll_pos_y);
 
     BoxExtra* extra = ctx->frame_arena.alloc<BoxExtra>();
@@ -6773,7 +6959,7 @@ VirtualListSlice begin_virtual_list(const VirtualListDesc& desc) noexcept {
         .end_index = end_idx,
         .total_count = desc.item_count,
         .scroll_y = ws->vscroll_pos_y,
-        .max_scroll_y = max_scroll,
+        .max_scroll_y = ws->vscroll_max_y,
         .viewport_height = static_cast<float>(view_h),
     };
 }
@@ -6828,14 +7014,22 @@ void virtual_list_scroll_to_row(
     if (!ws) {
         return;
     }
-    const float item_h = (item_height_px > 1.0f) ? item_height_px : 1.0f;
+    auto* cache = find_vlist(ctx->active_ui,list_id);
+    if (cache && cache->item_count == 0) return;
+    if (cache && row_index >= cache->item_count) row_index = cache->item_count-1;
+    const double previous_total = cache ? cache->total_stride_sum : 0;
+    const float item_h = cache ? vlist_height(cache,row_index) : (std::isfinite(item_height_px) && item_height_px > 1 ? item_height_px : 1);
     const double stride = (ws->vlist_stride >= item_h)
         ? static_cast<double>(ws->vlist_stride)
         : static_cast<double>(item_h);
     const double view_h = (ws->viewport_dim.y > 1.0f)
         ? static_cast<double>(ws->viewport_dim.y)
         : (static_cast<double>(ctx->active_ui->viewport_h) / static_cast<double>(ctx->active_ui->dpi_scale));
-    double target_y = static_cast<double>(row_index) * stride;
+    double target_y = cache ? vlist_row_top(cache,row_index) : static_cast<double>(row_index) * stride;
+    if (cache) {
+        ws->vscroll_total_h += cache->total_stride_sum-previous_total;
+        ws->vscroll_max_y = ws->vscroll_total_h > view_h ? ws->vscroll_total_h-view_h : 0;
+    }
     if (align == AlignY::Center) {
         target_y -= 0.5 * (view_h - static_cast<double>(item_h));
     } else if (align == AlignY::Bottom) {
@@ -7784,6 +7978,24 @@ void end_frame(Context* ctx_arg) noexcept {
     ctx->active_ui->span_hit_count = 0u;
     ctx->active_ui->drop_hit_count = 0;
     Clay_RenderCommandArray cmds = Clay_EndLayout(0.0f);
+    bool corrected_heights = false;
+    for (auto* rec = ctx->active_ui->active_vlists; rec; rec = rec->next) {
+        auto* cache = find_vlist(ctx->active_ui,rec->list_id);
+        auto* entry = Clay__GetHashMapItem(make_clay_id(rec->list_id).id);
+        if (!cache || entry == &Clay_LayoutElementHashMapItem_DEFAULT) continue;
+        auto* list = entry->layoutElement;
+        uint32_t count = rec->end_index-rec->first_index;
+        if (count > static_cast<uint32_t>(list->children.length)) count = static_cast<uint32_t>(list->children.length);
+        for (uint32_t i = 0; i < count; ++i) {
+            auto* child = Clay_LayoutElementArray_Get(&Clay_GetCurrentContext()->layoutElements,list->children.elements[i]);
+            float h = child->dimensions.height;
+            if (std::isfinite(h) && h >= 1 && std::fabs(h-vlist_height(cache,rec->first_index+i)) > .25f) {
+                update_vlist_height(ctx,cache,rec->first_index+i,clamp_range(h,1,16384)); corrected_heights = true;
+            }
+        }
+    }
+    if (corrected_heights) request_redraw(ctx);
+
     if (ctx->active_ui->active_id) {
         auto* ws = state_map_find(&ctx->active_ui->states,ctx->active_ui->active_id);
         if (ws && ws->is_selectable_text && (ws->pressed_this_frame || ws->pressed_down)) update_selectable_text_pointer(ctx,ws,cmds);
@@ -8376,7 +8588,7 @@ void end_frame(Context* ctx_arg) noexcept {
 
         emit_direct_text_px(
             ctx,
-            "ETCH 2.1 INSPECTOR   [F12]",
+            "ETCH 2.2 INSPECTOR   [F12]",
             hud_x + 12.0f,
             hud_y + 10.0f,
             12.0f,

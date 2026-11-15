@@ -349,12 +349,20 @@ CLAY__WRAPPER_STRUCT(Clay_Padding);
 
 // Controls various settings that affect the size and position of an element, as well as the sizes and positions
 // of any child elements.
+typedef struct Clay__GridTrack {
+    uint8_t kind;
+    float value, minPx, maxPx;
+} Clay__GridTrack;
 typedef struct Clay_LayoutConfig {
     Clay_Sizing sizing; // Controls the sizing of this element inside it's parent container, including FIT, GROW, PERCENT and FIXED sizing.
     Clay_Padding padding; // Controls "padding" in pixels, which is a gap between the bounding box of this element and where its children will be placed.
     uint16_t childGap; // Controls the gap in pixels between child elements along the layout axis (horizontal gap for LEFT_TO_RIGHT, vertical gap for TOP_TO_BOTTOM).
     Clay_ChildAlignment childAlignment; // Controls how child elements are aligned on each axis.
     Clay_LayoutDirection layoutDirection; // Controls the direction in which child elements will be automatically laid out.
+    bool wrap;
+    uint16_t crossChildGap, gridColumns, gridTrackCount;
+    const Clay__GridTrack *gridTracks;
+    uint16_t gridColSpan;
 } Clay_LayoutConfig;
 
 CLAY__WRAPPER_STRUCT(Clay_LayoutConfig);
@@ -1229,6 +1237,8 @@ typedef struct Clay_LayoutElement {
         };
     };
     uint32_t id;
+    int32_t cellRow, cellCol, cellSpan;
+    float cellX, cellY, cellWidth, cellHeight;
     uint16_t floatingChildrenCount;
     bool isTextElement;
     // True if the element is currently in an exit transition, and is "synthetic"
@@ -1872,13 +1882,155 @@ Clay_LayoutElementHashMapItem *Clay__GetHashMapItem(uint32_t id) {
 }
 
 void Clay__UpdateAspectRatioBox(Clay_LayoutElement *layoutElement) {
-    if (layoutElement->config.aspectRatio.aspectRatio != 0) {
+    if (!layoutElement->isTextElement && layoutElement->config.aspectRatio.aspectRatio != 0) {
         if (layoutElement->dimensions.width == 0 && layoutElement->dimensions.height != 0) {
             layoutElement->dimensions.width = layoutElement->dimensions.height * layoutElement->config.aspectRatio.aspectRatio;
         } else if (layoutElement->dimensions.width != 0 && layoutElement->dimensions.height == 0) {
             layoutElement->dimensions.height = layoutElement->dimensions.width * (1 / layoutElement->config.aspectRatio.aspectRatio);
         }
     }
+}
+
+Clay_SizingAxis Clay__GetElementSizing(Clay_LayoutElement* element, bool xAxis);
+
+// Grid and wrap share row metrics, retained in the frame's layout elements.
+int32_t Clay__ColumnCount(Clay_LayoutElement *p) {
+    return p->config.layout.gridTrackCount ? p->config.layout.gridTrackCount : p->config.layout.gridColumns;
+}
+bool Clay__IsRows(Clay_LayoutElement *p) {
+    return Clay__ColumnCount(p) > 0 || (p->config.layout.wrap && p->config.layout.layoutDirection == CLAY_LEFT_TO_RIGHT);
+}
+Clay_LayoutElement *Clay__RowChild(Clay_LayoutElement *p, int32_t i) {
+    return Clay_LayoutElementArray_Get(&Clay_GetCurrentContext()->layoutElements, p->children.elements[i]);
+}
+void Clay__Columns(Clay_LayoutElement *p, float *widths, bool intrinsic) {
+    Clay_LayoutConfig *l = &p->config.layout;
+    int32_t n = Clay__ColumnCount(p), col = 0, row = 0;
+    float avail = CLAY__MAX(0, p->dimensions.width - l->padding.left - l->padding.right - (n - 1) * l->childGap);
+    bool active[128] = {};
+    float weights[128] = {}, mins[128] = {}, maxs[128] = {};
+    for (int32_t c = 0; c < n; ++c) {
+        Clay__GridTrack t = {1, 1, 0, 0};
+        if (l->gridTrackCount) t = l->gridTracks[c];
+        mins[c] = t.minPx; maxs[c] = t.maxPx > 0 ? t.maxPx : CLAY__MAXFLOAT;
+        active[c] = t.kind == 1 && !intrinsic;
+        weights[c] = t.value > 0 ? t.value : 1;
+        widths[c] = t.kind == 2 ? t.value : (t.kind == 3 && !intrinsic ? avail * t.value : t.minPx);
+    }
+    for (int32_t i = 0; i < p->children.length; ++i) {
+        Clay_LayoutElement *ch = Clay__RowChild(p, i);
+        if (ch->exiting) continue;
+        int32_t span = CLAY__MIN(n, CLAY__MAX(1, ch->isTextElement ? 1 : ch->config.layout.gridColSpan));
+        if (col + span > n) { ++row; col = 0; }
+        ch->cellRow = row; ch->cellCol = col; ch->cellSpan = span;
+        if (span == 1 && (!l->gridTrackCount || l->gridTracks[col].kind == 0 || (intrinsic && l->gridTracks[col].kind == 1)))
+            widths[col] = CLAY__MAX(widths[col], ch->dimensions.width);
+        col += span;
+    }
+    for (int32_t c = 0; c < n; ++c) widths[c] = CLAY__MIN(maxs[c], CLAY__MAX(mins[c], widths[c]));
+    // Freeze tracks violating their bounds, then redistribute the remaining fraction.
+    for (int32_t pass = 0; pass <= n; ++pass) {
+        float remaining = avail, weight = 0;
+        for (int32_t c = 0; c < n; ++c) { if (active[c]) weight += weights[c]; else remaining -= widths[c]; }
+        if (weight == 0) break;
+        bool froze = false;
+        float boundedSum = 0;
+        for (int32_t c = 0; c < n; ++c) if (active[c]) {
+            float v = CLAY__MAX(0, remaining) * weights[c] / weight;
+            widths[c] = CLAY__MIN(maxs[c], CLAY__MAX(mins[c], v));
+            boundedSum += widths[c];
+        }
+        for (int32_t c = 0; c < n; ++c) if (active[c]) {
+            float v = CLAY__MAX(0, remaining) * weights[c] / weight;
+            if ((boundedSum > remaining && v < mins[c]) || (boundedSum < remaining && v > maxs[c])) {
+                active[c] = false; froze = true;
+            }
+        }
+        if (!froze) break;
+    }
+}
+void Clay__SizeRowsX(Clay_LayoutElement *p) {
+    Clay_LayoutConfig *l = &p->config.layout;
+    float avail = CLAY__MAX(0, p->dimensions.width - l->padding.left - l->padding.right);
+    int32_t n = Clay__ColumnCount(p);
+    if (n) {
+        float widths[128] = {};
+        Clay__Columns(p, widths, false);
+        for (int32_t i = 0; i < p->children.length; ++i) {
+            Clay_LayoutElement *ch = Clay__RowChild(p, i);
+            if (ch->exiting) continue;
+            float x = 0, w = 0;
+            for (int32_t c = 0; c < ch->cellCol; ++c) x += widths[c] + l->childGap;
+            for (int32_t c = 0; c < ch->cellSpan; ++c) w += widths[ch->cellCol + c];
+            w += (ch->cellSpan - 1) * l->childGap;
+            ch->cellX = x; ch->cellWidth = w;
+            Clay_SizingAxis a = Clay__GetElementSizing(ch, true);
+            ch->dimensions.width = ch->isTextElement ? w : a.type == CLAY__SIZING_TYPE_PERCENT ? w * a.size.percent : CLAY__MIN(a.size.minMax.max, CLAY__MAX(a.size.minMax.min, w));
+            Clay__UpdateAspectRatioBox(ch);
+        }
+        return;
+    }
+    int32_t row = 0; float used = 0; bool first = true;
+    for (int32_t i = 0; i < p->children.length; ++i) {
+        Clay_LayoutElement *ch = Clay__RowChild(p, i);
+        if (ch->exiting) continue;
+        if (!ch->isTextElement && ch->config.layout.sizing.width.type == CLAY__SIZING_TYPE_PERCENT) {
+            ch->dimensions.width = CLAY__MAX(ch->minDimensions.width, avail * ch->config.layout.sizing.width.size.percent);
+            Clay__UpdateAspectRatioBox(ch);
+        }
+        float next = used + (first ? 0 : l->childGap) + ch->dimensions.width;
+        if (!first && next > avail + .01f) { ++row; used = 0; first = true; }
+        ch->cellRow = row; used += (first ? 0 : l->childGap) + ch->dimensions.width; first = false;
+    }
+    for (int32_t start = 0; start < p->children.length;) {
+        int32_t end = start + 1;
+        while (end < p->children.length && Clay__RowChild(p, end)->cellRow == Clay__RowChild(p, start)->cellRow) ++end;
+        for (int32_t pass = start; pass <= end; ++pass) {
+            float sum = 0; int32_t count = 0, live = 0;
+            for (int32_t i = start; i < end; ++i) { Clay_LayoutElement *ch = Clay__RowChild(p,i); if (!ch->exiting) { sum += ch->dimensions.width; ++live; } }
+            float extra = avail - sum - CLAY__MAX(0,live-1)*l->childGap;
+            if (extra < 0 && p->config.clip.horizontal) break;
+            for (int32_t i = start; i < end; ++i) {
+                Clay_LayoutElement *ch = Clay__RowChild(p,i); Clay_SizingAxis a = Clay__GetElementSizing(ch, true);
+                if (!ch->exiting && (extra > 0 ? a.type == CLAY__SIZING_TYPE_GROW && ch->dimensions.width < a.size.minMax.max : a.type != CLAY__SIZING_TYPE_FIXED && a.type != CLAY__SIZING_TYPE_PERCENT && ch->dimensions.width > ch->minDimensions.width)) ++count;
+            }
+            if (!count || (extra < .01f && extra > -.01f)) break;
+            for (int32_t i = start; i < end; ++i) {
+                Clay_LayoutElement *ch = Clay__RowChild(p,i); Clay_SizingAxis a = Clay__GetElementSizing(ch, true);
+                if (!ch->exiting && (extra > 0 ? a.type == CLAY__SIZING_TYPE_GROW : a.type != CLAY__SIZING_TYPE_FIXED && a.type != CLAY__SIZING_TYPE_PERCENT)) {
+                    ch->dimensions.width = CLAY__MIN(ch->isTextElement ? CLAY__MAXFLOAT : a.size.minMax.max, CLAY__MAX(ch->minDimensions.width, ch->dimensions.width + extra/count));
+                    Clay__UpdateAspectRatioBox(ch);
+                }
+            }
+        }
+        start = end;
+    }
+}
+Clay_Dimensions Clay__RowMetrics(Clay_LayoutElement *p, bool stretch) {
+    Clay_LayoutConfig *l = &p->config.layout;
+    float y = 0, maxW = 0;
+    bool grid = Clay__ColumnCount(p) > 0;
+    for (int32_t start = 0; start < p->children.length;) {
+        int32_t end = start + 1;
+        while (end < p->children.length && Clay__RowChild(p,end)->cellRow == Clay__RowChild(p,start)->cellRow) ++end;
+        float h = 0, w = 0; int32_t live = 0;
+        for (int32_t i = start; i < end; ++i) {
+            Clay_LayoutElement *ch = Clay__RowChild(p,i); if (ch->exiting) continue;
+            h = CLAY__MAX(h,ch->dimensions.height);
+            w = grid ? CLAY__MAX(w,ch->cellX + ch->cellWidth) : w + ch->dimensions.width + (live ? l->childGap : 0); ++live;
+        }
+        float extra = CLAY__MAX(0,p->dimensions.width-l->padding.left-l->padding.right-w);
+        float x = l->childAlignment.x == CLAY_ALIGN_X_LEFT ? 0 : (l->childAlignment.x == CLAY_ALIGN_X_CENTER ? extra/2 : extra);
+        for (int32_t i = start; i < end; ++i) {
+            Clay_LayoutElement *ch = Clay__RowChild(p,i); if (ch->exiting) continue;
+            if (stretch && !ch->isTextElement && ch->config.layout.sizing.height.type == CLAY__SIZING_TYPE_GROW)
+                ch->dimensions.height = CLAY__MIN(ch->config.layout.sizing.height.size.minMax.max,CLAY__MAX(ch->config.layout.sizing.height.size.minMax.min,h));
+            if (!grid) { ch->cellX = x; ch->cellWidth = ch->dimensions.width; x += ch->dimensions.width+l->childGap; }
+            ch->cellY = y; ch->cellHeight = h;
+        }
+        maxW = CLAY__MAX(maxW,w); y += h + (end < p->children.length ? l->crossChildGap : 0); start = end;
+    }
+    return CLAY__INIT(Clay_Dimensions){maxW,y};
 }
 
 void Clay__CloseElement(void) {
@@ -1909,7 +2061,7 @@ void Clay__CloseElement(void) {
             openLayoutElement->dimensions.height = CLAY__MAX(openLayoutElement->dimensions.height, child->dimensions.height + topBottomPadding);
             // Minimum size of child elements doesn't matter to clip containers as they can shrink and hide their contents
             if (!elementHasClipHorizontal) {
-                openLayoutElement->minDimensions.width += child->minDimensions.width;
+                openLayoutElement->minDimensions.width = layoutConfig->wrap ? CLAY__MAX(openLayoutElement->minDimensions.width, leftRightPadding + child->minDimensions.width) : openLayoutElement->minDimensions.width + child->minDimensions.width;
             }
             if (!elementHasClipVertical) {
                 openLayoutElement->minDimensions.height = CLAY__MAX(openLayoutElement->minDimensions.height, child->minDimensions.height + topBottomPadding);
@@ -1918,7 +2070,7 @@ void Clay__CloseElement(void) {
         }
         float childGap = (float)(CLAY__MAX(openLayoutElement->children.length - 1, 0) * layoutConfig->childGap);
         openLayoutElement->dimensions.width += childGap;
-        if (!elementHasClipHorizontal) {
+        if (!elementHasClipHorizontal && !layoutConfig->wrap) {
             openLayoutElement->minDimensions.width += childGap;
         }
     }
@@ -1946,6 +2098,13 @@ void Clay__CloseElement(void) {
         }
     }
 
+    if (Clay__ColumnCount(openLayoutElement)) {
+        float widths[128] = {}; Clay__Columns(openLayoutElement, widths, true);
+        float w = leftRightPadding;
+        for (int32_t c = 0; c < Clay__ColumnCount(openLayoutElement); ++c) w += widths[c] + (c ? layoutConfig->childGap : 0);
+        openLayoutElement->dimensions.width = w;
+        openLayoutElement->minDimensions.width = elementHasClipHorizontal ? leftRightPadding : w;
+    }
     context->layoutElementChildrenBuffer.length -= openLayoutElement->children.length;
 
     // Clamp element min and max width to the values configured in the layout
@@ -2402,6 +2561,24 @@ void Clay__SizeContainersAlongAxis(bool xAxis, float deltaTime, Clay__int32_tArr
                 isFirstChild = false;
             }
 
+            if (Clay__IsRows(parent)) {
+                if (xAxis) Clay__SizeRowsX(parent);
+                else {
+                    float innerH = CLAY__MAX(0.0f, parentSize - parentPadding);
+                    for (int32_t i = 0; i < parent->children.length; ++i) {
+                        Clay_LayoutElement *childElement = Clay__RowChild(parent, i);
+                        if (childElement->exiting || childElement->isTextElement) continue;
+                        Clay_SizingAxis childSizing = childElement->config.layout.sizing.height;
+                        if (childSizing.type == CLAY__SIZING_TYPE_PERCENT) {
+                            childElement->dimensions.height = CLAY__MAX(childElement->minDimensions.height, innerH * childSizing.size.percent);
+                            Clay__UpdateAspectRatioBox(childElement);
+                        }
+                    }
+                    Clay__RowMetrics(parent, true);
+                }
+                continue;
+            }
+
             // Expand percentage containers to size
             for (int32_t childOffset = 0; childOffset < parent->children.length; childOffset++) {
                 int32_t childElementIndex = parent->children.elements[childOffset];
@@ -2693,6 +2870,7 @@ void Clay__CalculateFinalLayout(float deltaTime, bool useStoredBoundingBoxes, bo
     // Scale vertical heights according to aspect ratio
     for (int32_t i = 0; i < aspectRatioElements.length; ++i) {
         Clay_LayoutElement* aspectElement = Clay_LayoutElementArray_Get(&context->layoutElements, Clay__int32_tArray_GetValue(&aspectRatioElements, i));
+        if (aspectElement->config.layout.sizing.height.type == CLAY__SIZING_TYPE_FIXED) continue;
         aspectElement->dimensions.height = (1 / aspectElement->config.aspectRatio.aspectRatio) * aspectElement->dimensions.width;
         aspectElement->config.layout.sizing.height.size.minMax.max = aspectElement->dimensions.height;
     }
@@ -2726,14 +2904,20 @@ void Clay__CalculateFinalLayout(float deltaTime, bool useStoredBoundingBoxes, bo
 
         // DFS node has been visited, this is on the way back up to the root
         Clay_LayoutConfig *layoutConfig = &currentElement->config.layout;
-        if (layoutConfig->layoutDirection == CLAY_LEFT_TO_RIGHT) {
+        if (Clay__IsRows(currentElement)) {
+            Clay_Dimensions content = Clay__RowMetrics(currentElement, false);
+            if (!currentElement->config.clip.vertical && layoutConfig->sizing.height.type != CLAY__SIZING_TYPE_PERCENT)
+                currentElement->minDimensions.height = CLAY__MIN(layoutConfig->sizing.height.size.minMax.max, CLAY__MAX(layoutConfig->sizing.height.size.minMax.min, content.height + layoutConfig->padding.top + layoutConfig->padding.bottom));
+            if (layoutConfig->sizing.height.type != CLAY__SIZING_TYPE_PERCENT)
+                currentElement->dimensions.height = CLAY__MIN(layoutConfig->sizing.height.size.minMax.max, CLAY__MAX(layoutConfig->sizing.height.size.minMax.min, content.height + layoutConfig->padding.top + layoutConfig->padding.bottom));
+        } else if (layoutConfig->layoutDirection == CLAY_LEFT_TO_RIGHT && layoutConfig->sizing.height.type != CLAY__SIZING_TYPE_PERCENT) {
             // Resize any parent containers that have grown in height along their non layout axis
             for (int32_t j = 0; j < currentElement->children.length; ++j) {
                 Clay_LayoutElement *childElement = Clay_LayoutElementArray_Get(&context->layoutElements, currentElement->children.elements[j]);
                 float childHeightWithPadding = CLAY__MAX(childElement->dimensions.height + layoutConfig->padding.top + layoutConfig->padding.bottom, currentElement->dimensions.height);
                 currentElement->dimensions.height = CLAY__MIN(CLAY__MAX(childHeightWithPadding, layoutConfig->sizing.height.size.minMax.min), layoutConfig->sizing.height.size.minMax.max);
             }
-        } else if (layoutConfig->layoutDirection == CLAY_TOP_TO_BOTTOM) {
+        } else if (layoutConfig->layoutDirection == CLAY_TOP_TO_BOTTOM && layoutConfig->sizing.height.type != CLAY__SIZING_TYPE_PERCENT) {
             // Resizing along the layout axis
             float contentHeight = (float)(layoutConfig->padding.top + layoutConfig->padding.bottom);
             for (int32_t j = 0; j < currentElement->children.length; ++j) {
@@ -2743,6 +2927,17 @@ void Clay__CalculateFinalLayout(float deltaTime, bool useStoredBoundingBoxes, bo
             contentHeight += (float)(CLAY__MAX(currentElement->children.length - 1, 0) * layoutConfig->childGap);
             currentElement->dimensions.height = CLAY__MIN(CLAY__MAX(contentHeight, layoutConfig->sizing.height.size.minMax.min), layoutConfig->sizing.height.size.minMax.max);
         }
+        if (!Clay__IsRows(currentElement) && !currentElement->config.clip.vertical && layoutConfig->sizing.height.type != CLAY__SIZING_TYPE_PERCENT) {
+            float minH = 0;
+            for (int32_t j = 0; j < currentElement->children.length; ++j) {
+                Clay_LayoutElement *ch = Clay__RowChild(currentElement,j);
+                if (ch->exiting) continue;
+                minH = layoutConfig->layoutDirection == CLAY_TOP_TO_BOTTOM ? minH + ch->minDimensions.height : CLAY__MAX(minH,ch->minDimensions.height);
+            }
+            if (layoutConfig->layoutDirection == CLAY_TOP_TO_BOTTOM) minH += CLAY__MAX(0,currentElement->children.length-1)*layoutConfig->childGap;
+            minH += layoutConfig->padding.top + layoutConfig->padding.bottom;
+            currentElement->minDimensions.height = CLAY__MIN(layoutConfig->sizing.height.size.minMax.max,CLAY__MAX(layoutConfig->sizing.height.size.minMax.min,minH));
+        }
     }
 
     // Calculate sizing along the Y axis
@@ -2751,7 +2946,8 @@ void Clay__CalculateFinalLayout(float deltaTime, bool useStoredBoundingBoxes, bo
     // Scale horizontal widths according to aspect ratio
     for (int32_t i = 0; i < aspectRatioElements.length; ++i) {
         Clay_LayoutElement* aspectElement = Clay_LayoutElementArray_Get(&context->layoutElements, Clay__int32_tArray_GetValue(&aspectRatioElements, i));
-        aspectElement->dimensions.width = aspectElement->config.aspectRatio.aspectRatio * aspectElement->dimensions.height;
+        if (aspectElement->config.layout.sizing.width.type == CLAY__SIZING_TYPE_FIT)
+            aspectElement->dimensions.width = aspectElement->config.aspectRatio.aspectRatio * aspectElement->dimensions.height;
     }
 
     // Sort tree roots by z-index
@@ -3194,6 +3390,7 @@ void Clay__CalculateFinalLayout(float deltaTime, bool useStoredBoundingBoxes, bo
                 currentElementTreeNode->nextChildOffset.y += extraSpace;
             }
 
+            if (Clay__IsRows(currentElement)) contentSizeCurrent = Clay__RowMetrics(currentElement, false);
             if (scrollContainerData) {
                 scrollContainerData->contentSize = CLAY__INIT(Clay_Dimensions) {contentSizeCurrent.width + (float)(layoutConfig->padding.left + layoutConfig->padding.right), contentSizeCurrent.height + (float)(layoutConfig->padding.top + layoutConfig->padding.bottom) };
             }
@@ -3226,6 +3423,13 @@ void Clay__CalculateFinalLayout(float deltaTime, bool useStoredBoundingBoxes, bo
                     currentElementBoundingBox.x + currentElementTreeNode->nextChildOffset.x + scrollOffset.x,
                     currentElementBoundingBox.y + currentElementTreeNode->nextChildOffset.y + scrollOffset.y,
                 };
+
+                if (Clay__IsRows(currentElement)) {
+                    float dx = CLAY__MAX(0, childElement->cellWidth - childElement->dimensions.width);
+                    float dy = CLAY__MAX(0, childElement->cellHeight - childElement->dimensions.height);
+                    childPosition.x = currentElementBoundingBox.x + layoutConfig->padding.left + childElement->cellX + scrollOffset.x + (layoutConfig->childAlignment.x == CLAY_ALIGN_X_LEFT ? 0 : layoutConfig->childAlignment.x == CLAY_ALIGN_X_CENTER ? dx/2 : dx);
+                    childPosition.y = currentElementBoundingBox.y + layoutConfig->padding.top + childElement->cellY + scrollOffset.y + (layoutConfig->childAlignment.y == CLAY_ALIGN_Y_TOP ? 0 : layoutConfig->childAlignment.y == CLAY_ALIGN_Y_CENTER ? dy/2 : dy);
+                }
 
                 // DFS buffer elements need to be added in reverse because stack traversal happens backwards
                 uint32_t newNodeIndex = dfsBuffer.length - 1 - i;

@@ -1,4 +1,4 @@
-// Etch v2.1 — Pure-GPU UI Engine
+// Etch v2.2 — Pure-GPU UI Engine
 #ifndef ETCH_H
 #define ETCH_H
 
@@ -12,7 +12,7 @@
 #include <type_traits>
 
 #define ETCH_VERSION_MAJOR 2
-#define ETCH_VERSION_MINOR 1
+#define ETCH_VERSION_MINOR 2
 #define ETCH_VERSION_PATCH 0
 
 #ifndef ETCH_ASSERT
@@ -1011,6 +1011,17 @@ struct SpringSpec {
     float damping_ratio = 1.0f;
 };
 
+struct GridTrack {
+    SizingKind kind = SizingKind::Grow;
+    float value = 1.0f;
+    float min_px = 0.0f;
+    float max_px = 0.0f;
+    static constexpr GridTrack px(float v) noexcept { return {SizingKind::Fixed, v, v, v}; }
+    static constexpr GridTrack fr(float v = 1, float lo = 0, float hi = 0) noexcept { return {SizingKind::Grow, v, lo, hi}; }
+    static constexpr GridTrack auto_fit(float lo = 0, float hi = 0) noexcept { return {SizingKind::Fit, 0, lo, hi}; }
+    static constexpr GridTrack percent(float v, float lo = 0, float hi = 0) noexcept { return {SizingKind::Percent, v, lo, hi}; }
+};
+
 struct BoxDesc {
     uint32_t id = 0;
     Axis axis = Axis::Row;
@@ -1045,6 +1056,12 @@ struct BoxDesc {
     bool clip_to_parent = false;
     float backdrop_blur = 0.0f;
     bool clamp_to_viewport = false;
+    bool wrap = false;
+    float row_gap = -1.0f;
+    float aspect_ratio = 0.0f;
+    uint16_t grid_columns = 0; // Up to 128 columns; explicit tracks take precedence.
+    std::span<const GridTrack> grid_tracks = {}; // Copied into frame storage by begin_box.
+    uint16_t grid_col_span = 1;
 };
 
 inline constexpr uint16_t kFontSans       = 0u;
@@ -1144,6 +1161,8 @@ struct ImageDesc {
     Color tint = Color::white();
     Color border_color = {};
     float border_width = 0.0f;
+    float aspect_ratio = 0.0f;
+    uint16_t grid_col_span = 1;
 };
 
 struct IconDesc {
@@ -1388,6 +1407,8 @@ struct SplitResult {
     bool dragging = false;
 };
 
+using VirtualItemHeightFn = float (*)(uint32_t index, void* user_data) noexcept;
+
 struct VirtualListDesc {
     uint32_t id = 0;
     uint32_t item_count = 0;
@@ -1402,6 +1423,9 @@ struct VirtualListDesc {
     float border_width = 0.0f;
     Corners radius = {};
     bool show_scrollbar = true;
+    VirtualItemHeightFn measure_height_fn = nullptr;
+    void* measure_user_data = nullptr;
+    bool variable_height = false;
 };
 
 struct VirtualListSlice {
@@ -1772,6 +1796,8 @@ void set_split_ratio(uint32_t split_id, float ratio) noexcept;
 // Million-Row Virtual List (double-precision scrolling, O(visible) layout)
 VirtualListSlice begin_virtual_list(const VirtualListDesc& desc) noexcept;
 void end_virtual_list() noexcept;
+void virtual_list_set_item_height(uint32_t list_id, uint32_t row_index, float height_px) noexcept;
+void virtual_list_invalidate_heights(uint32_t list_id) noexcept;
 double virtual_list_scroll_offset(uint32_t list_id) noexcept;
 void set_virtual_list_scroll_offset(uint32_t list_id, double offset_y, bool stop_momentum = true) noexcept;
 void virtual_list_scroll_to_row(
