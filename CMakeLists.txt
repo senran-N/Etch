@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(etch VERSION 2.3.0 LANGUAGES C CXX)
+project(etch VERSION 2.4.0 LANGUAGES C CXX)
 
 option(ETCH_BUILD_EXAMPLES "Build Etch sandbox and etch_studio examples" ON)
 
@@ -215,7 +215,7 @@ add_library(etch STATIC
 add_library(Etch::etch ALIAS etch)
 set_source_files_properties(src/etch_unity.cpp PROPERTIES
     OBJECT_DEPENDS
-        "${CMAKE_CURRENT_SOURCE_DIR}/src/etch.h;${CMAKE_CURRENT_SOURCE_DIR}/src/etch_arena.cpp;${CMAKE_CURRENT_SOURCE_DIR}/src/etch_slug.cpp;${CMAKE_CURRENT_SOURCE_DIR}/src/etch_bidi.cpp;${CMAKE_CURRENT_SOURCE_DIR}/src/etch_bidi_data.h;${CMAKE_CURRENT_SOURCE_DIR}/src/etch_grapheme_data.h;${CMAKE_CURRENT_SOURCE_DIR}/src/etch_layout.cpp;${CMAKE_CURRENT_SOURCE_DIR}/src/etch_gpu.cpp;${CMAKE_CURRENT_SOURCE_DIR}/src/etch_widgets.cpp;${CMAKE_CURRENT_SOURCE_DIR}/third_party/clay.h;${CMAKE_CURRENT_SOURCE_DIR}/third_party/stb_truetype.h;${CMAKE_CURRENT_SOURCE_DIR}/third_party/stb_image_write.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/etch.h;${CMAKE_CURRENT_SOURCE_DIR}/src/etch_arena.cpp;${CMAKE_CURRENT_SOURCE_DIR}/src/etch_slug.cpp;${CMAKE_CURRENT_SOURCE_DIR}/src/etch_bidi.cpp;${CMAKE_CURRENT_SOURCE_DIR}/src/etch_bidi_data.h;${CMAKE_CURRENT_SOURCE_DIR}/src/etch_grapheme_data.h;${CMAKE_CURRENT_SOURCE_DIR}/src/etch_layout.cpp;${CMAKE_CURRENT_SOURCE_DIR}/src/etch_gpu.cpp;${CMAKE_CURRENT_SOURCE_DIR}/src/etch_widgets.cpp;${CMAKE_CURRENT_SOURCE_DIR}/src/etch_editor.cpp;${CMAKE_CURRENT_SOURCE_DIR}/third_party/clay.h;${CMAKE_CURRENT_SOURCE_DIR}/third_party/stb_truetype.h;${CMAKE_CURRENT_SOURCE_DIR}/third_party/stb_image_write.h"
 )
 etch_configure_orthodox_cpp(etch)
 target_include_directories(etch
@@ -233,7 +233,7 @@ if (ETCH_BUILD_EXAMPLES)
         examples/sandbox.cpp
     )
     set_source_files_properties(examples/sandbox.cpp PROPERTIES
-        OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/etch.h;${CMAKE_CURRENT_SOURCE_DIR}/examples/desktop_v23_checks.h"
+        OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/etch.h;${CMAKE_CURRENT_SOURCE_DIR}/examples/desktop_v23_checks.h;${CMAKE_CURRENT_SOURCE_DIR}/examples/editor_v24_checks.h"
     )
     etch_configure_orthodox_cpp(sandbox)
     target_include_directories(sandbox PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/third_party")
@@ -253,7 +253,7 @@ if (ETCH_BUILD_EXAMPLES)
         examples/etch_studio.cpp
     )
     set_source_files_properties(examples/etch_studio.cpp PROPERTIES
-        OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/etch.h;${CMAKE_CURRENT_SOURCE_DIR}/examples/desktop_v23_checks.h"
+        OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/etch.h;${CMAKE_CURRENT_SOURCE_DIR}/examples/desktop_v23_checks.h;${CMAKE_CURRENT_SOURCE_DIR}/examples/editor_v24_checks.h"
     )
     etch_configure_orthodox_cpp(etch_studio)
     target_include_directories(etch_studio PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/third_party")

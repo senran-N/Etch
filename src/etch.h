@@ -12,7 +12,7 @@
 #include <type_traits>
 
 #define ETCH_VERSION_MAJOR 2
-#define ETCH_VERSION_MINOR 3
+#define ETCH_VERSION_MINOR 4
 #define ETCH_VERSION_PATCH 0
 
 #ifndef ETCH_ASSERT
@@ -925,6 +925,7 @@ struct FrameStats {
     double gpu_submit_ms = 0.0;
     uint32_t active_animations = 0;
     bool idle_sleeping = false;
+    int32_t ime_cursor_offset_win = 0; // Cursor within the IME area, in window pixels.
 };
 
 enum class SizingKind : uint8_t {
@@ -1349,6 +1350,66 @@ struct DragPayloadView {
     const void* data = nullptr;
     uint32_t    size = 0;
 };
+
+struct TextLineCol { uint32_t line = 0; uint32_t col_byte = 0; };
+struct TextBufferEdit;
+// Caller owns this POD. Initialize once, free explicitly; do not shallow-copy ownership.
+struct TextBuffer {
+    char* data = nullptr; uint32_t cap = 0, gap_start = 0, gap_end = 0;
+    // Prefix entries are byte offsets <= gap_start. Suffix entries encode
+    // byte_length - logical_start, so local typing never shifts suffix entries.
+    uint32_t* line_data = nullptr; uint32_t line_cap = 0, line_gap_start = 0, line_gap_end = 0;
+    TextBufferEdit* undo_ops = nullptr; uint32_t undo_cap = 0, undo_count = 0, undo_cursor = 0;
+    char* undo_blob = nullptr; uint32_t undo_blob_cap = 0, undo_blob_used = 0;
+    uint64_t version = 1;
+};
+bool init_text_buffer(TextBuffer*, Str initial_utf8 = {}, uint32_t initial_cap = 4096) noexcept;
+void free_text_buffer(TextBuffer*) noexcept;
+bool text_buffer_set(TextBuffer*, Str) noexcept;
+bool text_buffer_replace(TextBuffer*, uint32_t byte_start, uint32_t byte_end, Str,
+    bool record_undo = true, uint32_t before_cursor = 0, uint32_t before_anchor = 0,
+    uint32_t after_cursor = 0, uint32_t after_anchor = 0, uint8_t op_group = 0, double timestamp_s = 0.0) noexcept;
+uint32_t text_buffer_byte_length(const TextBuffer*) noexcept;
+uint32_t text_buffer_line_count(const TextBuffer*) noexcept;
+uint32_t text_buffer_line_start(const TextBuffer*, uint32_t) noexcept;
+uint32_t text_buffer_line_end(const TextBuffer*, uint32_t) noexcept;
+Str text_buffer_line(const TextBuffer*, uint32_t, Arena* scratch = nullptr) noexcept;
+uint32_t text_buffer_copy_range(const TextBuffer*, uint32_t, uint32_t, char*, uint32_t) noexcept;
+TextLineCol text_buffer_line_col(const TextBuffer*, uint32_t) noexcept;
+uint32_t text_buffer_byte_offset(const TextBuffer*, uint32_t, uint32_t) noexcept;
+bool text_buffer_undo(TextBuffer*, uint32_t* out_cursor = nullptr, uint32_t* out_anchor = nullptr) noexcept;
+bool text_buffer_redo(TextBuffer*, uint32_t* out_cursor = nullptr, uint32_t* out_anchor = nullptr) noexcept;
+void text_buffer_clear_undo(TextBuffer*) noexcept;
+struct SyntaxToken {
+    uint32_t byte_start = 0, byte_end = 0; Color color = Color::white(); uint16_t font_id = kFontMono;
+};
+using SyntaxTokenizeFn = uint32_t (*)(uint32_t, Str, SyntaxToken*, uint32_t, void*) noexcept;
+uint32_t tokenize_cpp_hlsl(uint32_t, Str, SyntaxToken*, uint32_t, void*) noexcept;
+struct CodeEditorDesc {
+    uint32_t id = 0; TextBuffer* buffer = nullptr;
+    Sizing width = Sizing::grow(); Sizing height = Sizing::grow();
+    Padding padding = Padding::xy(10, 8);
+    float font_size_px = 14; uint16_t font_id = kFontMono; float line_height_px = 0;
+    bool show_line_numbers = true; float gutter_width_px = 0; uint32_t tab_width = 4;
+    bool read_only = false; bool show_scrollbar = true;
+    SyntaxTokenizeFn tokenizer = tokenize_cpp_hlsl; void* tokenizer_user_data = nullptr;
+    Color background = Color::rgb_hex(0x0F1420), gutter_background = Color::rgb_hex(0x111827);
+    Color active_line_color = Color::rgba8(148,163,184,16), selection_color = Color::rgba8(56,189,248,88);
+    Color text_color = Color::rgb_hex(0xE2E8F0), gutter_text_color = Color::rgb_hex(0x64748B);
+    Color gutter_active_text_color = Color::rgb_hex(0xCBD5E1), caret_color = Color::rgb_hex(0x38BDF8);
+    Color composition_color = Color::rgb_hex(0xFBBF24), border_color = Color::rgb_hex(0x334155);
+    Color focus_border_color = Color::rgb_hex(0x38BDF8);
+    float border_width = 1, focus_border_width = 1.5f; Corners radius = Corners::all(6);
+};
+struct CodeEditorResult {
+    bool changed = false, focused = false, composing = false;
+    uint32_t cursor_byte = 0, selection_anchor_byte = 0, cursor_line = 0, cursor_col_byte = 0;
+    uint32_t first_visible_line = 0, end_visible_line = 0, total_lines = 0;
+    Rect ime_cursor_rect = {};
+};
+CodeEditorResult code_editor(const CodeEditorDesc&) noexcept;
+void code_editor_set_cursor(uint32_t, uint32_t anchor_byte, uint32_t cursor_byte, bool scroll_into_view = true) noexcept;
+void code_editor_scroll_to_line(uint32_t, uint32_t, AlignY align = AlignY::Center) noexcept;
 
 struct TextInputDesc {
     uint32_t id = 0;

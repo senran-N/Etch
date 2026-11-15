@@ -54,4 +54,5 @@
 #include "etch_slug.cpp"
 #include "etch_layout.cpp"
 #include "etch_widgets.cpp"
+#include "etch_editor.cpp"
 #include "etch_gpu.cpp"

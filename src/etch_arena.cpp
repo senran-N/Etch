@@ -58,6 +58,9 @@ struct WidgetState {
     Vec2     viewport_dim = {};
     Vec2     content_dim = {};
     Rect     last_box_logical = {};
+    const TextBuffer* edit_text_buffer = nullptr;
+    bool editor_reveal = false;
+    bool editor_show_scrollbar = true;
     bool     edit_initialized = false;
     uint32_t edit_cursor = 0;
     uint32_t edit_sel_anchor = 0;
@@ -269,6 +272,7 @@ enum class CustomCmdKind : uint8_t {
     CanvasGrid = 2,
     CanvasWire = 3,
     Icon = 4,
+    CodeEditor = 5,
 };
 
 enum class DrawCmdKind : uint8_t {
@@ -329,7 +333,9 @@ struct CanvasWireExtra {
     float    tangent_bias = 0.45f;
 };
 
+struct CodeEditorExtra;
 struct BoxExtra {
+    CodeEditorExtra* code_editor = nullptr;
     CustomCmdKind    kind = CustomCmdKind::Box;
     BoxDesc          desc = {};
     TextInputExtra*  text_input = nullptr;
@@ -420,8 +426,25 @@ struct SpanHitRegion {
 
 struct ClipEntry {
     Rect  rect = {};
+
     float radius = 0.0f;
 };
+
+// Shared internal entry points; definitions precede the editor in the unity TU.
+uint32_t utf8_clamp_boundary(const char*, uint32_t, uint32_t) noexcept;
+uint32_t utf8_prev_grapheme(const char*, uint32_t, uint32_t) noexcept;
+uint32_t utf8_next_grapheme(const char*, uint32_t, uint32_t) noexcept;
+uint32_t utf8_word_left(const char*, uint32_t, uint32_t) noexcept;
+uint32_t utf8_word_right(const char*, uint32_t, uint32_t) noexcept;
+void utf8_word_bounds_at(const char*, uint32_t, uint32_t, uint32_t*, uint32_t*) noexcept;
+void measure_line_segment_x(Context*, uint16_t, const char*, uint32_t, uint32_t, uint32_t,
+    float, float, bool, bool, float*, float*, float*, uint32_t) noexcept;
+void emit_utf8_glyph_run(Context*, uint16_t, const char*, uint32_t, float, float, float,
+    float, Color, float, float, float, float, const ClipEntry&, float, bool, bool, float*, float*, uint32_t) noexcept;
+void clear_ime_composition(Context*) noexcept;
+struct ScrollbarGeom;
+ScrollbarGeom compute_vscrollbar_geom(const WidgetState*) noexcept;
+void emit_code_editor_command(Context*, const CodeEditorExtra*, Clay_BoundingBox, const ClipEntry&, float) noexcept;
 
 struct ClipStack {
     ClipEntry entries[kMaxClipDepth] = {};

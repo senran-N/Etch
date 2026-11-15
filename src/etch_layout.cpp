@@ -5,7 +5,7 @@
 
 namespace etch {
 
-namespace {
+// Internal unity-build helpers have etch namespace linkage.
 
 constexpr Clay_ElementId make_clay_id(uint32_t element_id) noexcept {
     return Clay_ElementId{
@@ -241,6 +241,7 @@ ScrollbarGeom compute_vscrollbar_geom(const WidgetState* ws) noexcept {
     if (!ws || (!ws->is_scroll_y && !ws->is_virtual_list)) {
         return g;
     }
+    if(ws->edit_text_buffer && !ws->editor_show_scrollbar)return g;
     double scroll_y = 0.0;
     double scroll_max_y = 0.0;
     double content_h = 0.0;
@@ -345,7 +346,8 @@ void measure_line_segment_x(
     bool spacing_between_glyphs_only,
     float* out_xa,
     float* out_xb,
-    float* out_total_w) noexcept
+    float* out_total_w,
+    uint32_t tab_width = 4u) noexcept
 {
     uint32_t glyph_idx = 0u;
     const auto next_spacing = [&]() noexcept -> float {
@@ -366,7 +368,7 @@ void measure_line_segment_x(
         while (p < end) {
             const uint32_t cp_off = static_cast<uint32_t>(p - seg);
             const uint32_t cp = next_utf8_codepoint(p, end);
-            const float adv = ((cp == '\t' && !mask_bullets) ? 4.0f * cp_w : cp_w) + next_spacing();
+            const float adv = ((cp == '\t' && !mask_bullets) ? static_cast<float>(tab_width) * cp_w : cp_w) + next_spacing();
             if (cp_off < stop_a) xa += adv;
             if (cp_off < stop_b) xb += adv;
             total_w += adv;
@@ -399,7 +401,7 @@ void measure_line_segment_x(
     uint32_t pos = 0u;
     while (pos < seg_len) {
         if (seg[pos] == '\t') {
-            const float adv = 4.0f * primary.space_advance_em * base_px + next_spacing();
+            const float adv = static_cast<float>(tab_width) * primary.space_advance_em * base_px + next_spacing();
             if (pos < stop_a) xa = total_w + adv;
             if (pos < stop_b) xb = total_w + adv;
             total_w += adv;
@@ -412,6 +414,7 @@ void measure_line_segment_x(
         }
         const uint32_t run_len = run_end - pos;
         bool is_rtl = false;
+        const size_t run_mark = ctx->frame_arena.mark();
         const std::span<const ShapedGlyph> glyphs = shape_utf8_run(ctx, slot_idx, seg + pos, run_len, &is_rtl);
         const uint32_t gcount = static_cast<uint32_t>(glyphs.size());
         uint32_t gi = 0u;
@@ -441,6 +444,7 @@ void measure_line_segment_x(
             total_w += cluster_adv;
             gi = gi_end;
         }
+        ctx->frame_arena.rewind(run_mark);
         pos = run_end;
     }
     if (out_xa) *out_xa = xa;
@@ -2175,6 +2179,7 @@ uint32_t visual_point_to_byte(Context* ctx, const TextInputDesc& desc, Str text,
         }
         const uint32_t run_len = run_end - pos;
         bool is_rtl = false;
+        const size_t run_mark = ctx->frame_arena.mark();
         const std::span<const ShapedGlyph> glyphs = shape_utf8_run(ctx, slot_idx, seg + pos, run_len, &is_rtl);
         const uint32_t gcount = static_cast<uint32_t>(glyphs.size());
         uint32_t gi = 0u;
@@ -2204,6 +2209,7 @@ uint32_t visual_point_to_byte(Context* ctx, const TextInputDesc& desc, Str text,
                     for (uint32_t k = 0u; k < target_k && cp_p < cl_end; ++k) {
                         (void)next_utf8_codepoint(cp_p, cl_end);
                     }
+                    ctx->frame_arena.rewind(run_mark);
                     return line_start + static_cast<uint32_t>(cp_p - seg);
                 }
                 const char* cp_p = seg + pos + c0;
@@ -2213,14 +2219,17 @@ uint32_t visual_point_to_byte(Context* ctx, const TextInputDesc& desc, Str text,
                     (void)next_utf8_codepoint(cp_p, cl_end);
                     const float mid = pen_x + ((static_cast<float>(k) + 0.5f) / static_cast<float>(n_cp)) * cluster_adv;
                     if (local_x < mid) {
+                        ctx->frame_arena.rewind(run_mark);
                         return line_start + cp_off;
                     }
                 }
+                ctx->frame_arena.rewind(run_mark);
                 return line_start + pos + c1;
             }
             pen_x += cluster_adv;
             gi = gi_end;
         }
+        ctx->frame_arena.rewind(run_mark);
         last_run_rtl = is_rtl;
         last_run_start = pos;
         pos = run_end;
@@ -2493,7 +2502,8 @@ void emit_utf8_glyph_run(
     bool multiline,
     bool mask_bullets,
     float* io_pen_x,
-    float* io_pen_y) noexcept
+    float* io_pen_y,
+    uint32_t tab_width = 4u) noexcept
 {
     if (!ctx || !ctx->atlas.font_valid || !s || len == 0u || !io_pen_x || !io_pen_y) {
         return;
@@ -2540,7 +2550,7 @@ void emit_utf8_glyph_run(
             continue;
         }
         if (ch == '\t') {
-            *io_pen_x += 4.0f * primary.space_advance_em * base_px + letter_spacing;
+            *io_pen_x += static_cast<float>(tab_width) * primary.space_advance_em * base_px + letter_spacing;
             ++pos;
             continue;
         }
@@ -3574,7 +3584,7 @@ void emit_draw_list_command(
     }
 }
 
-} // namespace
+// End internal unity-build helpers.
 
 bool needs_redraw(const Context* ctx) noexcept {
     if (!ctx) return false;
@@ -3774,7 +3784,8 @@ static void process_window_event(Context* ctx, const SDL_Event& event) noexcept 
                     }
                 }
             } else {
-                if (event.key.key == SDLK_TAB) {
+                const WidgetState* tab_ws=state_map_find(&ctx->active_ui->states,ctx->active_ui->focus_id);
+                if (event.key.key == SDLK_TAB && !(tab_ws && tab_ws->edit_text_buffer)) {
                     ctx->active_ui->pending_tab_delta += ((event.key.mod & SDL_KMOD_SHIFT) != 0u) ? -1 : 1;
                 } else {
                     push_pending_text_op(
@@ -3929,7 +3940,8 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
             };
         }
         if (ctx->active_ui->ime_comp_len == 0u) {
-            if (desc.key_pressed_code == SDLK_TAB) {
+            const WidgetState* tab_ws=state_map_find(&ctx->active_ui->states,ctx->active_ui->focus_id);
+            if (desc.key_pressed_code == SDLK_TAB && !(tab_ws && tab_ws->edit_text_buffer)) {
                 ctx->active_ui->pending_tab_delta += ((ctx->active_ui->frame_key_mods & Mod_Shift) != 0u) ? -1 : 1;
             } else if (ctx->active_ui->frame_text_op_count < kMaxTextOpsPerFrame) {
                 ctx->active_ui->frame_text_ops[ctx->active_ui->frame_text_op_count++] = PendingTextOp{
@@ -4690,6 +4702,7 @@ static void register_selectable_text(Context* ctx, uint32_t element_id, const ch
     WidgetState* ws = state_map_get_or_insert(&ui.states, element_id, ui.frame_index);
     if (!ws) return;
     ws->is_user_element = true; ws->is_text_span = true; ws->is_selectable_text = true; ws->is_focusable = true;
+    ws->edit_text_buffer = nullptr;
     ws->is_text_input_writable = false; ws->is_scroll_x = false; ws->is_scroll_y = false;
     ws->owner_canvas_id = ui.canvas_depth ? ui.canvas_stack[ui.canvas_depth-1u].id : 0u;
     ws->focus_scope = ui.modal_scope && focus_scope_contains(ui,ui.modal_scope) ? ui.modal_scope : ui.focus_scope;
@@ -5590,6 +5603,10 @@ bool has_text_selection(uint32_t element_id) noexcept {
     Context* ctx = current_context();
     if (!ctx) return false;
     auto* ws = state_map_find(&ctx->active_ui->states,element_id ? element_id : ctx->active_ui->focus_id);
+    if (ws && ws->edit_text_buffer && ws->sel_text_epoch == ctx->arena_epoch) {
+        const uint32_t n=text_buffer_byte_length(ws->edit_text_buffer);
+        return (ws->edit_cursor<n?ws->edit_cursor:n) != (ws->edit_sel_anchor<n?ws->edit_sel_anchor:n);
+    }
     if (!ws || !ws->sel_text_ptr || (!ws->sel_text_static && ws->sel_text_epoch != ctx->arena_epoch)) return false;
     return utf8_clamp_boundary(ws->sel_text_ptr,ws->sel_text_len,ws->edit_cursor) != utf8_clamp_boundary(ws->sel_text_ptr,ws->sel_text_len,ws->edit_sel_anchor);
 }
@@ -5597,6 +5614,14 @@ Str selected_text(uint32_t element_id, Arena* arena) noexcept {
     Context* ctx = current_context();
     if (!ctx || !has_text_selection(element_id)) return {};
     auto* ws = state_map_find(&ctx->active_ui->states,element_id ? element_id : ctx->active_ui->focus_id);
+    if(ws->edit_text_buffer && ws->sel_text_epoch == ctx->arena_epoch) {
+        const uint32_t nbytes=text_buffer_byte_length(ws->edit_text_buffer);
+        const uint32_t c=ws->edit_cursor<nbytes?ws->edit_cursor:nbytes,a=ws->edit_sel_anchor<nbytes?ws->edit_sel_anchor:nbytes;
+        const uint32_t lo=c<a?c:a,hi=c>a?c:a;
+        Arena* scratch=arena?arena:&ctx->frame_arena;
+        char* p=scratch->alloc<char>(size_t(hi-lo)+1);if(!p)return {};
+        const uint32_t n=text_buffer_copy_range(ws->edit_text_buffer,lo,hi,p,hi-lo);p[n]=0;return {p,n};
+    }
     const uint32_t a = utf8_clamp_boundary(ws->sel_text_ptr,ws->sel_text_len,ws->edit_sel_anchor);
     const uint32_t b = utf8_clamp_boundary(ws->sel_text_ptr,ws->sel_text_len,ws->edit_cursor);
     const uint32_t lo = a < b ? a : b, hi = a > b ? a : b;
@@ -5649,6 +5674,7 @@ TextInputResult text_input(const TextInputDesc& desc) noexcept {
     uint32_t len = 0u;
     const bool writable = (buf != nullptr && cap > 1u && !desc.read_only);
     if (ws) {
+        ws->edit_text_buffer = nullptr;
         ws->is_text_input_writable = writable;
     }
     if (buf && cap > 0u) {
@@ -8077,7 +8103,9 @@ void end_frame(Context* ctx_arg) noexcept {
                             .z_index = cmd->zIndex,
                             .clip_rect = {cur_clip.rect.x / dpi, cur_clip.rect.y / dpi, cur_clip.rect.w / dpi, cur_clip.rect.h / dpi}, .has_clip = true};
                     }
-                    if (extra->text_input) {
+                    if (extra->code_editor) {
+                        emit_code_editor_command(ctx, extra->code_editor, cmd->boundingBox, cur_clip, dpi);
+                    } else if (extra->text_input) {
                         emit_text_input_command(ctx, extra->text_input, cmd->boundingBox, box_px, cur_clip, dpi);
                     } else if (extra->kind == CustomCmdKind::CanvasWire && extra->canvas_wire) {
                         emit_canvas_wire_command(ctx, extra->canvas_wire, cmd->boundingBox, cur_clip, dpi);
@@ -8431,6 +8459,7 @@ void end_frame(Context* ctx_arg) noexcept {
         for (uint32_t i = 0u; i < ctx->active_ui->states.capacity; ++i) {
             WidgetState& ws = ctx->active_ui->states.entries[i];
             if (ws.key == 0u || ws.last_seen_frame != ctx->active_ui->frame_index) {
+                if (ws.last_seen_frame != ctx->active_ui->frame_index) ws.edit_text_buffer = nullptr;
                 continue;
             }
             if (ws.is_user_element || ws.split_initialized || ws.is_canvas || ws.is_canvas_node || ws.is_virtual_list) {
@@ -8442,6 +8471,7 @@ void end_frame(Context* ctx_arg) noexcept {
                         ed.boundingBox.width,
                         ed.boundingBox.height,
                     };
+                    if(ws.edit_text_buffer) {ws.viewport_dim={ed.boundingBox.width,ed.boundingBox.height};ws.vscroll_max_y=std::fmax(0.0,ws.vscroll_total_h-ed.boundingBox.height);}
                 }
             }
         }
@@ -8640,7 +8670,7 @@ void end_frame(Context* ctx_arg) noexcept {
 
         emit_direct_text_px(
             ctx,
-            "ETCH 2.3 INSPECTOR   [F12]",
+            "ETCH 2.4 INSPECTOR   [F12]",
             hud_x + 12.0f,
             hud_y + 10.0f,
             12.0f,
@@ -8780,6 +8810,7 @@ void end_frame(Context* ctx_arg) noexcept {
     ctx->stats.layout_ms = layout_ms;
     ctx->stats.active_animations = ctx->active_ui->active_anim_count;
     ctx->stats.idle_sleeping = idle_now;
+    ctx->stats.ime_cursor_offset_win = ctx->active_ui->ime_cursor_offset_win;
 }
 
 
