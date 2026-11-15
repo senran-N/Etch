@@ -14,6 +14,7 @@
 
 #include "desktop_v23_checks.h"
 #include "editor_v24_checks.h"
+#include "a11y_v30_checks.h"
 
 namespace {
 
@@ -3125,9 +3126,10 @@ int run_headless(const char* out_png_path) noexcept {
     // [20] Desktop primitives and interactive five-zone docking.
     const bool v23_ok = verify_desktop_v23(ctx);
     const bool v24_ok = verify_editor_v24(ctx);
-    const bool ok = v24_ok && v23_ok && v22_ok && v21_ok && v20_ok && v16_ok && v15_ok && png_ok && stats_ok && slug_ok && v10a_ok && v11_ok && v12_ok && v13_ok && v14_ok;
+    const bool v30_ok = verify_a11y_v30(ctx);
+    const bool ok = v30_ok && v24_ok && v23_ok && v22_ok && v21_ok && v20_ok && v16_ok && v15_ok && png_ok && stats_ok && slug_ok && v10a_ok && v11_ok && v12_ok && v13_ok && v14_ok;
     std::printf(
-        "Headless %s -> %s (asserts=21/21, prims=%u, draw_calls=%u, slug_glyphs=%u, slug_curves=%u, layout_ms=%.3f, gpu_submit_ms=%.3f, arena_used=%zuB, scroll_y=%.1f, focus=0x%08X, idle=%d)\n",
+        "Headless %s -> %s (asserts=22/22, prims=%u, draw_calls=%u, slug_glyphs=%u, slug_curves=%u, layout_ms=%.3f, gpu_submit_ms=%.3f, arena_used=%zuB, scroll_y=%.1f, focus=0x%08X, idle=%d)\n",
         ok ? "OK" : "FAILED",
         out_png_path,
         final_stats.prim_count,

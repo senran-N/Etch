@@ -30,6 +30,11 @@
 #include "etch_kawase_vs_spv.h"
 #include "etch_kawase_ps_spv.h"
 
+#include "etch_uber_vs_msl.h"
+#include "etch_uber_ps_msl.h"
+#include "etch_kawase_vs_msl.h"
+#include "etch_kawase_ps_msl.h"
+
 #define CLAY_IMPLEMENTATION
 #include "clay.h"
 
@@ -55,4 +60,5 @@
 #include "etch_layout.cpp"
 #include "etch_widgets.cpp"
 #include "etch_editor.cpp"
+#include "etch_a11y.cpp"
 #include "etch_gpu.cpp"

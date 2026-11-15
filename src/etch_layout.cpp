@@ -2035,6 +2035,13 @@ void clear_ime_composition(Context* ctx) noexcept {
     ctx->active_ui->ime_comp_sel_len_byte = 0u;
 }
 
+void cancel_ime_composition(Context* ctx) noexcept {
+    clear_ime_composition(ctx);
+    if (ctx && !ctx->headless && ctx->active_window) {
+        SDL_ClearComposition(ctx->active_window);
+    }
+}
+
 struct TextInnerGeom {
     Rect  clip_logical = {};
     float origin_x = 0.0f;
@@ -4019,6 +4026,7 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
     }
 
     ctx->frame_arena.reset();
+    a11y_begin(ctx);
     ctx->active_ui->active_vlists = nullptr;
     ctx->active_ui->active_vlist_count = 0;
     ++ctx->arena_epoch;
@@ -4586,6 +4594,16 @@ void begin_box(const BoxDesc& desc_in) noexcept {
         Clay__OpenElement();
     }
 
+    if(box_ws && (desc.scroll_x || desc.scroll_y)) {
+        PendingA11yAction sc_cmd = {};
+        float direction = 0.0f;
+        while(a11y_take_any(desc.id,12u,&sc_cmd)) direction += (sc_cmd.action==A11yAction::Increment)?1.0f:-1.0f;
+        if(direction != 0.0f) {
+            if(desc.scroll_y)box_ws->scroll_pos.y=clamp_range(box_ws->scroll_pos.y+direction*40,0,box_ws->scroll_max.y);
+            else box_ws->scroll_pos.x=clamp_range(box_ws->scroll_pos.x+direction*40,0,box_ws->scroll_max.x);
+            request_redraw(ctx);
+        }
+    }
     const bool focus_ring = desc.focusable && keyboard_focus_visible(desc.id);
     const bool is_scroll = desc.scroll_x || desc.scroll_y;
     const bool any_clip = desc.clip_children || is_scroll;
@@ -4683,12 +4701,16 @@ void begin_box(const BoxDesc& desc_in) noexcept {
     }
 
     Clay__ConfigureOpenElement(decl);
+    const uint32_t aid = Clay__GetOpenLayoutElement()->id;
+    auto* semantic = a11y_emit(ctx, desc.id ? desc.id : aid, is_scroll ? A11yRole::ScrollArea : A11yRole::Group, {}, {}, 0, (is_scroll?12u:0u)|(desc.id?2u:0u)|(desc.focusable?1u:0u));
+    if (semantic) { semantic->clay_id = aid; ctx->a11y_parent = semantic; }
 }
 
 void end_box() noexcept {
     if (!current_context() || !current_context()->in_frame) {
         return;
     }
+    if (current_context()->a11y_parent) current_context()->a11y_parent = current_context()->a11y_parent->parent;
     Clay__CloseElement();
 }
 
@@ -4786,6 +4808,10 @@ void text(Str content, const TextDesc& desc) noexcept {
     Clay_Context* cctx = Clay_GetCurrentContext();
     const int32_t prev_len = cctx->layoutElements.length;
     Clay__OpenTextElement(clay_str, cfg);
+    if (cctx->layoutElements.length > prev_len) {
+        const uint32_t cid = cctx->layoutElements.internalArray[cctx->layoutElements.length-1].id;
+        auto* n = a11y_emit(ctx,desc.id ? desc.id : cid,A11yRole::StaticText,content); if(n)n->clay_id=cid;
+    }
     if (extra && cctx->layoutElements.length > prev_len) extra->clay_elem_id = cctx->layoutElements.internalArray[cctx->layoutElements.length-1].id;
 }
 
@@ -4943,6 +4969,7 @@ void text_spans(std::span<const TextSpan> spans, const RichTextDesc& desc) noexc
     Clay__OpenTextElement(clay_str, cfg);
     if (cctx && cctx->layoutElements.length > prev_elem_len) {
         rich->clay_elem_id = cctx->layoutElements.internalArray[cctx->layoutElements.length - 1].id;
+        auto* n=a11y_emit(ctx,desc.id ? desc.id : rich->clay_elem_id,A11yRole::StaticText,{full_utf8,total_bytes}); if(n)n->clay_id=rich->clay_elem_id;
     }
 }
 
@@ -5769,6 +5796,27 @@ TextInputResult text_input(const TextInputDesc& desc) noexcept {
     }
 
     bool changed = false;
+    const auto record_edit = [&](uint8_t op_group) noexcept {
+        changed = true;
+        if (undo_slot) {
+            if (len <= 262144u) {
+                undo_push_snapshot(undo_slot, buf, len, cursor, anchor, ctx->active_ui->elapsed_seconds, op_group);
+            } else {
+                undo_reset_slot(undo_slot);
+            }
+        }
+    };
+    bool replaced_by_a11y = false;
+    PendingA11yAction command = {};
+    while (writable && a11y_take(desc.id, A11yAction::SetValue, &command)) {
+        cursor = anchor = insert_utf8_filtered(buf, cap, &len, 0u, len, Str{command.text, command.length}, desc.multiline);
+        record_edit(0u);
+        if (ws) ws->edit_preferred_x = -1.0f;
+        replaced_by_a11y = true;
+    }
+    if (replaced_by_a11y && is_focused) {
+        cancel_ime_composition(ctx);
+    }
     bool submitted = false;
     if (is_focused) {
         if (undo_slot && undo_slot->count > 0u) {
@@ -5776,16 +5824,6 @@ TextInputResult text_input(const TextInputDesc& desc) noexcept {
             cur_rec.cursor = cursor;
             cur_rec.anchor = anchor;
         }
-        const auto record_edit = [&](uint8_t op_group) noexcept {
-            changed = true;
-            if (undo_slot) {
-                if (len <= 262144u) {
-                    undo_push_snapshot(undo_slot, buf, len, cursor, anchor, ctx->active_ui->elapsed_seconds, op_group);
-                } else {
-                    undo_reset_slot(undo_slot);
-                }
-            }
-        };
         for (uint32_t oi = 0u; oi < ctx->active_ui->frame_text_op_count; ++oi) {
             const PendingTextOp& op = ctx->active_ui->frame_text_ops[oi];
             const uint32_t sel_min = (cursor < anchor) ? cursor : anchor;
@@ -6107,8 +6145,16 @@ TextInputResult text_input(const TextInputDesc& desc) noexcept {
     }
 
     Clay__ConfigureOpenElement(decl);
+    const uint32_t semantic_id=Clay__GetOpenLayoutElement()->id;
     Clay__CloseElement();
 
+    Str semantic_value={buf,len};
+    if(desc.password) {
+        uint32_t count=0; for(uint32_t i=0;i<len;++i) if((static_cast<unsigned char>(buf[i])&0xC0u)!=0x80u)++count;
+        char* bullets=ctx->frame_arena.alloc<char>(size_t(count)*3+1);
+        if(bullets) {for(uint32_t i=0;i<count;++i)std::memcpy(bullets+i*3,"\xE2\x80\xA2",3);semantic_value={bullets,count*3};} else semantic_value={};
+    }
+    a11y_emit(ctx,desc.id ? desc.id : semantic_id,A11yRole::TextInput,{},semantic_value,(desc.password?A11yState_Password:0u)|(desc.read_only?A11yState_ReadOnly:0u)|(desc.multiline?A11yState_Multiline:0u),1u|(writable?128u:0u));
     return TextInputResult{
         .changed = changed,
         .submitted = submitted,
@@ -6153,7 +6199,7 @@ bool clicked(uint32_t element_id) noexcept {
         return false;
     }
     const WidgetState* ws = state_map_find(&ctx->active_ui->states, element_id);
-    return ws != nullptr && ws->clicked_this_frame;
+    return (ctx->in_frame && a11y_take(element_id,A11yAction::Press)) || (ws != nullptr && ws->clicked_this_frame);
 }
 
 bool active(uint32_t element_id) noexcept {
@@ -6871,6 +6917,11 @@ VirtualListSlice begin_virtual_list(const VirtualListDesc& desc) noexcept {
     const double max_scroll = (total_h > view_h) ? (total_h - view_h) : 0.0;
     ws->vscroll_total_h = total_h;
     ws->vscroll_max_y = max_scroll;
+    PendingA11yAction lv_cmd = {};
+    while(a11y_take_any(desc.id,12u,&lv_cmd)) {
+        ws->vscroll_pos_y += (lv_cmd.action==A11yAction::Increment) ? 40.0 : -40.0;
+        request_redraw(ctx);
+    }
     ws->vscroll_pos_y = clamp_double(ws->vscroll_pos_y, 0.0, max_scroll);
     ws->viewport_dim.y = static_cast<float>(view_h);
 
@@ -6984,6 +7035,7 @@ VirtualListSlice begin_virtual_list(const VirtualListDesc& desc) noexcept {
 
     Clay__ConfigureOpenElement(decl);
 
+    ctx->a11y_parent=a11y_emit(ctx,desc.id,A11yRole::List,{}, {},0,12u);
     return VirtualListSlice{
         .first_index = first_idx,
         .end_index = end_idx,
@@ -6998,6 +7050,7 @@ void end_virtual_list() noexcept {
     if (!current_context() || !current_context()->in_frame) {
         return;
     }
+    if(current_context()->a11y_parent)current_context()->a11y_parent=current_context()->a11y_parent->parent;
     Clay__CloseElement();
 }
 
@@ -7175,6 +7228,7 @@ CanvasState begin_canvas(const CanvasDesc& desc) noexcept {
     decl.clip.vertical = true;
 
     Clay__ConfigureOpenElement(decl);
+    ctx->a11y_parent=a11y_emit(ctx,desc.id,A11yRole::Canvas);
     return cs;
 }
 
@@ -7217,6 +7271,7 @@ void end_canvas() noexcept {
             .clip_to_parent = false,
         });
     }
+    if(ctx->a11y_parent)ctx->a11y_parent=ctx->a11y_parent->parent;
     Clay__CloseElement();
 }
 
@@ -7597,6 +7652,7 @@ void begin_dock_space(const DockSpaceDesc& desc) noexcept {
     }
     c.space = s; c.desc = desc; c.depth = 1; c.stack[0] = {s->root, 0};
     begin_box({ .id = desc.id, .axis = Axis::Col, .width = desc.width, .height = desc.height, .background = desc.background });
+    a11y_semantic(desc.id,A11yRole::Region);
 }
 uint32_t next_dock_pane() noexcept {
     Context* ctx = current_context(); if (!ctx || !ctx->in_frame || !ctx->active_ui->dock_cursor.space) return 0;
@@ -7833,6 +7889,7 @@ TableResult begin_table(const TableDesc& desc) noexcept {
         .row_gap_px = desc.row_gap_px, .overscan_rows = desc.overscan_rows, .width = Sizing::grow(), .height = Sizing::grow(),
         .padding = desc.padding, .background = Color::transparent(), .border_width = 0, .show_scrollbar = desc.show_scrollbar });
     // Rows own the horizontal insets, including the scrollbar gutter. Keep the list's vertical padding.
+    a11y_semantic(desc.id,A11yRole::Table);
     Clay__GetOpenLayoutElement()->config.layout.padding.left = 0;
     Clay__GetOpenLayoutElement()->config.layout.padding.right = 0;
     t.cursor_row = result.slice.first_index; t.end_row = result.slice.end_index;
@@ -7897,8 +7954,15 @@ TreeNodeResult begin_tree_node(const TreeNodeDesc& d) noexcept {
     const uint32_t chev = id_index(d.id,kTreeChevronTag);
     auto* ws = state_map_get_or_insert(&ctx->active_ui->states,d.id,ctx->active_ui->frame_index);
     if (!ws->tree_initialized) { ws->tree_initialized = true; ws->tree_open = d.default_open; }
-    TreeNodeResult r = { .clicked = clicked(d.id), .double_clicked = double_clicked(d.id), .hovered = hovered(d.id) };
+    PendingA11yAction tree_act = {};
+    const bool got_act = a11y_take_any(d.id, d.leaf ? 2u : 50u, &tree_act);
+    const bool semantic_press = got_act && tree_act.action == A11yAction::Press;
+    TreeNodeResult r = { .clicked = semantic_press || ws->clicked_this_frame, .double_clicked = double_clicked(d.id), .hovered = hovered(d.id) };
     bool open = ws->tree_open;
+    if (got_act && !d.leaf) {
+        const bool next = (tree_act.action == A11yAction::Press) ? !open : (tree_act.action == A11yAction::Expand);
+        if (next != open) { open = next; r.toggled = true; }
+    }
     if (!d.leaf) {
         if (clicked(chev) || r.double_clicked) { open = !open; r.toggled = true; }
         if (focused(d.id)) {
@@ -7910,6 +7974,7 @@ TreeNodeResult begin_tree_node(const TreeNodeDesc& d) noexcept {
     begin_box({ .id = d.id, .width = Sizing::grow(), .height = Sizing::fixed(d.row_height_px),
         .padding = {static_cast<float>(ctx->active_ui->tree_depth)*d.indent_px,0,0,0}, .gap = 4,
         .align_y = AlignY::Center, .background = d.selected ? d.selected_bg : (r.hovered ? d.hover_bg : Color{}), .focusable = true });
+    a11y_semantic(d.id,A11yRole::TreeItem,d.label,(!d.leaf && open?A11yState_Expanded:0u)|(d.selected?A11yState_Selected:0u),d.leaf?3u:51u);
     if (d.selected) draw_line({ .from = {1,2}, .to = {1,d.row_height_px-2}, .color = d.selected_accent, .thickness = 2 });
     begin_box({ .id = chev, .width = Sizing::fixed(16), .height = Sizing::fixed(d.row_height_px) });
     if (!d.leaf) {
@@ -7922,6 +7987,7 @@ TreeNodeResult begin_tree_node(const TreeNodeDesc& d) noexcept {
     text(d.label,{ .color = d.text_color, .font_size_px = d.font_size_px, .font_id = d.font_id, .wrap = false }); end_box();
     r.open = !d.leaf && open;
     if (r.open) {
+        for(auto* semantic=ctx->a11y_first;semantic;semantic=semantic->next)if(semantic->node.id==d.id){ctx->a11y_parent=semantic;break;}
         begin_box({ .id = id_index(d.id,0x7EE1u), .axis = Axis::Col, .width = Sizing::grow(), .height = Sizing::fit() });
         if (d.show_indent_guide) {
             const float x = static_cast<float>(ctx->active_ui->tree_depth)*d.indent_px+8;
@@ -7934,6 +8000,7 @@ TreeNodeResult begin_tree_node(const TreeNodeDesc& d) noexcept {
 void end_tree_node() noexcept {
     Context* ctx = current_context(); if (!ctx || !ctx->in_frame || !ctx->active_ui->tree_depth) return;
     --ctx->active_ui->tree_depth; end_box();
+    if(ctx->a11y_parent)ctx->a11y_parent=ctx->a11y_parent->parent;
 }
 
 bool is_collapsible_open(uint32_t element_id) noexcept {
@@ -7955,6 +8022,7 @@ CollapsibleResult begin_collapsible(const CollapsibleDesc& d) noexcept {
     auto* ws = state_map_get_or_insert(&ctx->active_ui->states,d.id,ctx->active_ui->frame_index);
     if (!ws) return {};
     if (!ws->collapsible_initialized) { ws->collapsible_initialized = true; ws->collapsible_open = d.default_open; }
+    a11y_toggle(d.id,&ws->collapsible_open);
     const uint32_t hdr_id = id_index(d.id,0xC011u);
     const bool toggle = clicked(hdr_id) || (focused(hdr_id) && (key_pressed(SDLK_RETURN) || key_pressed(SDLK_KP_ENTER) || key_pressed(SDLK_SPACE)));
     if (toggle) { ws->collapsible_open = !ws->collapsible_open; request_redraw(ctx); }
@@ -7973,6 +8041,7 @@ CollapsibleResult begin_collapsible(const CollapsibleDesc& d) noexcept {
     if (hov) set_cursor(Cursor::Hand);
     begin_box({.id=d.id,.axis=Axis::Col,.width=Sizing::grow(),.height=Sizing::fit(),
         .background=visible ? d.body_bg : Color{},.border_color=d.border_color,.border_width=d.border_width,.radius=d.radius,.clip_children=true});
+    a11y_semantic(d.id,A11yRole::Region,d.title,open?A11yState_Expanded:0u,51u);
     begin_box({.id=hdr_id,.axis=Axis::Row,.width=Sizing::grow(),.height=Sizing::fixed(d.header_height_px),
         .padding=d.header_padding,.gap=6,.align_y=AlignY::Center,.background=hov ? d.header_hover_bg : d.header_bg,.focusable=true});
     begin_box({.width=Sizing::fixed(14),.height=Sizing::fixed(d.header_height_px)});
@@ -8670,7 +8739,7 @@ void end_frame(Context* ctx_arg) noexcept {
 
         emit_direct_text_px(
             ctx,
-            "ETCH 2.4 INSPECTOR   [F12]",
+            "ETCH 3.0 INSPECTOR   [F12]",
             hud_x + 12.0f,
             hud_y + 10.0f,
             12.0f,
@@ -8797,6 +8866,7 @@ void end_frame(Context* ctx_arg) noexcept {
     ctx->active_ui->has_delivered_drop_pos = false;
     // A window-only context consumes global invalidations through its primary pass.
     if (!ctx->headless && ctx->active_window == ctx->window) ctx->headless_ui.redraw_budget = 0;
+    a11y_commit(ctx);
     ctx->in_frame = false;
     ctx->stats.prim_count = ctx->prim_count;
     ctx->stats.prim_capacity = ctx->max_prims;

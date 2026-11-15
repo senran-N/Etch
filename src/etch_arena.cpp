@@ -555,7 +555,14 @@ void free_vlist(VarVirtualListCache* c) noexcept {
 }
 
 struct DesktopPopup { uint32_t id = 0; Vec2 anchor = {}; uint32_t opened_frame = 0; int selection = 0; };
+struct PendingA11yAction { uint32_t id = 0; A11yAction action = {}; bool consumed = false; uint8_t age = 0; float number = 0; uint32_t length = 0; char text[1024] = {}; };
+struct A11yBuild { A11yNode node = {}; A11yBuild* next = nullptr; A11yBuild* parent = nullptr; uint32_t index = 0, clay_id = 0; };
+struct A11yPatch { A11yOverrideDesc desc = {}; A11yPatch* next = nullptr; };
 struct WindowUiState {
+    Arena a11y_arena = {}; A11yNode* a11y_nodes = nullptr; uint32_t a11y_node_count = 0;
+    PendingA11yAction a11y_actions[16] = {}; uint32_t a11y_action_count = 0;
+    PendingA11yAction frame_a11y_actions[16] = {}; uint32_t frame_a11y_action_count = 0;
+
     uint32_t scrub_id = 0; float scrub_value = 0;
     uint32_t drag_edit_id = 0; uint32_t drag_edit_seen_frame = 0;
     char drag_edit_buf[64] = {}; uint32_t drag_edit_len = 0;
@@ -755,6 +762,9 @@ struct ClaimedWindowSlot {
 };
 
 struct Context {
+    A11yBuild* a11y_first = nullptr; A11yBuild* a11y_last = nullptr; A11yBuild* a11y_parent = nullptr;
+    A11yPatch* a11y_patches = nullptr; uint32_t a11y_count = 0;
+
     WindowUiState headless_ui = {};
     WindowUiState* active_ui = nullptr;
     SDL_Window* active_window = nullptr;
@@ -1172,3 +1182,13 @@ FrameStats frame_stats(const Context* ctx) noexcept {
 }
 
 } // namespace etch
+
+namespace etch { namespace {
+void a11y_begin(Context* ctx) noexcept;
+void a11y_commit(Context* ctx) noexcept;
+A11yBuild* a11y_emit(Context* ctx, uint32_t id, A11yRole role, Str label = {}, Str value = {}, uint32_t states = 0, uint32_t actions = 0) noexcept;
+void a11y_semantic(uint32_t id, A11yRole role, Str label = {}, uint32_t states = 0, uint32_t actions = 0, float value = 0, float lo = 0, float hi = 0) noexcept;
+bool a11y_take_any(uint32_t id, uint32_t mask, PendingA11yAction* out = nullptr) noexcept;
+bool a11y_take(uint32_t id, A11yAction action, PendingA11yAction* out = nullptr) noexcept;
+void a11y_toggle(uint32_t id, bool* open) noexcept;
+} }

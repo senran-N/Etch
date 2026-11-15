@@ -26,6 +26,15 @@ bool desktop_number(uint32_t id, Str label, float* value, float lo, float hi, fl
     const char* format, Sizing width, float height, bool disabled, bool is_slider, Color bg, Color fill, Color fg) noexcept {
     auto& ui = *current_context()->active_ui;
     const float before = *value;
+    PendingA11yAction command={};
+    if(!disabled) {
+        const float delta=step>0?step:(hi-lo)*.05f;
+        while(a11y_take_any(id,140u,&command)) {
+            if(command.action==A11yAction::Increment)*value=desktop_snap(*value+delta,lo,hi,step);
+            else if(command.action==A11yAction::Decrement)*value=desktop_snap(*value-delta,lo,hi,step);
+            else *value=desktop_snap(command.number,lo,hi,step);
+        }
+    }
     if (ui.drag_edit_pending_id == id) {
         if (!disabled) {
             char* end = nullptr; const float parsed = std::strtof(ui.drag_edit_pending_buf,&end);
@@ -98,6 +107,7 @@ bool desktop_number(uint32_t id, Str label, float* value, float lo, float hi, fl
         const float w = element_bounds(id).w;
         draw_rect({.rect={0,height-4,w*clamp_range((*value-lo)/(hi-lo),0,1),4},.fill=fill,.radius=Corners::all(2)});
     }
+    a11y_semantic(id,is_slider?A11yRole::Slider:A11yRole::SpinButton,label,disabled?A11yState_Disabled:0u,141u,*value,lo,hi);
     desktop_label(label,12,kFontSans,fg);
     char number[64]; const char* fallback = desktop_format(format);
     std::snprintf(number,sizeof(number),fallback ? fallback : format,double(*value));
@@ -110,6 +120,7 @@ bool button(const ButtonDesc& d) noexcept {
     Color bg = d.variant == ButtonVariant::Primary ? Color::rgb_hex(0x0369A1) : d.variant == ButtonVariant::Danger ? Color::rgb_hex(0xB91C1C) : d.variant == ButtonVariant::Ghost ? Color{} : Color::rgb_hex(0x1E293B);
     begin_box({.id=d.id,.width=d.width,.height=d.height,.padding=d.padding,.gap=8,.align_y=AlignY::Center,
         .background=desktop_bg(d.id,bg,d.disabled),.radius=d.radius,.focusable=!d.disabled});
+    a11y_semantic(d.id,A11yRole::Button,d.label,d.disabled?A11yState_Disabled:0u,3u);
     if (d.icon_id != kInvalidIcon) icon({.icon_id=d.icon_id,.size_px=d.font_size_px});
     desktop_label(d.label,d.font_size_px,d.font_id,d.disabled ? Color::rgb_hex(0x64748B) : Color::white());
     desktop_label(d.shortcut_hint,d.font_size_px,d.font_id,Color::rgb_hex(0x94A3B8)); end_box();
@@ -119,6 +130,7 @@ bool checkbox(const CheckboxDesc& d) noexcept {
     if (!desktop_frame(d.id) || !d.checked || !std::isfinite(d.box_size_px) || d.box_size_px <= 0) return false;
     const bool change = desktop_activate(d.id,d.disabled); if (change) *d.checked = !*d.checked;
     begin_box({.id=d.id,.height=Sizing::fixed(d.box_size_px+8),.gap=8,.align_y=AlignY::Center,.focusable=!d.disabled});
+    a11y_semantic(d.id,A11yRole::Checkbox,d.label,(d.disabled?A11yState_Disabled:0u)|(*d.checked?A11yState_Checked:0u),3u);
     begin_box({.width=Sizing::fixed(d.box_size_px),.height=Sizing::fixed(d.box_size_px),.background=(*d.checked || d.indeterminate) ? d.accent : Color::rgb_hex(0x1E293B),.radius=Corners::all(3)});
     const float b=d.box_size_px;
     if (d.indeterminate) draw_line({.from={b*.25f,b*.5f},.to={b*.75f,b*.5f},.thickness=2});
@@ -133,6 +145,7 @@ bool toggle_switch(const ToggleSwitchDesc& d) noexcept {
     const bool change=desktop_activate(d.id,d.disabled); if(change) *d.value=!*d.value;
     const float t=spring(id_index(d.id,0x2301),*d.value ? 1.f : 0.f);
     begin_box({.id=d.id,.height=Sizing::fixed(d.track_height_px+8),.gap=8,.align_y=AlignY::Center,.focusable=!d.disabled});
+    a11y_semantic(d.id,A11yRole::Switch,d.label,(d.disabled?A11yState_Disabled:0u)|(*d.value?A11yState_Checked:0u),3u);
     begin_box({.width=Sizing::fixed(d.track_width_px),.height=Sizing::fixed(d.track_height_px),.background=*d.value ? d.on_color : d.off_color,.radius=Corners::all(999)});
     draw_rect({.rect={2+t*(d.track_width_px-d.track_height_px),2,d.track_height_px-4,d.track_height_px-4},.fill=Color::white(),.radius=Corners::all(999)});
     end_box(); desktop_label(d.label,d.font_size_px,d.font_id);end_box();return change;
@@ -140,6 +153,7 @@ bool toggle_switch(const ToggleSwitchDesc& d) noexcept {
 void progress_bar(const ProgressBarDesc& d) noexcept {
     if (!current_context() || !current_context()->in_frame || !std::isfinite(d.fraction)) return;
     begin_box({.id=d.id,.width=d.width,.height=d.height,.background=d.track_color,.radius=d.radius,.clip_children=true});
+    a11y_semantic(d.id,A11yRole::ProgressBar,d.overlay_text,0u,0u,clamp_range(d.fraction,0,1),0,1);
     begin_box({.width=Sizing::percent(clamp_range(d.fraction,0,1)),.height=Sizing::grow(),.background=d.fill_color,.radius=d.radius});end_box();
     if(d.overlay_text.chars && d.overlay_text.length) {
         begin_box({.attach_to=AttachTo::Parent,.anchor_element=Anchor::Center,.anchor_parent=Anchor::Center,.pointer_passthrough=true,.clip_to_parent=true});
@@ -150,7 +164,7 @@ void progress_bar(const ProgressBarDesc& d) noexcept {
 bool begin_tab_bar(const TabBarDesc& d) noexcept {
     if (!desktop_frame(d.id) || !d.active_tab || current_context()->active_ui->tab_bar_depth == 8) return false;
     auto& ui=*current_context()->active_ui;ui.tab_bars[ui.tab_bar_depth++]=d;
-    begin_box({.id=d.id,.width=d.width,.height=Sizing::fixed(d.height_px),.background=d.background});return true;
+    begin_box({.id=d.id,.width=d.width,.height=Sizing::fixed(d.height_px),.background=d.background});a11y_semantic(d.id,A11yRole::TabList);return true;
 }
 TabItemResult tab_item(const TabItemDesc& d) noexcept {
     if (!desktop_frame(d.id) || !current_context()->active_ui->tab_bar_depth) return {};
@@ -160,6 +174,7 @@ TabItemResult tab_item(const TabItemDesc& d) noexcept {
     if (r.clicked) *bar.active_tab=d.id;
     r.selected=*bar.active_tab==d.id;
     begin_box({.id=d.id,.height=Sizing::grow(),.padding=Padding::xy(12,0),.gap=8,.align_y=AlignY::Center,.background=r.selected ? bar.active_bg : hovered(d.id) ? bar.hover_bg : Color{},.focusable=!d.disabled});
+    a11y_semantic(d.id,A11yRole::Tab,d.label,(d.disabled?A11yState_Disabled:0u)|(r.selected?A11yState_Selected:0u),3u);
     if(d.icon_id!=kInvalidIcon) icon({.icon_id=d.icon_id,.size_px=14});
     desktop_label(d.label,bar.font_size_px,kFontSans,r.selected ? bar.active_text_color : bar.text_color);
     if(d.closable) button({.id=close_id,.label=str_lit("x"),.variant=ButtonVariant::Ghost,.height=Sizing::fixed(24),.padding=Padding::xy(3,0),.disabled=d.disabled});
@@ -195,6 +210,7 @@ bool is_popup_open(uint32_t id) noexcept {
 }
 bool begin_popup(const PopupDesc& d) noexcept {
     if(!desktop_frame(d.id) || !is_popup_open(d.id)) return false;
+    if(a11y_take(d.id,A11yAction::Dismiss)){close_popup(d.id);return false;}
     auto& ui=*current_context()->active_ui; DesktopPopup pop={};
     for(uint32_t i=0;i<ui.popup_count;++i) if(ui.popups[i].id==d.id) pop=ui.popups[i];
     bool over_child = false;
@@ -207,6 +223,7 @@ bool begin_popup(const PopupDesc& d) noexcept {
     begin_box({.id=d.id,.axis=Axis::Col,.width=d.width,.height=d.height,.padding=d.padding,.gap=d.gap,.background=d.background,
         .border_color=d.border_color,.border_width=1,.radius=d.radius,.scroll_y=d.height.kind==SizingKind::Fixed,
         .attach_to=AttachTo::Root,.anchor_parent=Anchor::TopLeft,.floating_offset=pop.anchor,.z_index=d.z_index,.clamp_to_viewport=true});
+    a11y_semantic(d.id,A11yRole::Menu,{},0,64u);
     ++ui.popup_depth;return true;
 }
 void end_popup() noexcept {if(current_context() && current_context()->active_ui->popup_depth) {--current_context()->active_ui->popup_depth;end_box();}}
@@ -218,7 +235,7 @@ bool begin_context_menu(uint32_t id, uint32_t target) noexcept {
 void end_context_menu() noexcept {end_popup();}
 bool begin_menu_bar(const MenuBarDesc& d) noexcept {
     if(!desktop_frame(d.id) || current_context()->active_ui->menu_bar_id) return false;
-    current_context()->active_ui->menu_bar_id=d.id;begin_box({.id=d.id,.width=d.width,.height=Sizing::fixed(d.height_px),.background=d.background});return true;
+    current_context()->active_ui->menu_bar_id=d.id;begin_box({.id=d.id,.width=d.width,.height=Sizing::fixed(d.height_px),.background=d.background});a11y_semantic(d.id,A11yRole::MenuBar);return true;
 }
 void end_menu_bar() noexcept {if(current_context() && current_context()->active_ui->menu_bar_id) {current_context()->active_ui->menu_bar_id=0;end_box();}}
 bool begin_menu(const MenuDesc& d) noexcept {
@@ -237,6 +254,7 @@ bool menu_item(const MenuItemDesc& d) noexcept {
     const bool hit=desktop_activate(d.id,d.disabled);
     begin_box({.id=d.id,.width=Sizing::grow(),.height=Sizing::fixed(26),.padding=Padding::xy(8,0),.gap=8,.align_y=AlignY::Center,
         .background=desktop_bg(d.id,Color{},d.disabled),.radius=Corners::all(3),.focusable=!d.disabled});
+    a11y_semantic(d.id,A11yRole::MenuItem,d.label,(d.disabled?A11yState_Disabled:0u)|(d.checked?A11yState_Checked:0u),3u);
     if(d.checked) desktop_label(str_lit("✓"),12,kFontSans,Color::rgb_hex(0x38BDF8));
     if(d.icon_id!=kInvalidIcon) icon({.icon_id=d.icon_id,.size_px=14});
     desktop_label(d.label,13,kFontSans,d.disabled ? Color::rgb_hex(0x64748B) : Color::white());
@@ -253,9 +271,15 @@ bool combo_box(const ComboBoxDesc& d) noexcept {
     Str label=*d.selected_index>=0 && size_t(*d.selected_index)<d.items.size() ? d.items[size_t(*d.selected_index)] : d.label;
     begin_box({.id=d.id,.width=d.width,.height=Sizing::fixed(d.height_px),.padding=Padding::xy(10,0),.gap=8,.align_y=AlignY::Center,
         .background=d.disabled ? Color::rgb_hex(0x18202C) : hovered(d.id) ? d.hover_bg : d.background,.radius=Corners::all(6),.focusable=!d.disabled});
+    a11y_semantic(d.id,A11yRole::ComboBox,d.label,d.disabled?A11yState_Disabled:0u,51u);
     desktop_label(label,13,kFontSans,d.text_color);
     begin_box({.width=Sizing::grow()});end_box();desktop_label(str_lit("▾"),12,kFontSans,d.text_color);end_box();
     if(d.disabled) {if(is_popup_open(pop)) close_popup(pop);return false;}
+    PendingA11yAction cb_act={};const bool got_cb=a11y_take_any(d.id,50u,&cb_act);
+    bool expanded=is_popup_open(pop);
+    if(got_cb && cb_act.action!=A11yAction::Press)expanded=(cb_act.action==A11yAction::Expand);
+    if(expanded && !is_popup_open(pop)){const Rect r=element_bounds(d.id);open_popup(pop,{r.x,r.y+r.h});request_focus(d.id);}
+    if(!expanded && is_popup_open(pop))close_popup(pop);
     auto& ui=*current_context()->active_ui;int index=*d.selected_index;
     bool combo_owns_focus=focused(d.id);
     for(uint32_t i=0;i<d.items.size();++i) if(ui.focus_id==id_index(pop,i+1)) combo_owns_focus=true;
@@ -276,7 +300,7 @@ bool combo_box(const ComboBoxDesc& d) noexcept {
             break;
         }
     }
-    if(!changed && desktop_activate(d.id,d.disabled)) {
+    if(!changed && ((got_cb && cb_act.action==A11yAction::Press) || (!got_cb && desktop_activate(d.id,d.disabled)))) {
         if(is_popup_open(pop)) close_popup(pop);else {
             const Rect r=element_bounds(d.id);open_popup(pop,{r.x,r.y+r.h});
             request_focus(d.id);
@@ -291,6 +315,7 @@ bool combo_box(const ComboBoxDesc& d) noexcept {
             end_popup();
         }
     }
+    a11y_semantic(d.id,A11yRole::ComboBox,d.label,is_popup_open(pop)?A11yState_Expanded:0u,51u);
     return changed;
 }
 void set_tooltip(uint32_t target, const TooltipDesc& d) noexcept {
@@ -302,6 +327,7 @@ void set_tooltip(uint32_t target, const TooltipDesc& d) noexcept {
     const uint32_t id=id_index(target,0x2305);const Vec2 p=pointer_pos();
     begin_box({.id=id,.width=Sizing::fit(0,d.max_width_px),.padding=Padding::all(8),.background=Color::rgb_hex(0x0F172A),.border_color=Color::rgb_hex(0x475569),.border_width=1,.radius=Corners::all(5),
         .attach_to=AttachTo::Root,.anchor_parent=Anchor::TopLeft,.floating_offset={p.x+12,p.y+18},.z_index=d.z_index,.pointer_passthrough=true,.clamp_to_viewport=true});
+    a11y_semantic(id,A11yRole::Tooltip,d.text);
     text(d.text,{.font_size_px=d.font_size_px});end_box();
 }
 void set_tooltip(uint32_t target, Str text_value) noexcept {set_tooltip(target,TooltipDesc{.text=text_value});}
@@ -309,11 +335,13 @@ bool begin_modal(const ModalDesc& d) noexcept {
     if(!desktop_frame(d.id) || !d.open || !*d.open || !std::isfinite(d.width_px) || d.width_px<=0 || current_context()->active_ui->modal_depth >= 32u) return false;
     auto& ui=*current_context()->active_ui;const uint32_t backdrop=id_index(d.id,0x2306);
     if((d.dismiss_on_escape && !ui.frame_escape_consumed_by_ime && key_pressed(SDLK_ESCAPE)) || (d.dismiss_on_backdrop && ui.left_pressed_this_frame && element_bounds(backdrop).contains(pointer_pos()) && !element_bounds(d.id).contains(pointer_pos()))) {*d.open=false;request_redraw(current_context());return false;}
+    if(a11y_take(d.id,A11yAction::Dismiss)){*d.open=false;return false;}
     const float dpi = ui.dpi_scale > 0.0f ? ui.dpi_scale : 1.0f;
     begin_box({.id=backdrop,.width=Sizing::fixed(float(ui.viewport_w)/dpi),.height=Sizing::fixed(float(ui.viewport_h)/dpi),.background=d.backdrop_color,.attach_to=AttachTo::Root,.anchor_parent=Anchor::TopLeft,.z_index=d.z_index});
     begin_focus_scope(d.id,true);
     begin_box({.id=d.id,.axis=Axis::Col,.width=Sizing::fixed(d.width_px),.height=d.height,.padding=Padding::all(18),.gap=12,.background=d.background,.border_color=d.border_color,.border_width=1,.radius=d.radius,
         .attach_to=AttachTo::Parent,.anchor_element=Anchor::Center,.anchor_parent=Anchor::Center,.z_index=int16_t(d.z_index+1),.clamp_to_viewport=true});
+    a11y_semantic(d.id,A11yRole::Dialog,d.title,A11yState_Modal,64u);
     desktop_label(d.title,16,kFontBold);++ui.modal_depth;return true;
 }
 void end_modal() noexcept {if(current_context() && current_context()->in_frame && current_context()->active_ui->modal_depth > 0u) {

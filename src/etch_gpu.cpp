@@ -516,6 +516,7 @@ bool run_kawase_step(
 }
 
 void destroy_window_ui_state(Context*, WindowUiState* ui) noexcept {
+    arena_destroy(&ui->a11y_arena);
     for (uint32_t i = 0; i < ui->vlist_count; ++i) free_vlist(&ui->vlists[i]);
     std::free(ui->vlists);
     for (uint32_t i = 0; i < ui->dock_space_count; ++i) {
@@ -1014,7 +1015,7 @@ Context* create_context(const ContextDesc& desc) noexcept {
     }
 
     // Initialize SDL3 GPU device (DXIL + SPIR-V).
-    const SDL_GPUShaderFormat want_formats = SDL_GPU_SHADERFORMAT_DXIL | SDL_GPU_SHADERFORMAT_SPIRV;
+    const SDL_GPUShaderFormat want_formats = SDL_GPU_SHADERFORMAT_DXIL | SDL_GPU_SHADERFORMAT_SPIRV | SDL_GPU_SHADERFORMAT_MSL;
     ctx->device = SDL_CreateGPUDevice(want_formats, desc.enable_gpu_debug, nullptr);
     if (!ctx->device && !SDL_WasInit(SDL_INIT_VIDEO)) {
         if (SDL_InitSubSystem(SDL_INIT_VIDEO)) {
@@ -1059,6 +1060,16 @@ Context* create_context(const ContextDesc& desc) noexcept {
         kawase_vs_size = sizeof(g_etch_kawase_vs_spv);
         kawase_ps_code = g_etch_kawase_ps_spv;
         kawase_ps_size = sizeof(g_etch_kawase_ps_spv);
+    } else if ((supported & SDL_GPU_SHADERFORMAT_MSL) != 0u) {
+        chosen_fmt = SDL_GPU_SHADERFORMAT_MSL;
+        vs_code = g_etch_uber_vs_msl;
+        vs_size = sizeof(g_etch_uber_vs_msl) - 1u;
+        ps_code = g_etch_uber_ps_msl;
+        ps_size = sizeof(g_etch_uber_ps_msl) - 1u;
+        kawase_vs_code = g_etch_kawase_vs_msl;
+        kawase_vs_size = sizeof(g_etch_kawase_vs_msl) - 1u;
+        kawase_ps_code = g_etch_kawase_ps_msl;
+        kawase_ps_size = sizeof(g_etch_kawase_ps_msl) - 1u;
     } else {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "No compatible shader format (DXIL/SPIR-V) supported by SDL_GPUDevice");
         destroy_context(ctx);

@@ -314,6 +314,14 @@ CodeEditorResult code_editor(const CodeEditorDesc& input) noexcept {
     if(ui.modal_needs_focus && focus_scope_contains(ui,ui.modal_scope)){ui.focus_id=d.id;ui.modal_needs_focus=false;clear_ime_composition(ctx);}
     TextBuffer* b=d.buffer;uint32_t c=tb_clamp(b,ws->edit_cursor),a=tb_clamp(b,ws->edit_sel_anchor);
     bool focus=ui.focus_id==d.id && (!ui.modal_scope || focus_scope_contains(ui,ui.modal_scope));bool changed=false;
+    bool replaced_by_a11y=false;
+    PendingA11yAction command={};
+    while(!d.read_only && a11y_take(d.id,A11yAction::SetValue,&command)) {
+        if(text_buffer_replace(b,0,tb_len(b),{command.text,command.length},true,c,a,command.length,command.length,0u,ui.elapsed_seconds)) {
+            changed=true;c=a=tb_len(b);ws->editor_reveal=true;ws->edit_preferred_x=-1;replaced_by_a11y=true;
+        }
+    }
+    if(replaced_by_a11y && focus)cancel_ime_composition(ctx);
     if(focus && !d.read_only){ui.ime_focused_id=d.id;ui.ime_focused_password=false;}
     const float gutter=editor_gutter(d,tb_lines(b));const Rect bounds=ws->last_box_logical;
     const float view_h=bounds.h>d.padding.top+d.padding.bottom?bounds.h-d.padding.top-d.padding.bottom:400;
@@ -431,6 +439,11 @@ CodeEditorResult code_editor(const CodeEditorDesc& input) noexcept {
     if(changed)request_redraw(ctx);
     if(focus && !d.read_only){const float x=editor_x(ctx,d,text_buffer_line(b,lc.line,&ctx->frame_arena),lc.col_byte);
         ui.ime_cursor_logical={origin_x+x-ws->edit_scroll_x,origin_y+float(double(lc.line)*stride-ws->vscroll_pos_y),2,stride};ui.ime_cursor_offset_win=0;}
+    const uint32_t summary_start=tb_start(b,lc.line),summary_end=text_buffer_line_end(b,lc.line);
+    char summary[256];uint32_t summary_size=text_buffer_copy_range(b,summary_start,summary_end-summary_start>256?summary_start+256:summary_end,summary,sizeof(summary));
+    summary_size=utf8_clamp_boundary(summary,summary_size,summary_size);
+    auto* semantic=a11y_emit(ctx,d.id,A11yRole::CodeEditor,{}, {summary,summary_size},A11yState_Multiline|(d.read_only?A11yState_ReadOnly:0u),1u|(d.read_only?0u:128u));
+    if(semantic){semantic->node.min_value=1;semantic->node.max_value=float(tb_lines(b));semantic->node.value_num=float(lc.line+1);}
     return {changed,focus,composing,c,a,lc.line,lc.col_byte,first,end,tb_lines(b),focus?ui.ime_cursor_logical:Rect{}};
 }
 void emit_code_editor_command(Context* ctx,const CodeEditorExtra* e,Clay_BoundingBox bb,const ClipEntry& outer,float dpi) noexcept {

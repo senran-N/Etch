@@ -11,8 +11,8 @@
 #include <span>
 #include <type_traits>
 
-#define ETCH_VERSION_MAJOR 2
-#define ETCH_VERSION_MINOR 4
+#define ETCH_VERSION_MAJOR 3
+#define ETCH_VERSION_MINOR 0
 #define ETCH_VERSION_PATCH 0
 
 #ifndef ETCH_ASSERT
@@ -860,6 +860,22 @@ static_assert(std::is_trivially_copyable_v<GlobalsUniform>);
 // Declarative UI & Context Lifecycle API
 // ============================================================================
 
+enum class A11yRole : uint8_t { None, Window, Group, Region, Toolbar, MenuBar, Menu, MenuItem, TabList, Tab, Dialog, ScrollArea, List, ListItem, Table, Tree, TreeItem, StaticText, Button, Checkbox, Switch, Slider, SpinButton, ProgressBar, ComboBox, TextInput, CodeEditor, Canvas, Tooltip };
+enum A11yStateFlags : uint32_t { A11yState_None = 0u, A11yState_Focused = 1u << 0, A11yState_Hovered = 1u << 1, A11yState_Pressed = 1u << 2, A11yState_Checked = 1u << 3, A11yState_Selected = 1u << 4, A11yState_Expanded = 1u << 5, A11yState_Disabled = 1u << 6, A11yState_ReadOnly = 1u << 7, A11yState_Modal = 1u << 8, A11yState_Multiline = 1u << 9, A11yState_Password = 1u << 10 };
+enum class A11yAction : uint8_t { Focus, Press, Increment, Decrement, Expand, Collapse, Dismiss, SetValue };
+constexpr uint32_t a11y_action_bit(A11yAction a) noexcept { return 1u << static_cast<uint8_t>(a); }
+struct A11yNode {
+ uint32_t id = 0, parent_id = 0, first_child_idx = 0xFFFFFFFFu, next_sibling_idx = 0xFFFFFFFFu;
+ A11yRole role = A11yRole::None;
+ uint32_t state_flags = A11yState_None, actions_mask = 0u;
+ Rect bounds = {}; Str label = {}, value_text = {};
+ float value_num = 0, min_value = 0, max_value = 0;
+};
+struct A11yOverrideDesc {
+ uint32_t element_id = 0; A11yRole role = A11yRole::None; Str label = {}, value_text = {};
+ uint32_t add_states = 0, clear_states = 0, actions_mask = 0;
+ bool has_role = false, has_label = false, has_value_text = false, has_actions_mask = false;
+};
 struct Context;
 
 struct ContextDesc {
@@ -912,6 +928,7 @@ struct FrameDesc {
 };
 
 struct FrameStats {
+    uint32_t a11y_node_count = 0u;
     uint32_t prim_count = 0;
     uint32_t prim_capacity = 0;
     uint32_t draw_call_count = 0;
@@ -1804,6 +1821,11 @@ bool wait_events(Context* ctx, SDL_Event* first_event_out, int32_t timeout_ms = 
 
 // begin_frame binds ctx as the active thread context; end_frame finalizes ctx (or current_context()).
 void begin_frame(Context* ctx, const FrameDesc& desc) noexcept;
+void set_a11y_override(const A11yOverrideDesc& desc) noexcept;
+std::span<const A11yNode> frame_a11y_nodes(const Context* ctx = nullptr, SDL_Window* window = nullptr) noexcept;
+const A11yNode* find_a11y_node(uint32_t element_id, const Context* ctx = nullptr, SDL_Window* window = nullptr) noexcept;
+bool perform_a11y_action(uint32_t element_id, A11yAction action, float numeric_value = 0, Str text_value = {}, Context* ctx = nullptr, SDL_Window* window = nullptr) noexcept;
+const char* a11y_role_name(A11yRole role) noexcept;
 void end_frame(Context* ctx = nullptr) noexcept;
 void begin_window_frame(Context* ctx, SDL_Window* window, float dt) noexcept;
 void begin_window_frame(Context* ctx, SDL_Window* window, const WindowFrameDesc& desc) noexcept;

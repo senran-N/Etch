@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(etch VERSION 2.4.0 LANGUAGES C CXX)
+project(etch VERSION 3.0.0 LANGUAGES C CXX)
 
 option(ETCH_BUILD_EXAMPLES "Build Etch sandbox and etch_studio examples" ON)
 
@@ -62,6 +62,11 @@ set(ETCH_UBER_SHADER "${CMAKE_CURRENT_SOURCE_DIR}/shaders/etch_uber.hlsl")
 set(ETCH_KAWASE_SHADER "${CMAKE_CURRENT_SOURCE_DIR}/shaders/etch_kawase.hlsl")
 set(ETCH_SHADER_GEN_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders_gen")
 set(ETCH_SHADER_HEADERS
+    "${ETCH_SHADER_GEN_DIR}/etch_uber_vs_msl.h"
+    "${ETCH_SHADER_GEN_DIR}/etch_uber_ps_msl.h"
+    "${ETCH_SHADER_GEN_DIR}/etch_kawase_vs_msl.h"
+    "${ETCH_SHADER_GEN_DIR}/etch_kawase_ps_msl.h"
+
     "${ETCH_SHADER_GEN_DIR}/etch_uber_vs_dxil.h"
     "${ETCH_SHADER_GEN_DIR}/etch_uber_ps_dxil.h"
     "${ETCH_SHADER_GEN_DIR}/etch_uber_vs_spv.h"
@@ -215,7 +220,7 @@ add_library(etch STATIC
 add_library(Etch::etch ALIAS etch)
 set_source_files_properties(src/etch_unity.cpp PROPERTIES
     OBJECT_DEPENDS
-        "${CMAKE_CURRENT_SOURCE_DIR}/src/etch.h;${CMAKE_CURRENT_SOURCE_DIR}/src/etch_arena.cpp;${CMAKE_CURRENT_SOURCE_DIR}/src/etch_slug.cpp;${CMAKE_CURRENT_SOURCE_DIR}/src/etch_bidi.cpp;${CMAKE_CURRENT_SOURCE_DIR}/src/etch_bidi_data.h;${CMAKE_CURRENT_SOURCE_DIR}/src/etch_grapheme_data.h;${CMAKE_CURRENT_SOURCE_DIR}/src/etch_layout.cpp;${CMAKE_CURRENT_SOURCE_DIR}/src/etch_gpu.cpp;${CMAKE_CURRENT_SOURCE_DIR}/src/etch_widgets.cpp;${CMAKE_CURRENT_SOURCE_DIR}/src/etch_editor.cpp;${CMAKE_CURRENT_SOURCE_DIR}/third_party/clay.h;${CMAKE_CURRENT_SOURCE_DIR}/third_party/stb_truetype.h;${CMAKE_CURRENT_SOURCE_DIR}/third_party/stb_image_write.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/etch.h;${CMAKE_CURRENT_SOURCE_DIR}/src/etch_arena.cpp;${CMAKE_CURRENT_SOURCE_DIR}/src/etch_slug.cpp;${CMAKE_CURRENT_SOURCE_DIR}/src/etch_bidi.cpp;${CMAKE_CURRENT_SOURCE_DIR}/src/etch_bidi_data.h;${CMAKE_CURRENT_SOURCE_DIR}/src/etch_grapheme_data.h;${CMAKE_CURRENT_SOURCE_DIR}/src/etch_layout.cpp;${CMAKE_CURRENT_SOURCE_DIR}/src/etch_gpu.cpp;${CMAKE_CURRENT_SOURCE_DIR}/src/etch_widgets.cpp;${CMAKE_CURRENT_SOURCE_DIR}/src/etch_editor.cpp;${CMAKE_CURRENT_SOURCE_DIR}/src/etch_a11y.cpp;${CMAKE_CURRENT_SOURCE_DIR}/third_party/clay.h;${CMAKE_CURRENT_SOURCE_DIR}/third_party/stb_truetype.h;${CMAKE_CURRENT_SOURCE_DIR}/third_party/stb_image_write.h"
 )
 etch_configure_orthodox_cpp(etch)
 target_include_directories(etch
@@ -233,7 +238,7 @@ if (ETCH_BUILD_EXAMPLES)
         examples/sandbox.cpp
     )
     set_source_files_properties(examples/sandbox.cpp PROPERTIES
-        OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/etch.h;${CMAKE_CURRENT_SOURCE_DIR}/examples/desktop_v23_checks.h;${CMAKE_CURRENT_SOURCE_DIR}/examples/editor_v24_checks.h"
+        OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/etch.h;${CMAKE_CURRENT_SOURCE_DIR}/examples/desktop_v23_checks.h;${CMAKE_CURRENT_SOURCE_DIR}/examples/editor_v24_checks.h;${CMAKE_CURRENT_SOURCE_DIR}/examples/a11y_v30_checks.h"
     )
     etch_configure_orthodox_cpp(sandbox)
     target_include_directories(sandbox PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/third_party")
@@ -253,7 +258,7 @@ if (ETCH_BUILD_EXAMPLES)
         examples/etch_studio.cpp
     )
     set_source_files_properties(examples/etch_studio.cpp PROPERTIES
-        OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/etch.h;${CMAKE_CURRENT_SOURCE_DIR}/examples/desktop_v23_checks.h;${CMAKE_CURRENT_SOURCE_DIR}/examples/editor_v24_checks.h"
+        OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/etch.h;${CMAKE_CURRENT_SOURCE_DIR}/examples/desktop_v23_checks.h;${CMAKE_CURRENT_SOURCE_DIR}/examples/editor_v24_checks.h;${CMAKE_CURRENT_SOURCE_DIR}/examples/a11y_v30_checks.h"
     )
     etch_configure_orthodox_cpp(etch_studio)
     target_include_directories(etch_studio PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/third_party")
@@ -269,3 +274,22 @@ if (ETCH_BUILD_EXAMPLES)
         )
     endif ()
 endif ()
+
+option(ETCH_BUILD_TESTS "Build Etch CTest suite" ON)
+if (ETCH_BUILD_TESTS)
+    enable_testing()
+    add_executable(etch_tests tests/etch_tests.cpp)
+    etch_configure_orthodox_cpp(etch_tests)
+    target_link_libraries(etch_tests PRIVATE etch)
+    target_include_directories(etch_tests PRIVATE src/shaders_gen examples)
+    if (WIN32)
+        add_custom_command(TARGET etch_tests POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E $<IF:$<BOOL:$<TARGET_RUNTIME_DLLS:etch_tests>>,copy_if_different,true>
+                    $<TARGET_RUNTIME_DLLS:etch_tests>
+                    $<$<BOOL:$<TARGET_RUNTIME_DLLS:etch_tests>>:$<TARGET_FILE_DIR:etch_tests>>
+            COMMAND_EXPAND_LISTS)
+    endif ()
+    foreach(suite arena_and_elasticity unicode_bidi_grapheme layout_clay_flex_grid fenwick_virtual_list_1m widgets_and_dockspace text_buffer_and_code_editor a11y_semantic_tree headless_gpu_invariants)
+        add_test(NAME ${suite} COMMAND etch_tests --suite=${suite})
+    endforeach()
+endif()
