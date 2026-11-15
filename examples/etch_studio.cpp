@@ -1,10 +1,11 @@
-// Etch Studio 1.6 — Pure-GPU Render-Graph & 1M Telemetry Workbench.
-// Showcases Etch 1.6 capabilities (frameless window chrome, box-local draw_text,
+// Etch Studio — Pure-GPU Render-Graph, 1M Editor & Telemetry Workbench.
+// Showcases Etch capabilities (frameless window chrome, box-local draw_text,
 // native RGBA texture upload/update, zero-heap drag-drop, canvas marquee
 // multi-selection, RingArc & SVG Slug icons) in Orthodox C++20 with zero
 // per-frame heap allocations, 1-3 draw-call batching, and "--headless" checks.
 
-#include "etch.h"
+#include "etch/etch.h"
+#include "etch_testing.h"
 
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_gpu.h>
@@ -14,9 +15,9 @@
 #include <cstring>
 
 
-#include "desktop_v23_checks.h"
-#include "editor_v24_checks.h"
-#include "a11y_v30_checks.h"
+#include "checks_desktop.h"
+#include "checks_editor.h"
+#include "checks_a11y.h"
 
 namespace {
 
@@ -583,7 +584,7 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
             }
             etch::end_menu_bar();
         }
-        if(etch::begin_modal({.id=etch::id("studio_about_modal"),.open=&app->desktop_about,.title=etch::str_lit("Etch Studio 3.0")})) {
+        if(etch::begin_modal({.id=etch::id("studio_about_modal"),.open=&app->desktop_about,.title=etch::str_lit("Etch Studio " ETCH_VERSION_STRING)})) {
             etch::text(etch::str_lit("Standard desktop primitives / interactive five-zone docking"));
             if(etch::button({.id=etch::id("studio_about_close"),.label=etch::str_lit("Close")})) app->desktop_about=false;
             etch::end_modal();
@@ -623,14 +624,14 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
                         .color = etch::Color::white(),
                     });
                 }
-                etch::text(etch::str_lit("ETCH 3.0"), {
+                etch::text(etch::str_lit("ETCH " ETCH_VERSION_STRING), {
                     .color = etch::Color::white(),
                     .font_size_px = 12.0f,
                     .wrap = false,
                 });
             }
 
-            etch::text(etch::str_lit("Etch Studio 3.0 — GPU Render-Graph & Telemetry"), {
+            etch::text(etch::str_lit("Etch Studio " ETCH_VERSION_STRING " — GPU Render-Graph & Telemetry"), {
                 .color = etch::Color::rgb_hex(0xE2E8F0),
                 .font_size_px = 14.0f,
                 .wrap = false,
@@ -641,7 +642,7 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
                     // Destruction occurs after the serialized main build ends.
                     SDL_HideWindow(app->tear_off_window);
                 } else {
-                    app->tear_off_window = SDL_CreateWindow("Etch Studio 3.0 — Tear-Off Preview", 480, 360, SDL_WINDOW_RESIZABLE);
+                    app->tear_off_window = SDL_CreateWindow("Etch Studio " ETCH_VERSION_STRING " — Tear-Off Preview", 480, 360, SDL_WINDOW_RESIZABLE);
                 }
             }
             draw_button(tear_id, "Tear-Off Preview", etch::Color::rgb_hex(0x1E293B), etch::Color::rgb_hex(0x475569));
@@ -1183,7 +1184,7 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
             }
             etch::text_spans({
                 etch::TextSpan{
-                    .text = etch::str_lit("v2.0 "),
+                    .text = etch::str_lit("v" ETCH_VERSION_STRING " "),
                     .color = etch::Color::rgb_hex(0xF8FAFC),
                     .font_id = etch::kFontBold,
                 },
@@ -1216,7 +1217,7 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
                 .selectable = true,
             });
 
-            ETCH_BOX({.axis=etch::Axis::Col,.width=etch::Sizing::grow(),.height=etch::Sizing::fixed(72),.padding=etch::Padding::xy(8,4),.gap=3,.background=etch::Color::rgb_hex(0x142032)}) {
+            ETCH_BOX({.axis=etch::Axis::Col,.width=etch::Sizing::grow(),.height=etch::Sizing::fit(),.padding=etch::Padding::xy(8,6),.gap=3,.background=etch::Color::rgb_hex(0x142032)}) {
             char trace_detail[160] = {};
             const uint32_t selected_trace = app->trace_selected_row;
             std::snprintf(trace_detail,sizeof(trace_detail),"Selected #%07u   %s   |   %.2f us   |   %u prims",selected_trace,kTracePassNames[selected_trace%6],18.0+static_cast<double>((selected_trace*37u)%kTraceRowCount)*.0001,920u+(selected_trace*13u)%kTraceRowCount);
@@ -1962,7 +1963,7 @@ void step_headless_frame(
 
 void build_preview_ui(StudioApp* app) noexcept {
     ETCH_BOX({.id = etch::id("tear_preview"), .width = etch::Sizing::grow(), .height = etch::Sizing::grow(), .background = etch::Color::rgb_hex(0x111827), .focusable = true}) {
-        etch::text(etch::str_lit("Etch Studio 3.0 — Preview"));
+        etch::text(etch::str_lit("Etch Studio " ETCH_VERSION_STRING " — Preview"));
         etch::image({.texture = app->preview_tex, .width = etch::Sizing::fixed(256), .height = etch::Sizing::fixed(256)});
     }
 }
@@ -2642,7 +2643,7 @@ int run_headless(const char* out_png_path) noexcept {
     }
     step_headless_frame(&app, kW, kH, kDt);
     s11_ok &= app.node_count == before_drop + 2;
-    app.tear_off_window = SDL_CreateWindow("Etch Studio 3.0 — Tear-Off Preview", 480, 360, SDL_WINDOW_HIDDEN);
+    app.tear_off_window = SDL_CreateWindow("Etch Studio " ETCH_VERSION_STRING " — Tear-Off Preview", 480, 360, SDL_WINDOW_HIDDEN);
     s11_ok &= app.tear_off_window != nullptr;
     if (app.tear_off_window) {
         etch::begin_window_frame(ctx, app.tear_off_window, kDt);
@@ -2722,7 +2723,7 @@ int run_headless(const char* out_png_path) noexcept {
     }
     if (!etch::render_headless_png(ctx,kW,kH,out_png_path)) { cleanup_release();return 1; }
     // [S16] Desktop menus, numeric editing and pointer dock integration.
-    if (!verify_desktop_v23(ctx)) { cleanup_release();return 1; }
+    if (!verify_desktop_checks(ctx)) { cleanup_release();return 1; }
     bool s16_ok=true;
     click_widget(etch::id_index(etch::id("studio_file_menu"),0x2303));
     step_headless_frame(&app,kW,kH,kDt);
@@ -2760,7 +2761,7 @@ int run_headless(const char* out_png_path) noexcept {
     // [S17] Both docked panes remain visible with a live, highlighted document.
     const auto shader_bounds=etch::element_bounds(etch::id("studio_shader_editor"));
     const auto graph_bounds=etch::element_bounds(etch::id("studio_canvas"));
-    if(!verify_a11y_v30(ctx) || !verify_editor_v24(ctx) || etch::text_buffer_line_count(&app.shader_buf)<100 || shader_bounds.w<200 || graph_bounds.w<200 || shader_bounds.x<graph_bounds.x+graph_bounds.w-1) { cleanup_release();return 1; }
+    if(!verify_a11y_checks(ctx) || !verify_editor_checks(ctx) || etch::text_buffer_line_count(&app.shader_buf)<100 || shader_bounds.w<200 || graph_bounds.w<200 || shader_bounds.x<graph_bounds.x+graph_bounds.w-1) { cleanup_release();return 1; }
     std::printf(
         "Headless Studio OK (%s) -> %s (asserts=18/18, prims=%u, draw_calls=%u, blur_pass=%u, slug_glyphs=%u, grid=%u, wire=%u, layout_us=%.0f, vrows=[%u..%u))\n",
         driver ? driver : "unknown",
@@ -2786,7 +2787,7 @@ int run_interactive() noexcept {
     }
 
     SDL_Window* window = SDL_CreateWindow(
-        "Etch Studio 3.0 — GPU Render-Graph, 1M Editor & Telemetry",
+        "Etch Studio " ETCH_VERSION_STRING " — GPU Render-Graph, 1M Editor & Telemetry",
         1440,
         900,
         SDL_WINDOW_BORDERLESS | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);

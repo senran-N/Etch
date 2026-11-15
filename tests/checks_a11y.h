@@ -1,5 +1,5 @@
 // Shared sandbox [22], Studio [S18], and CTest semantic regression.
-static bool verify_a11y_v30(etch::Context* restore) noexcept {
+static bool verify_a11y_checks(etch::Context* restore) noexcept {
     using namespace etch;
     Context* ctx=create_context({.headless=true});if(!ctx)return false;set_current_context(ctx);
     bool ok=true;const auto check=[&](bool pass,int line) noexcept {if(!pass){ok=false;std::fprintf(stderr,"v30 check line %d failed\n",line);}};

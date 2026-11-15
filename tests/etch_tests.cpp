@@ -1,20 +1,24 @@
-#include "etch.h"
+#include "etch/etch.h"
 #include <SDL3/SDL.h>
 #include <cstdio>
 #include <cstdlib>
 #include <cmath>
 #include <cstring>
-#include "desktop_v23_checks.h"
-#include "editor_v24_checks.h"
-#include "a11y_v30_checks.h"
+#include "checks_desktop.h"
+#include "checks_editor.h"
+#include "checks_a11y.h"
 #include "etch_uber_vs_msl.h"
 #include "etch_uber_ps_msl.h"
 #include "etch_kawase_vs_msl.h"
 #include "etch_kawase_ps_msl.h"
 using namespace etch;
+static_assert(ETCH_VERSION_MAJOR == 0 && ETCH_VERSION_MINOR == 5 && ETCH_VERSION_PATCH == 0);
+#if defined(ETCH_CMAKE_VERSION_MAJOR)
+static_assert(ETCH_VERSION_MAJOR == ETCH_CMAKE_VERSION_MAJOR && ETCH_VERSION_MINOR == ETCH_CMAKE_VERSION_MINOR && ETCH_VERSION_PATCH == ETCH_CMAKE_VERSION_PATCH);
+#endif
 static bool arena_suite() noexcept {
     Arena a=arena_create(128);if(!a.base)return false;
-    auto* p=a.alloc<uint32_t>(8);const bool ok=p && (reinterpret_cast<uintptr_t>(p)%alignof(uint32_t)==0) && a.remaining()==96;
+    auto* p=a.alloc<uint32_t>(8);const bool ok=p && (reinterpret_cast<uintptr_t>(p)%alignof(uint32_t)==0) && a.remaining()==96 && std::strcmp(ETCH_VERSION_STRING, "0.5.0") == 0;
     a.reset();const bool reset=a.offset==0 && a.alloc<uint32_t>(8)==p;arena_destroy(&a);
     Context* c=create_context({.max_prims_per_frame=64,.headless=true});if(!c)return false;
     begin_frame(c,{.viewport_w=800,.viewport_h=500});for(uint32_t i=0;i<256;++i)box({.width=Sizing::fixed(1),.height=Sizing::fixed(1),.background=Color::white()});end_frame(c);
@@ -59,7 +63,16 @@ static bool gpu_suite() noexcept {
     const char* buffers[]={"g_slug_curves [[buffer(0)]]","g_slug_bands [[buffer(1)]]","g_dyn_slug_curves [[buffer(2)]]","g_dyn_slug_bands [[buffer(3)]]"};for(const char* b:buffers)ok &= std::strstr(ps,b)!=nullptr;
     const char* kinds[]={"RECT","SHADOW","GLYPH","TEXTURE","SLUG_GLYPH","BLUR_GLASS","CANVAS_GRID","BEZIER_WIRE","RING_ARC","SLUG_FILL","ROT_RECT"};
     for(const char* k:kinds){char branch[80];std::snprintf(branch,sizeof(branch),"kind == ETCH_PRIM_%s",k);ok &= std::strstr(ps,branch)!=nullptr;}
+    Context* bad=create_context({.headless=true,.gpu_driver="nonexistent_driver_xyz"});
+    if(!bad)return false;
+    ok &= gpu_device(bad)==nullptr;
+    destroy_context(bad);set_current_context(nullptr);
+    Context* vk=create_context({.headless=true,.gpu_driver="vulkan"});
+    if(!vk)return false;
+    if(SDL_GPUDevice* vdev=gpu_device(vk);vdev!=nullptr)ok &= std::strcmp(SDL_GetGPUDeviceDriver(vdev),"vulkan")==0;
+    destroy_context(vk);set_current_context(nullptr);
     Context* c=create_context({.headless=true});if(!c)return false;
+    ok &= gpu_device(c)!=nullptr;
     for(uint32_t i=0;i<4;++i){begin_frame(c,{.viewport_w=320,.viewport_h=200});button({.id=id("gpu"),.label=str_lit("GPU")});end_frame(c);}
     ok &= frame_stats(c).idle_sleeping && render_headless_png(c,320,200,"etch_ctest_gpu.png") && frame_stats(c).draw_call_count<=3;
     std::remove("etch_ctest_gpu.png");destroy_context(c);set_current_context(nullptr);return ok;
@@ -69,7 +82,7 @@ int main(int argc,char** argv) {
     const char* selected=argc==2 && std::strncmp(argv[1],"--suite=",8)==0?argv[1]+8:nullptr;
     if(argc>1 && !selected)return 2;bool found=false,ok=true;
     for(uint32_t i=0;i<8;++i)if(!selected || std::strcmp(selected,names[i])==0){found=true;bool pass=false;
-        switch(i){case 0:pass=arena_suite();break;case 1:pass=unicode_suite();break;case 2:pass=layout_suite();break;case 3:pass=list_suite();break;case 4:pass=verify_desktop_v23(nullptr);break;case 5:pass=verify_editor_v24(nullptr);break;case 6:pass=verify_a11y_v30(nullptr);break;case 7:pass=gpu_suite();break;}
+        switch(i){case 0:pass=arena_suite();break;case 1:pass=unicode_suite();break;case 2:pass=layout_suite();break;case 3:pass=list_suite();break;case 4:pass=verify_desktop_checks(nullptr);break;case 5:pass=verify_editor_checks(nullptr);break;case 6:pass=verify_a11y_checks(nullptr);break;case 7:pass=gpu_suite();break;}
         std::printf("%s: %s\n",names[i],pass?"PASS":"FAIL");ok &= pass;
     }return !found?2:ok?0:1;
 }

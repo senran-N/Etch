@@ -7,6 +7,8 @@ namespace etch {
 
 namespace {
 
+bool ensure_gpu_device(Context* ctx) noexcept;
+
 constexpr bool is_srgb_gpu_format(SDL_GPUTextureFormat fmt) noexcept {
     return fmt == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB ||
            fmt == SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM_SRGB;
@@ -534,7 +536,7 @@ void destroy_window_ui_state(Context*, WindowUiState* ui) noexcept {
 }
 
 bool claim_window_swapchain(Context* ctx, SDL_Window* win) noexcept {
-    if (!ctx || !ctx->device || !win) {
+    if (!ensure_gpu_device(ctx) || !win) {
         return false;
     }
     for (uint32_t i = 0; i < ctx->claimed_window_cap; ++i)
@@ -948,85 +950,70 @@ bool ensure_headless_resources(Context* ctx, uint32_t width, uint32_t height, ui
     return true;
 }
 
-} // namespace
+bool ensure_gpu_device(Context* ctx) noexcept {
+    if (!ctx || ctx->gpu_init_failed) return false;
+    if (ctx->device) return true;
 
-Context* create_context(const ContextDesc& desc) noexcept {
-    Context* ctx = static_cast<Context*>(std::calloc(1u, sizeof(Context)));
-    if (!ctx) {
-        return nullptr;
-    }
+    const char* driver = ctx->gpu_driver;
+    if (!driver[0]) driver = SDL_getenv("ETCH_GPU_DRIVER");
+    if (!driver || !driver[0]) driver = SDL_getenv("SDL_GPU_DRIVER");
+    if (driver && !driver[0]) driver = nullptr;
 
-    ctx->max_layout_elements = desc.max_layout_elements < 4096u ? 4096u : (desc.max_layout_elements > (1u << 20) ? (1u << 20) : desc.max_layout_elements);
-    if (!ensure_batch_cap(ctx)) { destroy_context(ctx); return nullptr; }
-    ctx->arena_epoch = 1u;
-    ctx->active_ui = &ctx->headless_ui;
-    ctx->headless = desc.headless;
-    ctx->max_prims = (desc.max_prims_per_frame > 0u) ? desc.max_prims_per_frame : 65536u;
-    if (ctx->max_prims < kMinPrimCap) ctx->max_prims = kMinPrimCap;
-    if (ctx->max_prims > kMaxPrimHardCap) ctx->max_prims = kMaxPrimHardCap;
-    ctx->frame_arena = arena_create(desc.frame_arena_bytes ? desc.frame_arena_bytes : (4u * 1024u * 1024u));
-    if (!ctx->frame_arena.base) {
-        destroy_context(ctx);
-        return nullptr;
-    }
-
-    if (!state_map_init(&ctx->active_ui->states, kDefaultStateCapacity)) {
-        destroy_context(ctx);
-        return nullptr;
-    }
-
-    ctx->prims = static_cast<Prim*>(std::calloc(ctx->max_prims, sizeof(Prim)));
-    if (!ctx->prims) {
-        destroy_context(ctx);
-        return nullptr;
-    }
-
-    ctx->atlas.scratch = &ctx->frame_arena;
-    if (!font_atlas_init(&ctx->atlas, desc.font_path)) {
-        destroy_context(ctx);
-        return nullptr;
-    }
-    // font_atlas_init clears the atlas, including its scratch pointer.
-    ctx->atlas.scratch = &ctx->frame_arena;
-
-    // Initialize Clay layout arena cleanly.
-    Clay_Context* saved_clay = Clay_GetCurrentContext();
-    Clay_SetCurrentContext(nullptr);
-    Clay_SetMaxElementCount(static_cast<int32_t>(ctx->max_layout_elements));
-    Clay_SetMaxMeasureTextCacheWordCount(static_cast<int32_t>(ctx->max_layout_elements * 4u));
-    const uint32_t clay_min = Clay_MinMemorySize();
-    ctx->active_ui->clay_mem = std::malloc(clay_min);
-    if (!ctx->active_ui->clay_mem) {
-        Clay_SetCurrentContext(saved_clay);
-        destroy_context(ctx);
-        return nullptr;
-    }
-    const Clay_Arena clay_arena = Clay_CreateArenaWithCapacityAndMemory(clay_min, ctx->active_ui->clay_mem);
-    Clay_Context* prev_clay = saved_clay;
-    ctx->active_ui->clay_ctx = Clay_Initialize(
-        clay_arena,
-        Clay_Dimensions{ 1280.0f, 720.0f },
-        Clay_ErrorHandler{ etch_clay_error_handler, ctx });
-    if (ctx->active_ui->clay_ctx) Clay_SetMeasureTextFunction(etch_measure_text, ctx);
-    Clay_SetCurrentContext(prev_clay);
-    if (!ctx->active_ui->clay_ctx) {
-        destroy_context(ctx);
-        return nullptr;
-    }
+    const auto fail = [&]() noexcept -> bool {
+        for (uint32_t i = 0u; i < ctx->pipeline_count; ++i) {
+            SDL_ReleaseGPUGraphicsPipeline(ctx->device, ctx->pipelines[i].pipeline);
+            ctx->pipelines[i] = {};
+        }
+        ctx->pipeline_count = 0u;
+        if (ctx->vs_shader) SDL_ReleaseGPUShader(ctx->device, ctx->vs_shader);
+        ctx->vs_shader = nullptr;
+        if (ctx->ps_shader) SDL_ReleaseGPUShader(ctx->device, ctx->ps_shader);
+        ctx->ps_shader = nullptr;
+        if (ctx->kawase_vs_shader) SDL_ReleaseGPUShader(ctx->device, ctx->kawase_vs_shader);
+        ctx->kawase_vs_shader = nullptr;
+        if (ctx->kawase_ps_shader) SDL_ReleaseGPUShader(ctx->device, ctx->kawase_ps_shader);
+        ctx->kawase_ps_shader = nullptr;
+        if (ctx->linear_sampler) SDL_ReleaseGPUSampler(ctx->device, ctx->linear_sampler);
+        ctx->linear_sampler = nullptr;
+        if (ctx->prim_gpu_buf) SDL_ReleaseGPUBuffer(ctx->device, ctx->prim_gpu_buf);
+        ctx->prim_gpu_buf = nullptr;
+        if (ctx->prim_transfer_buf) SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->prim_transfer_buf);
+        ctx->prim_transfer_buf = nullptr;
+        if (ctx->atlas.gpu_tex) SDL_ReleaseGPUTexture(ctx->device, ctx->atlas.gpu_tex);
+        ctx->atlas.gpu_tex = nullptr;
+        if (ctx->atlas_transfer_buf) SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->atlas_transfer_buf);
+        ctx->atlas_transfer_buf = nullptr;
+        if (ctx->slug_curve_gpu_buf) SDL_ReleaseGPUBuffer(ctx->device, ctx->slug_curve_gpu_buf);
+        ctx->slug_curve_gpu_buf = nullptr;
+        if (ctx->slug_band_gpu_buf) SDL_ReleaseGPUBuffer(ctx->device, ctx->slug_band_gpu_buf);
+        ctx->slug_band_gpu_buf = nullptr;
+        if (ctx->dyn_slug_curve_gpu_buf) SDL_ReleaseGPUBuffer(ctx->device, ctx->dyn_slug_curve_gpu_buf);
+        ctx->dyn_slug_curve_gpu_buf = nullptr;
+        if (ctx->dyn_slug_band_gpu_buf) SDL_ReleaseGPUBuffer(ctx->device, ctx->dyn_slug_band_gpu_buf);
+        ctx->dyn_slug_band_gpu_buf = nullptr;
+        if (ctx->device) SDL_DestroyGPUDevice(ctx->device);
+        ctx->device = nullptr;
+        ctx->prim_gpu_cap = ctx->prim_tbuf_cap = 0u;
+        ctx->slug_curve_gpu_cap = ctx->slug_band_gpu_cap = 0u;
+        ctx->dyn_slug_curve_gpu_cap = ctx->dyn_slug_band_gpu_cap = 0u;
+        ctx->gpu_init_failed = true;
+        return false;
+    };
 
     // Initialize SDL3 GPU device (DXIL + SPIR-V).
     const SDL_GPUShaderFormat want_formats = SDL_GPU_SHADERFORMAT_DXIL | SDL_GPU_SHADERFORMAT_SPIRV | SDL_GPU_SHADERFORMAT_MSL;
-    ctx->device = SDL_CreateGPUDevice(want_formats, desc.enable_gpu_debug, nullptr);
+    ctx->device = SDL_CreateGPUDevice(want_formats, ctx->enable_gpu_debug, driver);
     if (!ctx->device && !SDL_WasInit(SDL_INIT_VIDEO)) {
         if (SDL_InitSubSystem(SDL_INIT_VIDEO)) {
             ctx->owns_video_init = true;
-            ctx->device = SDL_CreateGPUDevice(want_formats, desc.enable_gpu_debug, nullptr);
+            if (ctx->wake_event_type == 0 && (SDL_WasInit(SDL_INIT_EVENTS) || SDL_WasInit(SDL_INIT_VIDEO)))
+                ctx->wake_event_type = SDL_RegisterEvents(1);
+            ctx->device = SDL_CreateGPUDevice(want_formats, ctx->enable_gpu_debug, driver);
         }
     }
     if (!ctx->device) {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "SDL_CreateGPUDevice failed: %s", SDL_GetError());
-        destroy_context(ctx);
-        return nullptr;
+        return fail();
     }
 
     const SDL_GPUShaderFormat supported = SDL_GetGPUShaderFormats(ctx->device);
@@ -1072,8 +1059,7 @@ Context* create_context(const ContextDesc& desc) noexcept {
         kawase_ps_size = sizeof(g_etch_kawase_ps_msl) - 1u;
     } else {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "No compatible shader format (DXIL/SPIR-V) supported by SDL_GPUDevice");
-        destroy_context(ctx);
-        return nullptr;
+        return fail();
     }
 
     const SDL_GPUShaderCreateInfo vs_info = {
@@ -1136,8 +1122,7 @@ Context* create_context(const ContextDesc& desc) noexcept {
         !ctx->kawase_vs_shader || !ctx->kawase_ps_shader)
     {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "SDL_CreateGPUShader failed: %s", SDL_GetError());
-        destroy_context(ctx);
-        return nullptr;
+        return fail();
     }
 
     const SDL_GPUSamplerCreateInfo sampler_info = {
@@ -1160,8 +1145,7 @@ Context* create_context(const ContextDesc& desc) noexcept {
     };
     ctx->linear_sampler = SDL_CreateGPUSampler(ctx->device, &sampler_info);
     if (!ctx->linear_sampler) {
-        destroy_context(ctx);
-        return nullptr;
+        return fail();
     }
 
     const uint32_t prim_buf_bytes = ctx->max_prims * static_cast<uint32_t>(sizeof(Prim));
@@ -1227,12 +1211,89 @@ Context* create_context(const ContextDesc& desc) noexcept {
         !ctx->atlas.gpu_tex || !ctx->atlas_transfer_buf ||
         !ctx->slug_curve_gpu_buf || !ctx->slug_band_gpu_buf || !ctx->dyn_slug_curve_gpu_buf || !ctx->dyn_slug_band_gpu_buf)
     {
+        return fail();
+    }
+
+    // Pre-create universal sRGB pipeline for offscreen/SDR_LINEAR rendering.
+    if (!get_or_create_pipeline(ctx, SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB)) return fail();
+
+    return true;
+}
+
+} // namespace
+
+Context* create_context(const ContextDesc& desc) noexcept {
+    Context* ctx = static_cast<Context*>(std::calloc(1u, sizeof(Context)));
+    if (!ctx) {
+        return nullptr;
+    }
+
+    ctx->max_layout_elements = desc.max_layout_elements < 4096u ? 4096u : (desc.max_layout_elements > (1u << 20) ? (1u << 20) : desc.max_layout_elements);
+    if (!ensure_batch_cap(ctx)) { destroy_context(ctx); return nullptr; }
+    ctx->arena_epoch = 1u;
+    ctx->active_ui = &ctx->headless_ui;
+    ctx->headless = desc.headless;
+    ctx->enable_gpu_debug = desc.enable_gpu_debug;
+    if (desc.gpu_driver) {
+        std::strncpy(ctx->gpu_driver, desc.gpu_driver, sizeof(ctx->gpu_driver) - 1u);
+        ctx->gpu_driver[sizeof(ctx->gpu_driver) - 1u] = '\0';
+    }
+    ctx->max_prims = (desc.max_prims_per_frame > 0u) ? desc.max_prims_per_frame : 65536u;
+    if (ctx->max_prims < kMinPrimCap) ctx->max_prims = kMinPrimCap;
+    if (ctx->max_prims > kMaxPrimHardCap) ctx->max_prims = kMaxPrimHardCap;
+    ctx->frame_arena = arena_create(desc.frame_arena_bytes ? desc.frame_arena_bytes : (4u * 1024u * 1024u));
+    if (!ctx->frame_arena.base) {
         destroy_context(ctx);
         return nullptr;
     }
 
-    // Pre-create universal sRGB pipeline for offscreen/SDR_LINEAR rendering.
-    get_or_create_pipeline(ctx, SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB);
+    if (!state_map_init(&ctx->active_ui->states, kDefaultStateCapacity)) {
+        destroy_context(ctx);
+        return nullptr;
+    }
+
+    ctx->prims = static_cast<Prim*>(std::calloc(ctx->max_prims, sizeof(Prim)));
+    if (!ctx->prims) {
+        destroy_context(ctx);
+        return nullptr;
+    }
+
+    ctx->atlas.scratch = &ctx->frame_arena;
+    if (!font_atlas_init(&ctx->atlas, desc.font_path)) {
+        destroy_context(ctx);
+        return nullptr;
+    }
+    // font_atlas_init clears the atlas, including its scratch pointer.
+    ctx->atlas.scratch = &ctx->frame_arena;
+
+    // Initialize Clay layout arena cleanly.
+    Clay_Context* saved_clay = Clay_GetCurrentContext();
+    Clay_SetCurrentContext(nullptr);
+    Clay_SetMaxElementCount(static_cast<int32_t>(ctx->max_layout_elements));
+    Clay_SetMaxMeasureTextCacheWordCount(static_cast<int32_t>(ctx->max_layout_elements * 4u));
+    const uint32_t clay_min = Clay_MinMemorySize();
+    ctx->active_ui->clay_mem = std::malloc(clay_min);
+    if (!ctx->active_ui->clay_mem) {
+        Clay_SetCurrentContext(saved_clay);
+        destroy_context(ctx);
+        return nullptr;
+    }
+    const Clay_Arena clay_arena = Clay_CreateArenaWithCapacityAndMemory(clay_min, ctx->active_ui->clay_mem);
+    Clay_Context* prev_clay = saved_clay;
+    ctx->active_ui->clay_ctx = Clay_Initialize(
+        clay_arena,
+        Clay_Dimensions{ 1280.0f, 720.0f },
+        Clay_ErrorHandler{ etch_clay_error_handler, ctx });
+    if (ctx->active_ui->clay_ctx) Clay_SetMeasureTextFunction(etch_measure_text, ctx);
+    Clay_SetCurrentContext(prev_clay);
+    if (!ctx->active_ui->clay_ctx) {
+        destroy_context(ctx);
+        return nullptr;
+    }
+
+    if (desc.window != nullptr || !desc.headless) {
+        if (!ensure_gpu_device(ctx)) { destroy_context(ctx); return nullptr; }
+    }
 
     if (desc.window && !claim_window_swapchain(ctx, desc.window)) {
         destroy_context(ctx);
@@ -1249,12 +1310,18 @@ Context* create_context(const ContextDesc& desc) noexcept {
     }
 
     ctx->active_ui->redraw_budget = 2u;
-    if (SDL_WasInit(SDL_INIT_EVENTS) || SDL_WasInit(SDL_INIT_VIDEO)) {
+    if (ctx->wake_event_type == 0 && (SDL_WasInit(SDL_INIT_EVENTS) || SDL_WasInit(SDL_INIT_VIDEO))) {
         ctx->wake_event_type = SDL_RegisterEvents(1);
     }
 
     set_current_context(ctx);
     return ctx;
+}
+
+SDL_GPUDevice* gpu_device(Context* ctx) noexcept {
+    if (!ctx) return nullptr;
+    (void)ensure_gpu_device(ctx);
+    return ctx->device;
 }
 
 void destroy_context(Context* ctx) noexcept {
@@ -1336,7 +1403,7 @@ void destroy_context(Context* ctx) noexcept {
 }
 
 bool render_window(Context* ctx, Color clear_color, SDL_Window* window_override) noexcept {
-    if (!ctx || !ctx->device) {
+    if (!ensure_gpu_device(ctx)) {
         return false;
     }
     SDL_Window* target_win = window_override ? window_override : (ctx->draw_list_window ? ctx->draw_list_window : ctx->window);
@@ -1388,7 +1455,7 @@ bool render_headless_png(
     const char* out_png_path,
     Color clear_color) noexcept
 {
-    if (!ctx || !ctx->device || width == 0u || height == 0u || !out_png_path || out_png_path[0] == '\0') {
+    if (!ensure_gpu_device(ctx) || width == 0u || height == 0u || !out_png_path || out_png_path[0] == '\0') {
         return false;
     }
 
@@ -1632,7 +1699,7 @@ uint32_t claimed_window_count(const Context* ctx) noexcept {
 }
 
 LoadedTexture create_texture_rgba(Context* ctx, const TextureDesc& desc) noexcept {
-    if (!ctx || !ctx->device || desc.width == 0u || desc.height == 0u) {
+    if (!ensure_gpu_device(ctx) || desc.width == 0u || desc.height == 0u) {
         return {};
     }
     const uint32_t tight_pitch = desc.width * 4u;
@@ -1690,7 +1757,7 @@ bool update_texture_rgba(
 }
 
 LoadedTexture load_texture_file(Context* ctx, const char* path, bool srgb) noexcept {
-    if (!ctx || !ctx->device || !path || path[0] == '\0') {
+    if (!ensure_gpu_device(ctx) || !path || path[0] == '\0') {
         return {};
     }
     SDL_Surface* surf = SDL_LoadPNG(path);
@@ -1707,7 +1774,7 @@ LoadedTexture load_texture_file(Context* ctx, const char* path, bool srgb) noexc
 }
 
 LoadedTexture load_texture_memory(Context* ctx, const void* data, size_t size_bytes, bool srgb) noexcept {
-    if (!ctx || !ctx->device || !data || size_bytes == 0u) {
+    if (!ensure_gpu_device(ctx) || !data || size_bytes == 0u) {
         return {};
     }
     SDL_IOStream* io = SDL_IOFromConstMem(data, size_bytes);

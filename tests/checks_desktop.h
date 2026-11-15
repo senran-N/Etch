@@ -1,5 +1,5 @@
 // Shared desktop integration regression, exercised by sandbox [20] and Studio [S16].
-static bool verify_desktop_v23(etch::Context* restore) noexcept {
+static bool verify_desktop_checks(etch::Context* restore) noexcept {
     using namespace etch;
     Context* test=create_context({.headless=true}); if(!test) return false;
     set_current_context(test); bool ok=true;
@@ -155,7 +155,7 @@ static bool verify_desktop_v23(etch::Context* restore) noexcept {
     const Rect tr=element_bounds(id_index(p1,0xD300));drag(p2,{tr.x+2,tr.y+tr.h*.5f});check(element_bounds(id_index(p2,0xD300)).x<element_bounds(id_index(p1,0xD300)).x,__LINE__);
     click(id_index(p2,0xD301));step();check(!dock_is_pane_open(dock,p2),__LINE__);
     for(int i=0;i<80;++i) step();
-    check(render_headless_png(test,800,800,"v23_check.png"),__LINE__);
+    check(render_headless_png(test,800,800,"etch_desktop_check.png"),__LINE__);
     const auto stats=frame_stats(test);check(stats.draw_call_count<=3 && stats.idle_sleeping,__LINE__);
-    std::remove("v23_check.png");destroy_context(test);set_current_context(restore);return ok;
+    std::remove("etch_desktop_check.png");destroy_context(test);set_current_context(restore);return ok;
 }

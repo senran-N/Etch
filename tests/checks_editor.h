@@ -1,5 +1,5 @@
 // Shared sandbox [21] / Studio [S17] document and editor regression.
-static bool verify_editor_v24(etch::Context* restore) noexcept {
+static bool verify_editor_checks(etch::Context* restore) noexcept {
     using namespace etch;
     bool ok=true;
     const auto check=[&](bool pass,int line) noexcept {if(!pass){ok=false;std::fprintf(stderr,"v24 check line %d failed\n",line);}};
@@ -33,8 +33,8 @@ static bool verify_editor_v24(etch::Context* restore) noexcept {
     step();code_editor_scroll_to_line(eid,999985,AlignY::Top);step();
     check(result.first_visible_line<=999985 && result.first_visible_line>999970 && result.end_visible_line==1000000 && result.end_visible_line-result.first_visible_line<30,__LINE__);
     check(frame_stats(test).arena_used_bytes<1024u*1024u,__LINE__);
-    check(render_headless_png(test,800,500,"editor_v24_check.png"),__LINE__);
-    std::remove("editor_v24_check.png");
+    check(render_headless_png(test,800,500,"etch_editor_check.png"),__LINE__);
+    std::remove("etch_editor_check.png");
     // Gap-straddling line copies use only that line's bytes.
     check(text_buffer_replace(&b,at,at,{}),__LINE__);
     begin_frame(test,{.viewport_w=800,.viewport_h=500});const Str crossed=text_buffer_line(&b,999985);check(crossed.length==31 && crossed.chars,__LINE__);end_frame(test);

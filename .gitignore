@@ -1,5 +1,5 @@
 # Build directories & compiled binaries
-/build/
+/build*/
 /out/
 CMakeFiles/
 CMakeCache.txt
@@ -25,6 +25,10 @@ compile_commands.json
 
 # Headless visual check outputs & FlowGuard local state
 /frame_check*.png
+/_*.png
+*.vectors.png
+/frame_*.png
+/studio_*.png
 /.flowguard/
 
 # IDE / OS metadata

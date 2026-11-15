@@ -1,6 +1,7 @@
 // Etch Unity Build aggregation unit: compiles the entire engine in one translation unit.
 
-#include "etch.h"
+#include "etch/etch.h"
+#include "etch_testing.h"
 
 #include <cmath>
 #include <cstdio>
@@ -57,7 +58,11 @@
 
 #include "etch_arena.cpp"
 #include "etch_slug.cpp"
+#include "etch_render_cmd.cpp"
+#include "etch_text_input.cpp"
 #include "etch_layout.cpp"
+#include "etch_containers.cpp"
+#include "etch_frame.cpp"
 #include "etch_widgets.cpp"
 #include "etch_editor.cpp"
 #include "etch_a11y.cpp"

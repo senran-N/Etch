@@ -1,9 +1,14 @@
 cmake_minimum_required(VERSION 3.24)
-project(etch VERSION 3.0.0 LANGUAGES C CXX)
+project(etch VERSION 0.5.0 LANGUAGES C CXX)
 
-option(ETCH_BUILD_EXAMPLES "Build Etch sandbox and etch_studio examples" ON)
+option(ETCH_BUILD_EXAMPLES "Build Etch sandbox and etch_studio examples" ${PROJECT_IS_TOP_LEVEL})
+option(ETCH_BUILD_TESTS "Build Etch CTest suite" ${PROJECT_IS_TOP_LEVEL})
+option(ETCH_INSTALL "Enable Etch install and package export targets" ${PROJECT_IS_TOP_LEVEL})
+option(ETCH_COMPILE_SHADERS "Compile HLSL shaders offline when DXC/shadercross are available" ON)
 
-# CMake's default /EHsc conflicts with the explicit no-exceptions contract.
+include(GNUInstallDirs)
+
+# Strip the conflicting default in this directory only; preserve parent/cache flags.
 if (MSVC OR CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
     string(REPLACE "/EHsc" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
 endif ()
@@ -36,6 +41,10 @@ else ()
     find_package(SDL3 CONFIG REQUIRED)
 endif ()
 
+set(ETCH_SHADER_OUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/shaders_gen")
+file(MAKE_DIRECTORY "${ETCH_SHADER_OUT_DIR}")
+set(ETCH_GENERATED_SHADER_HEADERS "")
+
 # Auto-discover DXC (vendored SPIR-V-capable DXC first, then Windows SDK / PATH)
 # to compile shaders/etch_uber.hlsl offline into DXIL & SPIR-V C headers.
 find_program(ETCH_DXC_EXE
@@ -58,137 +67,109 @@ if (NOT ETCH_DXC_EXE)
     )
 endif ()
 
-set(ETCH_UBER_SHADER "${CMAKE_CURRENT_SOURCE_DIR}/shaders/etch_uber.hlsl")
-set(ETCH_KAWASE_SHADER "${CMAKE_CURRENT_SOURCE_DIR}/shaders/etch_kawase.hlsl")
-set(ETCH_SHADER_GEN_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders_gen")
-set(ETCH_SHADER_HEADERS
-    "${ETCH_SHADER_GEN_DIR}/etch_uber_vs_msl.h"
-    "${ETCH_SHADER_GEN_DIR}/etch_uber_ps_msl.h"
-    "${ETCH_SHADER_GEN_DIR}/etch_kawase_vs_msl.h"
-    "${ETCH_SHADER_GEN_DIR}/etch_kawase_ps_msl.h"
+find_program(ETCH_SHADERCROSS_EXE NAMES shadercross
+    HINTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/SDL_shadercross/bin")
 
-    "${ETCH_SHADER_GEN_DIR}/etch_uber_vs_dxil.h"
-    "${ETCH_SHADER_GEN_DIR}/etch_uber_ps_dxil.h"
-    "${ETCH_SHADER_GEN_DIR}/etch_uber_vs_spv.h"
-    "${ETCH_SHADER_GEN_DIR}/etch_uber_ps_spv.h"
-    "${ETCH_SHADER_GEN_DIR}/etch_kawase_vs_dxil.h"
-    "${ETCH_SHADER_GEN_DIR}/etch_kawase_ps_dxil.h"
-    "${ETCH_SHADER_GEN_DIR}/etch_kawase_vs_spv.h"
-    "${ETCH_SHADER_GEN_DIR}/etch_kawase_ps_spv.h"
-)
-
-if (ETCH_DXC_EXE)
-    add_custom_command(
-        OUTPUT  "${ETCH_SHADER_GEN_DIR}/etch_uber_vs_dxil.h"
-        COMMAND "${ETCH_DXC_EXE}" -T vs_6_0 -E vs_main -O3 -WX -Ges -Vn g_etch_uber_vs_dxil
-                -Fh "${ETCH_SHADER_GEN_DIR}/etch_uber_vs_dxil.h" "${ETCH_UBER_SHADER}"
-        DEPENDS "${ETCH_UBER_SHADER}"
-        COMMENT "Compiling etch_uber.hlsl (vs_6_0 DXIL)"
-        VERBATIM
-    )
-    add_custom_command(
-        OUTPUT  "${ETCH_SHADER_GEN_DIR}/etch_uber_ps_dxil.h"
-        COMMAND "${ETCH_DXC_EXE}" -T ps_6_0 -E ps_main -O3 -WX -Ges -Vn g_etch_uber_ps_dxil
-                -Fh "${ETCH_SHADER_GEN_DIR}/etch_uber_ps_dxil.h" "${ETCH_UBER_SHADER}"
-        DEPENDS "${ETCH_UBER_SHADER}"
-        COMMENT "Compiling etch_uber.hlsl (ps_6_0 DXIL)"
-        VERBATIM
-    )
-    add_custom_command(
-        OUTPUT  "${ETCH_SHADER_GEN_DIR}/etch_kawase_vs_dxil.h"
-        COMMAND "${ETCH_DXC_EXE}" -T vs_6_0 -E vs_main -O3 -WX -Ges -Vn g_etch_kawase_vs_dxil
-                -Fh "${ETCH_SHADER_GEN_DIR}/etch_kawase_vs_dxil.h" "${ETCH_KAWASE_SHADER}"
-        DEPENDS "${ETCH_KAWASE_SHADER}"
-        COMMENT "Compiling etch_kawase.hlsl (vs_6_0 DXIL)"
-        VERBATIM
-    )
-    add_custom_command(
-        OUTPUT  "${ETCH_SHADER_GEN_DIR}/etch_kawase_ps_dxil.h"
-        COMMAND "${ETCH_DXC_EXE}" -T ps_6_0 -E ps_main -O3 -WX -Ges -Vn g_etch_kawase_ps_dxil
-                -Fh "${ETCH_SHADER_GEN_DIR}/etch_kawase_ps_dxil.h" "${ETCH_KAWASE_SHADER}"
-        DEPENDS "${ETCH_KAWASE_SHADER}"
-        COMMENT "Compiling etch_kawase.hlsl (ps_6_0 DXIL)"
-        VERBATIM
-    )
-
+if (ETCH_COMPILE_SHADERS AND ETCH_DXC_EXE)
     execute_process(
         COMMAND "${ETCH_DXC_EXE}" -spirv "-fspv-target-env=vulkan1.0" -T vs_6_0 -E vs_main
-                -Fo "${CMAKE_CURRENT_BINARY_DIR}/_etch_spv_probe.spv" "${ETCH_UBER_SHADER}"
+                -Fo "${CMAKE_CURRENT_BINARY_DIR}/_etch_spv_probe.spv"
+                "${CMAKE_CURRENT_SOURCE_DIR}/shaders/etch_uber.hlsl"
         RESULT_VARIABLE _etch_spv_probe_res
-        OUTPUT_QUIET
-        ERROR_QUIET
-    )
+        OUTPUT_QUIET ERROR_QUIET)
     file(REMOVE "${CMAKE_CURRENT_BINARY_DIR}/_etch_spv_probe.spv")
-    if (_etch_spv_probe_res EQUAL 0)
-        add_custom_command(
-            OUTPUT  "${ETCH_SHADER_GEN_DIR}/etch_uber_vs_spv.h"
-            COMMAND "${ETCH_DXC_EXE}" -spirv "-fspv-target-env=vulkan1.0" -T vs_6_0 -E vs_main -O3 -WX -Ges
-                    -Vn g_etch_uber_vs_spv -Fh "${ETCH_SHADER_GEN_DIR}/etch_uber_vs_spv.h" "${ETCH_UBER_SHADER}"
-            DEPENDS "${ETCH_UBER_SHADER}"
-            COMMENT "Compiling etch_uber.hlsl (vs_6_0 SPIR-V)"
-            VERBATIM
-        )
-        add_custom_command(
-            OUTPUT  "${ETCH_SHADER_GEN_DIR}/etch_uber_ps_spv.h"
-            COMMAND "${ETCH_DXC_EXE}" -spirv "-fspv-target-env=vulkan1.0" -T ps_6_0 -E ps_main -O3 -WX -Ges
-                    -Vn g_etch_uber_ps_spv -Fh "${ETCH_SHADER_GEN_DIR}/etch_uber_ps_spv.h" "${ETCH_UBER_SHADER}"
-            DEPENDS "${ETCH_UBER_SHADER}"
-            COMMENT "Compiling etch_uber.hlsl (ps_6_0 SPIR-V)"
-            VERBATIM
-        )
-        add_custom_command(
-            OUTPUT  "${ETCH_SHADER_GEN_DIR}/etch_kawase_vs_spv.h"
-            COMMAND "${ETCH_DXC_EXE}" -spirv "-fspv-target-env=vulkan1.0" -T vs_6_0 -E vs_main -O3 -WX -Ges
-                    -Vn g_etch_kawase_vs_spv -Fh "${ETCH_SHADER_GEN_DIR}/etch_kawase_vs_spv.h" "${ETCH_KAWASE_SHADER}"
-            DEPENDS "${ETCH_KAWASE_SHADER}"
-            COMMENT "Compiling etch_kawase.hlsl (vs_6_0 SPIR-V)"
-            VERBATIM
-        )
-        add_custom_command(
-            OUTPUT  "${ETCH_SHADER_GEN_DIR}/etch_kawase_ps_spv.h"
-            COMMAND "${ETCH_DXC_EXE}" -spirv "-fspv-target-env=vulkan1.0" -T ps_6_0 -E ps_main -O3 -WX -Ges
-                    -Vn g_etch_kawase_ps_spv -Fh "${ETCH_SHADER_GEN_DIR}/etch_kawase_ps_spv.h" "${ETCH_KAWASE_SHADER}"
-            DEPENDS "${ETCH_KAWASE_SHADER}"
-            COMMENT "Compiling etch_kawase.hlsl (ps_6_0 SPIR-V)"
-            VERBATIM
-        )
-    endif ()
+    foreach(shader etch_uber etch_kawase)
+        set(_etch_hlsl "${CMAKE_CURRENT_SOURCE_DIR}/shaders/${shader}.hlsl")
+        foreach(stage vs ps)
+            set(_etch_base "${ETCH_SHADER_OUT_DIR}/${shader}_${stage}")
+            if (stage STREQUAL "vs")
+                set(_etch_stage vertex)
+            else ()
+                set(_etch_stage fragment)
+            endif ()
+            add_custom_command(
+                OUTPUT "${_etch_base}_dxil.h"
+                COMMAND "${ETCH_DXC_EXE}" -T ${stage}_6_0 -E ${stage}_main -O3 -WX -Ges
+                        -Vn g_${shader}_${stage}_dxil -Fh "${_etch_base}_dxil.h" "${_etch_hlsl}"
+                DEPENDS "${_etch_hlsl}"
+                COMMENT "Compiling ${shader} (${stage} DXIL)"
+                VERBATIM)
+            list(APPEND ETCH_GENERATED_SHADER_HEADERS "${_etch_base}_dxil.h")
+            if (_etch_spv_probe_res EQUAL 0)
+                add_custom_command(
+                    OUTPUT "${_etch_base}_spv.h"
+                    COMMAND "${ETCH_DXC_EXE}" -spirv "-fspv-target-env=vulkan1.0"
+                            -T ${stage}_6_0 -E ${stage}_main -O3 -WX -Ges
+                            -Vn g_${shader}_${stage}_spv -Fh "${_etch_base}_spv.h" "${_etch_hlsl}"
+                    DEPENDS "${_etch_hlsl}"
+                    COMMENT "Compiling ${shader} (${stage} SPIR-V)"
+                    VERBATIM)
+                list(APPEND ETCH_GENERATED_SHADER_HEADERS "${_etch_base}_spv.h")
+                if (ETCH_SHADERCROSS_EXE)
+                    add_custom_command(
+                        OUTPUT "${_etch_base}.spv"
+                        COMMAND "${ETCH_DXC_EXE}" -spirv "-fspv-target-env=vulkan1.0"
+                                -T ${stage}_6_0 -E ${stage}_main -O3 -WX -Ges
+                                -Fo "${_etch_base}.spv" "${_etch_hlsl}"
+                        DEPENDS "${_etch_hlsl}"
+                        VERBATIM)
+                    add_custom_command(
+                        OUTPUT "${_etch_base}.msl"
+                        COMMAND "${ETCH_SHADERCROSS_EXE}" "${_etch_base}.spv"
+                                -s SPIRV -d MSL -t ${_etch_stage}
+                                --msl-version 2.1.0 -e ${stage}_main -o "${_etch_base}.msl"
+                        DEPENDS "${_etch_base}.spv"
+                        VERBATIM)
+                    add_custom_command(
+                        OUTPUT "${_etch_base}_msl.h"
+                        COMMAND "${CMAKE_COMMAND}" "-DIN=${_etch_base}.msl"
+                                "-DOUT=${_etch_base}_msl.h" "-DVAR=g_${shader}_${stage}_msl"
+                                -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_msl.cmake"
+                        DEPENDS "${_etch_base}.msl" "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_msl.cmake"
+                        VERBATIM)
+                    list(APPEND ETCH_GENERATED_SHADER_HEADERS "${_etch_base}_msl.h")
+                endif ()
+            endif ()
+        endforeach ()
+    endforeach ()
+endif ()
+if (ETCH_GENERATED_SHADER_HEADERS)
+    add_custom_target(etch_shaders DEPENDS ${ETCH_GENERATED_SHADER_HEADERS})
 endif ()
 
-# Optional cross-platform shader compiler CLI (needed later when targeting macOS MSL).
-find_program(ETCH_SHADERCROSS_EXE
-    NAMES shadercross
-    HINTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/SDL_shadercross/bin"
-)
-
-# Prefer a vendored prebuilt archive/source tree under third_party/harfbuzz before falling back to system packages.
+# Archive dependencies use build paths locally and relocatable installed paths.
 set(ETCH_HB_LIB_TARGET "")
+set(ETCH_HB_INCLUDE_DIRS "")
+set(ETCH_HB_PREBUILT_LIB "")
 if (WIN32 AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/harfbuzz/lib/harfbuzz.lib")
-    add_library(harfbuzz_static STATIC IMPORTED GLOBAL)
-    set_target_properties(harfbuzz_static PROPERTIES
-        IMPORTED_LOCATION "${CMAKE_CURRENT_SOURCE_DIR}/third_party/harfbuzz/lib/harfbuzz.lib"
-        INTERFACE_INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/third_party/harfbuzz/include;${CMAKE_CURRENT_SOURCE_DIR}/third_party/harfbuzz/include/harfbuzz"
-    )
-    set(ETCH_HB_LIB_TARGET harfbuzz_static)
+    set(ETCH_HB_PREBUILT_LIB "${CMAKE_CURRENT_SOURCE_DIR}/third_party/harfbuzz/lib/harfbuzz.lib")
 elseif (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/harfbuzz/lib/libharfbuzz.a")
-    add_library(harfbuzz_static STATIC IMPORTED GLOBAL)
-    set_target_properties(harfbuzz_static PROPERTIES
-        IMPORTED_LOCATION "${CMAKE_CURRENT_SOURCE_DIR}/third_party/harfbuzz/lib/libharfbuzz.a"
-        INTERFACE_INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/third_party/harfbuzz/include;${CMAKE_CURRENT_SOURCE_DIR}/third_party/harfbuzz/include/harfbuzz"
-    )
-    set(ETCH_HB_LIB_TARGET harfbuzz_static)
+    set(ETCH_HB_PREBUILT_LIB "${CMAKE_CURRENT_SOURCE_DIR}/third_party/harfbuzz/lib/libharfbuzz.a")
+endif ()
+if (ETCH_HB_PREBUILT_LIB)
+    set(ETCH_INSTALL_HB_MODE "VENDORED")
+    get_filename_component(_etch_hb_lib_name "${ETCH_HB_PREBUILT_LIB}" NAME)
+    set(ETCH_HB_INCLUDE_DIRS
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/harfbuzz/include"
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/harfbuzz/include/harfbuzz")
+    set(ETCH_HB_LIB_TARGET
+        "$<BUILD_INTERFACE:${ETCH_HB_PREBUILT_LIB}>$<INSTALL_INTERFACE:$<INSTALL_PREFIX>/${CMAKE_INSTALL_LIBDIR}/${_etch_hb_lib_name}>")
 elseif (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/harfbuzz/CMakeLists.txt")
     add_subdirectory(third_party/harfbuzz EXCLUDE_FROM_ALL)
-    set(ETCH_HB_LIB_TARGET harfbuzz)
+    # Installed consumers resolve HarfBuzz separately, avoiding an unexported target.
+    set(ETCH_INSTALL_HB_MODE "CONFIG")
+    set(ETCH_HB_LIB_TARGET "$<BUILD_INTERFACE:harfbuzz>$<INSTALL_INTERFACE:harfbuzz::harfbuzz>")
 else ()
     find_package(harfbuzz CONFIG QUIET)
     if (TARGET harfbuzz::harfbuzz)
+        set(ETCH_INSTALL_HB_MODE "CONFIG")
         set(ETCH_HB_LIB_TARGET harfbuzz::harfbuzz)
     else ()
         find_package(PkgConfig QUIET)
         if (PkgConfig_FOUND)
             pkg_check_modules(HARFBUZZ QUIET IMPORTED_TARGET harfbuzz)
             if (TARGET PkgConfig::HARFBUZZ)
+                set(ETCH_INSTALL_HB_MODE "PKGCONFIG")
                 set(ETCH_HB_LIB_TARGET PkgConfig::HARFBUZZ)
             endif ()
         endif ()
@@ -196,52 +177,52 @@ else ()
             find_library(ETCH_HARFBUZZ_LIBRARY NAMES harfbuzz libharfbuzz)
             find_path(ETCH_HARFBUZZ_INCLUDE_DIR NAMES hb.h PATH_SUFFIXES harfbuzz)
             if (ETCH_HARFBUZZ_LIBRARY AND ETCH_HARFBUZZ_INCLUDE_DIR)
-                add_library(harfbuzz_system UNKNOWN IMPORTED GLOBAL)
-                set_target_properties(harfbuzz_system PROPERTIES
-                    IMPORTED_LOCATION "${ETCH_HARFBUZZ_LIBRARY}"
-                    INTERFACE_INCLUDE_DIRECTORIES "${ETCH_HARFBUZZ_INCLUDE_DIR}"
-                )
-                set(ETCH_HB_LIB_TARGET harfbuzz_system)
+                set(ETCH_INSTALL_HB_MODE "SYSTEM_PATH")
+                set(ETCH_HB_INCLUDE_DIRS "${ETCH_HARFBUZZ_INCLUDE_DIR}")
+                set(ETCH_HB_LIB_TARGET "${ETCH_HARFBUZZ_LIBRARY}")
             endif ()
         endif ()
     endif ()
 endif ()
-
 if (NOT ETCH_HB_LIB_TARGET)
-    message(FATAL_ERROR "HarfBuzz not found. Provide third_party/harfbuzz/lib/harfbuzz.lib (or libharfbuzz.a), third_party/harfbuzz source, or install system HarfBuzz (vcpkg/brew/apt).")
+    message(FATAL_ERROR "HarfBuzz not found. Provide a vendored archive/source tree or install system HarfBuzz.")
 endif ()
 
-# Unity Build static library: compiles src/etch_unity.cpp as a single translation unit.
-add_library(etch STATIC
-    src/etch_unity.cpp
-    src/etch.h
-    ${ETCH_SHADER_HEADERS}
-)
+add_library(etch STATIC src/etch_unity.cpp)
 add_library(Etch::etch ALIAS etch)
-set_source_files_properties(src/etch_unity.cpp PROPERTIES
-    OBJECT_DEPENDS
-        "${CMAKE_CURRENT_SOURCE_DIR}/src/etch.h;${CMAKE_CURRENT_SOURCE_DIR}/src/etch_arena.cpp;${CMAKE_CURRENT_SOURCE_DIR}/src/etch_slug.cpp;${CMAKE_CURRENT_SOURCE_DIR}/src/etch_bidi.cpp;${CMAKE_CURRENT_SOURCE_DIR}/src/etch_bidi_data.h;${CMAKE_CURRENT_SOURCE_DIR}/src/etch_grapheme_data.h;${CMAKE_CURRENT_SOURCE_DIR}/src/etch_layout.cpp;${CMAKE_CURRENT_SOURCE_DIR}/src/etch_gpu.cpp;${CMAKE_CURRENT_SOURCE_DIR}/src/etch_widgets.cpp;${CMAKE_CURRENT_SOURCE_DIR}/src/etch_editor.cpp;${CMAKE_CURRENT_SOURCE_DIR}/src/etch_a11y.cpp;${CMAKE_CURRENT_SOURCE_DIR}/third_party/clay.h;${CMAKE_CURRENT_SOURCE_DIR}/third_party/stb_truetype.h;${CMAKE_CURRENT_SOURCE_DIR}/third_party/stb_image_write.h"
-)
 etch_configure_orthodox_cpp(etch)
 target_include_directories(etch
-    PUBLIC  "${CMAKE_CURRENT_SOURCE_DIR}/src"
-    PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders_gen"
+    PUBLIC "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
+           "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
+    PRIVATE "${ETCH_SHADER_OUT_DIR}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/src"
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders_gen"
             "${CMAKE_CURRENT_SOURCE_DIR}/third_party"
-)
-target_link_libraries(etch
-    PUBLIC  SDL3::SDL3
-    PRIVATE ${ETCH_HB_LIB_TARGET}
-)
+            ${ETCH_HB_INCLUDE_DIRS})
+target_link_libraries(etch PUBLIC SDL3::SDL3 PRIVATE ${ETCH_HB_LIB_TARGET})
+if (TARGET etch_shaders)
+    add_dependencies(etch etch_shaders)
+endif ()
+
+# Explicit dependencies also cover localized MSVC/Ninja include scanning.
+file(GLOB _etch_engine_dependencies CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders_gen/*.h")
+file(GLOB _etch_check_dependencies CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tests/checks_*.h")
+set(_etch_common_dependencies "${CMAKE_CURRENT_SOURCE_DIR}/include/etch/etch.h"
+    ${_etch_engine_dependencies} ${ETCH_GENERATED_SHADER_HEADERS})
+set_source_files_properties(src/etch_unity.cpp PROPERTIES OBJECT_DEPENDS "${_etch_common_dependencies}")
+set_source_files_properties(examples/sandbox.cpp examples/etch_studio.cpp tests/etch_tests.cpp
+    PROPERTIES OBJECT_DEPENDS "${_etch_common_dependencies};${_etch_check_dependencies}")
 
 if (ETCH_BUILD_EXAMPLES)
     add_executable(sandbox
         examples/sandbox.cpp
     )
-    set_source_files_properties(examples/sandbox.cpp PROPERTIES
-        OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/etch.h;${CMAKE_CURRENT_SOURCE_DIR}/examples/desktop_v23_checks.h;${CMAKE_CURRENT_SOURCE_DIR}/examples/editor_v24_checks.h;${CMAKE_CURRENT_SOURCE_DIR}/examples/a11y_v30_checks.h"
-    )
     etch_configure_orthodox_cpp(sandbox)
-    target_include_directories(sandbox PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/third_party")
+    target_include_directories(sandbox PRIVATE src tests "${CMAKE_CURRENT_SOURCE_DIR}/third_party")
     target_link_libraries(sandbox PRIVATE etch)
 
     if (WIN32)
@@ -257,11 +238,8 @@ if (ETCH_BUILD_EXAMPLES)
     add_executable(etch_studio
         examples/etch_studio.cpp
     )
-    set_source_files_properties(examples/etch_studio.cpp PROPERTIES
-        OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/etch.h;${CMAKE_CURRENT_SOURCE_DIR}/examples/desktop_v23_checks.h;${CMAKE_CURRENT_SOURCE_DIR}/examples/editor_v24_checks.h;${CMAKE_CURRENT_SOURCE_DIR}/examples/a11y_v30_checks.h"
-    )
     etch_configure_orthodox_cpp(etch_studio)
-    target_include_directories(etch_studio PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/third_party")
+    target_include_directories(etch_studio PRIVATE src tests "${CMAKE_CURRENT_SOURCE_DIR}/third_party")
     target_link_libraries(etch_studio PRIVATE etch)
 
     if (WIN32)
@@ -275,13 +253,20 @@ if (ETCH_BUILD_EXAMPLES)
     endif ()
 endif ()
 
-option(ETCH_BUILD_TESTS "Build Etch CTest suite" ON)
 if (ETCH_BUILD_TESTS)
     enable_testing()
     add_executable(etch_tests tests/etch_tests.cpp)
     etch_configure_orthodox_cpp(etch_tests)
     target_link_libraries(etch_tests PRIVATE etch)
-    target_include_directories(etch_tests PRIVATE src/shaders_gen examples)
+    target_include_directories(etch_tests PRIVATE "${ETCH_SHADER_OUT_DIR}" src src/shaders_gen tests)
+    if (TARGET etch_shaders)
+        add_dependencies(etch_tests etch_shaders)
+    endif ()
+    target_compile_definitions(etch_tests PRIVATE
+        ETCH_CMAKE_VERSION_MAJOR=${PROJECT_VERSION_MAJOR}
+        ETCH_CMAKE_VERSION_MINOR=${PROJECT_VERSION_MINOR}
+        ETCH_CMAKE_VERSION_PATCH=${PROJECT_VERSION_PATCH}
+    )
     if (WIN32)
         add_custom_command(TARGET etch_tests POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E $<IF:$<BOOL:$<TARGET_RUNTIME_DLLS:etch_tests>>,copy_if_different,true>
@@ -293,3 +278,25 @@ if (ETCH_BUILD_TESTS)
         add_test(NAME ${suite} COMMAND etch_tests --suite=${suite})
     endforeach()
 endif()
+
+if (ETCH_INSTALL)
+    include(CMakePackageConfigHelpers)
+    install(TARGETS etch EXPORT EtchTargets
+        ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
+        LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}"
+        RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
+    install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/include/etch" DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
+    if (ETCH_INSTALL_HB_MODE STREQUAL "VENDORED")
+        install(FILES "${ETCH_HB_PREBUILT_LIB}" DESTINATION "${CMAKE_INSTALL_LIBDIR}")
+    endif ()
+    configure_package_config_file("${CMAKE_CURRENT_SOURCE_DIR}/cmake/EtchConfig.cmake.in"
+        "${CMAKE_CURRENT_BINARY_DIR}/EtchConfig.cmake"
+        INSTALL_DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/Etch")
+    write_basic_package_version_file("${CMAKE_CURRENT_BINARY_DIR}/EtchConfigVersion.cmake"
+        VERSION ${PROJECT_VERSION} COMPATIBILITY SameMinorVersion)
+    install(EXPORT EtchTargets FILE EtchTargets.cmake NAMESPACE Etch::
+        DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/Etch")
+    install(FILES "${CMAKE_CURRENT_BINARY_DIR}/EtchConfig.cmake"
+        "${CMAKE_CURRENT_BINARY_DIR}/EtchConfigVersion.cmake"
+        DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/Etch")
+endif ()

@@ -1,4 +1,4 @@
-// Etch v2.2 — Pure-GPU UI Engine
+// Etch — Pure-GPU UI Engine
 #ifndef ETCH_H
 #define ETCH_H
 
@@ -11,9 +11,12 @@
 #include <span>
 #include <type_traits>
 
-#define ETCH_VERSION_MAJOR 3
-#define ETCH_VERSION_MINOR 0
+#define ETCH_VERSION_MAJOR 0
+#define ETCH_VERSION_MINOR 5
 #define ETCH_VERSION_PATCH 0
+#define ETCH_VERSION_STR_DETAIL(x) #x
+#define ETCH_VERSION_STR(x) ETCH_VERSION_STR_DETAIL(x)
+#define ETCH_VERSION_STRING ETCH_VERSION_STR(ETCH_VERSION_MAJOR) "." ETCH_VERSION_STR(ETCH_VERSION_MINOR) "." ETCH_VERSION_STR(ETCH_VERSION_PATCH)
 
 #ifndef ETCH_ASSERT
 #    if defined(NDEBUG)
@@ -888,6 +891,8 @@ struct ContextDesc {
     float font_size_px = 16.0f;
     bool enable_gpu_debug = false;
     bool headless = false;
+    // Optional SDL GPU backend name (vulkan, direct3d12, metal).
+    const char* gpu_driver = nullptr;
 };
 
 enum KeyMod : uint16_t {
@@ -1940,11 +1945,6 @@ bool os_drag_hovering(uint32_t element_id) noexcept;
 std::span<const Str> dropped_files_on(uint32_t element_id) noexcept;
 std::span<const Str> dropped_texts() noexcept;
 std::span<const Str> dropped_texts_on(uint32_t element_id) noexcept;
-void inject_drop_file(Context* ctx, Str utf8_path, SDL_Window* window = nullptr) noexcept;
-void inject_drop_text(Context* ctx, Str utf8_text, SDL_Window* window = nullptr) noexcept;
-void inject_os_drop_begin(Context* ctx, Vec2 logical_pos, SDL_Window* window = nullptr) noexcept;
-void inject_os_drop_move(Context* ctx, Vec2 logical_pos, SDL_Window* window = nullptr) noexcept;
-void inject_os_drop_complete(Context* ctx, Vec2 logical_pos, SDL_Window* window = nullptr) noexcept;
 void begin_focus_scope(uint32_t scope_id, bool trap_tab = true) noexcept;
 void end_focus_scope() noexcept;
 bool keyboard_focus_visible(uint32_t element_id = 0) noexcept;

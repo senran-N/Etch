@@ -59,7 +59,14 @@ void destroy_font_slot(FontSlot* slot) noexcept {
     *slot = {};
 }
 
-uint16_t resolve_font_slot_idx(const FontAtlas* atlas, uint16_t font_id) noexcept {
+void ensure_bold_loaded(FontAtlas* atlas) noexcept;
+void ensure_mono_loaded(FontAtlas* atlas) noexcept;
+
+uint16_t resolve_font_slot_idx(FontAtlas* atlas, uint16_t font_id) noexcept {
+    if (font_id == kFontBold && !atlas->slots[kFontBold].loaded && !atlas->bold_probed)
+        ensure_bold_loaded(atlas);
+    if (font_id == kFontMono && !atlas->slots[kFontMono].loaded && !atlas->mono_probed)
+        ensure_mono_loaded(atlas);
     if (font_id < kMaxFontSlots && atlas->slots[font_id].loaded) {
         return font_id;
     }
@@ -78,8 +85,9 @@ uint16_t resolve_target_font_slot(const FontAtlas* atlas, uint16_t slot_hint) no
     if (slot_hint < kMaxFontSlots) {
         return slot_hint;
     }
+    // Keep the built-in Sans/Bold/Mono slots available for lazy loading.
     if (slot_hint == kInvalidFont) {
-        for (uint16_t i = 0u; i < kMaxFontSlots; ++i) {
+        for (uint16_t i = 3u; i < kMaxFontSlots; ++i) {
             if (!atlas->slots[i].loaded) {
                 return i;
             }
@@ -262,6 +270,143 @@ bool font_has_source_hash(const FontAtlas* atlas, uint64_t source_hash) noexcept
     return false;
 }
 
+bool try_load_system_font(FontAtlas* atlas, uint16_t slot_idx, const char* filename) noexcept {
+    if (!filename || !filename[0]) return false;
+    char buf[512];
+    const auto probe = [&](const char* root, const char* directory) noexcept -> bool {
+        if (!root || !root[0]) return false;
+        const int n = std::snprintf(buf, sizeof(buf), "%s/%s%s", root, directory, filename);
+        if (n < 0 || static_cast<size_t>(n) >= sizeof(buf)) return false;
+        if (slot_idx >= 3u && font_has_source_hash(atlas, hash_font_path(buf, 0))) return true;
+        return try_load_font_file_into_slot(atlas, slot_idx, buf);
+    };
+#if defined(_WIN32)
+    if (probe(SDL_getenv("SystemRoot"), "Fonts/")) return true;
+    if (probe(SDL_getenv("WINDIR"), "Fonts/")) return true;
+    if (probe(SDL_getenv("LOCALAPPDATA"), "Microsoft/Windows/Fonts/")) return true;
+    return probe("C:/Windows", "Fonts/");
+#elif defined(__APPLE__)
+    if (probe(SDL_getenv("HOME"), "Library/Fonts/")) return true;
+    const char* directories[] = { "/Library/Fonts", "/System/Library/Fonts", "/System/Library/Fonts/Supplemental" };
+#else
+    if (probe(SDL_getenv("XDG_DATA_HOME"), "fonts/")) return true;
+    if (probe(SDL_getenv("HOME"), ".local/share/fonts/")) return true;
+    const char* directories[] = {
+        "/usr/share/fonts/TTF", "/usr/share/fonts/opentype", "/usr/share/fonts/truetype",
+        "/usr/share/fonts/truetype/dejavu", "/usr/share/fonts/truetype/noto",
+        "/usr/share/fonts/truetype/liberation", "/usr/share/fonts/noto", "/usr/share/fonts/noto-cjk",
+        "/usr/share/fonts/dejavu", "/usr/share/fonts/liberation", "/usr/local/share/fonts",
+        "/run/current-system/sw/share/fonts"
+    };
+#endif
+#if !defined(_WIN32)
+    for (const char* directory : directories) {
+        if (probe(directory, "")) return true;
+    }
+    return false;
+#endif
+}
+
+void rebuild_fallback_order(FontAtlas* atlas) noexcept {
+    // Prioritize Sans -> CJK/Symbols -> Bold -> Mono when resolving missing glyphs.
+    uint16_t ordered[kMaxFontSlots] = {};
+    uint32_t oc = 0u;
+    if (atlas->slots[kFontSans].loaded) {
+        ordered[oc++] = kFontSans;
+    }
+    for (uint16_t s = 3u; s < kMaxFontSlots; ++s) {
+        if (atlas->slots[s].loaded) {
+            ordered[oc++] = s;
+        }
+    }
+    if (atlas->slots[kFontBold].loaded) {
+        ordered[oc++] = kFontBold;
+    }
+    if (atlas->slots[kFontMono].loaded) {
+        ordered[oc++] = kFontMono;
+    }
+    for (uint32_t i = 0u; i < oc; ++i) {
+        atlas->fallback_order[i] = ordered[i];
+    }
+    atlas->fallback_count = oc;
+}
+
+void ensure_bold_loaded(FontAtlas* atlas) noexcept {
+    atlas->bold_probed = true;
+    const char* bold_candidates[] = {
+#if defined(_WIN32)
+        "segoeuib.ttf",
+        "msyhbd.ttc",
+        "arialbd.ttf",
+#elif defined(__APPLE__)
+        "HelveticaNeue.ttc",
+        "PingFang.ttc",
+#else
+        "DejaVuSans-Bold.ttf",
+        "NotoSans-Bold.ttf",
+        "NotoSansCJK-Bold.ttc",
+#endif
+    };
+    for (const char* path : bold_candidates) {
+        if (try_load_system_font(atlas, kFontBold, path)) {
+            break;
+        }
+    }
+
+    rebuild_fallback_order(atlas);
+}
+
+void ensure_mono_loaded(FontAtlas* atlas) noexcept {
+    atlas->mono_probed = true;
+    const char* mono_candidates[] = {
+#if defined(_WIN32)
+        "consola.ttf",
+        "lucon.ttf",
+#elif defined(__APPLE__)
+        "Menlo.ttc",
+        "Monaco.ttf",
+#else
+        "DejaVuSansMono.ttf",
+        "LiberationMono-Regular.ttf",
+#endif
+    };
+    for (const char* path : mono_candidates) {
+        if (try_load_system_font(atlas, kFontMono, path)) {
+            break;
+        }
+    }
+
+    rebuild_fallback_order(atlas);
+}
+
+void ensure_system_fallbacks_loaded(FontAtlas* atlas) noexcept {
+    atlas->fallbacks_probed = true;
+    const char* system_fallbacks[] = {
+#if defined(_WIN32)
+        "msyh.ttc",
+        "seguiemj.ttf",
+        "seguisym.ttf",
+#elif defined(__APPLE__)
+        "PingFang.ttc",
+        "Apple Color Emoji.ttc",
+        "Apple Symbols.ttf",
+#else
+        "NotoSansCJK-Regular.ttc",
+        "NotoColorEmoji.ttf",
+        "NotoSansSymbols-Regular.ttf",
+#endif
+    };
+    for (const char* path : system_fallbacks) {
+        const uint16_t free_slot = resolve_target_font_slot(atlas, kInvalidFont);
+        if (free_slot == kInvalidFont) {
+            break;
+        }
+        try_load_system_font(atlas, free_slot, path);
+    }
+
+    rebuild_fallback_order(atlas);
+}
+
 bool font_atlas_init(FontAtlas* atlas, const char* preferred_font_path) noexcept {
     if (!atlas) {
         return false;
@@ -284,114 +429,22 @@ bool font_atlas_init(FontAtlas* atlas, const char* preferred_font_path) noexcept
     std::memset(atlas->pixels, 255, size_t(kAtlasSize) * kAtlasSize * 4u);
     atlas->dirty = true;
 
-    const char* sans_candidates[] = {
-        preferred_font_path,
+    if (!preferred_font_path || !preferred_font_path[0] ||
+        !try_load_font_file_into_slot(atlas, kFontSans, preferred_font_path)) {
+        const char* sans_candidates[] = {
 #if defined(_WIN32)
-        "C:/Windows/Fonts/segoeui.ttf",
-        "C:/Windows/Fonts/msyh.ttc",
-        "C:/Windows/Fonts/arial.ttf",
+            "segoeui.ttf", "msyh.ttc", "arial.ttf",
 #elif defined(__APPLE__)
-        "/System/Library/Fonts/Helvetica.ttc",
-        "/System/Library/Fonts/PingFang.ttc",
+            "Helvetica.ttc", "PingFang.ttc",
 #else
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
-        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+            "DejaVuSans.ttf", "NotoSans-Regular.ttf", "LiberationSans-Regular.ttf",
 #endif
-    };
-    for (const char* path : sans_candidates) {
-        if (path && path[0] != '\0' && try_load_font_file_into_slot(atlas, kFontSans, path)) {
-            break;
+        };
+        for (const char* filename : sans_candidates) {
+            if (try_load_system_font(atlas, kFontSans, filename)) break;
         }
     }
-
-    // Reserve extra slots after Bold/Mono while registering CJK/Symbol fallbacks right after Sans.
-    const char* bold_candidates[] = {
-#if defined(_WIN32)
-        "C:/Windows/Fonts/segoeuib.ttf",
-        "C:/Windows/Fonts/msyhbd.ttc",
-        "C:/Windows/Fonts/arialbd.ttf",
-#elif defined(__APPLE__)
-        "/System/Library/Fonts/HelveticaNeue.ttc",
-        "/System/Library/Fonts/PingFang.ttc",
-#else
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-        "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
-        "/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc",
-#endif
-    };
-    for (const char* path : bold_candidates) {
-        if (try_load_font_file_into_slot(atlas, kFontBold, path)) {
-            break;
-        }
-    }
-
-    const char* mono_candidates[] = {
-#if defined(_WIN32)
-        "C:/Windows/Fonts/consola.ttf",
-        "C:/Windows/Fonts/lucon.ttf",
-#elif defined(__APPLE__)
-        "/System/Library/Fonts/Menlo.ttc",
-        "/System/Library/Fonts/Monaco.ttf",
-#else
-        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
-#endif
-    };
-    for (const char* path : mono_candidates) {
-        if (try_load_font_file_into_slot(atlas, kFontMono, path)) {
-            break;
-        }
-    }
-
-    const char* system_fallbacks[] = {
-#if defined(_WIN32)
-        "C:/Windows/Fonts/msyh.ttc",
-        "C:/Windows/Fonts/seguiemj.ttf",
-        "C:/Windows/Fonts/seguisym.ttf",
-#elif defined(__APPLE__)
-        "/System/Library/Fonts/PingFang.ttc",
-        "/System/Library/Fonts/Apple Color Emoji.ttc",
-        "/System/Library/Fonts/Apple Symbols.ttf",
-#else
-        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
-        "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",
-        "/usr/share/fonts/truetype/noto/NotoSansSymbols-Regular.ttf",
-#endif
-    };
-    for (const char* path : system_fallbacks) {
-        const uint64_t sh = hash_font_path(path, 0);
-        if (font_has_source_hash(atlas, sh)) {
-            continue;
-        }
-        const uint16_t free_slot = resolve_target_font_slot(atlas, kInvalidFont);
-        if (free_slot == kInvalidFont) {
-            break;
-        }
-        try_load_font_file_into_slot(atlas, free_slot, path);
-    }
-
-    // Prioritize Sans -> CJK/Symbols -> Bold -> Mono when resolving missing glyphs.
-    uint16_t ordered[kMaxFontSlots] = {};
-    uint32_t oc = 0u;
-    if (atlas->slots[kFontSans].loaded) {
-        ordered[oc++] = kFontSans;
-    }
-    for (uint16_t s = 3u; s < kMaxFontSlots; ++s) {
-        if (atlas->slots[s].loaded) {
-            ordered[oc++] = s;
-        }
-    }
-    if (atlas->slots[kFontBold].loaded) {
-        ordered[oc++] = kFontBold;
-    }
-    if (atlas->slots[kFontMono].loaded) {
-        ordered[oc++] = kFontMono;
-    }
-    for (uint32_t i = 0u; i < oc; ++i) {
-        atlas->fallback_order[i] = ordered[i];
-    }
-    atlas->fallback_count = oc;
+    rebuild_fallback_order(atlas);
     return true;
 }
 
@@ -899,6 +952,7 @@ std::span<const ShapedGlyph> shape_directional_run(
     }
 
     has_missing = has_missing || wants_emoji(utf8 + item_start, item_end - item_start);
+    if (has_missing && !ctx->atlas.fallbacks_probed) ensure_system_fallbacks_loaded(&ctx->atlas);
     if (!has_missing || ctx->atlas.fallback_count <= 1u) {
         ShapedGlyph* out = ctx->frame_arena.alloc_uninit<ShapedGlyph>(count);
         if (!out) {
@@ -1211,7 +1265,13 @@ uint16_t load_font_memory(
 }
 
 bool is_font_loaded(const Context* ctx, uint16_t font_id) noexcept {
-    return ctx && font_id < kMaxFontSlots && ctx->atlas.slots[font_id].loaded;
+    if (!ctx || font_id >= kMaxFontSlots) return false;
+    FontAtlas& atlas = const_cast<Context*>(ctx)->atlas;
+    if (font_id == kFontBold && !atlas.slots[kFontBold].loaded && !atlas.bold_probed)
+        ensure_bold_loaded(&atlas);
+    if (font_id == kFontMono && !atlas.slots[kFontMono].loaded && !atlas.mono_probed)
+        ensure_mono_loaded(&atlas);
+    return atlas.slots[font_id].loaded;
 }
 
 // Shared SVG and native path decoder. Caller owns the frame-arena mark.

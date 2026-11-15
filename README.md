@@ -1,0 +1,155 @@
+# Etch v0.5.0
+
+Etch is a Pure-GPU UI Engine for desktop applications on Windows, Linux, and
+macOS. It combines immediate UI construction, Clay layout, Unicode text
+handling, and SDL3 GPU rendering. The sandbox is the regression harness;
+Etch Studio demonstrates docking, tables, trees, and a virtual editor.
+
+## Architecture
+
+- Orthodox C++20, without exceptions or RTTI. The engine compiles as one
+  translation unit, [src/etch_unity.cpp](src/etch_unity.cpp).
+- GPU geometry uses 64-byte, `alignas(16)` `etch::Prim` records. UI geometry
+  and glyphs batch into 1–3 draw calls per window UI pass through
+  [etch_uber.hlsl](shaders/etch_uber.hlsl); [etch_kawase.hlsl](shaders/etch_kawase.hlsl)
+  handles backdrop blur and presentation. Blur adds downsample/upsample passes.
+- HarfBuzz shapes text; [src/etch_slug.cpp](src/etch_slug.cpp) extracts Slug
+  GPU Bezier contours and bands. Scalable glyphs use contours rather than
+  bitmap font atlases. Built-in bold and monospace fonts load on demand.
+- `etch::Arena` supplies frame temporaries with O(1) reset and zero steady-state
+  per-frame heap churn. Initialization and explicit/geometric capacity growth
+  may allocate.
+- Headless contexts defer GPU initialization to `ensure_gpu_device`; CPU
+  layout work needs no GPU. Rendering, texture operations, or requesting the
+  device initialize it lazily.
+- Backend selection order: `ContextDesc::gpu_driver`, `ETCH_GPU_DRIVER`,
+  `SDL_GPU_DRIVER`, then SDL's default. Use `direct3d12` or `vulkan` on Windows,
+  `vulkan` on Linux, and `metal` on macOS.
+
+## Build
+
+Requires CMake 3.24+, a C++20 compiler, Ninja, SDL3 **3.4.0+** (PNG APIs),
+HarfBuzz, and a system font. CMake prefers the local SDL SDK and HarfBuzz
+archive/source tree under `third_party/`, then installed packages. Fresh
+checkouts need system dependencies; local SDK binaries are ignored by Git.
+Checked-in DXIL, SPIR-V, and MSL headers allow builds without shader tools.
+Optional DXC and SDL_shadercross regenerate shaders offline when available.
+
+Windows: run in an **x64 Native Tools Command Prompt for VS 2022** with
+Ninja and vcpkg installed (`VCPKG_ROOT` points to vcpkg):
+
+```bat
+vcpkg install sdl3:x64-windows harfbuzz:x64-windows
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE="%VCPKG_ROOT%/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows -DETCH_BUILD_EXAMPLES=ON -DETCH_BUILD_TESTS=ON
+cmake --build build --parallel
+ctest --test-dir build --output-on-failure
+build\sandbox.exe --headless
+```
+
+MSVC targets use `/W4 /permissive- /GR- /EHs-c- /utf-8`.
+
+Linux (Debian/Ubuntu with SDL3 3.4.0+ packaged):
+
+```sh
+sudo apt-get update
+sudo apt-get install cmake ninja-build pkg-config libsdl3-dev libharfbuzz-dev fonts-dejavu-core
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DETCH_BUILD_EXAMPLES=ON -DETCH_BUILD_TESTS=ON
+cmake --build build --parallel
+ctest --test-dir build --output-on-failure
+ETCH_GPU_DRIVER=vulkan ./build/sandbox --headless
+```
+
+If SDL3 is absent or older, build a compatible SDL3 release with CMake and
+pass its installation prefix using `-DCMAKE_PREFIX_PATH=/path/to/sdl3`.
+The Linux [CI workflow](.github/workflows/ci.yml) includes the source-build path.
+
+macOS:
+
+```sh
+brew install sdl3 harfbuzz ninja
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$(brew --prefix)" -DETCH_BUILD_EXAMPLES=ON -DETCH_BUILD_TESTS=ON
+cmake --build build --parallel
+ctest --test-dir build --output-on-failure
+ETCH_GPU_DRIVER=metal ./build/sandbox --headless
+```
+
+## Verification
+
+CI builds all targets and runs these four CPU suites without requiring a GPU:
+
+```sh
+ctest --test-dir build --output-on-failure -R "^(arena_and_elasticity|unicode_bidi_grapheme|layout_clay_flex_grid|fenwick_virtual_list_1m)$"
+```
+
+Full CTest runs eight suites, including GPU invariants. `--headless` renders
+offscreen and writes `frame_check.png` in the working directory; it still
+requires a supported GPU device/driver. Check the image as well as assertions.
+For Windows backend verification in PowerShell:
+
+```powershell
+$env:ETCH_GPU_DRIVER = 'vulkan'
+ctest --test-dir build --output-on-failure
+.\build\sandbox.exe --headless
+$env:ETCH_GPU_DRIVER = 'direct3d12'
+ctest --test-dir build --output-on-failure
+.\build\sandbox.exe --headless
+Remove-Item Env:ETCH_GPU_DRIVER
+```
+
+## Consume with CMake
+
+Add Etch as a subdirectory and include `<etch/etch.h>`:
+
+```cmake
+cmake_minimum_required(VERSION 3.24)
+project(my_app LANGUAGES CXX)
+add_subdirectory(external/Etch)
+add_executable(my_app main.cpp)
+target_link_libraries(my_app PRIVATE Etch::etch)
+```
+
+`ETCH_BUILD_EXAMPLES` and `ETCH_BUILD_TESTS` default to OFF for subprojects
+(ON at the top level). `ETCH_INSTALL` follows the same default. The target
+exposes the public include directory, SDL3, and C++20; engine internals and
+Orthodox compiler flags remain private.
+
+MSVC consumers on non-UTF-8 system code pages should compile their own sources
+with `target_compile_options(my_app PRIVATE /utf-8)` to read the public header
+without encoding warnings.
+
+Or install the standalone Release build above to a local prefix:
+
+```sh
+cmake --install build --prefix "$PWD/install"
+cmake -S /path/to/consumer -B consumer-build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$PWD/install"
+cmake --build consumer-build --parallel
+```
+
+In Windows PowerShell use `--prefix "$PWD/install"` and
+`-DCMAKE_PREFIX_PATH="$PWD/install"` as well; pass the vcpkg toolchain when
+configuring the consumer. If installation was disabled, reconfigure Etch with
+`-DETCH_INSTALL=ON` first. The consumer's `CMakeLists.txt` uses:
+
+```cmake
+cmake_minimum_required(VERSION 3.24)
+project(my_app LANGUAGES CXX)
+find_package(Etch 0.5 CONFIG REQUIRED)
+add_executable(my_app main.cpp)
+target_link_libraries(my_app PRIVATE Etch::etch)
+```
+
+Keep SDL3 and HarfBuzz discoverable via the dependency package manager or
+`CMAKE_PREFIX_PATH`. The installed package exports `Etch::etch` through
+`EtchConfig.cmake`; version compatibility is within the same minor release.
+
+## License and attribution
+
+Etch is [MIT licensed](LICENSE), Copyright (c) 2026 Etch Contributors.
+See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for bundled dependencies
+and the full license-file references. Include those applicable licenses and
+notices with redistributed software; `cmake --install` currently installs
+the library, headers, and CMake package, so package notices alongside them.
+
+Slug is available under MIT or Apache-2.0. Its README states that the patent
+has been dedicated to the public domain and requires credit for distribution:
+**Slug shader code Copyright 2017 by Eric Lengyel.**

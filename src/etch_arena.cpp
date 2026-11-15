@@ -231,6 +231,9 @@ struct FontAtlas {
     uint32_t          fallback_count = 0;
     uint32_t          font_revision = 1;
     bool              font_valid = false;
+    bool              bold_probed = false;
+    bool              mono_probed = false;
+    bool              fallbacks_probed = false;
 
     VectorIconEntry   icons[kMaxVectorIcons] = {};
 
@@ -792,6 +795,9 @@ struct Context {
     bool          layer_has_bg_prims = false;
 
     // GPU objects
+    char gpu_driver[32] = {};
+    bool enable_gpu_debug = false;
+    bool gpu_init_failed = false;
     SDL_GPUDevice*           device = nullptr;
     SDL_Window*              window = nullptr;
     ClaimedWindowSlot** claimed_windows = nullptr;
@@ -1164,10 +1170,6 @@ void set_current_context(Context* ctx) noexcept {
 
 Arena* frame_arena(Context* ctx) noexcept {
     return ctx ? &ctx->frame_arena : nullptr;
-}
-
-SDL_GPUDevice* gpu_device(Context* ctx) noexcept {
-    return ctx ? ctx->device : nullptr;
 }
 
 std::span<const Prim> frame_prims(const Context* ctx) noexcept {
