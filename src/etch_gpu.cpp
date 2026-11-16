@@ -57,15 +57,15 @@ SDL_GPUGraphicsPipeline* create_graphics_pipeline(
     SDL_GPUShader* vs,
     SDL_GPUShader* ps,
     SDL_GPUTextureFormat target_fmt,
-    bool enable_blend) noexcept
+    bool enable_blend, bool punch = false) noexcept
 {
     SDL_GPUColorTargetBlendState blend = {};
     blend.enable_blend = enable_blend;
     if (enable_blend) {
-        blend.src_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+        blend.src_color_blendfactor = punch ? SDL_GPU_BLENDFACTOR_ZERO : SDL_GPU_BLENDFACTOR_ONE;
         blend.dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
         blend.color_blend_op = SDL_GPU_BLENDOP_ADD;
-        blend.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+        blend.src_alpha_blendfactor = punch ? SDL_GPU_BLENDFACTOR_ZERO : SDL_GPU_BLENDFACTOR_ONE;
         blend.dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
         blend.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
     }
@@ -106,7 +106,7 @@ SDL_GPUGraphicsPipeline* get_or_create_cached_pipeline(
     SDL_GPUTextureFormat target_fmt,
     bool enable_blend,
     CachedPipeline* cache,
-    uint32_t* count) noexcept
+    uint32_t* count, bool punch = false) noexcept
 {
     if (!device || !vs || !ps || target_fmt == SDL_GPU_TEXTUREFORMAT_INVALID) {
         return nullptr;
@@ -119,7 +119,7 @@ SDL_GPUGraphicsPipeline* get_or_create_cached_pipeline(
     if (*count >= kMaxCachedPipelines) {
         return nullptr;
     }
-    SDL_GPUGraphicsPipeline* pipe = create_graphics_pipeline(device, vs, ps, target_fmt, enable_blend);
+    SDL_GPUGraphicsPipeline* pipe = create_graphics_pipeline(device, vs, ps, target_fmt, enable_blend,punch);
     if (!pipe) {
         return nullptr;
     }
@@ -142,6 +142,11 @@ SDL_GPUGraphicsPipeline* get_or_create_pipeline(Context* ctx, SDL_GPUTextureForm
         true,
         ctx->pipelines,
         &ctx->pipeline_count);
+}
+
+SDL_GPUGraphicsPipeline* get_or_create_punch_pipeline(Context* ctx, SDL_GPUTextureFormat format) noexcept {
+    return get_or_create_cached_pipeline(ctx->device,ctx->vs_shader,ctx->ps_shader,format,true,
+        ctx->punch_pipelines,&ctx->punch_pipeline_count,true);
 }
 
 SDL_GPUGraphicsPipeline* get_or_create_present_pipeline(Context* ctx, SDL_GPUTextureFormat target_fmt) noexcept {
@@ -366,6 +371,7 @@ void emit_uber_batches(
     }
 
     SDL_BindGPUGraphicsPipeline(render_pass, pipeline);
+    bool punch_bound=false;
 
     const SDL_GPUViewport viewport = {
         .x = 0.0f,
@@ -402,6 +408,10 @@ void emit_uber_batches(
             continue;
         }
 
+        if(batch.is_punch_hole!=punch_bound) {
+            SDL_BindGPUGraphicsPipeline(render_pass,batch.is_punch_hole ? get_or_create_punch_pipeline(ctx,target_fmt) : pipeline);
+            punch_bound=batch.is_punch_hole;
+        }
         auto resolve_tex = [&](SDL_GPUTexture* t) noexcept -> SDL_GPUTexture* {
             if (t == sentinel) {
                 return ctx->active_ui->blur_ping_tex ? ctx->active_ui->blur_ping_tex : ctx->atlas.gpu_tex;
@@ -628,6 +638,9 @@ bool record_frame_commands(
         return false;
     }
 
+    for(uint32_t i=0;i<ctx->batch_count;++i) {
+        if(ctx->batches[i].is_punch_hole && !get_or_create_punch_pipeline(ctx,target_fmt)) return false;
+    }
     const bool slug_curves_pending = ctx->atlas.uploaded_slug_curves < ctx->atlas.slug_curve_count;
     const bool slug_bands_pending = ctx->atlas.uploaded_slug_bands < ctx->atlas.slug_band_count;
     if (slug_curves_pending &&
@@ -996,6 +1009,11 @@ bool ensure_gpu_device(Context* ctx) noexcept {
     if (driver && !driver[0]) driver = nullptr;
 
     const auto fail = [&]() noexcept -> bool {
+        for(uint32_t i=0;i<ctx->punch_pipeline_count;++i) {
+            SDL_ReleaseGPUGraphicsPipeline(ctx->device,ctx->punch_pipelines[i].pipeline);
+            ctx->punch_pipelines[i]={};
+        }
+        ctx->punch_pipeline_count=0;
         for (uint32_t i = 0u; i < ctx->pipeline_count; ++i) {
             SDL_ReleaseGPUGraphicsPipeline(ctx->device, ctx->pipelines[i].pipeline);
             ctx->pipelines[i] = {};
@@ -1395,6 +1413,11 @@ void destroy_context(Context* ctx) noexcept {
         if (ctx->claimed_windows[i]) release_window(ctx, ctx->claimed_windows[i]->window);
     ctx->active_ui = &ctx->headless_ui;
     if (ctx->device) {
+        for(uint32_t i=0;i<ctx->punch_pipeline_count;++i) {
+            SDL_ReleaseGPUGraphicsPipeline(ctx->device,ctx->punch_pipelines[i].pipeline);
+            ctx->punch_pipelines[i]={};
+        }
+        ctx->punch_pipeline_count=0;
         for (uint32_t i = 0u; i < ctx->pipeline_count; ++i) {
             if (ctx->pipelines[i].pipeline) {
                 SDL_ReleaseGPUGraphicsPipeline(ctx->device, ctx->pipelines[i].pipeline);
@@ -1630,7 +1653,7 @@ bool upload_rgba_rows(
     uint32_t height,
     const void* rgba_pixels,
     uint32_t row_pitch_bytes,
-    bool cycle) noexcept
+    bool cycle, uint32_t dst_x = 0, uint32_t dst_y = 0) noexcept
 {
     const uint32_t tight_pitch = width * 4u;
     const uint32_t src_pitch = (row_pitch_bytes != 0u) ? row_pitch_bytes : tight_pitch;
@@ -1677,8 +1700,8 @@ bool upload_rgba_rows(
         .texture = texture,
         .mip_level = 0u,
         .layer = 0u,
-        .x = 0u,
-        .y = 0u,
+        .x = dst_x,
+        .y = dst_y,
         .z = 0u,
         .w = width,
         .h = height,
@@ -1797,6 +1820,16 @@ bool update_texture_rgba(
         return false;
     }
     return upload_rgba_rows(ctx, texture, width, height, rgba_pixels, row_pitch_bytes, true);
+}
+
+bool update_texture_region_rgba(Context* ctx, SDL_GPUTexture* texture,
+    uint32_t x, uint32_t y, uint32_t width, uint32_t height,
+    const void* rgba_pixels, uint32_t row_pitch_bytes) noexcept {
+    if(!ctx || !ctx->device || !texture || !rgba_pixels || !width || !height ||
+       x>=16384 || y>=16384 || width>16384-x || height>16384-y ||
+       (row_pitch_bytes && row_pitch_bytes<width*4)) return false;
+    // Cycling the destination would discard pixels outside this rectangle.
+    return upload_rgba_rows(ctx,texture,width,height,rgba_pixels,row_pitch_bytes,false,x,y);
 }
 
 LoadedTexture load_texture_file(Context* ctx, const char* path, bool srgb) noexcept {

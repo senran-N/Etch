@@ -148,7 +148,7 @@ void end_frame(Context* ctx_arg) noexcept {
                             const bool box_clips =
                                 extra->desc.clip_children || extra->desc.scroll_x || extra->desc.scroll_y || extra->desc.shrink_width || extra->desc.shrink_height || extra->is_canvas;
                             if (box_clips) {
-                                draw_clip=make_box_clip(ctx,cur_clip,box_px,scale_corners(extra->desc.radius,dpi),extra->desc.continuous_corners);
+                                draw_clip=make_box_clip(ctx,cur_clip,box_px,scale_corners(extra->desc.radius,dpi),extra->desc.continuous_corners,box_scroll_fade(ctx,extra,dpi));
                             }
                             emit_draw_list_command(ctx, extra->draw_head, raw_box_px, draw_clip, dpi);
                         }
@@ -204,7 +204,8 @@ void end_frame(Context* ctx_arg) noexcept {
                     }
                 }
                 if (clip_stack.depth < kMaxClipDepth) {
-                    clip_stack.entries[clip_stack.depth]=extra ? make_box_clip(ctx,cur_clip,box_px,scale_corners(extra->desc.radius,dpi),extra->desc.continuous_corners)
+                    const Vec4 fade=extra ? box_scroll_fade(ctx,extra,dpi) : Vec4{};
+                    clip_stack.entries[clip_stack.depth]=extra ? make_box_clip(ctx,cur_clip,box_px,scale_corners(extra->desc.radius,dpi),extra->desc.continuous_corners,fade)
                         : ClipEntry{rect_intersect(cur_clip.rect,box_px),cur_clip.radius,cur_clip.shape,cur_clip.indexed};
                     if(extra && extra->is_canvas) {
                         ctx->active_ui->last_canvas_clip_px=clip_stack.entries[clip_stack.depth].rect;
@@ -233,6 +234,11 @@ void end_frame(Context* ctx_arg) noexcept {
                 const bool any_clip = d.clip_children || is_scroll || d.shrink_width || d.shrink_height;
 
                 if ((d.scroll_x || d.scroll_y || extra->is_virtual_list) && d.show_scrollbar && d.id != 0u) {
+                    // Retain the container's geometry and ancestor masks, excluding its content fade.
+                    const ClipEntry& parent_clip=clip_stack.depth>1u ? clip_stack.entries[clip_stack.depth-2u] : cur_clip;
+                    const ClipEntry scrollbar_clip=d.scroll_fade_px>0
+                        ? make_box_clip(ctx,parent_clip,box_px,scale_corners(d.radius,dpi),d.continuous_corners) : cur_clip;
+                    ctx->render_clip_index=scrollbar_clip.indexed ? scrollbar_clip.shape : 0;
                     if (const WidgetState* ws = state_map_find(&ctx->active_ui->states, d.id)) {
                         for(uint32_t axis=0;axis<2;++axis) {
                         const ScrollbarGeom sb = axis ? compute_hscrollbar_geom(ws) : compute_vscrollbar_geom(ws);
@@ -251,29 +257,34 @@ void end_frame(Context* ctx_arg) noexcept {
                                 ctx,
                                 Prim::make_rect(
                                     track_px,
-                                    cur_clip.rect,
+                                    scrollbar_clip.rect,
                                     track_col,
                                     Corners::all(0.5f * std::fmin(track_px.w,track_px.h)),
                                     {},
                                     0.0f,
                                     1.0f,
-                                    cur_clip.radius));
+                                    scrollbar_clip.radius));
                             push_prim(
                                 ctx,
                                 Prim::make_rect(
                                     thumb_px,
-                                    cur_clip.rect,
+                                    scrollbar_clip.rect,
                                     thumb_col,
                                     Corners::all(0.5f * std::fmin(thumb_px.w,thumb_px.h)),
                                     {},
                                     0.0f,
                                     1.0f,
-                                    cur_clip.radius));
+                                    scrollbar_clip.radius));
                         }
                         }
                     }
                 }
 
+                if(d.border_beam.color.a>0 || d.border_beam.base_color.a>0 || d.top_rim_alpha>0) {
+                    const ClipEntry& parent=any_clip && clip_stack.depth>1u ? clip_stack.entries[clip_stack.depth-2u] : cur_clip;
+                    ctx->render_clip_index=parent.indexed ? parent.shape : 0;
+                    emit_border_beam(ctx,box_px,parent,scale_corners(d.radius,dpi),d.border_beam,d.top_rim_alpha,d.continuous_corners,dpi);
+                }
                 if (any_clip && d.border_width > 0.0f && d.border_color.a > 0u) {
                     // Clip against parent container (below our own SCISSOR_START) so border AA edge isn't halved.
                     const ClipEntry& parent_clip = (clip_stack.depth > 1u)

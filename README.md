@@ -1,4 +1,4 @@
-# Etch v0.14.0
+# Etch v0.15.0
 
 Etch is a Pure-GPU UI Engine for desktop applications on Windows, Linux, and
 macOS. It combines immediate UI construction, Clay layout, Unicode text
@@ -277,3 +277,33 @@ parents. Visual transforms preserve layout geometry; interaction coordinates rem
 in layout space. `set_time_scale(ctx, 0)` pauses springs; F10 switches between 1x
 and 0.2x while the F12 HUD is open. Windows reduced-motion preferences settle
 springs immediately when `respect_reduced_motion` is enabled.
+
+### Mesh gradients, border beams and scroll fades
+
+`draw_mesh_rect` blends four corner colors in Oklab (or linear RGB with
+`oklab=false`), with optional sRGB grain and an explicit warp phase.
+`draw_border_beam` paints a conic beam and glow along rounded or
+continuous corners. Set `BoxDesc::border_beam` and `top_rim_alpha` for the same
+effect after a box's children. `angle_rad` sets a stationary angle; enabling
+`beam_active` advances it at `speed` radians per second. `symmetric_dual` adds an
+opposite beam; `base_color` supplies the unswept border. Animated beams honor time
+scaling and reduced motion, and stationary beams let the frame sleep.
+
+`scroll_fade_px` on boxes, virtual lists, tables and code editors masks scrollable
+content edges through the indexed clip buffer. The top/left mask disappears at
+scroll zero and the bottom/right mask disappears at the end; backgrounds and
+scrollbars retain their opacity. The fade uses a smoothstep ramp in logical
+pixels and adds no draw calls.
+
+`punch_hole` erases previously drawn color and alpha inside a rounded shape.
+Draw overlays afterward to keep them above the transparent opening. Hole runs
+use a lazily created destination-erase pipeline; normal/hole/normal ordering
+uses three draws, while frames without holes retain the normal batch path.
+`softness` is a physical-pixel feather width, including the outer half of the
+edge. All these APIs have C99 equivalents.
+
+`update_texture_region_rgba` queues an RGBA8 mip-zero subregion without cycling
+the destination, preserving surrounding texels. The caller supplies a region
+inside the texture and a byte row pitch (zero means tightly packed); source
+pixels may be reused immediately after the call. `flush_texture_uploads` submits
+queued uploads for consumers outside Etch's frame rendering.

@@ -609,19 +609,21 @@ Rect snap_pixel_rect(Rect r) noexcept {
     return w > 0 && h > 0 ? Rect{x, y, w, h} : r;
 }
 
-ClipEntry make_box_clip(Context* ctx,const ClipEntry& parent,Rect bounds,Corners radii,bool continuous) noexcept {
+ClipEntry make_box_clip(Context* ctx,const ClipEntry& parent,Rect bounds,Corners radii,bool continuous,Vec4 fade = {}) noexcept {
     if(const auto* layer=ctx->active_render_layer) {
         resolve_layer_chain(ctx,layer,ctx->active_ui->dpi_scale);
         const auto scale=layer->resolved_scale,offset=layer->resolved_offset_px;
         bounds={bounds.x*scale.x+offset.x,bounds.y*scale.y+offset.y,bounds.w*scale.x,bounds.h*scale.y};
         const float k=.5f*(scale.x+scale.y);
         radii={radii.tl*k,radii.tr*k,radii.br*k,radii.bl*k};
+        fade={fade.x*scale.y,fade.y*scale.y,fade.z*scale.x,fade.w*scale.x};
     }
 
+    fade={fade.x>.25f ? fade.x : 0,fade.y>.25f ? fade.y : 0,fade.z>.25f ? fade.z : 0,fade.w>.25f ? fade.w : 0};
     ClipEntry result={rect_intersect(parent.rect,bounds),0,parent.shape,parent.indexed || parent.shape!=0};
     const float radius=min4f(radii.tl,radii.tr,radii.br,radii.bl);
     result.radius=continuous ? -radius : radius;
-    if(radii.tl==0 && radii.tr==0 && radii.br==0 && radii.bl==0) {
+    if(radii.tl==0 && radii.tr==0 && radii.br==0 && radii.bl==0 && fade.x==0 && fade.y==0 && fade.z==0 && fade.w==0) {
         if(result.rect.x==parent.rect.x && result.rect.y==parent.rect.y && result.rect.w==parent.rect.w && result.rect.h==parent.rect.h) result.radius=parent.radius;
         return result;
     }
@@ -633,10 +635,31 @@ ClipEntry make_box_clip(Context* ctx,const ClipEntry& parent,Rect bounds,Corners
         ctx->clip_shapes=grown;ctx->clip_shape_capacity=capacity;ctx->clip_shapes[0]={};
     }
     const uint32_t index=ctx->clip_shape_count++;
-    ctx->clip_shapes[index]={{bounds.x,bounds.y,bounds.w,bounds.h},{radii.tl,radii.tr,radii.br,radii.bl},{parent.shape,continuous ? 1u : 0u,0,0}};
+    ctx->clip_shapes[index]={{bounds.x,bounds.y,bounds.w,bounds.h},{radii.tl,radii.tr,radii.br,radii.bl},
+        {parent.shape,continuous ? 1u : 0u,pack_f16x2(fade.x,fade.y),pack_f16x2(fade.z,fade.w)}};
     result.shape=index;
-    result.indexed=parent.shape!=0 || radii.tl!=radii.tr || radii.tr!=radii.br || radii.br!=radii.bl;
+    result.indexed=parent.shape!=0 || radii.tl!=radii.tr || radii.tr!=radii.br || radii.br!=radii.bl || fade.x>0 || fade.y>0 || fade.z>0 || fade.w>0;
     return result;
+}
+
+Vec4 box_scroll_fade(Context* ctx,const BoxExtra* extra,float dpi) noexcept {
+    if(extra->desc.scroll_fade_px<=0 || !extra->desc.id) return {};
+    const auto* ws=state_map_find(&ctx->active_ui->states,extra->desc.id);
+    if(!ws) return {};
+    const double pos=extra->is_virtual_list ? ws->vscroll_pos_y : ws->scroll_pos.y;
+    double max=extra->is_virtual_list ? ws->vscroll_max_y : ws->scroll_max.y;
+    float max_x=ws->scroll_max.x;
+    if((extra->desc.scroll_y || extra->desc.scroll_x) && !extra->is_virtual_list) {
+        const auto sc=Clay_GetScrollContainerData(make_clay_id(extra->desc.id));
+        if(sc.found) {
+            max=std::fmax(0.0f,sc.contentDimensions.height-sc.scrollContainerDimensions.height);
+            max_x=std::fmax(0.0f,sc.contentDimensions.width-sc.scrollContainerDimensions.width);
+        }
+    }
+    return {extra->is_virtual_list || extra->desc.scroll_y ? float(std::fmin(extra->desc.scroll_fade_px,pos))*dpi : 0,
+        extra->is_virtual_list || extra->desc.scroll_y ? float(std::fmin(extra->desc.scroll_fade_px,std::fmax(0.0,max-pos)))*dpi : 0,
+        extra->desc.scroll_x ? std::fmin(extra->desc.scroll_fade_px,ws->scroll_pos.x)*dpi : 0,
+        extra->desc.scroll_x ? std::fmin(extra->desc.scroll_fade_px,std::fmax(0.f,max_x-ws->scroll_pos.x))*dpi : 0};
 }
 
 void push_prim(
@@ -663,9 +686,14 @@ void push_prim(
         const auto fade=[&](uint32_t c) noexcept {return (c&0xFFFFFFu) | (uint32_t(float(c>>24)*layer->resolved_opacity+.5f)<<24);};
         const PrimKind kind=static_cast<PrimKind>(prim.style.x&15u);
         if(kind==PrimKind::BlurGlass) prim.payload.x=std::bit_cast<uint32_t>(1.f-layer->resolved_opacity);
+        else if(kind==PrimKind::BorderBeam) {
+            prim.style.y=fade(prim.style.y);prim.style.z=fade(prim.style.z);
+            prim.style.w=(prim.style.w&0xFFFF0000u)|pack_f16(unpack_f16_cpu(uint16_t(prim.style.w))*layer->resolved_opacity);
+        }
         else prim.style.y=fade(prim.style.y);
-        if(kind==PrimKind::Rect || kind==PrimKind::RotatedRect || kind==PrimKind::BezierWire || kind==PrimKind::RingArc || kind==PrimKind::Texture || kind==PrimKind::BlurGlass || kind==PrimKind::CanvasGrid) prim.style.z=fade(prim.style.z);
+        if(kind==PrimKind::Rect || kind==PrimKind::RotatedRect || kind==PrimKind::BezierWire || kind==PrimKind::RingArc || kind==PrimKind::Texture || kind==PrimKind::BlurGlass || kind==PrimKind::CanvasGrid || kind==PrimKind::MeshGrad) prim.style.z=fade(prim.style.z);
         if(kind==PrimKind::BezierWire || kind==PrimKind::RingArc) prim.payload.w=fade(prim.payload.w);
+        if(kind==PrimKind::MeshGrad) {prim.payload.x=fade(prim.payload.x);prim.payload.y=fade(prim.payload.y);}
         if(kind==PrimKind::SlugFill) prim.payload.z=fade(prim.payload.z);
         if((kind==PrimKind::Rect || kind==PrimKind::RotatedRect) && (prim.style.x & ((PrimFlag_LinearGrad|PrimFlag_RadialGrad)<<4))) prim.payload.x=fade(prim.payload.x);
         const float metric_scale=.5f*(scale.x+scale.y);
@@ -674,7 +702,8 @@ void push_prim(
         };
         if(kind==PrimKind::BezierWire || kind==PrimKind::RingArc || kind==PrimKind::Shadow) prim.style.w=scaled_pair(prim.style.w);
         if(kind==PrimKind::RingArc) prim.payload.z=scaled_pair(prim.payload.z);
-        if(kind==PrimKind::Rect || kind==PrimKind::RotatedRect || kind==PrimKind::Shadow || kind==PrimKind::Texture || kind==PrimKind::BlurGlass) {
+        if(kind==PrimKind::BorderBeam) prim.payload.y=scaled_pair(prim.payload.y);
+        if(kind==PrimKind::Rect || kind==PrimKind::RotatedRect || kind==PrimKind::Shadow || kind==PrimKind::Texture || kind==PrimKind::BlurGlass || kind==PrimKind::MeshGrad || kind==PrimKind::PunchHole || kind==PrimKind::BorderBeam) {
             const float k=.5f*(scale.x+scale.y);
             const auto scale_pair=[k](uint32_t pair) noexcept {return pack_f16x2(unpack_f16_cpu(uint16_t(pair))*k,unpack_f16_cpu(uint16_t(pair>>16))*k);};
             prim.payload.z=scale_pair(prim.payload.z);prim.payload.w=scale_pair(prim.payload.w);
@@ -705,6 +734,9 @@ void push_prim(
     float min_x = prim.bounds.x, min_y = prim.bounds.y;
     float max_x = min_x + prim.bounds.z, max_y = min_y + prim.bounds.w;
     const PrimKind kind = static_cast<PrimKind>(prim.style.x & 15u);
+    if(kind==PrimKind::BorderBeam) cull_pad_px=std::fmax(std::fmax(unpack_f16_cpu(uint16_t(prim.payload.y>>16)),1.f)+2,
+        unpack_f16_cpu(uint16_t(prim.style.w>>16))*.5f+1);
+    if(kind==PrimKind::PunchHole) cull_pad_px=std::fmax(cull_pad_px,unpack_f16_cpu(uint16_t(prim.style.w>>16))*.5f+1);
     if (kind == PrimKind::RotatedRect || (kind == PrimKind::SlugGlyph && prim.payload.z != 0u)) {
         const float angle = kind == PrimKind::RotatedRect
             ? unpack_f16_cpu(static_cast<uint16_t>(prim.style.w >> 16))
@@ -729,6 +761,13 @@ void push_prim(
     }
 
     DrawBatch* cur = &ctx->batches[ctx->batch_count - 1u];
+    const bool hole=(prim.style.x&15u)==uint32_t(PrimKind::PunchHole);
+    if(cur->is_punch_hole!=hole && cur->prim_count) {
+        if(!ensure_batch_cap(ctx)) return;
+        cur=&ctx->batches[ctx->batch_count++];
+        *cur={.first_prim=ctx->prim_count};
+    }
+    cur->is_punch_hole=hole;
     uint16_t tex_slot = 0u;
 
     if (ext_tex != nullptr) {
@@ -851,6 +890,25 @@ void align_border_bounds(Rect* bounds,Corners* corners,float width,BorderAlign a
 Prim continuous_prim(Prim prim, bool enabled) noexcept {
     if (enabled) prim.style.x |= uint32_t(PrimFlag_Continuous) << 4;
     return prim;
+}
+
+BorderBeamStyle valid_border_beam(BorderBeamStyle s) noexcept {
+    if(!std::isfinite(s.width) || s.width<0) s.width=1.5f;
+    if(!std::isfinite(s.angle_rad)) s.angle_rad=0;
+    if(!std::isfinite(s.sweep_fraction) || s.sweep_fraction<=.02f || s.sweep_fraction>1) s.sweep_fraction=.25f;
+    if(!std::isfinite(s.glow_px) || s.glow_px<0) s.glow_px=0;
+    if(!std::isfinite(s.speed)) s.speed=0;
+    if(!std::isfinite(s.softness) || s.softness<.5f) s.softness=1;
+    return s;
+}
+
+void emit_border_beam(Context* ctx,Rect bounds,const ClipEntry& clip,Corners radius,
+    const BorderBeamStyle& beam,float rim,bool continuous,float scale) noexcept {
+    float angle=beam.angle_rad;
+    if(beam.beam_active && !ctx->reduced_motion) angle+=ctx->active_ui->elapsed_seconds*beam.speed;
+    angle=std::fmod(angle,6.283185307f);
+    push_prim(ctx,Prim::make_border_beam(bounds,clip.rect,beam.color,beam.base_color,radius,
+        beam.width*scale,angle,beam.sweep_fraction,beam.glow_px*scale,rim,beam.softness,beam.symmetric_dual,continuous,clip.radius));
 }
 
 void emit_box_background_and_shadow(

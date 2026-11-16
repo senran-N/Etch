@@ -4,6 +4,16 @@ All notable changes to Etch are documented here. This file follows
 [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.0] - 2026-11-17
+
+### Added
+- Four-corner Oklab/linear mesh gradients with optional grain and warp phase.
+- Rounded and continuous-corner conic border beams, glow and box top rims; animated beams honor reduced motion and time scaling.
+- Ordered alpha punch holes with lazy destination-erase pipelines and complete feathered edges.
+- Scroll-edge smoothstep masks through indexed clip chains for boxes, virtual lists, tables and code editors.
+- Queued RGBA8 texture subregion uploads preserving pixels outside each rectangle.
+- C99 descriptors and APIs for every feature, pixel regressions and installed/subproject consumer coverage.
+
 ## [0.14.0] - 2026-11-17
 
 ### Added

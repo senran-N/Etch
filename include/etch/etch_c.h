@@ -8,7 +8,7 @@
 
 #ifndef ETCH_VERSION_MAJOR
 #define ETCH_VERSION_MAJOR 0
-#define ETCH_VERSION_MINOR 14
+#define ETCH_VERSION_MINOR 15
 #define ETCH_VERSION_PATCH 0
 #define ETCH_VERSION_STR_DETAIL(x) #x
 #define ETCH_VERSION_STR(x) ETCH_VERSION_STR_DETAIL(x)
@@ -88,7 +88,10 @@ typedef enum EtchPrimKind {
     ETCH_PRIM_BEZIER_WIRE = 7,
     ETCH_PRIM_RING_ARC = 8,
     ETCH_PRIM_SLUG_FILL = 9,
-    ETCH_PRIM_ROTATED_RECT = 10
+    ETCH_PRIM_ROTATED_RECT = 10,
+    ETCH_PRIM_MESH_GRAD = 11,
+    ETCH_PRIM_BORDER_BEAM = 12,
+    ETCH_PRIM_PUNCH_HOLE = 13
 } EtchPrimKind;
 
 typedef enum EtchPrimFlags {
@@ -772,6 +775,13 @@ typedef struct EtchFrameStats {
 
 typedef enum EtchBorderAlign { ETCH_BORDER_INSIDE=0, ETCH_BORDER_CENTER=1, ETCH_BORDER_OUTSIDE=2 } EtchBorderAlign;
 
+typedef struct EtchBorderBeamStyle {
+    EtchColor color, base_color;
+    float width, angle_rad, sweep_fraction, glow_px, speed, softness;
+    bool beam_active, symmetric_dual;
+} EtchBorderBeamStyle;
+EtchBorderBeamStyle etch_border_beam_style_default(void);
+
 typedef struct EtchBoxDesc {
     uint32_t id;
     EtchAxis axis;
@@ -825,6 +835,9 @@ typedef struct EtchBoxDesc {
     bool animate_layout;
     uint32_t hero_id;
     EtchSpringSpec transition;
+    EtchBorderBeamStyle border_beam;
+    float top_rim_alpha;
+    float scroll_fade_px;
 } EtchBoxDesc;
 
 typedef struct EtchTextDesc {
@@ -940,6 +953,36 @@ typedef struct EtchRectDrawDesc {
     bool continuous_corners;
     EtchBorderAlign border_align;
 } EtchRectDrawDesc;
+
+typedef struct EtchMeshRectDrawDesc {
+    EtchRect rect;
+    EtchColor color_tl, color_tr, color_br, color_bl;
+    EtchCorners radius;
+    bool oklab;
+    float grain_intensity, warp_phase;
+    bool continuous_corners, foreground;
+} EtchMeshRectDrawDesc;
+EtchMeshRectDrawDesc etch_mesh_rect_draw_desc_default(void);
+void etch_draw_mesh_rect(const EtchMeshRectDrawDesc* desc);
+
+typedef struct EtchPunchHoleDesc {
+    EtchRect rect;
+    EtchCorners radius;
+    float softness;
+    bool continuous_corners, foreground;
+} EtchPunchHoleDesc;
+EtchPunchHoleDesc etch_punch_hole_desc_default(void);
+void etch_punch_hole(const EtchPunchHoleDesc* desc);
+
+typedef struct EtchBorderBeamDrawDesc {
+    EtchRect rect;
+    EtchCorners radius;
+    EtchBorderBeamStyle beam;
+    float top_rim_alpha;
+    bool continuous_corners, foreground;
+} EtchBorderBeamDrawDesc;
+EtchBorderBeamDrawDesc etch_border_beam_draw_desc_default(void);
+void etch_draw_border_beam(const EtchBorderBeamDrawDesc* desc);
 
 typedef struct EtchLineDesc {
     EtchVec2 from;
@@ -1154,6 +1197,7 @@ typedef struct EtchCodeEditorDesc {
     float border_width;
     float focus_border_width;
     EtchCorners radius;
+    float scroll_fade_px;
 } EtchCodeEditorDesc;
 
 typedef struct EtchCodeEditorResult {
@@ -1438,6 +1482,7 @@ typedef struct EtchVirtualListDesc {
     EtchVirtualItemHeightFn measure_height_fn;
     void* measure_user_data;
     bool variable_height;
+    float scroll_fade_px;
 } EtchVirtualListDesc;
 
 typedef struct EtchVirtualListSlice {
@@ -1521,6 +1566,7 @@ typedef struct EtchTableDesc {
     EtchColor selected_row_color;
     bool horizontal_scroll, keyboard_navigation;
     EtchTableSelection selection;
+    float scroll_fade_px;
 } EtchTableDesc;
 
 typedef struct EtchTableResult {
@@ -1848,6 +1894,8 @@ uint32_t etch_sprite_count(const EtchContext* ctx);
 EtchLoadedTexture etch_create_texture_rgba(EtchContext* ctx, const EtchTextureDesc* desc);
 bool etch_flush_texture_uploads(EtchContext* ctx);
 bool etch_update_texture_rgba(EtchContext* ctx, struct SDL_GPUTexture* texture, uint32_t width, uint32_t height, const void* rgba_pixels, uint32_t row_pitch_bytes);
+/* Caller owns an RGBA8 texture; the rectangle must fit mip zero. Pixels are copied immediately. */
+bool etch_update_texture_region_rgba(EtchContext* ctx, struct SDL_GPUTexture* texture, uint32_t x, uint32_t y, uint32_t width, uint32_t height, const void* rgba_pixels, uint32_t row_pitch_bytes);
 EtchLoadedTexture etch_load_texture_file(EtchContext* ctx, const char* path, bool srgb);
 EtchLoadedTexture etch_load_texture_memory(EtchContext* ctx, const void* data, size_t size_bytes, bool srgb);
 void etch_destroy_loaded_texture(EtchContext* ctx, EtchLoadedTexture* tex);

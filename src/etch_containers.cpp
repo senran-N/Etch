@@ -541,6 +541,7 @@ VirtualListSlice begin_virtual_list_with_c_measure(const VirtualListDesc& desc, 
             .radius = eff_radius,
             .clip_children = true,
             .show_scrollbar = desc.show_scrollbar,
+            .scroll_fade_px = std::isfinite(desc.scroll_fade_px) && desc.scroll_fade_px>0 ? desc.scroll_fade_px*current_world_scale(ctx) : 0,
         };
     }
 
@@ -1523,7 +1524,7 @@ TableResult begin_table(const TableDesc& desc_in) noexcept {
     begin_box({ .axis = Axis::Col, .width = Sizing::grow(content_min), .height = Sizing::grow(), .shrink_width = true, .shrink_height=true });
     result.slice = begin_virtual_list({ .id = desc.id, .item_count = desc.item_count, .item_height_px = desc.row_height_px,
         .row_gap_px = desc.row_gap_px, .overscan_rows = desc.overscan_rows, .width = Sizing::grow(), .height = Sizing::grow(),
-        .padding = desc.padding, .background = Color::transparent(), .border_width = 0, .show_scrollbar = desc.show_scrollbar });
+        .padding = desc.padding, .background = Color::transparent(), .border_width = 0, .show_scrollbar = desc.show_scrollbar, .scroll_fade_px=desc.scroll_fade_px });
     Clay__GetOpenLayoutElement()->config.layout.shrinkWidth = true;
     // The list viewport must shrink inside the clipped table body. Its rows
     // describe scrollable content, not a minimum height for the table.

@@ -495,6 +495,7 @@ CodeEditorResult code_editor(const CodeEditorDesc& input) noexcept {
     if (!ctx || !ctx->in_frame || !input.id || !input.buffer || !input.buffer->data) return {};
     const Theme& thm = active_theme(ctx);
     CodeEditorDesc d = input;
+    d.scroll_fade_px=std::isfinite(d.scroll_fade_px) && d.scroll_fade_px>0 ? d.scroll_fade_px : 0;
     d.tab_width = d.tab_width ? d.tab_width : 4u;
     d.tab_width = d.tab_width > 32u ? 32u : d.tab_width;
     d.font_size_px = d.font_size_px > 0.0f ? d.font_size_px : 14.0f;
@@ -1225,6 +1226,14 @@ void emit_code_editor_command(Context* ctx, const CodeEditorExtra* e, Clay_Bound
     };
     push_prim(ctx, Prim::make_rect({ box.x * dpi, box.y * dpi, box.w * dpi, box.h * dpi }, outer.rect, d.background, scale_corners(d.radius, dpi), e->focused ? d.focus_border_color : d.border_color, (e->focused ? d.focus_border_width : d.border_width) * dpi));
     rect({ box.x + 1.0f, box.y + 1.0f, e->gutter, box.h - 2.0f }, d.gutter_background);
+    const uint32_t outer_clip_index=ctx->render_clip_index;
+    if(d.scroll_fade_px>0) {
+        const Vec4 fade={float(std::fmin(d.scroll_fade_px,e->scroll))*dpi,
+            float(std::fmin(d.scroll_fade_px,std::fmax(0.0,ws->vscroll_max_y-e->scroll)))*dpi,0,0};
+        const ClipEntry content_clip=make_box_clip(ctx,outer,
+            {box.x*dpi,(box.y+d.padding.top)*dpi,box.w*dpi,std::fmax(0.f,box.h-d.padding.top-d.padding.bottom)*dpi},{},false,fade);
+        ctx->render_clip_index=content_clip.indexed ? content_clip.shape : outer_clip_index;
+    }
     const float ox = box.x + d.padding.left + e->gutter;
     const float oy = box.y + d.padding.top;
     const ClipEntry clip = { rect_intersect(outer.rect, layer_rect(ctx,{ ox * dpi, oy * dpi, std::fmax(0.0f, box.w - e->gutter - d.padding.left - d.padding.right - 14.0f) * dpi, std::fmax(0.0f, box.h - d.padding.top - d.padding.bottom) * dpi })), 0.0f };
@@ -1462,6 +1471,7 @@ void emit_code_editor_command(Context* ctx, const CodeEditorExtra* e, Clay_Bound
     ctx->theme_depth = prev_td;
     ctx->theme_overflow = prev_to;
     set_current_context(prev_cur);
+    ctx->render_clip_index=outer_clip_index;
     if (d.show_scrollbar) {
         const ScrollbarGeom sb = compute_vscrollbar_geom(ws);
         if (sb.visible) {

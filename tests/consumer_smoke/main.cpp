@@ -25,6 +25,12 @@ int main() {
     etch::pop_layer();
     etch::box({.id = etch::id("smoke"),
         .width = etch::Sizing::fixed(32), .height = etch::Sizing::fixed(32)});
+    etch::begin_box({.width=etch::Sizing::fixed(32),.height=etch::Sizing::fixed(32),.border_beam={.color=etch::Color::white()},.top_rim_alpha=.2f,.scroll_fade_px=12});
+    etch::draw_mesh_rect({.rect={0,0,16,16},.color_tl=seed,.color_tr=seed,.color_br=seed,.color_bl=seed});
+    etch::draw_border_beam({.rect={0,0,16,16},.beam={.color=seed}});
+    etch::punch_hole({.rect={4,4,8,8}});
+    etch::end_box();
+    if(etch::update_texture_region_rgba(nullptr,nullptr,0,0,1,1,nullptr)) return 1;
     etch::end_frame(ctx);
     const bool found = etch::find_a11y_node(etch::id("smoke"), ctx) != nullptr;
     etch::destroy_context(ctx);

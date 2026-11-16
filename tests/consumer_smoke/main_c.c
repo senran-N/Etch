@@ -52,6 +52,13 @@ int main(void) {
     btn.id = etch_id("smoke_c_btn");
     btn.label = ETCH_STR_LIT("OK");
     (void)etch_button(&btn);
+    EtchMeshRectDrawDesc mesh=etch_mesh_rect_draw_desc_default();
+    mesh.rect=(EtchRect){0,0,16,16};mesh.color_tl=seed;mesh.color_tr=seed;mesh.color_br=seed;mesh.color_bl=seed;
+    etch_draw_mesh_rect(&mesh);
+    EtchBorderBeamDrawDesc beam=etch_border_beam_draw_desc_default();
+    beam.rect=mesh.rect;beam.beam.color=seed;etch_draw_border_beam(&beam);
+    EtchPunchHoleDesc hole=etch_punch_hole_desc_default();hole.rect=(EtchRect){4,4,8,8};etch_punch_hole(&hole);
+    if(etch_update_texture_region_rgba(NULL,NULL,0,0,1,1,NULL,0)) return 1;
     etch_end_box();
 
     etch_end_frame(ctx);

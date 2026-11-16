@@ -12,7 +12,7 @@
 #include <type_traits>
 
 #define ETCH_VERSION_MAJOR 0
-#define ETCH_VERSION_MINOR 14
+#define ETCH_VERSION_MINOR 15
 #define ETCH_VERSION_PATCH 0
 #define ETCH_VERSION_STR_DETAIL(x) #x
 #define ETCH_VERSION_STR(x) ETCH_VERSION_STR_DETAIL(x)
@@ -469,6 +469,9 @@ enum class PrimKind : uint8_t {
     RingArc = 8,
     SlugFill = 9,
     RotatedRect = 10,
+    MeshGrad = 11,
+    BorderBeam = 12,
+    PunchHole = 13,
 };
 
 enum PrimFlags : uint8_t {
@@ -576,6 +579,36 @@ struct alignas(16) Prim {
                 pack_f16x2(border_width, softness),
             },
         };
+    }
+
+    static constexpr Prim make_mesh_grad(Rect rect, Rect clip_rect,
+        Color tl, Color tr, Color br, Color bl, Corners radius = {},
+        bool oklab = true, float grain = 0, float phase = 0, bool continuous = false, float clip_radius = 0) noexcept {
+        return {.bounds={rect.x,rect.y,rect.w,rect.h},
+            .clip={clip_rect.x,clip_rect.y,clip_rect.x+clip_rect.w,clip_rect.y+clip_rect.h},
+            .payload={br.pack_rgba8(),bl.pack_rgba8(),pack_f16x2(radius.tl,radius.tr),pack_f16x2(radius.br,radius.bl)},
+            .style={pack_header(PrimKind::MeshGrad,uint8_t((oklab ? 1u : 0u)|(continuous ? PrimFlag_Continuous : 0u)|(clip_radius!=0 ? PrimFlag_RoundedClip : 0u)),0,clip_radius),
+                tl.pack_rgba8(),tr.pack_rgba8(),pack_f16x2(grain,phase)}};
+    }
+
+    static constexpr Prim make_punch_hole(Rect rect, Rect clip_rect, Corners radius = {},
+        float softness = 1, bool continuous = false, float clip_radius = 0) noexcept {
+        return {.bounds={rect.x,rect.y,rect.w,rect.h},
+            .clip={clip_rect.x,clip_rect.y,clip_rect.x+clip_rect.w,clip_rect.y+clip_rect.h},
+            .payload={0,0,pack_f16x2(radius.tl,radius.tr),pack_f16x2(radius.br,radius.bl)},
+            .style={pack_header(PrimKind::PunchHole,uint8_t((continuous ? PrimFlag_Continuous : 0u)|(clip_radius!=0 ? PrimFlag_RoundedClip : 0u)),0,clip_radius),
+                Color::white().pack_rgba8(),0,pack_f16x2(0,softness)}};
+    }
+
+    static constexpr Prim make_border_beam(Rect rect, Rect clip_rect, Color color, Color base_color,
+        Corners radius = {}, float width = 1.5f, float angle_rad = 0, float sweep_fraction = .25f,
+        float glow_px = 0, float top_rim_alpha = 0, float softness = 1, bool symmetric_dual = false,
+        bool continuous = false, float clip_radius = 0) noexcept {
+        return {.bounds={rect.x,rect.y,rect.w,rect.h},
+            .clip={clip_rect.x,clip_rect.y,clip_rect.x+clip_rect.w,clip_rect.y+clip_rect.h},
+            .payload={pack_f16x2(angle_rad,sweep_fraction),pack_f16x2(width,glow_px),pack_f16x2(radius.tl,radius.tr),pack_f16x2(radius.br,radius.bl)},
+            .style={pack_header(PrimKind::BorderBeam,uint8_t((symmetric_dual ? 1u : 0u)|(top_rim_alpha>0 ? 2u : 0u)|(continuous ? PrimFlag_Continuous : 0u)|(clip_radius!=0 ? PrimFlag_RoundedClip : 0u)),0,clip_radius),
+                color.pack_rgba8(),base_color.pack_rgba8(),pack_f16x2(top_rim_alpha,softness)}};
     }
 
     static constexpr Prim make_shadow(
@@ -1203,6 +1236,12 @@ struct GridTrack {
 
 enum class BorderAlign : uint8_t { Inside=0, Center=1, Outside=2 };
 
+struct BorderBeamStyle {
+    Color color = {}, base_color = {};
+    float width = 1.5f, angle_rad = 0, sweep_fraction = .25f, glow_px = 0, speed = 1, softness = 1;
+    bool beam_active = false, symmetric_dual = false;
+};
+
 struct BoxDesc {
     uint32_t id = 0;
     Axis axis = Axis::Row;
@@ -1255,6 +1294,9 @@ struct BoxDesc {
     bool animate_layout = false;
     uint32_t hero_id = 0;
     SpringSpec transition = SpringSpec::snappy();
+    BorderBeamStyle border_beam = {};
+    float top_rim_alpha = 0;
+    float scroll_fade_px = 0; // Content edge masks; no leading fade at scroll zero.
 };
 
 inline constexpr uint16_t kFontSans       = 0u;
@@ -1383,6 +1425,33 @@ struct RectDrawDesc {
     bool continuous_corners = false; // Exponent-4 superellipse corners.
     BorderAlign border_align = BorderAlign::Inside;
 };
+
+struct MeshRectDrawDesc {
+    Rect rect = {};
+    Color color_tl = {}, color_tr = {}, color_br = {}, color_bl = {};
+    Corners radius = {};
+    bool oklab = true;
+    float grain_intensity = 0, warp_phase = 0;
+    bool continuous_corners = false, foreground = false;
+};
+void draw_mesh_rect(const MeshRectDrawDesc& desc) noexcept;
+
+struct PunchHoleDesc {
+    Rect rect = {};
+    Corners radius = {};
+    float softness = 1;
+    bool continuous_corners = false, foreground = false;
+};
+void punch_hole(const PunchHoleDesc& desc) noexcept;
+
+struct BorderBeamDrawDesc {
+    Rect rect = {};
+    Corners radius = {};
+    BorderBeamStyle beam = {};
+    float top_rim_alpha = 0;
+    bool continuous_corners = false, foreground = false;
+};
+void draw_border_beam(const BorderBeamDrawDesc& desc) noexcept;
 
 struct LineDesc {
     Vec2  from = {};
@@ -1605,6 +1674,7 @@ struct CodeEditorDesc {
     Color composition_color = Color::theme_auto(), border_color = Color::theme_auto();
     Color focus_border_color = Color::theme_auto();
     float border_width = 1, focus_border_width = 1.5f; Corners radius = Corners::theme_auto();
+    float scroll_fade_px = 0;
 };
 struct CodeEditorResult {
     bool changed = false, focused = false, composing = false;
@@ -1797,6 +1867,7 @@ struct VirtualListDesc {
     VirtualItemHeightFn measure_height_fn = nullptr;
     void* measure_user_data = nullptr;
     bool variable_height = false;
+    float scroll_fade_px = 0;
 };
 
 struct VirtualListSlice {
@@ -1873,6 +1944,7 @@ struct TableDesc {
     Color selected_row_color = Color::theme_auto();
     bool horizontal_scroll = true; bool keyboard_navigation = true;
     TableSelection selection = {};
+    float scroll_fade_px = 0;
 };
 struct TableResult {
     VirtualListSlice slice = {}; uint32_t sort_column = 0;
@@ -2143,6 +2215,11 @@ bool update_texture_rgba(
     uint32_t height,
     const void* rgba_pixels,
     uint32_t row_pitch_bytes = 0) noexcept;
+// The caller owns a 2D RGBA8 texture; the rectangle must fit its mip-zero dimensions.
+// Partial uploads preserve all texels outside the rectangle and copy caller pixels immediately.
+bool update_texture_region_rgba(Context* ctx, SDL_GPUTexture* texture,
+    uint32_t x, uint32_t y, uint32_t width, uint32_t height,
+    const void* rgba_pixels, uint32_t row_pitch_bytes = 0) noexcept;
 LoadedTexture load_texture_file(Context* ctx, const char* path, bool srgb = true) noexcept;
 LoadedTexture load_texture_memory(Context* ctx, const void* data, size_t size_bytes, bool srgb = true) noexcept;
 void destroy_texture(Context* ctx, LoadedTexture* tex) noexcept;

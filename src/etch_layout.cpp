@@ -395,6 +395,25 @@ void emit_draw_list_command(
                 emit_draw_list_command(ctx,target.fg_draw_head,box_px,clip,dpi);
                 break;
             }
+            case DrawCmdKind::Beam: {
+                const auto& d=node->beam;
+                const Rect r={origin.x+d.rect.x*scale,origin.y+d.rect.y*scale,d.rect.w*scale,d.rect.h*scale};
+                emit_border_beam(ctx,r,clip,scale_corners(d.radius,scale),d.beam,d.top_rim_alpha,d.continuous_corners,scale);
+                break;
+            }
+            case DrawCmdKind::Hole: {
+                const auto& d=node->hole;
+                const Rect r={origin.x+d.rect.x*scale,origin.y+d.rect.y*scale,d.rect.w*scale,d.rect.h*scale};
+                push_prim(ctx,Prim::make_punch_hole(r,clip.rect,scale_corners(d.radius,scale),d.softness,d.continuous_corners,clip.radius));
+                break;
+            }
+            case DrawCmdKind::Mesh: {
+                const auto& d=node->mesh;
+                const Rect r={origin.x+d.rect.x*scale,origin.y+d.rect.y*scale,d.rect.w*scale,d.rect.h*scale};
+                push_prim(ctx,Prim::make_mesh_grad(r,clip.rect,d.color_tl,d.color_tr,d.color_br,d.color_bl,
+                    scale_corners(d.radius,scale),d.oklab,d.grain_intensity,d.warp_phase,d.continuous_corners,clip.radius));
+                break;
+            }
             case DrawCmdKind::Fill: emit_vector_fill(ctx, node->fill_cmd, origin, scale, clip); break;
             case DrawCmdKind::Rect: {
                 const RectDrawDesc& rd = node->rect;
@@ -1654,6 +1673,10 @@ void begin_box(const BoxDesc& desc_in) noexcept {
     const float wscale = current_world_scale(ctx);
     BoxDesc desc = desc_in;
     desc.transition=valid_spring_spec(desc.transition);
+    desc.border_beam=valid_border_beam(desc.border_beam);
+    desc.scroll_fade_px=std::isfinite(desc.scroll_fade_px) && desc.scroll_fade_px>0 ? desc.scroll_fade_px : 0;
+    desc.top_rim_alpha=std::isfinite(desc.top_rim_alpha) ? clamp_range(desc.top_rim_alpha,0,1) : 0;
+    if(desc.border_beam.color.a && desc.border_beam.beam_active && desc.border_beam.speed!=0 && !ctx->reduced_motion && ctx->time_scale>0) ++ctx->active_ui->active_anim_count;
     if(!std::isfinite(desc.opacity)) desc.opacity=1;
     desc.opacity=std::fmin(1.f,std::fmax(0.f,desc.opacity));
     if(!std::isfinite(desc.hover_scale) || desc.hover_scale<=0) desc.hover_scale=1;
@@ -1665,6 +1688,9 @@ void begin_box(const BoxDesc& desc_in) noexcept {
         desc.gap *= wscale;
         if (desc.row_gap >= 0) desc.row_gap *= wscale;
         desc.border_width *= wscale;
+        desc.border_beam.width *= wscale;
+        desc.border_beam.glow_px *= wscale;
+        desc.scroll_fade_px *= wscale;
         desc.radius = scale_corners_uniform(desc.radius, wscale);
         desc.shadow_blur *= wscale;
         desc.shadow_spread *= wscale;
@@ -1732,7 +1758,8 @@ void begin_box(const BoxDesc& desc_in) noexcept {
     const bool is_scroll = eff_desc.scroll_x || eff_desc.scroll_y;
     const bool any_clip = eff_desc.clip_children || is_scroll || eff_desc.shrink_width || eff_desc.shrink_height;
     const bool is_floating_blocker = (eff_desc.attach_to != AttachTo::None && !eff_desc.pointer_passthrough);
-    const bool has_border = (eff_desc.border_width > 0.0f && eff_desc.border_color.a > 0u);
+    const bool has_beam=eff_desc.border_beam.color.a>0 || eff_desc.border_beam.base_color.a>0 || eff_desc.top_rim_alpha>0;
+    const bool has_border = (eff_desc.border_width > 0.0f && eff_desc.border_color.a > 0u) || has_beam;
     const bool has_scrollbar = is_scroll && eff_desc.show_scrollbar;
     const bool has_visual =
         eff_desc.background.a > 0u ||
@@ -1830,11 +1857,11 @@ void begin_box(const BoxDesc& desc_in) noexcept {
         if (is_scroll && box_ws) {
             decl.clip.childOffset = Clay_Vector2{ -box_ws->scroll_pos.x, -box_ws->scroll_pos.y };
         }
-        if (has_border || has_scrollbar) {
-            // Ask Clay to emit CLAY_RENDER_COMMAND_TYPE_BORDER after children for scrollbar + crisp outer rim.
-            decl.border.color = Clay_Color{255.0f, 255.0f, 255.0f, 1.0f};
-            decl.border.width = Clay_BorderWidth{1u, 1u, 1u, 1u, 0u};
-        }
+    }
+    if ((any_clip && (has_border || has_scrollbar)) || has_beam) {
+        // Ask Clay to emit a border command after children for scrollbars and material rims.
+        decl.border.color = Clay_Color{255.0f, 255.0f, 255.0f, 1.0f};
+        decl.border.width = Clay_BorderWidth{1u, 1u, 1u, 1u, 0u};
     }
 
     Clay__ConfigureOpenElement(decl);
@@ -2228,6 +2255,37 @@ void draw_rect(const RectDrawDesc& desc) noexcept {
         eff.radius = resolve_theme_corners(eff.radius, Corners::all(thm.radius_panel_px));
         node->kind = DrawCmdKind::Rect;
         node->rect = eff;
+    }
+}
+
+void draw_mesh_rect(const MeshRectDrawDesc& desc) noexcept {
+    Context* ctx=current_context();
+    if(!ctx || !ctx->in_frame || !std::isfinite(desc.rect.x) || !std::isfinite(desc.rect.y) ||
+       !std::isfinite(desc.rect.w) || !std::isfinite(desc.rect.h) || desc.rect.w<=0 || desc.rect.h<=0 ||
+       !std::isfinite(desc.grain_intensity) || desc.grain_intensity<0 || desc.grain_intensity>1 ||
+       !std::isfinite(desc.warp_phase)) return;
+    if(auto* node=append_open_box_draw_cmd(ctx,desc.foreground)) {
+        node->kind=DrawCmdKind::Mesh;node->mesh=desc;
+    }
+}
+
+void punch_hole(const PunchHoleDesc& desc) noexcept {
+    Context* ctx=current_context();
+    if(!ctx || !ctx->in_frame || !std::isfinite(desc.rect.x) || !std::isfinite(desc.rect.y) ||
+       !std::isfinite(desc.rect.w) || !std::isfinite(desc.rect.h) || desc.rect.w<=0 || desc.rect.h<=0 ||
+       !std::isfinite(desc.softness) || desc.softness<.5f) return;
+    if(auto* node=append_open_box_draw_cmd(ctx,desc.foreground)) {node->kind=DrawCmdKind::Hole;node->hole=desc;}
+}
+
+void draw_border_beam(const BorderBeamDrawDesc& desc) noexcept {
+    Context* ctx=current_context();
+    if(!ctx || !ctx->in_frame || !std::isfinite(desc.rect.x) || !std::isfinite(desc.rect.y) ||
+       !std::isfinite(desc.rect.w) || !std::isfinite(desc.rect.h) || desc.rect.w<=0 || desc.rect.h<=0) return;
+    if(auto* node=append_open_box_draw_cmd(ctx,desc.foreground)) {
+        node->kind=DrawCmdKind::Beam;node->beam=desc;
+        node->beam.beam=valid_border_beam(desc.beam);
+        node->beam.top_rim_alpha=std::isfinite(desc.top_rim_alpha) ? clamp_range(desc.top_rim_alpha,0,1) : 0;
+        if(desc.beam.color.a && node->beam.beam.beam_active && node->beam.beam.speed!=0 && !ctx->reduced_motion && ctx->time_scale>0) ++ctx->active_ui->active_anim_count;
     }
 }
 

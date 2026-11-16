@@ -303,6 +303,7 @@ struct DrawBatch {
     uint32_t        prim_count = 0;
     SDL_GPUTexture* ext_textures[8] = {}; // Slots 1..8; slot 0 is always FontAtlas::gpu_tex
     uint32_t        ext_count = 0;
+    bool is_punch_hole = false;
 };
 
 enum class TextEditOpKind : uint8_t {
@@ -347,6 +348,9 @@ enum class DrawCmdKind : uint8_t {
     Image = 7,
     Fill = 8,
     Callback = 9,
+    Mesh = 10,
+    Hole = 11,
+    Beam = 12,
 };
 
 struct BoxExtra;
@@ -370,6 +374,9 @@ struct DrawCmdNode {
     DrawCmdKind   kind = DrawCmdKind::Rect;
     float         world_scale = 1.0f;
     RectDrawDesc  rect = {};
+    MeshRectDrawDesc mesh = {};
+    PunchHoleDesc hole = {};
+    BorderBeamDrawDesc beam = {};
     LineDesc      line = {};
     const Vec2*   poly_points = nullptr;
     uint32_t      poly_count = 0;
@@ -520,7 +527,7 @@ struct SpanHitRegion {
 
 struct alignas(16) ClipShapeGpu {
     Vec4 bounds = {}, radii = {};
-    Uint4 meta = {};
+    Uint4 meta = {}; // Parent index, continuous corners, packed f16 top/bottom and left/right fade widths.
 };
 static_assert(sizeof(ClipShapeGpu)==48 && sizeof(ClipShapeGpu)%16==0);
 
@@ -940,6 +947,8 @@ struct Context {
     SDL_GPUSampler*          linear_sampler = nullptr;
     CachedPipeline           pipelines[kMaxCachedPipelines] = {};
     uint32_t                 pipeline_count = 0;
+    CachedPipeline punch_pipelines[kMaxCachedPipelines] = {};
+    uint32_t punch_pipeline_count = 0;
     SDL_GPUGraphicsPipeline* kawase_pipe = nullptr;
     CachedPipeline           present_pipelines[kMaxCachedPipelines] = {};
     uint32_t                 present_pipeline_count = 0;

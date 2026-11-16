@@ -12,6 +12,9 @@
 #define ETCH_PRIM_RING_ARC    8u
 #define ETCH_PRIM_SLUG_FILL   9u
 #define ETCH_PRIM_ROT_RECT    10u
+#define ETCH_PRIM_MESH_GRAD   11u
+#define ETCH_PRIM_BORDER_BEAM 12u
+#define ETCH_PRIM_PUNCH_HOLE  13u
 
 #define ETCH_FLAG_LINEAR_GRAD   (1u << 0)
 #define ETCH_FLAG_RADIAL_GRAD   (1u << 1)
@@ -28,7 +31,7 @@ struct Prim
     float4 bounds;   // xy = top-left px, zw = width, height px
     float4 clip;     // xy = clip min px, zw = clip max px
     uint4  payload;  // xy = uv0/uv1 (UNORM16x2) OR (color1 RGBA8, f16x2 grad_dir); zw = f16x2 radii
-    uint4  style;    // x = header [kind:4 | flags:6 | tex_slot:9 | continuous_clip:1 | clip_r_q2:12];
+    uint4  style;    // x = header [kind:4 | flags:6 | tex_slot:4 | clip_index_hi:4 | indexed:1 | continuous:1 | clip_r_or_index_lo:12];
                      // y = color0 sRGB RGBA8; z = border sRGB RGBA8; w = f16x2(border_width, softness)
 };
 
@@ -214,6 +217,14 @@ VSOut vs_main(uint vertex_id : SV_VertexID, uint instance_id : SV_InstanceID)
     {
         pad = max(bw_soft.y, 1.0f) * 2.0f + 2.0f;
     }
+    else if (kind == ETCH_PRIM_PUNCH_HOLE)
+    {
+        pad = max(1.0f, bw_soft.y * .5f + 1.0f);
+    }
+    else if (kind == ETCH_PRIM_BORDER_BEAM)
+    {
+        pad = max(max(unpack_f16x2_custom(p.payload.y).y, 1.0f) + 2.0f, bw_soft.y * .5f + 1.0f);
+    }
 
     // Quad triangle-list corners: (0,0), (1,0), (1,1), (0,0), (1,1), (0,1)
     static const float2 kCorners[6] = {
@@ -276,6 +287,15 @@ VSOut vs_main(uint vertex_id : SV_VertexID, uint instance_id : SV_InstanceID)
         uv_rect = float4(asfloat(p.payload.x), asfloat(p.payload.y), r_tl_tr.x, r_tl_tr.y);
         col1    = unpack_rgba8_srgb_to_linear(p.payload.w);
     }
+    else if (kind == ETCH_PRIM_MESH_GRAD)
+    {
+        col1 = unpack_rgba8_srgb_to_linear(p.payload.x);
+        uv_rect = unpack_rgba8_srgb_to_linear(p.payload.y);
+    }
+    else if (kind == ETCH_PRIM_BORDER_BEAM)
+    {
+        uv_rect = float4(unpack_f16x2_custom(p.payload.x), unpack_f16x2_custom(p.payload.y));
+    }
     else if ((flags & (ETCH_FLAG_LINEAR_GRAD | ETCH_FLAG_RADIAL_GRAD)) != 0u)
     {
         col1 = unpack_rgba8_srgb_to_linear(kind == ETCH_PRIM_SLUG_FILL ? p.payload.z : p.payload.x);
@@ -303,6 +323,8 @@ VSOut vs_main(uint vertex_id : SV_VertexID, uint instance_id : SV_InstanceID)
     o.meta         = uint4(kind, flags | (g_flags & ETCH_GLOBAL_MANUAL_SRGB), tex_slot, asuint(clip_r));
     if ((kind == ETCH_PRIM_SLUG_GLYPH || kind == ETCH_PRIM_TEXTURE) && (flags & ETCH_FLAG_ROUND_CAP) != 0u)
         o.grad_params = float4(asfloat(p.style.z), asfloat(p.style.w), 0.0f, 1.0f);
+    if (kind == ETCH_PRIM_MESH_GRAD) o.grad_params = float4(bw_soft, 0.0f, 0.0f);
+    if (kind == ETCH_PRIM_BORDER_BEAM) o.grad_params = float4(bw_soft, 0.0f, 0.0f);
     o.slug_meta    = uint2(p.payload.x, p.payload.y);
     return o;
 }
@@ -315,6 +337,22 @@ uint slug_calc_root_code(float y1, float y2, float y3)
     uint shift = (i2 & 2u) | (i1 & ~2u);
     shift = (i3 & 4u) | (shift & ~4u);
     return (0x2E74u >> shift) & 0x0101u;
+}
+
+// Oklab matrices: Bjorn Ottosson's public-domain reference (see THIRD_PARTY_NOTICES.md).
+float3 mesh_to_lab(float3 rgb) {
+    float3 lms = float3(dot(rgb,float3(.4122214708,.5363325363,.0514459929)),
+        dot(rgb,float3(.2119034982,.6806995451,.1073969566)),dot(rgb,float3(.0883024619,.2817188376,.6299787005)));
+    lms = pow(max(lms,0.0f),1.0f/3.0f);
+    return float3(dot(lms,float3(.2104542553,.7936177850,-.0040720468)),
+        dot(lms,float3(1.9779984951,-2.4285922050,.4505937099)),dot(lms,float3(.0259040371,.7827717662,-.8086757660)));
+}
+float3 mesh_from_lab(float3 lab) {
+    float3 lms = float3(lab.x+.3963377774*lab.y+.2158037573*lab.z,
+        lab.x-.1055613458*lab.y-.0638541728*lab.z,lab.x-.0894841775*lab.y-1.2914855480*lab.z);
+    lms=lms*lms*lms;
+    return saturate(float3(dot(lms,float3(4.0767416621,-3.3077115913,.2309699292)),
+        dot(lms,float3(-1.2684380046,2.6097574011,-.3413193965)),dot(lms,float3(-.0041960863,-.7034186147,1.7076147010))));
 }
 
 float2 slug_solve_horiz_poly(float4 p12, float2 p3)
@@ -590,6 +628,7 @@ float4 ps_main(VSOut input) : SV_Target0
         clip_d = max(cq.x, cq.y);
     }
     float clip_cov = saturate(0.5f - clip_d);
+    float fade_cov = 1.0f;
     uint clip_index=input.clip_index;
     [loop] while(clip_index!=0u) {
         ClipShape shape=g_clip_shapes[clip_index];
@@ -597,8 +636,14 @@ float4 ps_main(VSOut input) : SV_Target0
         float2 relative=input.pixel_pos-shape.bounds.xy-half_shape;
         float distance=sd_rounded_box(relative,half_shape,shape.radii,shape.meta.y!=0u);
         clip_cov=min(clip_cov,saturate(0.5f-distance));
+        float2 tb=unpack_f16x2_custom(shape.meta.z),lr=unpack_f16x2_custom(shape.meta.w);
+        if(tb.x>0.0f) fade_cov*=smoothstep(0.0f,tb.x,input.pixel_pos.y-shape.bounds.y);
+        if(tb.y>0.0f) fade_cov*=smoothstep(0.0f,tb.y,shape.bounds.y+shape.bounds.w-input.pixel_pos.y);
+        if(lr.x>0.0f) fade_cov*=smoothstep(0.0f,lr.x,input.pixel_pos.x-shape.bounds.x);
+        if(lr.y>0.0f) fade_cov*=smoothstep(0.0f,lr.y,shape.bounds.x+shape.bounds.z-input.pixel_pos.x);
         clip_index=shape.meta.x;
     }
+    clip_cov*=fade_cov;
     // Glyph/emoji reuse the wire cap flag for a second, horizontal text clip.
     if ((kind == ETCH_PRIM_SLUG_GLYPH || kind == ETCH_PRIM_TEXTURE) && (flags & ETCH_FLAG_ROUND_CAP) != 0u) {
         float2 text_center=input.bounds.xy+input.bounds.zw*0.5f;
@@ -619,7 +664,50 @@ float4 ps_main(VSOut input) : SV_Target0
 
     float4 out_pm = float4(0.0f, 0.0f, 0.0f, 0.0f);
 
-    if (kind == ETCH_PRIM_RECT || kind == ETCH_PRIM_ROT_RECT)
+    if (kind == ETCH_PRIM_PUNCH_HOLE) {
+        float d=sd_rounded_box(p_rel,half_size,input.radii,(flags & ETCH_FLAG_ROUND_CAP)!=0u);
+        float coverage=saturate(.5f-d/max(input.grad_params.w,.5f))*input.color0.a;
+        out_pm=float4(0.0f,0.0f,0.0f,coverage);
+    }
+    else if (kind == ETCH_PRIM_BORDER_BEAM) {
+        float d=sd_rounded_box(p_rel,half_size,input.radii,(flags & ETCH_FLAG_ROUND_CAP)!=0u);
+        float width=input.uv_rect.z;
+        float softness=max(input.grad_params.y,.5f);
+        float outer=saturate(.5f-d/softness);
+        float inner=saturate(.5f-(d+width)/softness);
+        float ring=max(outer-inner,0.0f);
+        float turn=(atan2(p_rel.y/half_size.y,p_rel.x/half_size.x)-input.uv_rect.x)/6.283185307f;
+        float tail=frac(-turn);
+        if((flags & 1u)!=0u) tail=min(tail,frac(.5f-turn));
+        float beam=saturate(1.0f-tail/max(input.uv_rect.y,.001f));
+        beam=beam*beam*(3.0f-2.0f*beam);
+        float glow_t=input.uv_rect.w>0.0f ? saturate(1.0f-abs(d+.5f*width)/input.uv_rect.w) : 0.0f;
+        float glow=glow_t*glow_t*glow_t*.5f*(1.0f-ring);
+        out_pm=float4(input.border_color.rgb,1.0f)*(input.border_color.a*ring*(1.0f-beam))
+            +float4(input.color0.rgb,1.0f)*(input.color0.a*beam*(ring+glow));
+        if((flags & 2u)!=0u) {
+            float rim=(saturate(.5f-d)-saturate(.5f-d-1.0f))*input.grad_params.x*saturate(-p_rel.y/half_size.y);
+            out_pm=max(out_pm,float4(rim.xxx,rim));
+        }
+    }
+    else if (kind == ETCH_PRIM_MESH_GRAD) {
+        float2 uv=saturate((p_rel+half_size)/size);
+        if(input.grad_params.y!=0.0f) uv=saturate(uv+.12f*sin(uv.yx*3.14159265f+input.grad_params.y));
+        float4 tl=input.color0, tr=input.border_color, br=input.color1, bl=input.uv_rect;
+        bool lab=(flags & 1u)!=0u;
+        if(lab) {tl.rgb=mesh_to_lab(tl.rgb);tr.rgb=mesh_to_lab(tr.rgb);br.rgb=mesh_to_lab(br.rgb);bl.rgb=mesh_to_lab(bl.rgb);}
+        float4 col=lerp(lerp(tl,tr,uv.x),lerp(bl,br,uv.x),uv.y);
+        if(lab) col.rgb=mesh_from_lab(col.rgb);
+        if(input.grad_params.x>0.0f) {
+            float ign=frac(52.9829189f*frac(dot(input.pixel_pos,float2(.06711056f,.00583715f))));
+            float4 encoded=linear_to_srgb(col);
+            encoded.rgb=saturate(encoded.rgb+(ign-.5f)*input.grad_params.x);
+            col=srgb_to_linear(encoded);
+        }
+        float d=sd_rounded_box(p_rel,half_size,input.radii,(flags & ETCH_FLAG_ROUND_CAP)!=0u);
+        out_pm=float4(col.rgb,1.0f)*(col.a*saturate(.5f-d));
+    }
+    else if (kind == ETCH_PRIM_RECT || kind == ETCH_PRIM_ROT_RECT)
     {
         float d = sd_rounded_box(p_local, half_size, input.radii, (flags & ETCH_FLAG_ROUND_CAP) != 0u);
 
