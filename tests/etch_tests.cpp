@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstring>
 #include "checks_desktop.h"
+#include "checks_desktop_precision.h"
 #include "checks_editor.h"
 #include "checks_a11y.h"
 #include "checks_media_emoji.h"
@@ -65,7 +66,7 @@ static bool source_ok(const unsigned char* p,size_t size,const char* entry) noex
     return std::strstr(source,entry) && !std::strstr(source,"SampleLevel") && !std::strstr(source,"StructuredBuffer") && !std::strstr(source,"register(");
 }
 static bool gpu_suite() noexcept {
-    const bool media_ok=verify_media_emoji_checks();
+    const bool media_ok=verify_media_emoji_checks() && verify_border_coverage();
     const bool v070_ok=verify_theme_wrap_checks();
     static_assert(sizeof(Prim)==64);
     bool ok=source_ok(g_etch_uber_vs_msl,sizeof(g_etch_uber_vs_msl),"vertex VSOut vs_main(") && source_ok(g_etch_uber_ps_msl,sizeof(g_etch_uber_ps_msl),"fragment float4 ps_main(") && source_ok(g_etch_kawase_vs_msl,sizeof(g_etch_kawase_vs_msl),"vertex VSOut vs_main(") && source_ok(g_etch_kawase_ps_msl,sizeof(g_etch_kawase_ps_msl),"fragment float4 ps_main(");
@@ -95,7 +96,7 @@ int main(int argc,char** argv) {
     const char* selected=argc==2 && std::strncmp(argv[1],"--suite=",8)==0?argv[1]+8:nullptr;
     if(argc>1 && !selected) { return 2; } bool found=false,ok=true;
     for(uint32_t i=0;i<8;++i)if(!selected || std::strcmp(selected,names[i])==0){found=true;bool pass=false;
-        switch(i){case 0:pass=arena_suite();break;case 1:pass=unicode_suite();break;case 2:pass=layout_suite();break;case 3:pass=list_suite();break;case 4:pass=verify_desktop_checks(nullptr);break;case 5:pass=verify_editor_checks(nullptr);break;case 6:pass=verify_a11y_checks(nullptr) && verify_os_window_a11y_checks();break;case 7:pass=gpu_suite();break;}
+        switch(i){case 0:pass=arena_suite();break;case 1:pass=unicode_suite();break;case 2:pass=layout_suite() && verify_desktop_precision();break;case 3:pass=list_suite();break;case 4:pass=verify_desktop_checks(nullptr);break;case 5:pass=verify_editor_checks(nullptr);break;case 6:pass=verify_a11y_checks(nullptr) && verify_os_window_a11y_checks();break;case 7:pass=gpu_suite();break;}
         std::printf("%s: %s\n",names[i],pass?"PASS":"FAIL");ok &= pass;
     }return !found?2:ok?0:1;
 }

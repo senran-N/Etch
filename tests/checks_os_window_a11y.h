@@ -563,7 +563,14 @@ inline bool verify_os_window_a11y_checks() noexcept {
     check(empty_insets.top == 0.0f && empty_insets.right == 0.0f &&
           empty_insets.bottom == 0.0f && empty_insets.left == 0.0f, __LINE__);
 
-    SDL_Window* win = SDL_CreateWindow("Etch UIA Test", 480, 320, SDL_WINDOW_HIDDEN | SDL_WINDOW_RESIZABLE);
+    SDL_Window* win = create_desktop_window("Etch UIA Test", 480, 320, SDL_WINDOW_HIDDEN | SDL_WINDOW_RESIZABLE);
+    if (win) {
+        int pw=0, ph=0;
+        SDL_GetWindowSizeInPixels(win,&pw,&ph);
+        const float scale=SDL_GetWindowDisplayScale(win);
+        check(std::fabs(pw/scale-480)<2 && std::fabs(ph/scale-320)<2, __LINE__);
+        check((SDL_GetWindowFlags(win)&SDL_WINDOW_HIDDEN)!=0, __LINE__);
+    }
     check(win != nullptr, __LINE__);
     Context* wctx = win ? create_context({.window = win, .headless = false, .enable_os_a11y = true}) : nullptr;
     check(wctx != nullptr && gpu_device(wctx) != nullptr, __LINE__);

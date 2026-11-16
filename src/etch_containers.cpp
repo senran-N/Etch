@@ -1354,7 +1354,7 @@ TableResult begin_table(const TableDesc& desc_in) noexcept {
     for (uint32_t c = 0; c < t.count; ++c) t.columns[c] = desc.columns[c];
     t.desc.columns = {t.columns, t.count};
     auto* ws = state_map_get_or_insert(&ctx->active_ui->states, desc.id, ctx->active_ui->frame_index);
-    if (!ws->table_initialized) {
+    if (!ws->table_initialized || ws->table_sort_column >= t.count) {
         ws->table_initialized = true; ws->table_sort_column = desc.default_sort_column < t.count ? desc.default_sort_column : 0;
         ws->table_sort_descending = desc.default_sort_descending;
     }
@@ -1370,6 +1370,7 @@ TableResult begin_table(const TableDesc& desc_in) noexcept {
         const auto& col = t.columns[c]; const uint32_t cid = table_col_id(desc, c), rid = id_index(cid, 0x7600u);
         state_map_get_or_insert(&ctx->active_ui->states, rid, ctx->active_ui->frame_index);
         auto* cw = state_map_get_or_insert(&ctx->active_ui->states, cid, ctx->active_ui->frame_index);
+        if (metadata->count != 0 && metadata->count != t.count && col.id == 0) cw->column_override = false;
         const bool active = ctx->active_ui->active_id == rid;
         const bool ended = cw->column_resizing && !active;
         cw->column_resizing = active;
@@ -1417,10 +1418,10 @@ TableResult begin_table(const TableDesc& desc_in) noexcept {
             result.sort_column = c; result.sort_changed = true;
         }
         begin_box({ .id = hid, .width = Sizing::fixed(t.col_widths[c]), .height = Sizing::grow(),
-            .padding = Padding::xy(desc.cell_padding_x,0), .align_x = col.align_x, .align_y = AlignY::Center, .clip_children = true, .focusable = true });
+            .padding = {desc.cell_padding_x, desc.cell_padding_x + (col.sortable && result.sort_column == c ? 18.0f : 0.0f), 0, 0}, .align_x = col.align_x, .align_y = AlignY::Center, .clip_children = true, .focusable = true });
         text(col.title, { .font_size_px = 12, .wrap = false });
         draw_line({ .from = {t.col_widths[c]-1,0}, .to = {t.col_widths[c]-1,desc.header_height_px}, .color = desc.border_color });
-        if (result.sort_column == c) {
+        if (col.sortable && result.sort_column == c) {
             const float x = t.col_widths[c] - 14, y = desc.header_height_px * .5f;
             const float dir = result.sort_descending ? 3.0f : -3.0f;
             draw_line({ .from = {x-3,y-dir}, .to = {x,y+dir}, .color = thm.accent });

@@ -586,7 +586,7 @@ void etch_clay_error_handler(Clay_ErrorData error) noexcept {
 
 void push_prim(
     Context* ctx,
-    const Prim& prim,
+    Prim prim,
     SDL_GPUTexture* ext_tex = nullptr,
     float cull_pad_px = 2.0f) noexcept
 {
@@ -599,6 +599,16 @@ void push_prim(
         if (!grown) return;
         ctx->prims = grown;
         ctx->max_prims = cap;
+    }
+    // Raster-only snapping preserves logical layout and text positioning.
+    if (ctx->active_ui->pixel_snap && static_cast<PrimKind>(prim.style.x & 15u) == PrimKind::Rect &&
+        unpack_f16_cpu(static_cast<uint16_t>(prim.style.w >> 16)) <= 1.0f) {
+        const float right = std::round(prim.bounds.x + prim.bounds.z);
+        const float bottom = std::round(prim.bounds.y + prim.bounds.w);
+        prim.bounds.x = std::round(prim.bounds.x); prim.bounds.y = std::round(prim.bounds.y);
+        prim.bounds.z = right - prim.bounds.x; prim.bounds.w = bottom - prim.bounds.y;
+        const float width = unpack_f16_cpu(static_cast<uint16_t>(prim.style.w));
+        if (width > 0) prim.style.w = (prim.style.w & 0xFFFF0000u) | pack_f16(std::fmax(1.0f, std::round(width)));
     }
     // CPU-side offscreen clip culling: drop primitives completely outside their active clip rect.
     if (prim.clip.z <= prim.clip.x || prim.clip.w <= prim.clip.y ||
@@ -785,7 +795,7 @@ void emit_box_background_and_shadow(
     }
 
     const bool has_fill = (d.background.a > 0u) || has_grad;
-    const bool any_clip = d.clip_children || d.scroll_x || d.scroll_y;
+    const bool any_clip = d.clip_children || d.scroll_x || d.scroll_y || d.shrink_width;
     const bool draw_border_here = !any_clip && d.border_width > 0.0f && d.border_color.a > 0u;
     if (has_fill || draw_border_here || use_blur) {
         const Color border_col = draw_border_here ? d.border_color : Color{};

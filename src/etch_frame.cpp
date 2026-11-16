@@ -116,7 +116,7 @@ void end_frame(Context* ctx_arg) noexcept {
                         if (extra->draw_head) {
                             ClipEntry draw_clip = cur_clip;
                             const bool box_clips =
-                                extra->desc.clip_children || extra->desc.scroll_x || extra->desc.scroll_y || extra->is_canvas;
+                                extra->desc.clip_children || extra->desc.scroll_x || extra->desc.scroll_y || extra->desc.shrink_width || extra->is_canvas;
                             if (box_clips) {
                                 const Rect clipped_rect = rect_intersect(cur_clip.rect, box_px);
                                 const Corners& c = extra->desc.radius;
@@ -231,7 +231,7 @@ void end_frame(Context* ctx_arg) noexcept {
                 }
                 const BoxDesc& d = extra->desc;
                 const bool is_scroll = d.scroll_x || d.scroll_y || extra->is_virtual_list;
-                const bool any_clip = d.clip_children || is_scroll;
+                const bool any_clip = d.clip_children || is_scroll || d.shrink_width;
 
                 if ((d.scroll_y || extra->is_virtual_list) && d.show_scrollbar && d.id != 0u) {
                     if (const WidgetState* ws = state_map_find(&ctx->active_ui->states, d.id)) {
@@ -865,13 +865,14 @@ void begin_window_frame(Context* ctx, SDL_Window* window, const WindowFrameDesc&
     if (!ctx || !window || ctx->in_frame || !claim_window_swapchain(ctx, window)) return;
     ctx->active_window = window; ctx->active_ui = window_ui(ctx, window);
     ctx->active_ui->min_dpi_scale = (desc.min_scale > 0.0f && std::isfinite(desc.min_scale)) ? desc.min_scale : 0.0f;
+    sync_desktop_window(window);
     int w = 0, h = 0;
     SDL_GetWindowSizeInPixels(window, &w, &h);
     float scale = SDL_GetWindowDisplayScale(window);
     if (scale <= 0) scale = 1;
     if (scale < ctx->active_ui->min_dpi_scale) scale = ctx->active_ui->min_dpi_scale;
     begin_bound_frame(ctx, FrameDesc{.viewport_w = static_cast<uint32_t>(w > 0 ? w : 1),
-        .viewport_h = static_cast<uint32_t>(h > 0 ? h : 1), .dpi_scale = scale, .dt_seconds = desc.dt});
+        .viewport_h = static_cast<uint32_t>(h > 0 ? h : 1), .dpi_scale = scale, .dt_seconds = desc.dt, .pixel_snap = desc.pixel_snap});
 }
 void end_window_frame(Context* ctx) noexcept { end_frame(ctx); }
 void begin_focus_scope(uint32_t scope_id, bool trap_tab) noexcept {

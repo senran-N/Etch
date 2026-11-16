@@ -665,6 +665,7 @@ struct WindowUiState {
     uint32_t   viewport_w = 1280u;
     uint32_t   viewport_h = 720u;
     float      dpi_scale = 1.0f;
+    bool       pixel_snap = true;
     float      min_dpi_scale = 0.0f;
     float      applied_dpi_scale = 1.0f;
     float      elapsed_seconds = 0.0f;

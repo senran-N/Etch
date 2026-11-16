@@ -236,7 +236,7 @@ void emit_draw_text_cmd(
         const uint32_t seg_len = trim_end - pos;
 
         float line_w_logical = 0.0f;
-        if (tc.align_x != AlignX::Left && seg_len > 0u) {
+        if ((tc.align_x != AlignX::Left || tc.max_width_px > 0) && seg_len > 0u) {
             measure_line_segment_x(
                 ctx,
                 tc.font_id,
@@ -253,6 +253,8 @@ void emit_draw_text_cmd(
                 &line_w_logical);
         }
 
+        const bool elided = tc.max_width_px > 0 && line_w_logical > tc.max_width_px;
+        if (elided) line_w_logical = tc.max_width_px;
         float start_x_logical = tc.pos.x;
         if (tc.align_x == AlignX::Center) {
             start_x_logical -= line_w_logical * 0.5f;
@@ -263,7 +265,14 @@ void emit_draw_text_cmd(
         float pen_x = origin.x + start_x_logical * scale;
         const float base_y = origin.y + (start_y_logical + static_cast<float>(line_idx) * line_h_logical) * scale + asc_px;
 
-        uint32_t run_pos = pos;
+        const ClipEntry text_clip = clip;
+        const uint32_t first_text_prim = ctx->prim_count;
+        const float clip_left = pen_x;
+        if (elided && tc.ellipsis) {
+            emit_elided_line(ctx, tc.text.chars + pos, seg_len, tc.font_id, tc.size, tc.letter_spacing,
+                pen_x / scale, base_y / scale, tc.max_width_px, text_clip, tc.color, scale);
+        }
+        uint32_t run_pos = elided && tc.ellipsis ? trim_end : pos;
         while (run_pos < trim_end) {
             if (tc.text.chars[run_pos] == '\t') {
                 pen_x += 4.0f * primary.space_advance_em * phys_px + ls_px;
@@ -285,13 +294,21 @@ void emit_draw_text_cmd(
                     base_y,
                     g.x_offset_em,
                     g.y_offset_em,
-                    clip,
+                    text_clip,
                     tc.color);
                 pen_x += g.x_advance_1px * phys_px + ls_px;
             }
             run_pos = run_end;
         }
 
+        if (tc.max_width_px > 0) {
+            for (uint32_t i = first_text_prim; i < ctx->prim_count; ++i) {
+                Prim& p = ctx->prims[i];
+                p.style.x |= uint32_t(PrimFlag_TextClip) << 4;
+                p.style.z = std::bit_cast<uint32_t>(clip_left);
+                p.style.w = std::bit_cast<uint32_t>(clip_left + tc.max_width_px * scale);
+            }
+        }
         ++line_idx;
         if (end >= tc.text.length) {
             break;
@@ -378,7 +395,7 @@ void emit_draw_list_command(
                             rd.border_color,
                             bw_px,
                             clip.radius,
-                            rd.radial_gradient));
+                            rd.radial_gradient, rd.softness));
                 } else if (rd.fill.a > 0u || (bw_px > 0.0f && rd.border_color.a > 0u)) {
                     push_prim(
                         ctx,
@@ -389,17 +406,24 @@ void emit_draw_list_command(
                             rad_px,
                             rd.border_color,
                             bw_px,
-                            1.0f,
+                            rd.softness,
                             clip.radius));
                 }
                 break;
             }
             case DrawCmdKind::Line: {
                 const LineDesc& ld = node->line;
-                const Vec2 a = origin + ld.from * scale;
-                const Vec2 b = origin + ld.to * scale;
+                Vec2 a = origin + ld.from * scale;
+                Vec2 b = origin + ld.to * scale;
+                float thickness = std::fmax(ld.thickness * scale, 0.75f);
+                if (ctx->active_ui->pixel_snap && ld.glow_px <= 0 && (a.x == b.x || a.y == b.y)) {
+                    thickness = std::fmax(1.0f, std::round(thickness));
+                    const float offset = std::fmod(thickness, 2.0f) * 0.5f;
+                    if (a.x == b.x) a.x = b.x = std::round(a.x - offset) + offset;
+                    else a.y = b.y = std::round(a.y - offset) + offset;
+                }
                 const Vec2 mid = (a + b) * 0.5f;
-                const float hw = 0.5f * ((ld.thickness * scale > 0.75f) ? (ld.thickness * scale) : 0.75f);
+                const float hw = thickness * 0.5f;
                 const Color c_end = (ld.color_end.a > 0u) ? ld.color_end : ld.color;
                 push_prim(
                     ctx,
@@ -622,6 +646,9 @@ bool wait_events(Context* ctx, SDL_Event* first_event_out, int32_t timeout_ms) n
 }
 
 static void process_window_event(Context* ctx, const SDL_Event& event) noexcept {
+    if (event.type == SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED) {
+        if (SDL_Window* window = SDL_GetWindowFromID(event.window.windowID)) sync_desktop_window(window);
+    }
     if (ctx->wake_event_type != 0u && event.type == ctx->wake_event_type) {
         request_redraw(ctx);
         return;
@@ -1062,6 +1089,7 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
     ctx->active_ui->viewport_w = (desc.viewport_w > 0u) ? desc.viewport_w : 1u;
     ctx->active_ui->viewport_h = (desc.viewport_h > 0u) ? desc.viewport_h : 1u;
     ctx->active_ui->dpi_scale = dpi;
+    ctx->active_ui->pixel_snap = desc.pixel_snap;
     if (std::fabs(dpi - ctx->active_ui->applied_dpi_scale) > 1e-4f) {
         ctx->active_ui->applied_dpi_scale = dpi;
         ctx->active_ui->applied_ime_rect = {-1, -1, 0, 0};
@@ -1628,7 +1656,7 @@ void begin_box(const BoxDesc& desc_in) noexcept {
 
     const bool focus_ring = eff_desc.focusable && keyboard_focus_visible(eff_desc.id);
     const bool is_scroll = eff_desc.scroll_x || eff_desc.scroll_y;
-    const bool any_clip = eff_desc.clip_children || is_scroll;
+    const bool any_clip = eff_desc.clip_children || is_scroll || eff_desc.shrink_width;
     const bool is_floating_blocker = (eff_desc.attach_to != AttachTo::None && !eff_desc.pointer_passthrough);
     const bool has_border = (eff_desc.border_width > 0.0f && eff_desc.border_color.a > 0u);
     const bool has_scrollbar = is_scroll && eff_desc.show_scrollbar;
@@ -1666,6 +1694,7 @@ void begin_box(const BoxDesc& desc_in) noexcept {
     };
     decl.aspectRatio.aspectRatio = std::isfinite(desc.aspect_ratio) && desc.aspect_ratio > 0 ? desc.aspect_ratio : 0;
     decl.layout.wrap = desc.wrap;
+    decl.layout.shrinkWidth = desc.shrink_width;
     decl.layout.crossChildGap = to_u16_round(std::isfinite(desc.row_gap) && desc.row_gap >= 0 ? desc.row_gap : desc.gap);
     decl.layout.gridColumns = desc.grid_columns > 128 ? 128 : desc.grid_columns;
     decl.layout.gridColSpan = desc.grid_col_span > 0 ? desc.grid_col_span : 1;
@@ -1716,7 +1745,7 @@ void begin_box(const BoxDesc& desc_in) noexcept {
         decl.floating.clampToViewport = desc.clamp_to_viewport;
     }
     if (any_clip) {
-        decl.clip.horizontal = desc.clip_children || desc.scroll_x;
+        decl.clip.horizontal = desc.clip_children || desc.scroll_x || desc.shrink_width;
         decl.clip.vertical = desc.clip_children || desc.scroll_y;
         if (is_scroll && box_ws) {
             decl.clip.childOffset = Clay_Vector2{ -box_ws->scroll_pos.x, -box_ws->scroll_pos.y };
@@ -2100,7 +2129,7 @@ void icon(const IconDesc& desc_in) noexcept {
 }
 
 void draw_rect(const RectDrawDesc& desc) noexcept {
-    if (desc.rect.w <= 0.0f || desc.rect.h <= 0.0f || !std::isfinite(desc.angle_rad)) {
+    if (desc.rect.w <= 0.0f || desc.rect.h <= 0.0f || !std::isfinite(desc.angle_rad) || !std::isfinite(desc.softness) || desc.softness < 0.5f) {
         return;
     }
     Context* ctx = current_context();
@@ -2286,7 +2315,7 @@ Vec2 measure_text(Str text, uint16_t font_id, float size, float letter_spacing) 
 
 void draw_text(const TextDrawDesc& desc) noexcept {
     Context* ctx = current_context();
-    if (!ctx || !desc.text.chars || desc.text.length == 0u || desc.size <= 0.0f) {
+    if (!ctx || !desc.text.chars || desc.text.length == 0u || !std::isfinite(desc.size) || desc.size <= 0.0f || !std::isfinite(desc.max_width_px) || desc.max_width_px < 0) {
         return;
     }
     TextDrawDesc copied = desc;
@@ -3600,6 +3629,10 @@ std::span<const Str> dropped_files() noexcept {
 
 
 float spring(uint32_t anim_id, float target, SpringSpec spec) noexcept {
+    return spring(anim_id, target, target, spec);
+}
+
+float spring(uint32_t anim_id, float target, float initial_value, SpringSpec spec) noexcept {
     Context* ctx = current_context();
     if (!ctx || anim_id == 0u) {
         return target;
@@ -3609,10 +3642,11 @@ float spring(uint32_t anim_id, float target, SpringSpec spec) noexcept {
         return target;
     }
     if (!ws->spring_initialized) {
-        ws->spring_pos = target;
+        ws->spring_pos = initial_value;
         ws->spring_vel = 0.0f;
         ws->spring_initialized = true;
-        return target;
+        if (initial_value != target) ++ctx->active_ui->active_anim_count;
+        return initial_value;
     }
 
     const float x0 = ws->spring_pos - target;

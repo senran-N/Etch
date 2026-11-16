@@ -130,7 +130,7 @@ bool button(const ButtonDesc& d) noexcept {
     const Color label_col = d.disabled
         ? thm.text_disabled
         : ((d.variant == ButtonVariant::Primary || d.variant == ButtonVariant::Danger) ? Color::white() : thm.text_primary);
-    begin_box({.id=d.id,.width=d.width,.height=d.height,.padding=d.padding,.gap=8,.align_y=AlignY::Center,
+    begin_box({.id=d.id,.width=d.width,.height=d.height,.padding=d.padding,.gap=8,.align_x=(d.icon_id != kInvalidIcon && d.label.length == 0 && d.shortcut_hint.length == 0) ? AlignX::Center : AlignX::Left,.align_y=AlignY::Center,
         .background=desktop_bg(d.id,bg,d.disabled),.radius=resolve_theme_corners(d.radius,Corners::all(thm.radius_control_px)),.focusable=!d.disabled});
     a11y_semantic(d.id,A11yRole::Button,d.label,d.disabled?A11yState_Disabled:0u,3u);
     if (d.icon_id != kInvalidIcon) icon({.icon_id=d.icon_id,.size_px=d.font_size_px,.color=label_col});

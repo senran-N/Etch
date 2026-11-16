@@ -75,6 +75,7 @@
 #include "etch_emoji.cpp"
 #include "etch_render_cmd.cpp"
 #include "etch_text_input.cpp"
+#include "etch_window.cpp"
 #include "etch_layout.cpp"
 #include "etch_containers.cpp"
 #include "etch_frame.cpp"

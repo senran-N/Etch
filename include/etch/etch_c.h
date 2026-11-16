@@ -8,8 +8,8 @@
 
 #ifndef ETCH_VERSION_MAJOR
 #define ETCH_VERSION_MAJOR 0
-#define ETCH_VERSION_MINOR 9
-#define ETCH_VERSION_PATCH 1
+#define ETCH_VERSION_MINOR 10
+#define ETCH_VERSION_PATCH 0
 #define ETCH_VERSION_STR_DETAIL(x) #x
 #define ETCH_VERSION_STR(x) ETCH_VERSION_STR_DETAIL(x)
 #define ETCH_VERSION_STRING ETCH_VERSION_STR(ETCH_VERSION_MAJOR) "." ETCH_VERSION_STR(ETCH_VERSION_MINOR) "." ETCH_VERSION_STR(ETCH_VERSION_PATCH)
@@ -727,11 +727,13 @@ typedef struct EtchFrameDesc {
     uint8_t pointer_clicks;
     uint16_t key_mods;
     uint32_t key_pressed_code;
+    bool pixel_snap;
 } EtchFrameDesc;
 
 typedef struct EtchWindowFrameDesc {
     float dt;
     float min_scale;
+    bool pixel_snap;
 } EtchWindowFrameDesc;
 
 typedef struct EtchFrameStats {
@@ -795,6 +797,7 @@ typedef struct EtchBoxDesc {
     const EtchGridTrack* grid_tracks;
     uint32_t grid_track_count;
     uint16_t grid_col_span;
+    bool shrink_width;
 } EtchBoxDesc;
 
 typedef struct EtchTextDesc {
@@ -906,6 +909,7 @@ typedef struct EtchRectDrawDesc {
     float border_width;
     bool foreground;
     float angle_rad;
+    float softness;
 } EtchRectDrawDesc;
 
 typedef struct EtchLineDesc {
@@ -1023,6 +1027,8 @@ typedef struct EtchTextDrawDesc {
     EtchAlignX align_x;
     EtchAlignY align_y;
     bool foreground;
+    float max_width_px;
+    bool ellipsis;
 } EtchTextDrawDesc;
 
 typedef struct EtchImageDrawDesc {
@@ -1893,6 +1899,8 @@ bool etch_is_dragging_payload(uint32_t kind_hash);
 bool etch_peek_drag_payload(EtchDragPayloadView* out_view, uint32_t kind_hash);
 bool etch_accept_drag_payload(uint32_t target_id, uint32_t kind_hash, EtchDragPayloadView* out_view);
 
+struct SDL_Window* etch_create_desktop_window(const char* title, float logical_w, float logical_h, uint64_t flags);
+float etch_spring_from(uint32_t anim_id, float target, float initial_value, EtchSpringSpec spec);
 float etch_spring(uint32_t anim_id, float target, EtchSpringSpec spec);
 EtchVec2 etch_spring_vec2(uint32_t anim_id, EtchVec2 target, EtchSpringSpec spec);
 EtchVec2 etch_scroll_offset(uint32_t element_id);

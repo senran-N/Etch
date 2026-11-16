@@ -360,6 +360,7 @@ typedef struct Clay_LayoutConfig {
     Clay_ChildAlignment childAlignment; // Controls how child elements are aligned on each axis.
     Clay_LayoutDirection layoutDirection; // Controls the direction in which child elements will be automatically laid out.
     bool wrap;
+    bool shrinkWidth; // Etch: opt-in content-independent minimum for flexible items.
     uint16_t crossChildGap, gridColumns, gridTrackCount;
     const Clay__GridTrack *gridTracks;
     uint16_t gridColSpan;
@@ -2106,6 +2107,10 @@ void Clay__CloseElement(void) {
         openLayoutElement->minDimensions.width = elementHasClipHorizontal ? leftRightPadding : w;
     }
     context->layoutElementChildrenBuffer.length -= openLayoutElement->children.length;
+
+    if (layoutConfig->shrinkWidth && (layoutConfig->sizing.width.type == CLAY__SIZING_TYPE_FIT || layoutConfig->sizing.width.type == CLAY__SIZING_TYPE_GROW)) {
+        openLayoutElement->minDimensions.width = leftRightPadding;
+    }
 
     // Clamp element min and max width to the values configured in the layout
     if (layoutConfig->sizing.width.type != CLAY__SIZING_TYPE_PERCENT) {

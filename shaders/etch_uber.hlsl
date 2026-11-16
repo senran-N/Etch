@@ -281,6 +281,8 @@ VSOut vs_main(uint vertex_id : SV_VertexID, uint instance_id : SV_InstanceID)
     o.uv_rect      = uv_rect;
     o.grad_params  = float4(grad_dir.x, grad_dir.y, bw_soft.x, bw_soft.y);
     o.meta         = uint4(kind, flags | (g_flags & ETCH_GLOBAL_MANUAL_SRGB), tex_slot, asuint(clip_r));
+    if ((kind == ETCH_PRIM_SLUG_GLYPH || kind == ETCH_PRIM_TEXTURE) && (flags & ETCH_FLAG_ROUND_CAP) != 0u)
+        o.grad_params = float4(asfloat(p.style.z), asfloat(p.style.w), 0.0f, 1.0f);
     o.slug_meta    = uint2(p.payload.x, p.payload.y);
     return o;
 }
@@ -557,6 +559,9 @@ float4 ps_main(VSOut input) : SV_Target0
         clip_d = max(cq.x, cq.y);
     }
     float clip_cov = saturate(0.5f - clip_d);
+    // Glyph/emoji reuse the wire cap flag for a second, horizontal text clip.
+    if ((kind == ETCH_PRIM_SLUG_GLYPH || kind == ETCH_PRIM_TEXTURE) && (flags & ETCH_FLAG_ROUND_CAP) != 0u)
+        clip_cov *= saturate(0.5f + min(input.pixel_pos.x - input.grad_params.x, input.grad_params.y - input.pixel_pos.x));
     if (clip_cov <= 0.0f)
     {
         return float4(0.0f, 0.0f, 0.0f, 0.0f);
@@ -581,12 +586,12 @@ float4 ps_main(VSOut input) : SV_Target0
         float softness  = input.grad_params.w;
         float inv_aa    = 1.0f / max(softness, 0.5f);
         float outer_cov = saturate(0.5f - d * inv_aa);
-        float inner_cov = (border_w > 0.0f) ? saturate(0.5f - (d + border_w)) : 1.0f;
-        float border_t  = 1.0f - inner_cov;
+        float inner_cov = (border_w > 0.0f) ? saturate(0.5f - (d + border_w) * inv_aa) : outer_cov;
+        float border_t  = max(outer_cov - inner_cov, 0.0f);
 
         float4 b_pm = float4(input.border_color.rgb, 1.0f) * (input.border_color.a * border_t);
         float4 f_pm = float4(fill_col.rgb, 1.0f) * fill_col.a;
-        out_pm      = (b_pm + f_pm * (1.0f - b_pm.a)) * outer_cov;
+        out_pm      = b_pm + f_pm * inner_cov;
     }
     else if (kind == ETCH_PRIM_SHADOW)
     {
@@ -644,8 +649,8 @@ float4 ps_main(VSOut input) : SV_Target0
         float softness  = input.grad_params.w;
         float inv_aa    = 1.0f / max(softness, 0.5f);
         float outer_cov = saturate(0.5f - d * inv_aa);
-        float inner_cov = (border_w > 0.0f) ? saturate(0.5f - (d + border_w)) : 1.0f;
-        float border_t  = 1.0f - inner_cov;
+        float inner_cov = (border_w > 0.0f) ? saturate(0.5f - (d + border_w) * inv_aa) : outer_cov;
+        float border_t  = max(outer_cov - inner_cov, 0.0f);
 
         float4 b_pm = float4(input.border_color.rgb, 1.0f) * (input.border_color.a * border_t);
         float4 tex_pm;
@@ -658,7 +663,7 @@ float4 ps_main(VSOut input) : SV_Target0
             float ta = texel.a * input.color0.a;
             tex_pm = float4(texel.rgb * input.color0.rgb * ta, ta);
         }
-        out_pm = (b_pm + tex_pm * (1.0f - b_pm.a)) * outer_cov;
+        out_pm = b_pm + tex_pm * inner_cov;
     }
     else if (kind == ETCH_PRIM_BLUR_GLASS)
     {
@@ -677,12 +682,12 @@ float4 ps_main(VSOut input) : SV_Target0
         float softness  = input.grad_params.w;
         float inv_aa    = 1.0f / max(softness, 0.5f);
         float outer_cov = saturate(0.5f - d * inv_aa);
-        float inner_cov = (border_w > 0.0f) ? saturate(0.5f - (d + border_w)) : 1.0f;
-        float border_t  = 1.0f - inner_cov;
+        float inner_cov = (border_w > 0.0f) ? saturate(0.5f - (d + border_w) * inv_aa) : outer_cov;
+        float border_t  = max(outer_cov - inner_cov, 0.0f);
 
         float4 b_pm = float4(input.border_color.rgb, 1.0f) * (input.border_color.a * border_t);
         float4 g_pm = float4(glass_lin.rgb, 1.0f);
-        out_pm      = (b_pm + g_pm * (1.0f - b_pm.a)) * outer_cov;
+        out_pm      = b_pm + g_pm * inner_cov;
     }
     else if (kind == ETCH_PRIM_CANVAS_GRID)
     {

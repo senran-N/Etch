@@ -12,8 +12,8 @@
 #include <type_traits>
 
 #define ETCH_VERSION_MAJOR 0
-#define ETCH_VERSION_MINOR 9
-#define ETCH_VERSION_PATCH 1
+#define ETCH_VERSION_MINOR 10
+#define ETCH_VERSION_PATCH 0
 #define ETCH_VERSION_STR_DETAIL(x) #x
 #define ETCH_VERSION_STR(x) ETCH_VERSION_STR_DETAIL(x)
 #define ETCH_VERSION_STRING ETCH_VERSION_STR(ETCH_VERSION_MAJOR) "." ETCH_VERSION_STR(ETCH_VERSION_MINOR) "." ETCH_VERSION_STR(ETCH_VERSION_PATCH)
@@ -467,6 +467,7 @@ enum PrimFlags : uint8_t {
     PrimFlag_Premultiplied = 1 << 3,
     PrimFlag_StemDarken = 1 << 4,
     PrimFlag_RoundCap = 1 << 5,
+    PrimFlag_TextClip = 1 << 5, // Glyph/emoji style.zw hold a secondary horizontal clip.
 };
 
 #ifdef _MSC_VER
@@ -540,7 +541,8 @@ struct alignas(16) Prim {
         Color border_color = {},
         float border_width = 0.0f,
         float clip_radius = 0.0f,
-        bool radial = false) noexcept
+        bool radial = false,
+        float softness = 1.0f) noexcept
     {
         const uint8_t grad_flag = radial ? PrimFlag_RadialGrad : PrimFlag_LinearGrad;
         const uint8_t clip_flag = (clip_radius > 0.0f) ? PrimFlag_RoundedClip : PrimFlag_None;
@@ -557,7 +559,7 @@ struct alignas(16) Prim {
                 pack_header(PrimKind::Rect, static_cast<uint8_t>(grad_flag | clip_flag), 0, clip_radius),
                 color_start.pack_rgba8(),
                 border_color.pack_rgba8(),
-                pack_f16x2(border_width, 1.0f),
+                pack_f16x2(border_width, softness),
             },
         };
     }
@@ -933,6 +935,7 @@ enum KeyMod : uint16_t {
 struct WindowFrameDesc {
     float dt = 0.0f;
     float min_scale = 0.0f;
+    bool pixel_snap = true;
 };
 
 enum class SystemTheme : uint8_t { Unknown = 0, Light = 1, Dark = 2 };
@@ -1038,6 +1041,7 @@ struct FrameDesc {
     uint8_t pointer_clicks = 0;      // 0 = use event clicks (1); 2 = double-click
     uint16_t key_mods = Mod_None;
     uint32_t key_pressed_code = 0;   // Optional single-frame SDL_Keycode injection
+    bool pixel_snap = true; // Align axis-aligned rectangle edges to physical pixels.
 };
 
 struct FrameStats {
@@ -1195,6 +1199,7 @@ struct BoxDesc {
     uint16_t grid_columns = 0; // Up to 128 columns; explicit tracks take precedence.
     std::span<const GridTrack> grid_tracks = {}; // Copied into frame storage by begin_box.
     uint16_t grid_col_span = 1;
+    bool shrink_width = false; // Fit/Grow may shrink below content width; clips overflow.
 };
 
 inline constexpr uint16_t kFontSans       = 0u;
@@ -1318,6 +1323,7 @@ struct RectDrawDesc {
     float   border_width = 0.0f;
     bool    foreground = false;
     float   angle_rad = 0.0f;
+    float   softness = 1.0f; // Physical-pixel AA width, minimum 0.5.
 };
 
 struct LineDesc {
@@ -1427,6 +1433,8 @@ struct TextDrawDesc {
     AlignX   align_x = AlignX::Left;
     AlignY   align_y = AlignY::Top;
     bool     foreground = false;
+    float    max_width_px = 0.0f; // Logical px, like size; 0 = unlimited.
+    bool     ellipsis = false;
 };
 
 struct ImageDrawDesc {
@@ -1952,6 +1960,8 @@ void set_os_a11y_enabled(Context* ctx, bool enabled) noexcept;
 bool os_a11y_enabled(const Context* ctx = nullptr) noexcept;
 bool os_a11y_active(const Context* ctx = nullptr, SDL_Window* window = nullptr) noexcept;
 void end_frame(Context* ctx = nullptr) noexcept;
+// Main thread; caller destroys the returned window with SDL_DestroyWindow.
+SDL_Window* create_desktop_window(const char* title, float logical_w, float logical_h, uint64_t flags = 0) noexcept;
 void begin_window_frame(Context* ctx, SDL_Window* window, float dt) noexcept;
 void begin_window_frame(Context* ctx, SDL_Window* window, const WindowFrameDesc& desc) noexcept;
 void end_window_frame(Context* ctx = nullptr) noexcept;
@@ -2096,6 +2106,7 @@ bool accept_drag_payload(uint32_t target_id, uint32_t kind_hash, DragPayloadView
 
 // Analytic damped spring animator & inertial scroll container control
 float spring(uint32_t anim_id, float target, SpringSpec spec = {}) noexcept;
+float spring(uint32_t anim_id, float target, float initial_value, SpringSpec spec = {}) noexcept;
 Vec2 spring_vec2(uint32_t anim_id, Vec2 target, SpringSpec spec = {}) noexcept;
 Vec2 scroll_offset(uint32_t element_id) noexcept;
 void set_scroll_offset(uint32_t element_id, Vec2 offset, bool stop_momentum = true) noexcept;

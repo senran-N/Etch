@@ -4,6 +4,19 @@ All notable changes to Etch are documented here. This file follows
 [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] - 2026-11-16
+
+### Added
+- Logical desktop window creation with usable-area sizing and opt-in per-monitor size updates.
+- Physical pixel snapping (frame switch), immediate text width/ellipsis, rectangle softness,
+  spring initial values, and flexible boxes that can shrink below their content width.
+- Matching C99 descriptors and window/spring entry points. Recompile consumers for the expanded descriptors.
+
+### Fixed
+- Consistent inner/outer border AA and coverage-partitioned transparent border blending.
+- Sorted right-aligned table headers reserve arrow space; anonymous column caches reset when column counts change.
+- Icon-only buttons center their icon.
+
 ## [0.9.1] - 2026-11-16
 
 ### Fixed
