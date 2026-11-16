@@ -70,6 +70,8 @@
 
 #include "etch_arena.cpp"
 #include "etch_theme.cpp"
+#include "etch_color.cpp"
+#include "etch_motion.cpp"
 #include "etch_image.cpp"
 #include "etch_slug.cpp"
 #include "etch_emoji.cpp"

@@ -55,6 +55,13 @@ struct WidgetState {
     bool     is_text_input_writable = false;
     bool     is_multiline_input = false, edit_reveal_caret = true;
     float    edit_max_scroll_y = 0;
+    float hover_t=0, hover_vel=0, press_t=0, press_vel=0;
+    Rect anim_rect = {};
+    Vec2 anim_vel_pos = {}, anim_vel_size = {};
+    uint32_t anim_seen_frame=0;
+    bool presence_initialized = false;
+    float presence_pos = 0, presence_vel = 0;
+    uint32_t presence_frame = 0;
     bool     spring_initialized = false;
     float    spring_pos = 0.0f;
     float    spring_vel = 0.0f;
@@ -342,7 +349,23 @@ enum class DrawCmdKind : uint8_t {
     Callback = 9,
 };
 
+struct BoxExtra;
+struct VisualLayerNode {
+    const VisualLayerNode* parent = nullptr;
+    BoxExtra* source_box = nullptr;
+    LayerDesc local = {};
+    mutable float resolved_opacity = 1;
+    mutable Vec2 resolved_scale = {1,1}, resolved_offset_px = {};
+    mutable Vec2 inherited_scale = {1,1}, inherited_offset_px = {};
+    mutable bool resolved_animating = false;
+    mutable uint32_t resolved_frame = 0;
+};
+struct BoxBuildStack {
+    BoxBuildStack* parent = nullptr;
+    const VisualLayerNode* previous_layer = nullptr;
+};
 struct DrawCmdNode {
+    const VisualLayerNode* layer = nullptr;
     DrawCmdNode*  next = nullptr;
     DrawCmdKind   kind = DrawCmdKind::Rect;
     float         world_scale = 1.0f;
@@ -392,6 +415,8 @@ struct CanvasWireExtra {
 
 struct CodeEditorExtra;
 struct BoxExtra {
+    const VisualLayerNode* layer = nullptr;
+    Rect layout_rect_logical = {};
     CodeEditorExtra* code_editor = nullptr;
     CustomCmdKind    kind = CustomCmdKind::Box;
     BoxDesc          desc = {};
@@ -438,6 +463,7 @@ struct CanvasStackEntry {
 };
 
 struct ImageExtra {
+    const VisualLayerNode* layer = nullptr;
     ImageDesc desc = {};
 };
 
@@ -458,6 +484,7 @@ struct RichSpanInternal {
 };
 
 struct SelectableTextExtra {
+    const VisualLayerNode* layer = nullptr;
     const char* full_utf8 = nullptr;
     uint32_t total_bytes = 0;
     uint32_t selectable_id = 0;
@@ -466,6 +493,7 @@ struct SelectableTextExtra {
 };
 
 struct RichTextExtra {
+    const VisualLayerNode* layer = nullptr;
     uint32_t selectable_id = 0;
     Color selection_color = {};
     RichSpanInternal* spans = nullptr;
@@ -637,6 +665,8 @@ struct A11yBuild { A11yNode node = {}; A11yBuild* next = nullptr; A11yBuild* par
 struct A11yPatch { A11yOverrideDesc desc = {}; A11yPatch* next = nullptr; };
 struct A11yIndexEntry { uint32_t id = 0; A11yBuild* build = nullptr; A11yPatch* patches = nullptr; A11yPatch* tail = nullptr; };
 struct WindowUiState {
+    const VisualLayerNode* current_layer = nullptr;
+    BoxBuildStack* box_build_stack = nullptr;
     Arena a11y_arena = {}; A11yNode* a11y_nodes = nullptr; uint32_t a11y_node_count = 0;
     PendingA11yAction a11y_actions[16] = {}; uint32_t a11y_action_count = 0;
     PendingA11yAction frame_a11y_actions[16] = {}; uint32_t frame_a11y_action_count = 0;
@@ -852,6 +882,9 @@ struct ClaimedWindowSlot {
 };
 
 struct Context {
+    const VisualLayerNode* active_render_layer = nullptr;
+    float time_scale = 1;
+    bool reduced_motion = false;
     A11yIndexEntry* a11y_index = nullptr; uint32_t a11y_index_cap = 0, a11y_index_count = 0;
     A11yBuild* a11y_first = nullptr; A11yBuild* a11y_last = nullptr; A11yBuild* a11y_parent = nullptr;
     A11yPatch* a11y_patches = nullptr; uint32_t a11y_count = 0;

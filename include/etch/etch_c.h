@@ -8,7 +8,7 @@
 
 #ifndef ETCH_VERSION_MAJOR
 #define ETCH_VERSION_MAJOR 0
-#define ETCH_VERSION_MINOR 13
+#define ETCH_VERSION_MINOR 14
 #define ETCH_VERSION_PATCH 0
 #define ETCH_VERSION_STR_DETAIL(x) #x
 #define ETCH_VERSION_STR(x) ETCH_VERSION_STR_DETAIL(x)
@@ -656,6 +656,7 @@ typedef struct EtchContextDesc {
     EtchWindowRefreshFn on_window_refresh;
     void* refresh_user_data;
     bool enable_os_a11y;
+    bool respect_reduced_motion;
 } EtchContextDesc;
 
 typedef struct EtchTheme {
@@ -818,6 +819,12 @@ typedef struct EtchBoxDesc {
     float shadow_spread;
     bool window_drag_passthrough;
     EtchBorderAlign border_align;
+    float opacity;
+    EtchColor hover_background, hover_border_color;
+    float hover_scale, press_scale;
+    bool animate_layout;
+    uint32_t hero_id;
+    EtchSpringSpec transition;
 } EtchBoxDesc;
 
 typedef struct EtchTextDesc {
@@ -1700,6 +1707,24 @@ bool etch_system_dark_mode(bool default_when_unknown);
 
 EtchTheme etch_theme_dark(void);
 EtchTheme etch_theme_light(void);
+EtchColor etch_color_oklch(float L, float C, float hue_deg, float alpha);
+EtchColor etch_color_lerp_oklab(EtchColor a, EtchColor b, float t);
+EtchTheme etch_theme_from_seed(EtchColor seed, bool dark_mode, float chroma_scale);
+EtchSpringSpec etch_spring_spec_snappy(void);
+EtchSpringSpec etch_spring_spec_fluid(void);
+EtchSpringSpec etch_spring_spec_bouncy(void);
+EtchSpringSpec etch_spring_spec_gentle(void);
+typedef struct EtchLayerDesc {
+    float opacity;
+    EtchVec2 translate, scale, pivot_norm, pivot_px;
+    bool animating;
+} EtchLayerDesc;
+EtchLayerDesc etch_layer_desc_default(void);
+void etch_push_layer(const EtchLayerDesc* desc);
+void etch_pop_layer(void);
+typedef struct EtchPresenceResult { bool visible; float opacity; bool exiting; } EtchPresenceResult;
+EtchPresenceResult etch_presence(uint32_t id, bool mounted, EtchSpringSpec spec);
+void etch_set_time_scale(EtchContext* ctx, float scale);
 EtchTheme etch_theme_high_contrast(void);
 EtchTheme etch_theme_industrial(void);
 void etch_set_theme(const EtchTheme* theme, EtchContext* ctx);

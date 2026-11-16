@@ -4,6 +4,15 @@ All notable changes to Etch are documented here. This file follows
 [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.0] - 2026-11-17
+
+### Added
+- Oklch colors, Oklab interpolation and contrast-tested seed themes with C99 parity.
+- Arena-backed visual layer chains, opacity scopes and animated presence with balanced early exits.
+- FLIP layout springs and shared hero identities across parents; inline hover and press transitions.
+- Spring presets, animation time scaling and Windows reduced-motion preference support.
+- F10 slow motion toggle in the F12 inspector; motion lifecycle and 5,000-item state growth regressions.
+
 ## [0.13.0] - 2026-11-16
 
 ### Added

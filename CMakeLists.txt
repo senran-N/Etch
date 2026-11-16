@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(etch VERSION 0.13.0 LANGUAGES C CXX)
+project(etch VERSION 0.14.0 LANGUAGES C CXX)
 
 option(ETCH_BUILD_EXAMPLES "Build Etch sandbox and etch_studio examples" ${PROJECT_IS_TOP_LEVEL})
 option(ETCH_BUILD_TESTS "Build Etch CTest suite" ${PROJECT_IS_TOP_LEVEL})
@@ -289,7 +289,7 @@ if (ETCH_BUILD_TESTS)
                     $<$<BOOL:$<TARGET_RUNTIME_DLLS:etch_tests>>:$<TARGET_FILE_DIR:etch_tests>>
             COMMAND_EXPAND_LISTS)
     endif ()
-    foreach(suite arena_and_elasticity unicode_bidi_grapheme layout_clay_flex_grid fenwick_virtual_list_1m widgets_and_dockspace text_buffer_and_code_editor a11y_semantic_tree headless_gpu_invariants)
+    foreach(suite motion_layers_presence arena_and_elasticity unicode_bidi_grapheme layout_clay_flex_grid fenwick_virtual_list_1m widgets_and_dockspace text_buffer_and_code_editor a11y_semantic_tree headless_gpu_invariants)
         add_test(NAME ${suite} COMMAND etch_tests --suite=${suite})
     endforeach()
 

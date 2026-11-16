@@ -147,6 +147,8 @@ inline etch::BoxDesc to_cpp(const EtchBoxDesc& d) noexcept {
     out.border_color = to_cpp(d.border_color); out.border_width = d.border_width;
     out.radius = to_cpp(d.radius); out.shadow_color = to_cpp(d.shadow_color);
     out.shadow_spread = d.shadow_spread; out.shadow_blur = d.shadow_blur; out.shadow_offset = to_cpp(d.shadow_offset);
+    out.opacity=d.opacity; out.hover_background=to_cpp(d.hover_background); out.hover_border_color=to_cpp(d.hover_border_color);
+    out.hover_scale=d.hover_scale;out.press_scale=d.press_scale;out.animate_layout=d.animate_layout;out.hero_id=d.hero_id;out.transition=to_cpp(d.transition);
     out.border_align=static_cast<etch::BorderAlign>(d.border_align); out.window_drag_passthrough = d.window_drag_passthrough; out.continuous_corners = d.continuous_corners; out.shrink_width = d.shrink_width; out.shrink_height = d.shrink_height; out.clip_children = d.clip_children; out.scroll_x = d.scroll_x; out.scroll_y = d.scroll_y;
     out.show_scrollbar = d.show_scrollbar; out.focusable = d.focusable;
     out.attach_to = static_cast<etch::AttachTo>(d.attach_to);
@@ -228,7 +230,7 @@ EtchContextDesc etch_context_desc_default(void) {
     const etch::ContextDesc d{};
     return {d.max_layout_elements, d.window, d.frame_arena_bytes, d.max_prims_per_frame,
             d.font_path, d.font_size_px, d.enable_gpu_debug, d.headless, d.gpu_driver,
-            nullptr, nullptr, d.enable_os_a11y};
+            nullptr, nullptr, d.enable_os_a11y, d.respect_reduced_motion};
 }
 
 EtchFrameDesc etch_frame_desc_default(void) {
@@ -255,7 +257,7 @@ EtchBoxDesc etch_box_desc_default(void) {
             static_cast<EtchAnchor>(d.anchor_element), static_cast<EtchAnchor>(d.anchor_parent),
             from_cpp(d.floating_offset), d.z_index, d.pointer_passthrough, d.clip_to_parent,
             d.backdrop_blur, d.clamp_to_viewport, d.wrap, d.row_gap, d.aspect_ratio,
-            d.grid_columns, nullptr, 0u, d.grid_col_span, d.shrink_width, d.shrink_height, d.continuous_corners, d.shadow_spread, d.window_drag_passthrough,static_cast<EtchBorderAlign>(d.border_align)};
+            d.grid_columns, nullptr, 0u, d.grid_col_span, d.shrink_width, d.shrink_height, d.continuous_corners, d.shadow_spread, d.window_drag_passthrough,static_cast<EtchBorderAlign>(d.border_align),d.opacity,from_cpp(d.hover_background),from_cpp(d.hover_border_color),d.hover_scale,d.press_scale,d.animate_layout,d.hero_id,from_cpp(d.transition)};
 }
 
 EtchTextDesc etch_text_desc_default(void) {
@@ -643,6 +645,13 @@ EtchSystemTheme etch_system_theme(void) { return static_cast<EtchSystemTheme>(et
 bool etch_system_dark_mode(bool default_when_unknown) { return etch::system_dark_mode(default_when_unknown); }
 EtchTheme etch_theme_dark(void) { return from_cpp(etch::Theme::dark()); }
 EtchTheme etch_theme_light(void) { return from_cpp(etch::Theme::light()); }
+EtchColor etch_color_oklch(float L, float C, float hue_deg, float alpha) { return from_cpp(etch::Color::oklch(L,C,hue_deg,alpha)); }
+EtchColor etch_color_lerp_oklab(EtchColor a, EtchColor b, float t) { return from_cpp(etch::Color::lerp_oklab(to_cpp(a),to_cpp(b),t)); }
+EtchTheme etch_theme_from_seed(EtchColor seed, bool dark_mode, float chroma_scale) { return from_cpp(etch::Theme::from_seed(to_cpp(seed),dark_mode,chroma_scale)); }
+EtchSpringSpec etch_spring_spec_snappy(void) { return from_cpp(etch::SpringSpec::snappy()); }
+EtchSpringSpec etch_spring_spec_fluid(void) { return from_cpp(etch::SpringSpec::fluid()); }
+EtchSpringSpec etch_spring_spec_bouncy(void) { return from_cpp(etch::SpringSpec::bouncy()); }
+EtchSpringSpec etch_spring_spec_gentle(void) { return from_cpp(etch::SpringSpec::gentle()); }
 EtchTheme etch_theme_high_contrast(void) { return from_cpp(etch::Theme::high_contrast()); }
 EtchTheme etch_theme_industrial(void) { return from_cpp(etch::Theme::industrial()); }
 void etch_set_theme(const EtchTheme* theme, EtchContext* ctx) { if (theme) etch::set_theme(to_cpp(*theme), to_ctx(ctx)); }
@@ -660,7 +669,7 @@ EtchContext* etch_create_context(const EtchContextDesc* desc) {
         cpp_desc = {desc->max_layout_elements, desc->window, desc->frame_arena_bytes,
                     desc->max_prims_per_frame, desc->font_path, desc->font_size_px,
                     desc->enable_gpu_debug, desc->headless, desc->gpu_driver,
-                    nullptr, nullptr, desc->enable_os_a11y};
+                    nullptr, nullptr, desc->enable_os_a11y, desc->respect_reduced_motion};
     }
     etch::Context* ctx = etch::create_context(cpp_desc);
     if (ctx && desc && desc->on_window_refresh) {
@@ -1476,3 +1485,14 @@ void etch_set_debug_hud_open(EtchContext* ctx, bool open) { etch::set_debug_hud_
 bool etch_debug_hud_open(const EtchContext* ctx) { return etch::debug_hud_open(to_ctx(ctx)); }
 void etch_set_debug_wireframe(EtchContext* ctx, bool enabled) { etch::set_debug_wireframe(to_ctx(ctx), enabled); }
 bool etch_debug_wireframe(const EtchContext* ctx) { return etch::debug_wireframe(to_ctx(ctx)); }
+
+extern "C" EtchPresenceResult etch_presence(uint32_t id, bool mounted, EtchSpringSpec spec) {
+    const auto r=etch::presence(id,mounted,to_cpp(spec)); return {r.visible,r.opacity,r.exiting};
+}
+extern "C" void etch_set_time_scale(EtchContext* ctx, float scale) { etch::set_time_scale(to_ctx(ctx),scale); }
+
+extern "C" EtchLayerDesc etch_layer_desc_default(void) {
+    const etch::LayerDesc d;return {d.opacity,from_cpp(d.translate),from_cpp(d.scale),from_cpp(d.pivot_norm),from_cpp(d.pivot_px),d.animating};
+}
+extern "C" void etch_push_layer(const EtchLayerDesc* d) {etch::push_layer(d ? etch::LayerDesc{d->opacity,to_cpp(d->translate),to_cpp(d->scale),to_cpp(d->pivot_norm),to_cpp(d->pivot_px),d->animating} : etch::LayerDesc{});}
+extern "C" void etch_pop_layer(void) {etch::pop_layer();}

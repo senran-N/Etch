@@ -10,6 +10,9 @@
 typedef char c_chk_prim[(sizeof(EtchPrim) == 64u) ? 1 : -1];
 
 int main(void) {
+    const EtchColor seed=etch_color_oklch(.6f,.15f,240.f,1.f);
+    const EtchTheme seeded=etch_theme_from_seed(seed,true,1.f);
+    if (seeded.on_primary.a!=255 || etch_color_lerp_oklab(seed,seed,.5f).r!=seed.r || etch_spring_spec_fluid().response<=0) return 1;
     const char* ver = ETCH_VERSION_STRING;
     if (ver[0] == '\0') {
         return 1;
@@ -33,6 +36,11 @@ int main(void) {
     fd.viewport_w = 128u;
     fd.viewport_h = 96u;
     etch_begin_frame(ctx, &fd);
+    etch_set_time_scale(ctx,.2f);
+    if(!etch_presence(etch_id("presence"),true,etch_spring_spec_fluid()).visible) return 1;
+    const EtchLayerDesc layer=etch_layer_desc_default();
+    etch_push_layer(&layer);etch_pop_layer();
+
 
     EtchBoxDesc box = etch_box_desc_default();
     box.id = etch_id("smoke_c");

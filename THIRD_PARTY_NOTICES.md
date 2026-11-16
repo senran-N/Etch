@@ -54,6 +54,12 @@ Unicode License V3, `Copyright (c) 1991-2026 Unicode, Inc.`
 and permission notice with copies of the data/software or in accompanying
 documentation.
 
+## Oklab conversion matrices
+
+The matrices used in `src/etch_color.cpp` are from Björn Ottosson's
+[Oklab reference implementation](https://bottosson.github.io/posts/oklab/),
+dedicated to the public domain by its author.
+
 ## Slug
 
 [third_party/slug/LICENSE](third_party/slug/LICENSE) offers a choice of

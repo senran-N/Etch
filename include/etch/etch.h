@@ -12,7 +12,7 @@
 #include <type_traits>
 
 #define ETCH_VERSION_MAJOR 0
-#define ETCH_VERSION_MINOR 13
+#define ETCH_VERSION_MINOR 14
 #define ETCH_VERSION_PATCH 0
 #define ETCH_VERSION_STR_DETAIL(x) #x
 #define ETCH_VERSION_STR(x) ETCH_VERSION_STR_DETAIL(x)
@@ -106,6 +106,8 @@ struct Rect {
 // Colors are authored in sRGB [0..255]. Shaders decode sRGB -> linear before alpha blending
 // and stem darkening so anti-aliased edges and soft shadows remain physically accurate.
 struct Color {
+    static Color oklch(float L, float C, float hue_deg, float alpha = 1.0f) noexcept;
+    static Color lerp_oklab(Color a, Color b, float t) noexcept;
     uint8_t r = 0;
     uint8_t g = 0;
     uint8_t b = 0;
@@ -931,6 +933,7 @@ struct ContextDesc {
     WindowRefreshFn on_window_refresh = nullptr;
     void* refresh_user_data = nullptr;
     bool enable_os_a11y = true;
+    bool respect_reduced_motion = true;
 };
 
 enum KeyMod : uint16_t {
@@ -1036,6 +1039,7 @@ struct Theme {
     static Theme light() noexcept;
     static Theme high_contrast() noexcept;
     static Theme industrial() noexcept;
+    static Theme from_seed(Color seed, bool dark_mode = true, float chroma_scale = 1.0f) noexcept;
     Color on_primary = Color::white();
     Color on_error = Color::white();
 };
@@ -1162,8 +1166,30 @@ enum class AttachTo : uint8_t {
 struct SpringSpec {
     float response = 0.20f;
     float damping_ratio = 1.0f;
+    static constexpr SpringSpec snappy() noexcept { return {0.18f, 1.0f}; }
+    static constexpr SpringSpec fluid() noexcept { return {0.32f, 1.0f}; }
+    static constexpr SpringSpec bouncy() noexcept { return {0.36f, 0.65f}; }
+    static constexpr SpringSpec gentle() noexcept { return {0.50f, 1.0f}; }
 };
 
+// Zero pauses animation time; reduced-motion preference settles springs immediately.
+void set_time_scale(Context* ctx, float scale) noexcept;
+struct LayerDesc {
+    float opacity = 1.0f;
+    Vec2 translate = {};
+    Vec2 scale = {1,1};
+    Vec2 pivot_norm = {.5f,.5f};
+    Vec2 pivot_px = {NAN,NAN};
+    bool animating = false;
+};
+void push_layer(const LayerDesc& desc) noexcept;
+void pop_layer() noexcept;
+struct PresenceResult {
+    bool visible = false;
+    float opacity = 0.0f;
+    bool exiting = false;
+};
+PresenceResult presence(uint32_t id, bool mounted, SpringSpec spec = SpringSpec::fluid()) noexcept;
 struct GridTrack {
     SizingKind kind = SizingKind::Grow;
     float value = 1.0f;
@@ -1223,6 +1249,12 @@ struct BoxDesc {
     float shadow_spread = 0.0f; // Logical pixels; negative values inset the shadow.
     bool window_drag_passthrough = false; // Allow caption dragging through this pointer target.
     BorderAlign border_align = BorderAlign::Inside;
+    float opacity = 1;
+    Color hover_background = {}, hover_border_color = {};
+    float hover_scale = 1, press_scale = 1;
+    bool animate_layout = false;
+    uint32_t hero_id = 0;
+    SpringSpec transition = SpringSpec::snappy();
 };
 
 inline constexpr uint16_t kFontSans       = 0u;
@@ -2234,6 +2266,24 @@ struct BoxScope {
 #define ETCH_BOX(...) \
     if (::etch::BoxScope ETCH_CONCAT(_etch_box_, __LINE__) = (::etch::begin_box(__VA_ARGS__), ::etch::BoxScope{}); \
         ETCH_CONCAT(_etch_box_, __LINE__).active)
+
+struct LayerScope {
+    bool active = true;
+    ~LayerScope() noexcept { pop_layer(); }
+};
+#define ETCH_LAYER(...) \
+    for (::etch::LayerScope ETCH_CONCAT(_etch_layer_, __LINE__) = (::etch::push_layer(__VA_ARGS__), ::etch::LayerScope{}); \
+         ETCH_CONCAT(_etch_layer_, __LINE__).active; ETCH_CONCAT(_etch_layer_, __LINE__).active = false)
+
+struct PresenceScope {
+    PresenceResult result = {};
+    ~PresenceScope() noexcept { if (result.visible) pop_layer(); }
+};
+#define ETCH_PRESENCE(id, mounted) \
+    for (::etch::PresenceScope ETCH_CONCAT(_etch_presence_, __LINE__) = {::etch::presence(id, mounted)}; \
+         ETCH_CONCAT(_etch_presence_, __LINE__).result.visible && \
+             (::etch::push_layer({.opacity = ETCH_CONCAT(_etch_presence_, __LINE__).result.opacity}), true); \
+         ::etch::pop_layer(), ETCH_CONCAT(_etch_presence_, __LINE__).result.visible = false)
 
 struct ThemeScope {
     bool active = true;

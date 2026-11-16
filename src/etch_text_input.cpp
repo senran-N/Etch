@@ -1522,7 +1522,7 @@ void emit_text_input_command(
         geom.clip_logical.h * dpi,
     };
     const ClipEntry inner_clip = {
-        .rect = rect_intersect(outer_clip.rect, inner_px),
+        .rect = rect_intersect(outer_clip.rect, layer_rect(ctx,inner_px)),
         .radius = 0.0f,
     };
 

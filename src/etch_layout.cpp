@@ -61,6 +61,7 @@ DrawCmdNode* append_open_box_draw_cmd(Context* ctx, bool foreground) noexcept {
             if (!extra) {
                 return nullptr;
             }
+            extra->layer = ctx->active_ui->current_layer;
             extra->kind = CustomCmdKind::Box;
             open_elem->config.userData = extra;
         }
@@ -83,6 +84,7 @@ DrawCmdNode* append_open_box_draw_cmd(Context* ctx, bool foreground) noexcept {
         return nullptr;
     }
     *node = DrawCmdNode{};
+    node->layer = ctx->layout_draw_target ? ctx->active_render_layer : ctx->active_ui->current_layer;
     node->world_scale = ctx->layout_draw_target ? ctx->layout_draw_scale : current_world_scale(ctx);
     if (!foreground) {
         if (!extra->draw_head) {
@@ -312,8 +314,11 @@ void emit_draw_text_cmd(
             for (uint32_t i = first_text_prim; i < ctx->prim_count; ++i) {
                 Prim& p = ctx->prims[i];
                 p.style.x |= uint32_t(PrimFlag_TextClip) << 4;
-                p.style.z = std::bit_cast<uint32_t>(clip_left);
-                p.style.w = std::bit_cast<uint32_t>(clip_left + tc.max_width_px * scale);
+                const auto* layer=ctx->active_render_layer;
+                const float sx=layer ? layer->resolved_scale.x : 1.f;
+                const float ox=layer ? layer->resolved_offset_px.x : 0.f;
+                p.style.z = std::bit_cast<uint32_t>(clip_left*sx+ox);
+                p.style.w = std::bit_cast<uint32_t>((clip_left + tc.max_width_px * scale)*sx+ox);
             }
         }
         ++line_idx;
@@ -373,7 +378,9 @@ void emit_draw_list_command(
     const uint32_t previous_clip=ctx->render_clip_index;
     ctx->render_clip_index=clip.indexed ? clip.shape : 0;
     const Vec2 origin = { box_px.x, box_px.y };
+    const auto* previous_layer=ctx->active_render_layer;
     for (const DrawCmdNode* node = head; node != nullptr; node = node->next) {
+        ctx->active_render_layer=node->layer;
         const float scale = node->world_scale * dpi;
         switch (node->kind) {
             case DrawCmdKind::Callback: {
@@ -607,6 +614,7 @@ void emit_draw_list_command(
         }
     }
     ctx->render_clip_index=previous_clip;
+    ctx->active_render_layer=previous_layer;
 }
 
 // End internal unity-build helpers.
@@ -779,6 +787,10 @@ static void process_window_event(Context* ctx, const SDL_Event& event) noexcept 
                 request_redraw(ctx);
                 break;
             }
+            if (event.key.key == SDLK_F10 && !event.key.repeat && ctx->active_ui->debug_hud_open) {
+                set_time_scale(ctx, ctx->time_scale == 1.f ? .2f : 1.f);
+                break;
+            }
             if (event.key.key == SDLK_SPACE) {
                 ctx->active_ui->space_down = true;
             }
@@ -948,6 +960,10 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
     ctx->theme_depth = 0u;
     ctx->theme_overflow = 0u;
     ctx->draw_list_window = ctx->active_window;
+    ctx->active_ui->current_layer=nullptr;
+    Clay_SetCullingEnabled(true);
+    ctx->active_ui->box_build_stack=nullptr;
+    ctx->active_render_layer=nullptr;
     ctx->active_ui->focus_scope_depth = 0;
     ctx->active_ui->popup_depth = 0;
     ctx->active_ui->tab_bar_depth = 0;
@@ -956,7 +972,7 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
     ctx->active_ui->focus_scope = 0;
     ctx->layout_start_ticks = SDL_GetPerformanceCounter();
     ++ctx->active_ui->frame_index;
-    ctx->active_ui->elapsed_seconds += desc.dt_seconds;
+    ctx->active_ui->elapsed_seconds += desc.dt_seconds*ctx->time_scale;
 
     if (ctx->active_ui->redraw_budget > 0u) {
         --ctx->active_ui->redraw_budget;
@@ -964,6 +980,7 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
     ctx->active_ui->sim_dt = (desc.dt_seconds <= 0.0f)
         ? 0.0f
         : ((desc.dt_seconds > 0.1f) ? (1.0f / 60.0f) : desc.dt_seconds);
+    ctx->active_ui->sim_dt *= ctx->time_scale;
     ctx->active_ui->active_anim_count = 0u;
     ctx->active_ui->desired_cursor = Cursor::Arrow;
 
@@ -1632,8 +1649,15 @@ void begin_box(const BoxDesc& desc_in) noexcept {
         return;
     }
 
+    auto* build=ctx->frame_arena.alloc<BoxBuildStack>();
+    if(build) {*build={ctx->active_ui->box_build_stack,ctx->active_ui->current_layer};ctx->active_ui->box_build_stack=build;}
     const float wscale = current_world_scale(ctx);
     BoxDesc desc = desc_in;
+    desc.transition=valid_spring_spec(desc.transition);
+    if(!std::isfinite(desc.opacity)) desc.opacity=1;
+    desc.opacity=std::fmin(1.f,std::fmax(0.f,desc.opacity));
+    if(!std::isfinite(desc.hover_scale) || desc.hover_scale<=0) desc.hover_scale=1;
+    if(!std::isfinite(desc.press_scale) || desc.press_scale<=0) desc.press_scale=1;
     if (wscale != 1.0f) {
         desc.width = scale_sizing(desc.width, wscale);
         desc.height = scale_sizing(desc.height, wscale);
@@ -1698,6 +1722,12 @@ void begin_box(const BoxDesc& desc_in) noexcept {
     eff_desc.shadow_color = resolve_theme_color(eff_desc.shadow_color, thm.shadow);
     eff_desc.radius = resolve_theme_corners(eff_desc.radius, Corners::all(thm.radius_panel_px));
 
+    if(box_ws && (desc.hover_background.a || desc.hover_border_color.a || desc.hover_scale!=1 || desc.press_scale!=1)) {
+        advance_motion(ctx,&box_ws->hover_t,&box_ws->hover_vel,hovered(desc.id) ? 1.f : 0.f,desc.transition);
+        advance_motion(ctx,&box_ws->press_t,&box_ws->press_vel,pressed(desc.id) ? 1.f : 0.f,desc.transition);
+        if(desc.hover_background.a) eff_desc.background=Color::lerp_oklab(eff_desc.background,desc.hover_background,box_ws->hover_t);
+        if(desc.hover_border_color.a) eff_desc.border_color=Color::lerp_oklab(eff_desc.border_color,desc.hover_border_color,box_ws->hover_t);
+    }
     const bool focus_ring = eff_desc.focusable && keyboard_focus_visible(eff_desc.id);
     const bool is_scroll = eff_desc.scroll_x || eff_desc.scroll_y;
     const bool any_clip = eff_desc.clip_children || is_scroll || eff_desc.shrink_width || eff_desc.shrink_height;
@@ -1713,10 +1743,15 @@ void begin_box(const BoxDesc& desc_in) noexcept {
         has_border || focus_ring;
 
     BoxExtra* extra = nullptr;
-    if (has_visual || any_clip || is_floating_blocker || eff_desc.id) {
+    if (has_visual || any_clip || is_floating_blocker || eff_desc.id || ctx->active_ui->current_layer || eff_desc.opacity<1 || eff_desc.animate_layout || eff_desc.hero_id || eff_desc.hover_scale!=1 || eff_desc.press_scale!=1) {
         extra = ctx->frame_arena.alloc<BoxExtra>();
         if (extra) {
             extra->desc = eff_desc;
+            if(eff_desc.opacity<1 || eff_desc.animate_layout || eff_desc.hero_id || eff_desc.hover_scale!=1 || eff_desc.press_scale!=1) {
+                push_layer({.opacity=eff_desc.opacity});
+                if(build && ctx->active_ui->current_layer!=build->previous_layer) const_cast<VisualLayerNode*>(ctx->active_ui->current_layer)->source_box=extra;
+            }
+            extra->layer=ctx->active_ui->current_layer;
             extra->keyboard_focus_ring = focus_ring;
             extra->focus_ring_color = thm.focus_ring;
             extra->focus_ring_radius_px = thm.radius_small_px * 0.8f;
@@ -1768,7 +1803,7 @@ void begin_box(const BoxDesc& desc_in) noexcept {
     decl.cornerRadius = to_clay_corners(desc.radius);
     decl.userData = extra;
 
-    if ((has_visual || is_floating_blocker || desc.id) && extra) {
+    if ((has_visual || is_floating_blocker || desc.id || (extra && extra->layer)) && extra) {
         // Emit via CUSTOM command so shadows + gradients + borders + floating blockers render/occlude uniformly.
         decl.custom.customData = extra;
     }
@@ -1814,6 +1849,8 @@ void end_box() noexcept {
     }
     if (current_context()->a11y_parent) current_context()->a11y_parent = current_context()->a11y_parent->parent;
     Clay__CloseElement();
+    auto& ui=*current_context()->active_ui;
+    if(ui.box_build_stack) {ui.current_layer=ui.box_build_stack->previous_layer;ui.box_build_stack=ui.box_build_stack->parent;}
 }
 
 void box(const BoxDesc& desc) noexcept {
@@ -1903,13 +1940,14 @@ void text(Str content, const TextDesc& desc) noexcept {
     cfg.textAlignment = desc.align_x == AlignX::Center ? CLAY_TEXT_ALIGN_CENTER : (desc.align_x == AlignX::Right ? CLAY_TEXT_ALIGN_RIGHT : CLAY_TEXT_ALIGN_LEFT);
 
     SelectableTextExtra* extra = nullptr;
-    if (desc.selectable && desc.id) {
+    if ((desc.selectable && desc.id) || ctx->active_ui->current_layer) {
         extra = ctx->frame_arena.alloc<SelectableTextExtra>();
         if (!extra) return;
+        extra->layer=ctx->active_ui->current_layer;
         extra->full_utf8 = clay_str.chars; extra->total_bytes = content.length;
-        extra->selectable_id = desc.id; extra->selection_color = eff_sel_color;
+        extra->selectable_id = desc.selectable ? desc.id : 0; extra->selection_color = eff_sel_color;
         cfg.userData = extra;
-        register_selectable_text(ctx,desc.id,clay_str.chars,content.length,content.is_static);
+        if(desc.selectable && desc.id) register_selectable_text(ctx,desc.id,clay_str.chars,content.length,content.is_static);
     }
     Clay_Context* cctx = Clay_GetCurrentContext();
     const int32_t prev_len = cctx->layoutElements.length;
@@ -1950,6 +1988,7 @@ void text_spans(std::span<const TextSpan> spans, const RichTextDesc& desc) noexc
         return;
     }
 
+    rich->layer=ctx->active_ui->current_layer;
     const Theme& thm = active_theme(ctx);
     const Color base_color = resolve_theme_color(desc.color, thm.text_primary);
     const Color eff_sel_color = resolve_theme_color(desc.selection_color, thm.selection);
@@ -2115,6 +2154,7 @@ void image(const ImageDesc& desc_in) noexcept {
     if (!extra) {
         return;
     }
+    extra->layer=ctx->active_ui->current_layer;
     extra->desc = desc;
 
     if (desc.id != 0u) {
@@ -2164,6 +2204,7 @@ void icon(const IconDesc& desc_in) noexcept {
     decl.layout.sizing.width = CLAY_SIZING_FIXED(layout_sz);
     decl.layout.sizing.height = CLAY_SIZING_FIXED(layout_sz);
     if (extra) {
+        extra->layer = ctx->active_ui->current_layer;
         extra->kind = CustomCmdKind::Icon;
         extra->icon_desc = desc;
         decl.custom.customData = extra;
@@ -3390,6 +3431,7 @@ TextInputResult text_input(const TextInputDesc& desc_in) noexcept {
     TextInputExtra* ti_extra = ctx->frame_arena.alloc<TextInputExtra>();
     BoxExtra* extra = ctx->frame_arena.alloc<BoxExtra>();
     if (ti_extra && extra) {
+        extra->layer = ctx->active_ui->current_layer;
         extra->kind = CustomCmdKind::TextInput;
         ti_extra->desc = desc;
         if (desc.placeholder.chars && desc.placeholder.length > 0u && !desc.placeholder.is_static) {
@@ -3737,78 +3779,23 @@ float spring(uint32_t anim_id, float target, SpringSpec spec) noexcept {
 
 float spring(uint32_t anim_id, float target, float initial_value, SpringSpec spec) noexcept {
     Context* ctx = current_context();
-    if (!ctx || anim_id == 0u) {
+    if (!ctx || anim_id == 0u || !std::isfinite(target) || !std::isfinite(initial_value)) {
         return target;
     }
+    spec=valid_spring_spec(spec);
     WidgetState* ws = state_map_get_or_insert(&ctx->active_ui->states, anim_id, ctx->active_ui->frame_index);
     if (!ws) {
         return target;
     }
     if (!ws->spring_initialized) {
-        ws->spring_pos = initial_value;
+        ws->spring_pos = ctx->reduced_motion ? target : initial_value;
         ws->spring_vel = 0.0f;
         ws->spring_initialized = true;
-        if (initial_value != target) ++ctx->active_ui->active_anim_count;
-        return initial_value;
-    }
-
-    const float x0 = ws->spring_pos - target;
-    const float v0 = ws->spring_vel;
-    if (std::fabs(x0) <= 0.0005f && std::fabs(v0) <= 0.005f) {
-        ws->spring_pos = target;
-        ws->spring_vel = 0.0f;
-        return target;
-    }
-
-    const float dt = ctx->active_ui->sim_dt;
-    if (dt <= 0.0f) {
-        ++ctx->active_ui->active_anim_count;
+        if (ws->spring_pos != target && ctx->time_scale>0) ++ctx->active_ui->active_anim_count;
         return ws->spring_pos;
     }
 
-    const float response = (spec.response < 0.01f) ? 0.01f : spec.response;
-    const float zeta = (spec.damping_ratio < 0.05f) ? 0.05f : spec.damping_ratio;
-    const float omega = 6.28318530718f / response;
-
-    float x1 = 0.0f;
-    float v1 = 0.0f;
-    if (std::fabs(zeta - 1.0f) < 1e-3f) {
-        const float e = std::exp(-omega * dt);
-        const float c1 = x0;
-        const float c2 = v0 + omega * x0;
-        const float linear = c1 + c2 * dt;
-        x1 = linear * e;
-        v1 = (c2 - omega * linear) * e;
-    } else if (zeta < 1.0f) {
-        const float omega_d = omega * std::sqrt(1.0f - zeta * zeta);
-        const float e = std::exp(-zeta * omega * dt);
-        const float c1 = x0;
-        const float c2 = (v0 + zeta * omega * x0) / omega_d;
-        const float s = std::sin(omega_d * dt);
-        const float c = std::cos(omega_d * dt);
-        x1 = e * (c1 * c + c2 * s);
-        v1 = e * ((c2 * omega_d - c1 * zeta * omega) * c - (c1 * omega_d + c2 * zeta * omega) * s);
-    } else {
-        const float sq = std::sqrt(zeta * zeta - 1.0f);
-        const float r1 = -omega * (zeta - sq);
-        const float r2 = -omega * (zeta + sq);
-        const float e1 = std::exp(r1 * dt);
-        const float e2 = std::exp(r2 * dt);
-        const float c2 = (v0 - r1 * x0) / (r2 - r1);
-        const float c1 = x0 - c2;
-        x1 = c1 * e1 + c2 * e2;
-        v1 = c1 * r1 * e1 + c2 * r2 * e2;
-    }
-
-    if (std::fabs(x1) <= 0.0005f && std::fabs(v1) <= 0.005f) {
-        ws->spring_pos = target;
-        ws->spring_vel = 0.0f;
-        return target;
-    }
-
-    ws->spring_pos = target + x1;
-    ws->spring_vel = v1;
-    ++ctx->active_ui->active_anim_count;
+    advance_motion(ctx,&ws->spring_pos,&ws->spring_vel,target,spec);
     return ws->spring_pos;
 }
 

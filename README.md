@@ -1,4 +1,4 @@
-# Etch v0.13.0
+# Etch v0.14.0
 
 Etch is a Pure-GPU UI Engine for desktop applications on Windows, Linux, and
 macOS. It combines immediate UI construction, Clay layout, Unicode text
@@ -94,7 +94,7 @@ CI builds all targets and runs these seven suites without requiring a GPU:
 ctest --test-dir build --output-on-failure -R "^(repo_guardrails|downstream_consumers|arena_and_elasticity|unicode_bidi_grapheme|layout_clay_flex_grid|fenwick_virtual_list_1m|c99_abi_smoke)$"
 ```
 
-With tests and installation enabled, full CTest runs eleven suites, including GPU
+With tests and installation enabled, full CTest runs twelve suites, including GPU
 invariants. `repo_guardrails` checks architecture,
 versions, pure C99 header includes, artifacts and OSS notices;
 `downstream_consumers` installs Etch and builds/runs strict C++20 and pure C99
@@ -265,3 +265,15 @@ Destroying a texture flushes pending uploads; destroying the context cancels the
 v0.13 extends C++/C99 descriptors and changes packed `Prim` header bindings while
 preserving its 64-byte size. Recompile downstream consumers and use matching shader
 headers. DXIL, SPIR-V and offline Metal fallbacks are regenerated from the same HLSL.
+
+### Perceptual color and motion
+
+`Theme::from_seed(seed, dark_mode)` builds a contrast-tested palette; `Color::oklch`
+and `Color::lerp_oklab` provide perceptual color control. `ETCH_LAYER` changes
+opacity, translation and scale without adding layout boxes. `ETCH_PRESENCE(id, mounted)`
+keeps content mounted through its exit fade. Both scopes balance on break and return.
+Use `BoxDesc::animate_layout` for FLIP and a stable `hero_id` for transitions between
+parents. Visual transforms preserve layout geometry; interaction coordinates remain
+in layout space. `set_time_scale(ctx, 0)` pauses springs; F10 switches between 1x
+and 0.2x while the F12 HUD is open. Windows reduced-motion preferences settle
+springs immediately when `respect_reduced_motion` is enabled.

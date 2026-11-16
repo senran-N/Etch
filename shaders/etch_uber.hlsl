@@ -257,7 +257,7 @@ VSOut vs_main(uint vertex_id : SV_VertexID, uint instance_id : SV_InstanceID)
     }
     else if (kind == ETCH_PRIM_BLUR_GLASS)
     {
-        uv_rect = float4(g_inv_viewport_size, 0.0f, 0.0f);
+        uv_rect = float4(g_inv_viewport_size, 1.0f - asfloat(p.payload.x), 0.0f);
     }
     else if (kind == ETCH_PRIM_CANVAS_GRID)
     {
@@ -729,7 +729,7 @@ float4 ps_main(VSOut input) : SV_Target0
         float border_t  = max(outer_cov - inner_cov, 0.0f);
 
         float4 b_pm = float4(input.border_color.rgb, 1.0f) * (input.border_color.a * border_t);
-        float4 g_pm = float4(glass_lin.rgb, 1.0f);
+        float4 g_pm = float4(glass_lin.rgb, 1.0f) * input.uv_rect.z;
         out_pm      = b_pm + g_pm * inner_cov;
     }
     else if (kind == ETCH_PRIM_CANVAS_GRID)

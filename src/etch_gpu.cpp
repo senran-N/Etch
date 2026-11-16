@@ -1279,6 +1279,11 @@ Context* create_context(const ContextDesc& desc) noexcept {
     ctx->active_ui = &ctx->headless_ui;
     ctx->headless = desc.headless;
     ctx->enable_gpu_debug = desc.enable_gpu_debug;
+    ctx->time_scale=1;
+#if defined(_WIN32)
+    BOOL animation_enabled=TRUE;
+    if(desc.respect_reduced_motion && SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION,0,&animation_enabled,0)) ctx->reduced_motion=!animation_enabled;
+#endif
     ctx->enable_os_a11y = desc.enable_os_a11y;
     ctx->refresh_fn = desc.on_window_refresh;
     ctx->refresh_user_data = desc.on_window_refresh ? desc.refresh_user_data : nullptr;

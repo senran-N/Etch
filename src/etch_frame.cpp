@@ -29,6 +29,14 @@ void end_frame(Context* ctx_arg) noexcept {
     ctx->active_ui->span_hit_count = 0u;
     ctx->active_ui->drop_hit_count = 0;
     Clay_RenderCommandArray cmds = Clay_EndLayout(0.0f);
+    // Resolve bounds before walking commands: floating descendants can render before ancestors.
+    for(int32_t i=0;i<cmds.length;++i) {
+        const auto* cmd=Clay_RenderCommandArray_Get(&cmds,i);
+        if(cmd->commandType==CLAY_RENDER_COMMAND_TYPE_CUSTOM) {
+            auto* extra=static_cast<BoxExtra*>(cmd->renderData.custom.customData);
+            if(extra) extra->layout_rect_logical={cmd->boundingBox.x,cmd->boundingBox.y,cmd->boundingBox.width,cmd->boundingBox.height};
+        }
+    }
     bool corrected_heights = false;
     for (auto* rec = ctx->active_ui->active_vlists; rec; rec = rec->next) {
         auto* cache = find_vlist(ctx->active_ui,rec->list_id);
@@ -65,7 +73,27 @@ void end_frame(Context* ctx_arg) noexcept {
             .h = cmd->boundingBox.height * dpi,
         };
 
-        const Rect box_px = ctx->active_ui->pixel_snap && cmd->commandType != CLAY_RENDER_COMMAND_TYPE_TEXT ? snap_pixel_rect(raw_box_px) : raw_box_px;
+        ctx->active_render_layer=nullptr;
+        switch(cmd->commandType) {
+            case CLAY_RENDER_COMMAND_TYPE_CUSTOM:
+            case CLAY_RENDER_COMMAND_TYPE_BORDER:
+            case CLAY_RENDER_COMMAND_TYPE_SCISSOR_START: {
+                const auto* extra=static_cast<const BoxExtra*>(cmd->userData);
+                if(extra) ctx->active_render_layer=extra->layer;
+                break;
+            }
+            case CLAY_RENDER_COMMAND_TYPE_TEXT:
+                if(cmd->userData) ctx->active_render_layer=(cmd->renderData.text.fontId&0x8000u) ? static_cast<const RichTextExtra*>(cmd->userData)->layer : static_cast<const SelectableTextExtra*>(cmd->userData)->layer;
+                break;
+            case CLAY_RENDER_COMMAND_TYPE_IMAGE: {
+                const auto* extra=static_cast<const ImageExtra*>(cmd->renderData.image.imageData);
+                if(extra) ctx->active_render_layer=extra->layer;
+                break;
+            }
+            default: break;
+        }
+        if(ctx->active_render_layer) resolve_layer_chain(ctx,ctx->active_render_layer,dpi);
+        const Rect box_px = ctx->active_ui->pixel_snap && !ctx->active_render_layer && cmd->commandType != CLAY_RENDER_COMMAND_TYPE_TEXT ? snap_pixel_rect(raw_box_px) : raw_box_px;
         switch (cmd->commandType) {
             case CLAY_RENDER_COMMAND_TYPE_CUSTOM: {
                 const BoxExtra* extra = static_cast<const BoxExtra*>(cmd->renderData.custom.customData);
@@ -318,6 +346,7 @@ void end_frame(Context* ctx_arg) noexcept {
         }
     }
 
+    ctx->active_render_layer=nullptr;
     ctx->active_ui->frame_text_op_count = 0u;
     ctx->active_ui->frame_key_count = 0u;
     ctx->active_ui->last_mouse_clicks = 1u;
@@ -678,10 +707,10 @@ void end_frame(Context* ctx_arg) noexcept {
         std::snprintf(
             line,
             sizeof(line),
-            "Prims: %u   Glyphs: %u   Curves: %u",
+            "Prims: %u Glyphs: %u Curves: %u | F10 %.1fx",
             app_prim_count,
             ctx->atlas.slug_glyph_count,
-            ctx->atlas.slug_curve_count);
+            ctx->atlas.slug_curve_count, double(ctx->time_scale));
         emit_direct_text_px(ctx, line, hud_x + 12.0f, hud_y + 64.0f, 10.5f, Color::rgb_hex(0xCBD5E1), hud_clip, dpi);
 
         const uint32_t arena_kb = static_cast<uint32_t>((ctx->frame_arena.used() + 512u) / 1024u);
@@ -767,6 +796,9 @@ void end_frame(Context* ctx_arg) noexcept {
     // A window-only context consumes global invalidations through its primary pass.
     if (!ctx->headless && ctx->active_window == ctx->window) ctx->headless_ui.redraw_budget = 0;
     a11y_commit(ctx);
+    ctx->active_render_layer=nullptr;
+    ctx->active_ui->current_layer=nullptr;
+    ctx->active_ui->box_build_stack=nullptr;
     ctx->in_frame = false;
     ctx->stats.sprite_count = ctx->atlas.sprite_live;
     ctx->stats.sprite_atlas_size = ctx->atlas.width;

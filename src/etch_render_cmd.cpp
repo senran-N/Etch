@@ -610,6 +610,14 @@ Rect snap_pixel_rect(Rect r) noexcept {
 }
 
 ClipEntry make_box_clip(Context* ctx,const ClipEntry& parent,Rect bounds,Corners radii,bool continuous) noexcept {
+    if(const auto* layer=ctx->active_render_layer) {
+        resolve_layer_chain(ctx,layer,ctx->active_ui->dpi_scale);
+        const auto scale=layer->resolved_scale,offset=layer->resolved_offset_px;
+        bounds={bounds.x*scale.x+offset.x,bounds.y*scale.y+offset.y,bounds.w*scale.x,bounds.h*scale.y};
+        const float k=.5f*(scale.x+scale.y);
+        radii={radii.tl*k,radii.tr*k,radii.br*k,radii.bl*k};
+    }
+
     ClipEntry result={rect_intersect(parent.rect,bounds),0,parent.shape,parent.indexed || parent.shape!=0};
     const float radius=min4f(radii.tl,radii.tr,radii.br,radii.bl);
     result.radius=continuous ? -radius : radius;
@@ -647,11 +655,38 @@ void push_prim(
         ctx->prims = grown;
         ctx->max_prims = cap;
     }
+    const auto* layer=ctx->active_render_layer;
+    if(layer) {
+        resolve_layer_chain(ctx,layer,ctx->active_ui->dpi_scale);
+        const Vec2 scale=layer->resolved_scale, offset=layer->resolved_offset_px;
+        prim.bounds={prim.bounds.x*scale.x+offset.x,prim.bounds.y*scale.y+offset.y,prim.bounds.z*scale.x,prim.bounds.w*scale.y};
+        const auto fade=[&](uint32_t c) noexcept {return (c&0xFFFFFFu) | (uint32_t(float(c>>24)*layer->resolved_opacity+.5f)<<24);};
+        const PrimKind kind=static_cast<PrimKind>(prim.style.x&15u);
+        if(kind==PrimKind::BlurGlass) prim.payload.x=std::bit_cast<uint32_t>(1.f-layer->resolved_opacity);
+        else prim.style.y=fade(prim.style.y);
+        if(kind==PrimKind::Rect || kind==PrimKind::RotatedRect || kind==PrimKind::BezierWire || kind==PrimKind::RingArc || kind==PrimKind::Texture || kind==PrimKind::BlurGlass || kind==PrimKind::CanvasGrid) prim.style.z=fade(prim.style.z);
+        if(kind==PrimKind::BezierWire || kind==PrimKind::RingArc) prim.payload.w=fade(prim.payload.w);
+        if(kind==PrimKind::SlugFill) prim.payload.z=fade(prim.payload.z);
+        if((kind==PrimKind::Rect || kind==PrimKind::RotatedRect) && (prim.style.x & ((PrimFlag_LinearGrad|PrimFlag_RadialGrad)<<4))) prim.payload.x=fade(prim.payload.x);
+        const float metric_scale=.5f*(scale.x+scale.y);
+        const auto scaled_pair=[metric_scale](uint32_t pair) noexcept {
+            return pack_f16x2(unpack_f16_cpu(uint16_t(pair))*metric_scale,unpack_f16_cpu(uint16_t(pair>>16))*metric_scale);
+        };
+        if(kind==PrimKind::BezierWire || kind==PrimKind::RingArc || kind==PrimKind::Shadow) prim.style.w=scaled_pair(prim.style.w);
+        if(kind==PrimKind::RingArc) prim.payload.z=scaled_pair(prim.payload.z);
+        if(kind==PrimKind::Rect || kind==PrimKind::RotatedRect || kind==PrimKind::Shadow || kind==PrimKind::Texture || kind==PrimKind::BlurGlass) {
+            const float k=.5f*(scale.x+scale.y);
+            const auto scale_pair=[k](uint32_t pair) noexcept {return pack_f16x2(unpack_f16_cpu(uint16_t(pair))*k,unpack_f16_cpu(uint16_t(pair>>16))*k);};
+            prim.payload.z=scale_pair(prim.payload.z);prim.payload.w=scale_pair(prim.payload.w);
+            if(kind==PrimKind::Rect || kind==PrimKind::BlurGlass || kind==PrimKind::RotatedRect) prim.style.w=(prim.style.w&0xFFFF0000u) | pack_f16(unpack_f16_cpu(uint16_t(prim.style.w))*k);
+        }
+
+    }
     // Raster-only snapping preserves logical layout and text positioning.
     const PrimKind snap_kind=static_cast<PrimKind>(prim.style.x&15u);
     const bool snap_rect=snap_kind==PrimKind::Rect && unpack_f16_cpu(static_cast<uint16_t>(prim.style.w>>16))<=1;
     const bool snap_image=(snap_kind==PrimKind::Texture && (prim.style.x & (uint32_t(PrimFlag_TextClip)<<4))==0) || snap_kind==PrimKind::BlurGlass;
-    if (ctx->active_ui->pixel_snap && (snap_rect || snap_image)) {
+    if (ctx->active_ui->pixel_snap && !(layer && layer->resolved_animating) && (snap_rect || snap_image)) {
         const Rect r = snap_pixel_rect({prim.bounds.x, prim.bounds.y, prim.bounds.z, prim.bounds.w});
         prim.bounds = {r.x, r.y, r.w, r.h};
         const float width = unpack_f16_cpu(static_cast<uint16_t>(prim.style.w));
@@ -831,14 +866,11 @@ void emit_box_background_and_shadow(
     const BoxDesc& d = extra->desc;
     Corners rad_px = scale_corners(d.radius, dpi);
     const bool has_grad = (d.background_end.a > 0u) || d.radial_gradient;
-    const bool box_visible =
-        clip.rect.w > 0.0f && clip.rect.h > 0.0f &&
-        box_px.w > 0.0f && box_px.h > 0.0f &&
-        (box_px.x + box_px.w) > clip.rect.x && box_px.x < (clip.rect.x + clip.rect.w) &&
-        (box_px.y + box_px.h) > clip.rect.y && box_px.y < (clip.rect.y + clip.rect.h);
+    const Rect visual_box=layer_rect(ctx,box_px);
+    const bool box_visible = rect_intersect(clip.rect,visual_box).w>0 && rect_intersect(clip.rect,visual_box).h>0;
     const bool use_blur =
         (d.backdrop_blur > 0.0f) && !has_grad && box_visible &&
-        begin_blur_layer(ctx, box_px, d.backdrop_blur * dpi);
+        begin_blur_layer(ctx, visual_box, d.backdrop_blur * dpi);
 
     if (d.shadow_color.a > 0u && d.shadow_blur > 0.0f) {
         const float blur_px = d.shadow_blur * dpi;
@@ -912,7 +944,7 @@ void emit_box_background_and_shadow(
     }
 
     if (extra->is_canvas && extra->canvas_grid && box_visible) {
-        const Rect canvas_clip_rect = rect_intersect(clip.rect, box_px);
+        const Rect canvas_clip_rect = rect_intersect(clip.rect, layer_rect(ctx,box_px));
         float canvas_clip_r = min4f(rad_px.tl, rad_px.tr, rad_px.br, rad_px.bl);
         if (d.continuous_corners) canvas_clip_r = -canvas_clip_r;
         if (canvas_clip_r == 0.0f &&
@@ -1182,7 +1214,10 @@ void emit_rich_text_command(
     ClipEntry effective_clip = clip;
     if(cmd->renderData.text.truncated) {
         const float width=cmd->renderData.text.maxWidth>0?cmd->renderData.text.maxWidth:cmd->boundingBox.width;
-        effective_clip.rect=rect_intersect(clip.rect,Rect{cmd->boundingBox.x*dpi,clip.rect.y,width*dpi,clip.rect.h});
+        const auto* layer=ctx->active_render_layer;
+        const float sx=layer ? layer->resolved_scale.x : 1.f;
+        const float ox=layer ? layer->resolved_offset_px.x : 0.f;
+        effective_clip.rect=rect_intersect(clip.rect,Rect{cmd->boundingBox.x*dpi*sx+ox,clip.rect.y,width*dpi*sx,clip.rect.h});
     }
     emit_selection_line(ctx, cmd, effective_clip, dpi);
     const Clay_TextRenderData& td = cmd->renderData.text;
@@ -1551,7 +1586,10 @@ void emit_text_command(
     if(td.truncated) {
         ClipEntry local_clip=clip;
         const float width=td.maxWidth>0?td.maxWidth:cmd->boundingBox.width;
-        local_clip.rect=rect_intersect(clip.rect,Rect{cmd->boundingBox.x*dpi,clip.rect.y,width*dpi,clip.rect.h});
+        const auto* layer=ctx->active_render_layer;
+        const float sx=layer ? layer->resolved_scale.x : 1.f;
+        const float ox=layer ? layer->resolved_offset_px.x : 0.f;
+        local_clip.rect=rect_intersect(clip.rect,Rect{cmd->boundingBox.x*dpi*sx+ox,clip.rect.y,width*dpi*sx,clip.rect.h});
         emit_elided_line(ctx,chars,static_cast<uint32_t>(len),primary_slot,logical_font_px,static_cast<float>(td.letterSpacing),
             cmd->boundingBox.x,baseline_y/dpi,width,local_clip,tint,dpi);return;
     }

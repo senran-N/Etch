@@ -99,7 +99,7 @@ inline bool verify_workbench_checks() noexcept {
     set_theme(custom,ctx);const uint32_t bid=id("workbench.button");
     uint32_t bg[3]={};
     for (int pass=0;pass<3;++pass) {
-        begin_frame(ctx,{.viewport_w=400,.viewport_h=100,.pointer_pos=pass?Vec2{50,16}:Vec2{-1,-1},.pointer_down=pass==2});
+        begin_frame(ctx,{.viewport_w=400,.viewport_h=100,.dt_seconds=1.f/60,.pointer_pos=pass?Vec2{50,16}:Vec2{-1,-1},.pointer_down=pass==2});
         button({.id=bid,.label=str_lit("Center"),.variant=ButtonVariant::Primary,.width=Sizing::fixed(160)});end_frame(ctx);
         bool foreground=false;float first=1000,last=0;
         for (const auto& p:frame_prims(ctx)) {

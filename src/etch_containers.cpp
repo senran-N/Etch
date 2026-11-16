@@ -521,6 +521,7 @@ VirtualListSlice begin_virtual_list_with_c_measure(const VirtualListDesc& desc, 
 
     BoxExtra* extra = ctx->frame_arena.alloc<BoxExtra>();
     if (extra) {
+        extra->layer = ctx->active_ui->current_layer;
         extra->kind = CustomCmdKind::Box;
         extra->is_virtual_list = true;
         extra->scrollbar_track = thm.scrollbar_track;
@@ -737,6 +738,7 @@ CanvasState begin_canvas(const CanvasDesc& desc_in) noexcept {
 
     BoxExtra* extra = ctx->frame_arena.alloc<BoxExtra>();
     if (extra) {
+        extra->layer = ctx->active_ui->current_layer;
         extra->kind = CustomCmdKind::Box;
         extra->is_canvas = true;
         extra->desc = BoxDesc{
@@ -845,6 +847,7 @@ void canvas_wire(const CanvasWireDesc& desc) noexcept {
     cw->thickness_world = desc.thickness_world;
     cw->glow_world = desc.glow_world;
     cw->tangent_bias = desc.tangent_bias;
+    extra->layer = ctx->active_ui->current_layer;
     extra->kind = CustomCmdKind::CanvasWire;
     extra->canvas_wire = cw;
 

@@ -12,8 +12,16 @@ Color desktop_bg(uint32_t id, Color bg, bool disabled) noexcept {
     const Theme& thm = active_theme(current_context());
     if (disabled) return thm.surface_disabled;
     if (hovered(id)) set_cursor(Cursor::Hand);
+    Context* ctx=current_context();
+    auto* ws=state_map_get_or_insert(&ctx->active_ui->states,id,ctx->active_ui->frame_index);
+    float hover=hovered(id) ? 1.f : 0.f, press=pressed(id) ? 1.f : 0.f;
+    if(ws) {
+        advance_motion(ctx,&ws->hover_t,&ws->hover_vel,hover,SpringSpec::snappy());
+        advance_motion(ctx,&ws->press_t,&ws->press_vel,press,SpringSpec::snappy());
+        hover=ws->hover_t;press=ws->press_t;
+    }
     Color overlay = thm.text_primary;
-    overlay.a = pressed(id) ? 51 : hovered(id) ? 26 : 0;
+    overlay.a = uint8_t(std::fmin(51.f,std::fmax(0.f,26*hover+25*press)));
     return Color::blend_over(bg, overlay);
 }
 void desktop_label(Str label, float size, uint16_t font, Color color = Color::theme_auto()) noexcept {
@@ -175,7 +183,7 @@ bool toggle_switch(const ToggleSwitchDesc& d) noexcept {
     const float t=spring(id_index(d.id,0x2301),*d.value ? 1.f : 0.f);
     begin_box({.id=d.id,.height=Sizing::fixed(d.track_height_px+8),.gap=8,.align_y=AlignY::Center,.focusable=!d.disabled});
     a11y_semantic(d.id,A11yRole::Switch,d.label,(d.disabled?A11yState_Disabled:0u)|(*d.value?A11yState_Checked:0u),3u);
-    begin_box({.width=Sizing::fixed(d.track_width_px),.height=Sizing::fixed(d.track_height_px),.background=*d.value ? on_c : off_c,.radius=pill});
+    begin_box({.width=Sizing::fixed(d.track_width_px),.height=Sizing::fixed(d.track_height_px),.background=desktop_bg(d.id,Color::lerp_oklab(off_c,on_c,t),d.disabled),.radius=pill});
     draw_rect({.rect={2+t*(d.track_width_px-d.track_height_px),2,d.track_height_px-4,d.track_height_px-4},.fill=Color::white(),.radius=pill,.border_color=thm.border_control,.border_width=1});
     end_box(); desktop_label(d.label,d.font_size_px,d.font_id,d.disabled ? thm.text_disabled : thm.text_primary);end_box();return change;
 }
@@ -215,7 +223,12 @@ TabItemResult tab_item(const TabItemDesc& d) noexcept {
     r.closed=d.closable && !d.disabled && clicked(close_id); r.clicked=!r.closed && desktop_activate(d.id,d.disabled);
     if (r.clicked) *bar.active_tab=d.id;
     r.selected=*bar.active_tab==d.id;
-    begin_box({.id=d.id,.height=Sizing::grow(),.padding=Padding::xy(12,0),.gap=8,.align_y=AlignY::Center,.background=r.selected ? bar.active_bg : hovered(d.id) ? bar.hover_bg : Color{},.focusable=!d.disabled});
+    Color tab_bg=desktop_bg(d.id,r.selected ? bar.active_bg : Color{},d.disabled);
+    if(!r.selected && !d.disabled) {
+        const auto* ws=state_map_find(&current_context()->active_ui->states,d.id);
+        tab_bg=Color::lerp_oklab({},bar.hover_bg,ws ? ws->hover_t : 0.f);
+    }
+    begin_box({.id=d.id,.height=Sizing::grow(),.padding=Padding::xy(12,0),.gap=8,.align_y=AlignY::Center,.background=tab_bg,.focusable=!d.disabled});
     a11y_semantic(d.id,A11yRole::Tab,d.label,(d.disabled?A11yState_Disabled:0u)|(r.selected?A11yState_Selected:0u),3u);
     if(d.icon_id!=kInvalidIcon) icon({.icon_id=d.icon_id,.size_px=14,.color=r.selected ? bar.active_text_color : bar.text_color});
     desktop_label(d.label,bar.font_size_px,kFontSans,r.selected ? bar.active_text_color : bar.text_color);

@@ -1121,6 +1121,7 @@ CodeEditorResult code_editor(const CodeEditorDesc& input) noexcept {
         e->comp_selection = ui.ime_comp_sel_len_byte;
     }
     *extra = {};
+    extra->layer = ctx->active_ui->current_layer;
     extra->kind = CustomCmdKind::CodeEditor;
     extra->code_editor = e;
     extra->desc.id = d.id;
@@ -1226,8 +1227,8 @@ void emit_code_editor_command(Context* ctx, const CodeEditorExtra* e, Clay_Bound
     rect({ box.x + 1.0f, box.y + 1.0f, e->gutter, box.h - 2.0f }, d.gutter_background);
     const float ox = box.x + d.padding.left + e->gutter;
     const float oy = box.y + d.padding.top;
-    const ClipEntry clip = { rect_intersect(outer.rect, { ox * dpi, oy * dpi, std::fmax(0.0f, box.w - e->gutter - d.padding.left - d.padding.right - 14.0f) * dpi, std::fmax(0.0f, box.h - d.padding.top - d.padding.bottom) * dpi }), 0.0f };
-    const ClipEntry gutter_clip = { rect_intersect(outer.rect, { box.x * dpi, oy * dpi, (e->gutter + d.padding.left) * dpi, std::fmax(0.0f, box.h - d.padding.top - d.padding.bottom) * dpi }), 0.0f };
+    const ClipEntry clip = { rect_intersect(outer.rect, layer_rect(ctx,{ ox * dpi, oy * dpi, std::fmax(0.0f, box.w - e->gutter - d.padding.left - d.padding.right - 14.0f) * dpi, std::fmax(0.0f, box.h - d.padding.top - d.padding.bottom) * dpi })), 0.0f };
+    const ClipEntry gutter_clip = { rect_intersect(outer.rect, layer_rect(ctx,{ box.x * dpi, oy * dpi, (e->gutter + d.padding.left) * dpi, std::fmax(0.0f, box.h - d.padding.top - d.padding.bottom) * dpi })), 0.0f };
     const uint16_t slot = resolve_font_slot_idx(&ctx->atlas, d.font_id);
     const float asc = slot != kInvalidFont ? ctx->atlas.slots[slot].ascent_em * d.font_size_px * dpi : d.font_size_px * dpi * 0.8f;
     const auto glyph = [&](Str s, Color color, uint16_t font, float x, float y, const ClipEntry& cp) noexcept {

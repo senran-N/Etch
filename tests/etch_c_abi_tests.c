@@ -103,6 +103,10 @@ static bool test_abi_and_arena(void) {
 }
 
 static bool test_layout_widgets_and_a11y(EtchContext* ctx) {
+    const EtchColor seed=etch_color_oklch(.62795536f,.25768331f,29.233885f,1.f);
+    if(seed.r!=255 || seed.g>1 || seed.b>1 || etch_theme_from_seed(seed,true,1.f).on_primary.a!=255 ||
+       etch_color_lerp_oklab(seed,seed,.5f).r!=255 || etch_spring_spec_snappy().response<=0 ||
+       etch_spring_spec_fluid().response<=0 || etch_spring_spec_bouncy().damping_ratio>=1 || etch_spring_spec_gentle().response<=0) return false;
     const EtchTheme dark = etch_theme_dark();
     const EtchTheme light = etch_theme_light();
     const EtchTheme hc = etch_theme_high_contrast();
@@ -131,6 +135,11 @@ static bool test_layout_widgets_and_a11y(EtchContext* ctx) {
     fd.viewport_w = 640u;
     fd.viewport_h = 480u;
     etch_begin_frame(ctx, &fd);
+    etch_set_time_scale(ctx,1.f);
+    const EtchLayerDesc motion_layer=etch_layer_desc_default();
+    etch_push_layer(&motion_layer);etch_pop_layer();
+    if(!etch_presence(etch_id("c_presence"),true,etch_spring_spec_fluid()).visible) return false;
+
 
     EtchBoxDesc root_d = etch_box_desc_default();
     root_d.id = etch_id("c_root");

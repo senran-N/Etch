@@ -1,4 +1,4 @@
-# CLAUDE.md — Etch Architecture Constitution (v0.13.0)
+# CLAUDE.md — Etch Architecture Constitution (v0.14.0)
 
 ## 1. Project Identity & End-State Goals
 - **Codename**: `Etch` (Namespace `etch::`, C ABI prefix `etch_` / `Etch`, Macro prefix `ETCH_`, Library `etch` / `libetch`)
@@ -87,7 +87,7 @@ etch/
     |-- consumer_smoke/main.cpp # Public C++20 consumer smoke
     |-- consumer_smoke/main_c.c # Public C99 consumer smoke
     |-- etch_c_abi_tests.c    # Standalone C99 ABI suite (`c99_abi_smoke`)
-    `-- etch_tests.cpp        # Eight C++ suites; eleven CTest suites total
+    `-- etch_tests.cpp        # Nine C++ suites; twelve CTest suites total
 ```
 
 The former layout implementation is split across `etch_render_cmd.cpp`,
@@ -95,7 +95,7 @@ The former layout implementation is split across `etch_render_cmd.cpp`,
 `etch_frame.cpp`; these remain part of the single unity translation unit.
 Examples, tests, and installation default to OFF in subprojects. Generated
 shader headers live in the build directory; checked-in headers are fallbacks.
-With tests and installation enabled, CTest runs eleven suites (eight C++ suites,
+With tests and installation enabled, CTest runs twelve suites (nine C++ suites,
 pure C99 `c99_abi_smoke`, `repo_guardrails`, and C++/C99 `downstream_consumers`).
 
 ---
@@ -138,7 +138,7 @@ pure C99 `c99_abi_smoke`, `repo_guardrails`, and C++/C99 `downstream_consumers`)
 - `etch_editor.cpp`: gap-buffer documents, indexed lines and virtual code editor.
 - `etch_a11y.cpp`: frame-arena semantic builders, per-window arena snapshots and bounded queued automation actions. Snapshots survive other window builds and remain readable until their own next end_frame.
 - `src/shaders_gen/*_msl.h`: offline Metal 2.1 source as NUL-terminated byte arrays. SDL Metal uniform slots precede storage slots.
-- `tests/etch_tests.cpp`: eight standalone CTest regression suites; no exceptions, RTTI or heap containers.
+- `tests/etch_tests.cpp`: nine standalone C++ CTest regression suites; no exceptions, RTTI or heap containers.
 
 ---
 
