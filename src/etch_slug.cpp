@@ -64,6 +64,7 @@ void destroy_font_slot(FontSlot* slot) noexcept {
 
 void ensure_bold_loaded(FontAtlas* atlas) noexcept;
 void ensure_mono_loaded(FontAtlas* atlas) noexcept;
+void ensure_weighted_loaded(FontAtlas* atlas, uint16_t slot) noexcept;
 void evict_font_slot_emoji_bitmaps(FontAtlas* atlas, uint16_t slot_idx) noexcept;
 
 uint16_t resolve_font_slot_idx(FontAtlas* atlas, uint16_t font_id) noexcept {
@@ -71,6 +72,7 @@ uint16_t resolve_font_slot_idx(FontAtlas* atlas, uint16_t font_id) noexcept {
         ensure_bold_loaded(atlas);
     if (font_id == kFontMono && !atlas->slots[kFontMono].loaded && !atlas->mono_probed)
         ensure_mono_loaded(atlas);
+    if (font_id == kFontMedium || font_id == kFontSemiBold) ensure_weighted_loaded(atlas, font_id);
     if (font_id < kMaxFontSlots && atlas->slots[font_id].loaded) {
         return font_id;
     }
@@ -91,7 +93,7 @@ uint16_t resolve_target_font_slot(const FontAtlas* atlas, uint16_t slot_hint) no
     }
     // Keep the built-in Sans/Bold/Mono slots available for lazy loading.
     if (slot_hint == kInvalidFont) {
-        for (uint16_t i = 3u; i < kMaxFontSlots; ++i) {
+        for (uint16_t i = 3u; i < kFontMedium; ++i) {
             if (!atlas->slots[i].loaded) {
                 return i;
             }
@@ -306,7 +308,7 @@ bool try_load_system_font(FontAtlas* atlas, uint16_t slot_idx, const char* filen
         if (!root || !root[0]) return false;
         const int n = std::snprintf(buf, sizeof(buf), "%s/%s%s", root, directory, filename);
         if (n < 0 || static_cast<size_t>(n) >= sizeof(buf)) return false;
-        if (slot_idx >= 3u && font_has_source_hash(atlas, hash_font_path(buf, 0))) return true;
+        if (slot_idx >= 3u && slot_idx < kFontMedium && font_has_source_hash(atlas, hash_font_path(buf, 0))) return true;
         return try_load_font_file_into_slot(atlas, slot_idx, buf);
     };
 #if defined(_WIN32)
@@ -358,6 +360,17 @@ void rebuild_fallback_order(FontAtlas* atlas) noexcept {
         atlas->fallback_order[i] = ordered[i];
     }
     atlas->fallback_count = oc;
+}
+
+void ensure_weighted_loaded(FontAtlas* atlas, uint16_t slot) noexcept {
+    const uint8_t bit = static_cast<uint8_t>(1u << (slot - kFontMedium));
+    if (atlas->slots[slot].loaded || (atlas->weighted_probed & bit)) return;
+    atlas->weighted_probed |= bit;
+    const char* medium[] = {"Inter-Medium.ttf", "Roboto-Medium.ttf", "NotoSans-Medium.ttf"};
+    const char* semibold[] = {"seguisb.ttf", "Inter-SemiBold.ttf", "NotoSans-SemiBold.ttf"};
+    for (const char* path : std::span<const char* const>(slot == kFontMedium ? medium : semibold, 3))
+        if (try_load_system_font(atlas, slot, path)) break;
+    rebuild_fallback_order(atlas);
 }
 
 void ensure_bold_loaded(FontAtlas* atlas) noexcept {
@@ -954,12 +967,13 @@ std::span<const ShapedGlyph> shape_directional_run(
     hb_buffer_set_direction(buf, direction);
     hb_buffer_set_script(buf, script);
 
-    static constexpr hb_feature_t kFeatures[3] = {
+    const hb_feature_t kFeatures[4] = {
         { HB_TAG('k', 'e', 'r', 'n'), 1u, 0u, static_cast<unsigned int>(-1) },
         { HB_TAG('l', 'i', 'g', 'a'), 1u, 0u, static_cast<unsigned int>(-1) },
         { HB_TAG('c', 'a', 'l', 't'), 1u, 0u, static_cast<unsigned int>(-1) },
+        { HB_TAG('t', 'n', 'u', 'm'), 1u, 0u, static_cast<unsigned int>(-1) },
     };
-    hb_shape(primary.hb_font, buf, kFeatures, 3u);
+    hb_shape(primary.hb_font, buf, kFeatures, primary.tabular_numbers ? 4u : 3u);
 
     hb_segment_properties_t seg_props = {};
     hb_buffer_get_segment_properties(buf, &seg_props);
@@ -1077,7 +1091,7 @@ std::span<const ShapedGlyph> shape_directional_run(
             sr.byte_start,
             static_cast<int>(sr.byte_end - sr.byte_start));
         hb_buffer_set_segment_properties(buf, &seg_props);
-        hb_shape(slot.hb_font, buf, kFeatures, 3u);
+        hb_shape(slot.hb_font, buf, kFeatures, primary.tabular_numbers ? 4u : 3u);
 
         unsigned int sub_gcount = 0u;
         const hb_glyph_info_t* sub_infos = hb_buffer_get_glyph_infos(buf, &sub_gcount);
@@ -1296,6 +1310,19 @@ uint16_t load_font_memory(
     return loaded ? target_slot : kInvalidFont;
 }
 
+bool set_font_tabular_numbers(Context* ctx, uint16_t font_id, bool enabled) noexcept {
+    if (!ctx || ctx->in_frame || !is_font_loaded(ctx, font_id)) return false;
+    FontSlot& slot = ctx->atlas.slots[font_id];
+    if (slot.tabular_numbers == enabled) return true;
+    slot.tabular_numbers = enabled;
+    slot.metric_hash ^= 0x746E756Du;
+    ++ctx->atlas.font_revision;
+    ctx->headless_ui.redraw_budget = 2;
+    for (uint32_t i = 0; i < ctx->claimed_window_cap; ++i)
+        if (ctx->claimed_windows[i]) ctx->claimed_windows[i]->ui.redraw_budget = 2;
+    return true;
+}
+
 bool is_font_loaded(const Context* ctx, uint16_t font_id) noexcept {
     if (!ctx || font_id >= kMaxFontSlots) return false;
     FontAtlas& atlas = const_cast<Context*>(ctx)->atlas;
@@ -1303,6 +1330,7 @@ bool is_font_loaded(const Context* ctx, uint16_t font_id) noexcept {
         ensure_bold_loaded(&atlas);
     if (font_id == kFontMono && !atlas.slots[kFontMono].loaded && !atlas.mono_probed)
         ensure_mono_loaded(&atlas);
+    if (font_id == kFontMedium || font_id == kFontSemiBold) ensure_weighted_loaded(&atlas, font_id);
     return atlas.slots[font_id].loaded;
 }
 
@@ -1314,7 +1342,6 @@ static SlugRawCurve* decode_vector_path(Context* ctx, Str svg_path_d,
     uint32_t raw_cap = kStackRawCap;
     uint32_t raw_count = 0u;
     bool complete = true;
-
 
     auto push_raw = [&](SlugRawCurve c) noexcept -> bool {
         if (raw_count >= raw_cap) {

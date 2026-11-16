@@ -146,8 +146,8 @@ inline etch::BoxDesc to_cpp(const EtchBoxDesc& d) noexcept {
     out.gradient_dir = to_cpp(d.gradient_dir); out.radial_gradient = d.radial_gradient;
     out.border_color = to_cpp(d.border_color); out.border_width = d.border_width;
     out.radius = to_cpp(d.radius); out.shadow_color = to_cpp(d.shadow_color);
-    out.shadow_blur = d.shadow_blur; out.shadow_offset = to_cpp(d.shadow_offset);
-    out.shrink_width = d.shrink_width; out.clip_children = d.clip_children; out.scroll_x = d.scroll_x; out.scroll_y = d.scroll_y;
+    out.shadow_spread = d.shadow_spread; out.shadow_blur = d.shadow_blur; out.shadow_offset = to_cpp(d.shadow_offset);
+    out.continuous_corners = d.continuous_corners; out.shrink_width = d.shrink_width; out.clip_children = d.clip_children; out.scroll_x = d.scroll_x; out.scroll_y = d.scroll_y;
     out.show_scrollbar = d.show_scrollbar; out.focusable = d.focusable;
     out.attach_to = static_cast<etch::AttachTo>(d.attach_to);
     out.attach_element_id = d.attach_element_id;
@@ -253,7 +253,7 @@ EtchBoxDesc etch_box_desc_default(void) {
             static_cast<EtchAnchor>(d.anchor_element), static_cast<EtchAnchor>(d.anchor_parent),
             from_cpp(d.floating_offset), d.z_index, d.pointer_passthrough, d.clip_to_parent,
             d.backdrop_blur, d.clamp_to_viewport, d.wrap, d.row_gap, d.aspect_ratio,
-            d.grid_columns, nullptr, 0u, d.grid_col_span, d.shrink_width};
+            d.grid_columns, nullptr, 0u, d.grid_col_span, d.shrink_width, d.continuous_corners, d.shadow_spread};
 }
 
 EtchTextDesc etch_text_desc_default(void) {
@@ -302,7 +302,7 @@ EtchRectDrawDesc etch_rect_draw_desc_default(void) {
     const etch::RectDrawDesc d{};
     return {from_cpp(d.rect), from_cpp(d.fill), from_cpp(d.fill_end), from_cpp(d.gradient_dir),
             d.radial_gradient, from_cpp(d.radius), from_cpp(d.border_color), d.border_width,
-            d.foreground, d.angle_rad, d.softness};
+            d.foreground, d.angle_rad, d.softness, d.continuous_corners};
 }
 
 EtchLineDesc etch_line_draw_desc_default(void) {
@@ -540,7 +540,7 @@ EtchTableDesc etch_table_desc_default(void) {
             d.overscan_rows, d.default_sort_column, d.default_sort_descending, d.cell_padding_x,
             from_cpp(d.width), from_cpp(d.height), from_cpp(d.padding), from_cpp(d.background),
             from_cpp(d.header_background), from_cpp(d.zebra_color), from_cpp(d.hover_row_color),
-            from_cpp(d.border_color), d.border_width, from_cpp(d.radius), d.show_scrollbar};
+            from_cpp(d.border_color), d.border_width, from_cpp(d.radius), d.show_scrollbar, d.show_column_lines, d.header_font_size_px};
 }
 
 EtchTreeNodeDesc etch_tree_node_desc_default(void) {
@@ -680,6 +680,9 @@ uint16_t etch_load_font_memory(EtchContext* ctx, const void* data, size_t size_b
     return etch::load_font_memory(to_ctx(ctx), data, size_bytes, slot_hint, face_index);
 }
 
+bool etch_set_font_tabular_numbers(EtchContext* ctx, uint16_t font_id, bool enabled) {
+    return etch::set_font_tabular_numbers(to_ctx(ctx), font_id, enabled);
+}
 bool etch_is_font_loaded(const EtchContext* ctx, uint16_t font_id) {
     return etch::is_font_loaded(to_ctx(ctx), font_id);
 }
@@ -865,7 +868,7 @@ void etch_draw_rect(const EtchRectDrawDesc* desc) {
     if (!desc) return;
     etch::draw_rect({to_cpp(desc->rect), to_cpp(desc->fill), to_cpp(desc->fill_end),
                      to_cpp(desc->gradient_dir), desc->radial_gradient, to_cpp(desc->radius),
-                     to_cpp(desc->border_color), desc->border_width, desc->foreground, desc->angle_rad, desc->softness});
+                     to_cpp(desc->border_color), desc->border_width, desc->foreground, desc->angle_rad, desc->softness, desc->continuous_corners});
 }
 void etch_draw_line(const EtchLineDesc* desc) {
     if (!desc) return;
@@ -1386,7 +1389,7 @@ EtchTableResult etch_begin_table(const EtchTableDesc* desc) {
         desc->overscan_rows, desc->default_sort_column, desc->default_sort_descending, desc->cell_padding_x,
         to_cpp(desc->width), to_cpp(desc->height), to_cpp(desc->padding), to_cpp(desc->background),
         to_cpp(desc->header_background), to_cpp(desc->zebra_color), to_cpp(desc->hover_row_color),
-        to_cpp(desc->border_color), desc->border_width, to_cpp(desc->radius), desc->show_scrollbar});
+        to_cpp(desc->border_color), desc->border_width, to_cpp(desc->radius), desc->show_scrollbar, desc->show_column_lines, desc->header_font_size_px});
     return {from_cpp(r.slice), r.sort_column, r.sort_descending, r.sort_changed};
 }
 bool etch_table_next_row(uint32_t* out_row_index, EtchColor row_bg_override, EtchColor row_border_override) {

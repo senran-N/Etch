@@ -303,7 +303,8 @@ inline bool verify_media_emoji_checks(const char* temp_prefix = "_etch_v060") no
     char input[8] = "\xF0\x9F\x98\x80";
     begin_frame(c, {.viewport_w = 640, .viewport_h = 240});
     begin_box({.axis = Axis::Col, .width = Sizing::fixed(640), .height = Sizing::fixed(240)});
-    begin_box({.width = Sizing::fixed(640), .height = Sizing::fixed(140)});
+    begin_box({.width = Sizing::fixed(640), .height = Sizing::fixed(140),
+        .radius = Corners::all(1), .clip_children = true, .continuous_corners = true});
     for (uint32_t i = 0; i < 32; ++i)
         draw_image({.sprite_id = sprites[i], .rect = {float(i * 18), 0, 16, 16}});
     draw_text({.text = str_lit("\xF0\x9F\x98\x80"), .pos = {0, 40}, .font_id = fs, .size = 14});
@@ -355,7 +356,7 @@ inline bool verify_media_emoji_checks(const char* temp_prefix = "_etch_v060") no
           __LINE__);
     check(!update_sprite_rgba(c, sprites[0], 8, 8, rgba, 4), __LINE__);
     check(sprite_size(c, old).x == 0, __LINE__);
-    check(update_sprite_rgba(c, sprites[0], 8, 8, rgba), __LINE__);
+    check(update_sprite_rgba(c, sprites[0], 4, 4, rgba, 32), __LINE__);
     check(render_headless_png(c, 640, 240, render), __LINE__);
     rendered = SDL_LoadPNG(render);
     check(pixel(rendered, 8, 8, 0xEBD964), __LINE__);

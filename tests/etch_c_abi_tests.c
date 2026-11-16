@@ -367,6 +367,8 @@ static bool test_containers_and_canvas(EtchContext* ctx) {
         tbd.columns = cols;
         tbd.column_count = 2u;
         tbd.item_count = 50u;
+        tbd.show_column_lines = false;
+        tbd.header_font_size_px = 14;
         tbd.height = etch_sizing_fixed(120.0f);
         const EtchTableResult tr = etch_begin_table(&tbd);
         uint32_t row_idx = 0u;
@@ -455,7 +457,9 @@ int main(void) {
         return 1;
     }
 
-    const bool ok_layout = test_layout_widgets_and_a11y(ctx);
+    const bool ok_numerals = etch_set_font_tabular_numbers(ctx, ETCH_FONT_SANS, true) &&
+        etch_set_font_tabular_numbers(ctx, ETCH_FONT_SANS, false);
+    const bool ok_layout = ok_numerals && test_layout_widgets_and_a11y(ctx);
     const bool ok_editor = test_text_buffer_and_code_editor(ctx);
     const bool ok_containers = test_containers_and_canvas(ctx);
 

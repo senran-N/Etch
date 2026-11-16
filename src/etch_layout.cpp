@@ -382,12 +382,12 @@ void emit_draw_list_command(
                 const float bw_px = rd.border_width * scale;
                 const bool has_grad = (rd.fill_end.pack_rgba8() != 0u) || rd.radial_gradient;
                 if (std::fabs(rd.angle_rad) > 1e-5f) {
-                    push_prim(ctx, Prim::make_rotated_rect(r_px, clip.rect, rd.fill, rd.angle_rad,
-                        rad_px, rd.border_color, bw_px, rd.fill_end, rd.gradient_dir, rd.radial_gradient, clip.radius));
+                    push_prim(ctx, continuous_prim(Prim::make_rotated_rect(r_px, clip.rect, rd.fill, rd.angle_rad,
+                        rad_px, rd.border_color, bw_px, rd.fill_end, rd.gradient_dir, rd.radial_gradient, clip.radius), rd.continuous_corners));
                 } else if (has_grad) {
                     push_prim(
                         ctx,
-                        Prim::make_gradient_rect(
+                        continuous_prim(Prim::make_gradient_rect(
                             r_px,
                             clip.rect,
                             rd.fill,
@@ -397,11 +397,11 @@ void emit_draw_list_command(
                             rd.border_color,
                             bw_px,
                             clip.radius,
-                            rd.radial_gradient, rd.softness));
+                            rd.radial_gradient, rd.softness), rd.continuous_corners));
                 } else if (rd.fill.a > 0u || (bw_px > 0.0f && rd.border_color.a > 0u)) {
                     push_prim(
                         ctx,
-                        Prim::make_rect(
+                        continuous_prim(Prim::make_rect(
                             r_px,
                             clip.rect,
                             rd.fill,
@@ -409,7 +409,7 @@ void emit_draw_list_command(
                             rd.border_color,
                             bw_px,
                             rd.softness,
-                            clip.radius));
+                            clip.radius), rd.continuous_corners));
                 }
                 break;
             }
@@ -1606,6 +1606,7 @@ void begin_box(const BoxDesc& desc_in) noexcept {
         desc.border_width *= wscale;
         desc.radius = scale_corners_uniform(desc.radius, wscale);
         desc.shadow_blur *= wscale;
+        desc.shadow_spread *= wscale;
         desc.shadow_offset.x *= wscale;
         desc.shadow_offset.y *= wscale;
         desc.floating_offset.x *= wscale;
@@ -3628,8 +3629,6 @@ std::span<const Str> dropped_files() noexcept {
     }
     return std::span<const Str>(ctx->active_ui->frame_drops, ctx->active_ui->frame_drop_count);
 }
-
-
 
 float spring(uint32_t anim_id, float target, SpringSpec spec) noexcept {
     return spring(anim_id, target, target, spec);

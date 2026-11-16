@@ -1328,7 +1328,7 @@ void table_close_row(TableStackEntry& t) noexcept {
 TableResult begin_table(const TableDesc& desc_in) noexcept {
     Context* ctx = current_context();
     if (!ctx || !ctx->in_frame || !desc_in.id || desc_in.columns.empty() || desc_in.columns.size() > kMaxTableColumns || ctx->active_ui->table_depth == 8 ||
-        !std::isfinite(desc_in.row_height_px) || desc_in.row_height_px <= 0) return {};
+        !std::isfinite(desc_in.header_font_size_px) || desc_in.header_font_size_px <= 0 || !std::isfinite(desc_in.row_height_px) || desc_in.row_height_px <= 0) return {};
     for (const auto& col : desc_in.columns) if (!std::isfinite(col.width) || !std::isfinite(col.min_width) || !std::isfinite(col.max_width) || col.min_width < 0 || col.max_width < col.min_width) return {};
     const Theme& thm = active_theme(ctx);
     TableDesc desc = desc_in;
@@ -1419,8 +1419,8 @@ TableResult begin_table(const TableDesc& desc_in) noexcept {
         }
         begin_box({ .id = hid, .width = Sizing::fixed(t.col_widths[c]), .height = Sizing::grow(),
             .padding = {desc.cell_padding_x, desc.cell_padding_x + (col.sortable && result.sort_column == c ? 18.0f : 0.0f), 0, 0}, .align_x = col.align_x, .align_y = AlignY::Center, .clip_children = true, .focusable = true });
-        text(col.title, { .font_size_px = 12, .wrap = false });
-        draw_line({ .from = {t.col_widths[c]-1,0}, .to = {t.col_widths[c]-1,desc.header_height_px}, .color = desc.border_color });
+        text(col.title, { .font_size_px = desc.header_font_size_px, .wrap = false });
+        if (desc.show_column_lines) draw_line({ .from = {t.col_widths[c]-1,0}, .to = {t.col_widths[c]-1,desc.header_height_px}, .color = desc.border_color });
         if (col.sortable && result.sort_column == c) {
             const float x = t.col_widths[c] - 14, y = desc.header_height_px * .5f;
             const float dir = result.sort_descending ? 3.0f : -3.0f;

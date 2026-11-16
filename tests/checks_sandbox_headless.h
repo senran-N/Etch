@@ -510,7 +510,7 @@ int run_headless(const char* out_png_path) noexcept {
                 etch::is_font_loaded(vctx, etch::kFontSans) &&
                 etch::is_font_loaded(vctx, etch::kFontBold) &&
                 etch::is_font_loaded(vctx, etch::kFontMono) &&
-                !etch::is_font_loaded(vctx, 15u);
+                !etch::is_font_loaded(vctx, etch::kMaxFontSlots);
 
 #if defined(_WIN32)
             const char* probe_font_a = "C:/Windows/Fonts/arial.ttf";

@@ -122,7 +122,8 @@ void end_frame(Context* ctx_arg) noexcept {
                                 const Rect clipped_rect = rect_intersect(cur_clip.rect, box_px);
                                 const Corners& c = extra->desc.radius;
                                 float cr = min4f(c.tl, c.tr, c.br, c.bl) * dpi;
-                                if (cr <= 0.0f &&
+                                if (extra->desc.continuous_corners) cr = -cr;
+                                if (cr == 0.0f &&
                                     clipped_rect.x == cur_clip.rect.x &&
                                     clipped_rect.y == cur_clip.rect.y &&
                                     clipped_rect.w == cur_clip.rect.w &&
@@ -190,6 +191,7 @@ void end_frame(Context* ctx_arg) noexcept {
                     if (extra) {
                         const Corners& c = extra->desc.radius;
                         next_radius = min4f(c.tl, c.tr, c.br, c.bl) * dpi;
+                        if (extra->desc.continuous_corners) next_radius = -next_radius;
                         if (extra->is_canvas) {
                             ctx->active_ui->last_canvas_clip_px = clipped_rect;
                             ctx->active_ui->last_canvas_clip_radius_px = next_radius;
@@ -201,7 +203,7 @@ void end_frame(Context* ctx_arg) noexcept {
                     {
                         next_radius = ctx->active_ui->last_canvas_clip_radius_px;
                     }
-                    if (next_radius <= 0.0f &&
+                    if (next_radius == 0.0f &&
                         clipped_rect.x == cur_clip.rect.x &&
                         clipped_rect.y == cur_clip.rect.y &&
                         clipped_rect.w == cur_clip.rect.w &&
@@ -281,7 +283,7 @@ void end_frame(Context* ctx_arg) noexcept {
                         : clip_stack.entries[0];
                     push_prim(
                         ctx,
-                        Prim::make_rect(
+                        continuous_prim(Prim::make_rect(
                             box_px,
                             parent_clip.rect,
                             Color::transparent(),
@@ -289,7 +291,7 @@ void end_frame(Context* ctx_arg) noexcept {
                             d.border_color,
                             d.border_width * dpi,
                             1.0f,
-                            parent_clip.radius));
+                            parent_clip.radius), d.continuous_corners));
                 }
                 break;
             }
@@ -802,7 +804,6 @@ void end_frame(Context* ctx_arg) noexcept {
     ctx->stats.idle_sleeping = idle_now;
     ctx->stats.ime_cursor_offset_win = ctx->active_ui->ime_cursor_offset_win;
 }
-
 
 bool frame_in_progress(const Context* ctx) noexcept { return ctx && ctx->in_frame; }
 SystemTheme system_theme() noexcept { return static_cast<SystemTheme>(SDL_GetSystemTheme()); }

@@ -83,6 +83,7 @@ struct WidgetState {
     uint32_t edit_wrap_tab_width = 0u;
     float    edit_wrap_font_size = 0.0f;
     uint16_t edit_wrap_font_id = kInvalidFont;
+    uint32_t edit_wrap_font_revision = 0;
 
     bool is_selectable_text = false;
     const char* sel_text_ptr = nullptr;
@@ -222,6 +223,7 @@ struct FontSlot {
     uint32_t       metric_hash = 0;
     uint8_t        generation = 0;
     bool           loaded = false;
+    bool tabular_numbers = false;
 };
 
 struct VectorIconEntry {
@@ -277,6 +279,7 @@ struct FontAtlas {
     bool              font_valid = false;
     bool              bold_probed = false;
     bool              mono_probed = false;
+    uint8_t weighted_probed = 0;
     bool              fallbacks_probed = false;
 
     VectorIconEntry   icons[kMaxVectorIcons] = {};
@@ -354,7 +357,6 @@ struct DrawCmdNode {
     ImageDrawDesc image_cmd = {};
     FilledPathDesc fill_cmd = {};
 };
-
 
 SDL_HitTestResult SDLCALL etch_sdl_hit_test(SDL_Window* win, const SDL_Point* area, void* data) noexcept;
 
@@ -549,7 +551,6 @@ inline SDL_GPUTexture* blur_tex_sentinel() noexcept {
     static uint8_t s_blur_tex_tag = 0;
     return reinterpret_cast<SDL_GPUTexture*>(&s_blur_tex_tag);
 }
-
 
 inline constexpr uint32_t kMaxTreeDepth = 32u;
 struct DockNode {
@@ -814,7 +815,6 @@ struct WindowUiState {
     uint8_t* drag_heap = nullptr; uint32_t drag_heap_cap = 0;
     uint32_t         drag_label_len = 0;
     char             drag_label[kMaxDragLabelBytes] = {};
-
 
 };
 

@@ -4,6 +4,19 @@ All notable changes to Etch are documented here. This file follows
 [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0] - 2026-11-16
+
+### Added
+- Opt-in exponent-4 continuous corners for boxes, immediate rectangles, shadows and matching uniform-radius child clipping, within the existing 64-byte primitive and GPU batch.
+- Negative/positive `BoxDesc::shadow_spread`; low-level `Prim::make_shadow` accepts physical-pixel offset and spread. Existing box shadow offsets remain logical pixels.
+- Lazy `kFontMedium` / `kFontSemiBold` static faces (slots 14/15, including Windows `seguisb.ttf`). Missing faces fall back to Sans; explicit font loading into either slot is supported. Automatic custom allocation now uses slots 3–13.
+- `set_font_tabular_numbers` enables HarfBuzz `tnum` for a loaded font outside a frame, with measurement-cache invalidation and matching C99 API.
+- `TableDesc::show_column_lines` and `header_font_size_px`, mirrored in C99. Recompile consumers for expanded descriptors.
+
+### Fixed
+- Wrapped-editor row-height caches invalidate when font metrics or numeral features change.
+- Small dark Slug glyphs receive optical coverage compensation, alongside the existing light-glyph compensation.
+
 ## [0.10.1] - 2026-11-16
 
 ### Fixed

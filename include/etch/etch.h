@@ -12,8 +12,8 @@
 #include <type_traits>
 
 #define ETCH_VERSION_MAJOR 0
-#define ETCH_VERSION_MINOR 10
-#define ETCH_VERSION_PATCH 1
+#define ETCH_VERSION_MINOR 11
+#define ETCH_VERSION_PATCH 0
 #define ETCH_VERSION_STR_DETAIL(x) #x
 #define ETCH_VERSION_STR(x) ETCH_VERSION_STR_DETAIL(x)
 #define ETCH_VERSION_STRING ETCH_VERSION_STR(ETCH_VERSION_MAJOR) "." ETCH_VERSION_STR(ETCH_VERSION_MINOR) "." ETCH_VERSION_STR(ETCH_VERSION_PATCH)
@@ -467,6 +467,7 @@ enum PrimFlags : uint8_t {
     PrimFlag_Premultiplied = 1 << 3,
     PrimFlag_StemDarken = 1 << 4,
     PrimFlag_RoundCap = 1 << 5,
+    PrimFlag_Continuous = 1 << 5, // Rect/Shadow/BlurGlass superellipse corners.
     PrimFlag_TextClip = 1 << 5, // Glyph/emoji style.zw hold a secondary horizontal clip.
 };
 
@@ -482,7 +483,7 @@ enum PrimFlags : uint8_t {
 //       float4 bounds;   // xy = top-left px, zw = width, height px
 //       float4 clip;     // xy = clip min px, zw = clip max px
 //       uint4  payload;  // xy = uv0/uv1 (UNORM16x2) OR (color1 RGBA8, f16x2 grad_dir); zw = f16x2 radii
-//       uint4  style;    // x = header [kind:4 | flags:6 | tex_slot:10 | clip_r_q2:12];
+//       uint4  style;    // x = header [kind:4 | flags:6 | tex_slot:9 | continuous_clip:1 | clip_r_q2:12];
 //                        // y = color0 sRGB RGBA8; z = border sRGB RGBA8; w = f16x2(border_width, softness)
 //   };
 struct alignas(16) Prim {
@@ -497,13 +498,14 @@ struct alignas(16) Prim {
         uint16_t tex_slot = 0,
         float clip_radius_px = 0.0f) noexcept
     {
-        const float clamped_r = (clip_radius_px < 0.0f)
-            ? 0.0f
-            : ((clip_radius_px > 1023.75f) ? 1023.75f : clip_radius_px);
+        // Negative radius selects continuous clipping; bit 19 is independent of the texture slot.
+        const float magnitude = clip_radius_px < 0 ? -clip_radius_px : clip_radius_px;
+        const float clamped_r = magnitude > 1023.75f ? 1023.75f : magnitude;
         const uint32_t clip_r_q2 = static_cast<uint32_t>(clamped_r * 4.0f + 0.5f) & 0xFFFu;
         return (static_cast<uint32_t>(kind) & 0xFu) |
                ((static_cast<uint32_t>(flags) & 0x3Fu) << 4) |
-               ((static_cast<uint32_t>(tex_slot) & 0x3FFu) << 10) |
+               ((static_cast<uint32_t>(tex_slot) & 0x1FFu) << 10) |
+               (clip_radius_px < 0 ? (1u << 19) : 0u) |
                (clip_r_q2 << 20);
     }
 
@@ -517,7 +519,7 @@ struct alignas(16) Prim {
         float softness = 1.0f,
         float clip_radius = 0.0f) noexcept
     {
-        const uint8_t flags = (clip_radius > 0.0f) ? PrimFlag_RoundedClip : PrimFlag_None;
+        const uint8_t flags = (clip_radius != 0.0f) ? PrimFlag_RoundedClip : PrimFlag_None;
         return Prim{
             .bounds = {rect.x, rect.y, rect.w, rect.h},
             .clip = {clip_rect.x, clip_rect.y, clip_rect.x + clip_rect.w, clip_rect.y + clip_rect.h},
@@ -545,7 +547,7 @@ struct alignas(16) Prim {
         float softness = 1.0f) noexcept
     {
         const uint8_t grad_flag = radial ? PrimFlag_RadialGrad : PrimFlag_LinearGrad;
-        const uint8_t clip_flag = (clip_radius > 0.0f) ? PrimFlag_RoundedClip : PrimFlag_None;
+        const uint8_t clip_flag = (clip_radius != 0.0f) ? PrimFlag_RoundedClip : PrimFlag_None;
         return Prim{
             .bounds = {rect.x, rect.y, rect.w, rect.h},
             .clip = {clip_rect.x, clip_rect.y, clip_rect.x + clip_rect.w, clip_rect.y + clip_rect.h},
@@ -570,11 +572,13 @@ struct alignas(16) Prim {
         Color shadow_color,
         Corners radius = {},
         float blur_radius = 12.0f,
-        float clip_radius = 0.0f) noexcept
+        float clip_radius = 0.0f, Vec2 offset = {}, float spread = 0.0f) noexcept
     {
-        const uint8_t flags = (clip_radius > 0.0f) ? PrimFlag_RoundedClip : PrimFlag_None;
+        radius = {radius.tl + spread > 0 ? radius.tl + spread : 0, radius.tr + spread > 0 ? radius.tr + spread : 0,
+            radius.br + spread > 0 ? radius.br + spread : 0, radius.bl + spread > 0 ? radius.bl + spread : 0};
+        const uint8_t flags = (clip_radius != 0.0f) ? PrimFlag_RoundedClip : PrimFlag_None;
         return Prim{
-            .bounds = {rect.x, rect.y, rect.w, rect.h},
+            .bounds = {rect.x + offset.x - spread, rect.y + offset.y - spread, rect.w + 2 * spread, rect.h + 2 * spread},
             .clip = {clip_rect.x, clip_rect.y, clip_rect.x + clip_rect.w, clip_rect.y + clip_rect.h},
             .payload = {0u, 0u, pack_f16x2(radius.tl, radius.tr), pack_f16x2(radius.br, radius.bl)},
             .style = {
@@ -596,7 +600,7 @@ struct alignas(16) Prim {
         float clip_radius = 0.0f,
         uint8_t flags = PrimFlag_StemDarken) noexcept
     {
-        const uint8_t all_flags = static_cast<uint8_t>(flags | ((clip_radius > 0.0f) ? PrimFlag_RoundedClip : PrimFlag_None));
+        const uint8_t all_flags = static_cast<uint8_t>(flags | ((clip_radius != 0.0f) ? PrimFlag_RoundedClip : PrimFlag_None));
         return Prim{
             .bounds = {rect.x, rect.y, rect.w, rect.h},
             .clip = {clip_rect.x, clip_rect.y, clip_rect.x + clip_rect.w, clip_rect.y + clip_rect.h},
@@ -626,7 +630,7 @@ struct alignas(16) Prim {
         uint8_t flags = PrimFlag_StemDarken,
         float angle_rad = 0.0f) noexcept
     {
-        const uint8_t all_flags = static_cast<uint8_t>(flags | ((clip_radius > 0.0f) ? PrimFlag_RoundedClip : PrimFlag_None));
+        const uint8_t all_flags = static_cast<uint8_t>(flags | ((clip_radius != 0.0f) ? PrimFlag_RoundedClip : PrimFlag_None));
         return Prim{
             .bounds = {rect.x, rect.y, rect.w, rect.h},
             .clip = {clip_rect.x, clip_rect.y, clip_rect.x + clip_rect.w, clip_rect.y + clip_rect.h},
@@ -649,7 +653,7 @@ struct alignas(16) Prim {
         uint32_t band_offset, uint16_t hbands, uint16_t vbands, Color fill_end = {},
         Vec2 gradient_dir = {0, 1}, bool radial = false, float clip_radius = 0) noexcept
     {
-        const uint8_t flags = static_cast<uint8_t>((clip_radius > 0 ? PrimFlag_RoundedClip : 0) |
+        const uint8_t flags = static_cast<uint8_t>((clip_radius != 0 ? PrimFlag_RoundedClip : 0) |
             ((fill_end.pack_rgba8() != 0 || radial) ? (radial ? PrimFlag_RadialGrad : PrimFlag_LinearGrad) : 0));
         return Prim{.bounds = {rect.x, rect.y, rect.w, rect.h},
             .clip = {clip_rect.x, clip_rect.y, clip_rect.x + clip_rect.w, clip_rect.y + clip_rect.h},
@@ -682,7 +686,7 @@ struct alignas(16) Prim {
         uint8_t flags = PrimFlag_None,
         float clip_radius = 0.0f) noexcept
     {
-        const uint8_t all_flags = static_cast<uint8_t>(flags | ((clip_radius > 0.0f) ? PrimFlag_RoundedClip : PrimFlag_None));
+        const uint8_t all_flags = static_cast<uint8_t>(flags | ((clip_radius != 0.0f) ? PrimFlag_RoundedClip : PrimFlag_None));
         return Prim{
             .bounds = {rect.x, rect.y, rect.w, rect.h},
             .clip = {clip_rect.x, clip_rect.y, clip_rect.x + clip_rect.w, clip_rect.y + clip_rect.h},
@@ -711,7 +715,7 @@ struct alignas(16) Prim {
         uint16_t tex_slot = 0,
         float clip_radius = 0.0f) noexcept
     {
-        const uint8_t all_flags = static_cast<uint8_t>((clip_radius > 0.0f) ? PrimFlag_RoundedClip : PrimFlag_None);
+        const uint8_t all_flags = static_cast<uint8_t>((clip_radius != 0.0f) ? PrimFlag_RoundedClip : PrimFlag_None);
         return Prim{
             .bounds = {rect.x, rect.y, rect.w, rect.h},
             .clip = {clip_rect.x, clip_rect.y, clip_rect.x + clip_rect.w, clip_rect.y + clip_rect.h},
@@ -746,7 +750,7 @@ struct alignas(16) Prim {
         const auto clamp_origin = [](float v) constexpr noexcept -> float {
             return (v < -32000.0f) ? -32000.0f : ((v > 32000.0f) ? 32000.0f : v);
         };
-        const uint8_t flags = (clip_radius > 0.0f) ? PrimFlag_RoundedClip : PrimFlag_None;
+        const uint8_t flags = (clip_radius != 0.0f) ? PrimFlag_RoundedClip : PrimFlag_None;
         return Prim{
             .bounds = {rect.x, rect.y, rect.w, rect.h},
             .clip = {clip_rect.x, clip_rect.y, clip_rect.x + clip_rect.w, clip_rect.y + clip_rect.h},
@@ -794,7 +798,7 @@ struct alignas(16) Prim {
         const float raw_h = (max3f(q0_px.y, q1_px.y, q2_px.y) + margin) - by;
         const float bw = (raw_w > 1.0f) ? raw_w : 1.0f;
         const float bh = (raw_h > 1.0f) ? raw_h : 1.0f;
-        const uint8_t flags = (clip_radius > 0.0f) ? PrimFlag_RoundedClip : PrimFlag_None;
+        const uint8_t flags = (clip_radius != 0.0f) ? PrimFlag_RoundedClip : PrimFlag_None;
         return Prim{
             .bounds = {bx, by, bw, bh},
             .clip = {clip_rect.x, clip_rect.y, clip_rect.x + clip_rect.w, clip_rect.y + clip_rect.h},
@@ -833,7 +837,7 @@ struct alignas(16) Prim {
         const float ext = r + ht + gw + 2.0f;
         const uint8_t flags = static_cast<uint8_t>(
             (round_caps ? PrimFlag_RoundCap : PrimFlag_None) |
-            ((clip_radius > 0.0f) ? PrimFlag_RoundedClip : PrimFlag_None));
+            ((clip_radius != 0.0f) ? PrimFlag_RoundedClip : PrimFlag_None));
         return Prim{
             .bounds = {center_px.x - ext, center_px.y - ext, 2.0f * ext, 2.0f * ext},
             .clip = {clip_rect.x, clip_rect.y, clip_rect.x + clip_rect.w, clip_rect.y + clip_rect.h},
@@ -1200,11 +1204,14 @@ struct BoxDesc {
     std::span<const GridTrack> grid_tracks = {}; // Copied into frame storage by begin_box.
     uint16_t grid_col_span = 1;
     bool shrink_width = false; // Fit/Grow may shrink below content width; clips overflow.
+    bool continuous_corners = false; // Exponent-4 superellipse corners.
+    float shadow_spread = 0.0f; // Logical pixels; negative values inset the shadow.
 };
 
 inline constexpr uint16_t kFontSans       = 0u;
 inline constexpr uint16_t kFontBold       = 1u;
 inline constexpr uint16_t kFontMono       = 2u;
+inline constexpr uint16_t kFontMedium = 14u, kFontSemiBold = 15u; // Lazy static faces; missing faces fall back to Sans.
 inline constexpr uint16_t kMaxFontSlots   = 16u;
 inline constexpr uint16_t kInvalidFont    = 0xFFFFu;
 inline constexpr uint16_t kMaxVectorIcons = 256u;
@@ -1324,6 +1331,7 @@ struct RectDrawDesc {
     bool    foreground = false;
     float   angle_rad = 0.0f;
     float   softness = 1.0f; // Physical-pixel AA width, minimum 0.5.
+    bool continuous_corners = false; // Exponent-4 superellipse corners.
 };
 
 struct LineDesc {
@@ -1793,6 +1801,7 @@ struct TableDesc {
     Color zebra_color = Color::theme_auto(); Color hover_row_color = Color::theme_auto();
     Color border_color = Color::theme_auto(); float border_width = 1.0f;
     Corners radius = Corners::theme_auto(); bool show_scrollbar = true;
+    bool show_column_lines = true; float header_font_size_px = 12;
 };
 struct TableResult {
     VirtualListSlice slice = {}; uint32_t sort_column = 0;
@@ -1929,6 +1938,8 @@ uint16_t load_font_memory(
     uint16_t slot_hint = kInvalidFont,
     int32_t face_index = 0) noexcept;
 bool is_font_loaded(const Context* ctx, uint16_t font_id) noexcept;
+// Configure a loaded font outside a frame; applies to measurement and all text APIs.
+bool set_font_tabular_numbers(Context* ctx, uint16_t font_id, bool enabled) noexcept;
 
 // Zero-atlas SVG path -> Slug vector icon compiler
 uint16_t register_svg_icon(

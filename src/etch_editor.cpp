@@ -562,7 +562,7 @@ CodeEditorResult code_editor(const CodeEditorDesc& input) noexcept {
         const bool style_dirty = (std::fabs(ws->edit_wrap_width - wrap_w) > 0.5f) ||
             (ws->edit_wrap_tab_width != d.tab_width) ||
             (std::fabs(ws->edit_wrap_font_size - d.font_size_px) > 0.01f) ||
-            (ws->edit_wrap_font_id != d.font_id);
+            (ws->edit_wrap_font_id != d.font_id) || (ws->edit_wrap_font_revision != ctx->atlas.font_revision);
         vc = editor_vlist_prepare(&ui, d.id, pre_lines, stride, editor_measure_row_height, &mctx);
         if (vc && (external_dirty || style_dirty)) {
             editor_vlist_reset(vc);
@@ -951,6 +951,7 @@ CodeEditorResult code_editor(const CodeEditorDesc& input) noexcept {
         ws->edit_wrap_tab_width = d.tab_width;
         ws->edit_wrap_font_size = d.font_size_px;
         ws->edit_wrap_font_id = d.font_id;
+        ws->edit_wrap_font_revision = ctx->atlas.font_revision;
         ws->vscroll_total_h = (vc ? vc->total_stride_sum : double(post_lines) * stride) + d.padding.top + d.padding.bottom;
     } else {
         ws->vscroll_total_h = double(post_lines) * stride + d.padding.top + d.padding.bottom;

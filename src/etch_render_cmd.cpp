@@ -681,7 +681,7 @@ void push_prim(
     }
 
     Prim final_p = prim;
-    final_p.style.x = (final_p.style.x & ~(0x3FFu << 10)) | ((static_cast<uint32_t>(tex_slot) & 0x3FFu) << 10);
+    final_p.style.x = (final_p.style.x & ~(0x1FFu << 10)) | ((static_cast<uint32_t>(tex_slot) & 0x1FFu) << 10);
     ctx->prims[ctx->prim_count++] = final_p;
     ++cur->prim_count;
 
@@ -756,6 +756,11 @@ void emit_canvas_grid_command(
     const ClipEntry& clip,
     float dpi) noexcept;
 
+Prim continuous_prim(Prim prim, bool enabled) noexcept {
+    if (enabled) prim.style.x |= uint32_t(PrimFlag_Continuous) << 4;
+    return prim;
+}
+
 void emit_box_background_and_shadow(
     Context* ctx,
     const BoxExtra* extra,
@@ -788,13 +793,13 @@ void emit_box_background_and_shadow(
         };
         push_prim(
             ctx,
-            Prim::make_shadow(
+            continuous_prim(Prim::make_shadow(
                 shadow_rect,
                 clip.rect,
                 d.shadow_color,
                 rad_px,
                 blur_px,
-                clip.radius),
+                clip.radius, {}, d.shadow_spread * dpi), d.continuous_corners),
             nullptr,
             2.0f * blur_px + 2.0f);
     }
@@ -809,7 +814,7 @@ void emit_box_background_and_shadow(
         if (use_blur) {
             push_prim(
                 ctx,
-                Prim::make_blur_glass(
+                continuous_prim(Prim::make_blur_glass(
                     box_px,
                     clip.rect,
                     d.background,
@@ -817,12 +822,12 @@ void emit_box_background_and_shadow(
                     border_col,
                     border_w,
                     0u,
-                    clip.radius),
+                    clip.radius), d.continuous_corners),
                 blur_tex_sentinel());
         } else if (has_grad) {
             push_prim(
                 ctx,
-                Prim::make_gradient_rect(
+                continuous_prim(Prim::make_gradient_rect(
                     box_px,
                     clip.rect,
                     d.background,
@@ -832,11 +837,11 @@ void emit_box_background_and_shadow(
                     border_col,
                     border_w,
                     clip.radius,
-                    d.radial_gradient));
+                    d.radial_gradient), d.continuous_corners));
         } else {
             push_prim(
                 ctx,
-                Prim::make_rect(
+                continuous_prim(Prim::make_rect(
                     box_px,
                     clip.rect,
                     d.background,
@@ -844,14 +849,15 @@ void emit_box_background_and_shadow(
                     border_col,
                     border_w,
                     1.0f,
-                    clip.radius));
+                    clip.radius), d.continuous_corners));
         }
     }
 
     if (extra->is_canvas && extra->canvas_grid && box_visible) {
         const Rect canvas_clip_rect = rect_intersect(clip.rect, box_px);
         float canvas_clip_r = min4f(rad_px.tl, rad_px.tr, rad_px.br, rad_px.bl);
-        if (canvas_clip_r <= 0.0f &&
+        if (d.continuous_corners) canvas_clip_r = -canvas_clip_r;
+        if (canvas_clip_r == 0.0f &&
             canvas_clip_rect.x == clip.rect.x &&
             canvas_clip_rect.y == clip.rect.y &&
             canvas_clip_rect.w == clip.rect.w &&
@@ -1762,6 +1768,5 @@ uint32_t utf8_decode_at(const char* s, uint32_t len, uint32_t pos) noexcept {
     const char* p = s + pos;
     return next_utf8_codepoint(p, s + len);
 }
-
 
 } // namespace etch

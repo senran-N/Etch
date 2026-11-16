@@ -8,8 +8,8 @@
 
 #ifndef ETCH_VERSION_MAJOR
 #define ETCH_VERSION_MAJOR 0
-#define ETCH_VERSION_MINOR 10
-#define ETCH_VERSION_PATCH 1
+#define ETCH_VERSION_MINOR 11
+#define ETCH_VERSION_PATCH 0
 #define ETCH_VERSION_STR_DETAIL(x) #x
 #define ETCH_VERSION_STR(x) ETCH_VERSION_STR_DETAIL(x)
 #define ETCH_VERSION_STRING ETCH_VERSION_STR(ETCH_VERSION_MAJOR) "." ETCH_VERSION_STR(ETCH_VERSION_MINOR) "." ETCH_VERSION_STR(ETCH_VERSION_PATCH)
@@ -55,6 +55,7 @@ enum {
     ETCH_FONT_SANS = 0u,
     ETCH_FONT_BOLD = 1u,
     ETCH_FONT_MONO = 2u,
+    ETCH_FONT_MEDIUM = 14u, ETCH_FONT_SEMIBOLD = 15u,
     ETCH_MAX_FONT_SLOTS = 16u,
     ETCH_INVALID_FONT = 0xFFFFu,
     ETCH_MAX_VECTOR_ICONS = 256u,
@@ -798,6 +799,8 @@ typedef struct EtchBoxDesc {
     uint32_t grid_track_count;
     uint16_t grid_col_span;
     bool shrink_width;
+    bool continuous_corners;
+    float shadow_spread;
 } EtchBoxDesc;
 
 typedef struct EtchTextDesc {
@@ -910,6 +913,7 @@ typedef struct EtchRectDrawDesc {
     bool foreground;
     float angle_rad;
     float softness;
+    bool continuous_corners;
 } EtchRectDrawDesc;
 
 typedef struct EtchLineDesc {
@@ -1475,6 +1479,7 @@ typedef struct EtchTableDesc {
     float border_width;
     EtchCorners radius;
     bool show_scrollbar;
+    bool show_column_lines; float header_font_size_px;
 } EtchTableDesc;
 
 typedef struct EtchTableResult {
@@ -1681,6 +1686,7 @@ struct SDL_GPUDevice* etch_gpu_device(EtchContext* ctx);
 uint16_t etch_load_font_file(EtchContext* ctx, const char* path, uint16_t slot_hint, int32_t face_index);
 uint16_t etch_load_font_memory(EtchContext* ctx, const void* data, size_t size_bytes, uint16_t slot_hint, int32_t face_index);
 bool etch_is_font_loaded(const EtchContext* ctx, uint16_t font_id);
+bool etch_set_font_tabular_numbers(EtchContext* ctx, uint16_t font_id, bool enabled);
 
 uint16_t etch_register_svg_icon(EtchContext* ctx, EtchStr svg_path_d, EtchVec4 view_box, uint16_t slot_hint);
 bool etch_is_icon_loaded(const EtchContext* ctx, uint16_t icon_id);

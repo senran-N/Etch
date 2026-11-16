@@ -28,7 +28,7 @@ struct Prim
     float4 bounds;   // xy = top-left px, zw = width, height px
     float4 clip;     // xy = clip min px, zw = clip max px
     uint4  payload;  // xy = uv0/uv1 (UNORM16x2) OR (color1 RGBA8, f16x2 grad_dir); zw = f16x2 radii
-    uint4  style;    // x = header [kind:4 | flags:6 | tex_slot:10 | clip_r_q2:12];
+    uint4  style;    // x = header [kind:4 | flags:6 | tex_slot:9 | continuous_clip:1 | clip_r_q2:12];
                      // y = color0 sRGB RGBA8; z = border sRGB RGBA8; w = f16x2(border_width, softness)
 };
 
@@ -178,8 +178,8 @@ VSOut vs_main(uint vertex_id : SV_VertexID, uint instance_id : SV_InstanceID)
     uint header      = p.style.x;
     uint kind        = header & 0xFu;
     uint flags       = (header >> 4) & 0x3Fu;
-    uint tex_slot    = (header >> 10) & 0x3FFu;
-    float clip_r     = float((header >> 20) & 0xFFFu) * 0.25f;
+    uint tex_slot    = (header >> 10) & 0x1FFu;
+    float clip_r     = float((header >> 20) & 0xFFFu) * ((header & (1u << 19)) != 0u ? -0.25f : 0.25f);
 
     float2 bw_soft   = unpack_f16x2_custom(p.style.w);
     float2 r_tl_tr   = unpack_f16x2_custom(p.payload.z);
@@ -434,13 +434,19 @@ float slug_render_dyn(float2 coord, float2 size, uint offset, uint counts) {
     return slug_render_shared(coord, size, offset, counts, g_dyn_slug_curves, g_dyn_slug_bands);
 }
 
-float sd_rounded_box(float2 p, float2 half_size, float4 radii)
+float sd_rounded_box(float2 p, float2 half_size, float4 radii, bool continuous = false)
 {
     // radii: x = tl (-x,-y), y = tr (+x,-y), z = br (+x,+y), w = bl (-x,+y)
     float2 pair = (p.x > 0.0f) ? radii.zy : radii.wx;
     float r = (p.y > 0.0f) ? pair.x : pair.y;
     r = max(min(r, min(half_size.x, half_size.y)), 0.0f);
     float2 q = abs(p) - half_size + r;
+    if (continuous && r > 0.0f) {
+        float2 v = max(q, 0.0f);
+        float n = sqrt(length(v * v));
+        float gradient = n > 1e-4f ? length(v * v * v) / (n * n * n) : 1.0f;
+        return (min(max(q.x, q.y), 0.0f) + n - r) / max(gradient, 1e-4f);
+    }
     return min(max(q.x, q.y), 0.0f) + length(max(q, 0.0f)) - r;
 }
 
@@ -549,9 +555,9 @@ float4 ps_main(VSOut input) : SV_Target0
     float2 clip_center = 0.5f * (input.clip.xy + input.clip.zw);
     float2 clip_rel    = input.pixel_pos - clip_center;
     float clip_d;
-    if ((flags & ETCH_FLAG_ROUNDED_CLIP) != 0u && clip_r > 0.0f)
+    if ((flags & ETCH_FLAG_ROUNDED_CLIP) != 0u && clip_r != 0.0f)
     {
-        clip_d = sd_rounded_box(clip_rel, clip_half, clip_r.xxxx);
+        clip_d = sd_rounded_box(clip_rel, clip_half, abs(clip_r).xxxx, clip_r < 0.0f);
     }
     else
     {
@@ -578,7 +584,7 @@ float4 ps_main(VSOut input) : SV_Target0
 
     if (kind == ETCH_PRIM_RECT || kind == ETCH_PRIM_ROT_RECT)
     {
-        float d = sd_rounded_box(p_local, half_size, input.radii);
+        float d = sd_rounded_box(p_local, half_size, input.radii, (flags & ETCH_FLAG_ROUND_CAP) != 0u);
 
         float4 fill_col = gradient_color(input, (p_local + half_size) / size);
 
@@ -598,7 +604,7 @@ float4 ps_main(VSOut input) : SV_Target0
         float blur       = max(input.grad_params.w, 1.0f);
         float sigma      = max(blur * 0.5f, 0.5f);
         float inv_s2     = 1.0f / max(sigma * 1.41421356f, 0.5f);
-        float d          = sd_rounded_box(p_rel, half_size, input.radii);
+        float d          = sd_rounded_box(p_rel, half_size, input.radii, (flags & ETCH_FLAG_ROUND_CAP) != 0u);
         float edge_cov   = 0.5f * (1.0f - erf_approx(d * inv_s2));
         float size_atten = erf_approx(half_size.x * inv_s2) * erf_approx(half_size.y * inv_s2);
         float shadow_cov = saturate(edge_cov * size_atten);
@@ -628,7 +634,7 @@ float4 ps_main(VSOut input) : SV_Target0
         {
             float darken_t = saturate((28.0f - size.y) / 16.0f);
             float luma = saturate(dot(input.color0, float4(0.2126f, 0.7152f, 0.0722f, 0.0f)));
-            cov = lerp(cov, cov * (2.0f - cov), 0.30f * luma * darken_t);
+            cov = lerp(cov, cov * (2.0f - cov), (0.18f + 0.12f * luma) * darken_t);
         }
         out_pm = float4(input.color0.rgb, 1.0f) * (input.color0.a * cov);
     }
@@ -677,7 +683,7 @@ float4 ps_main(VSOut input) : SV_Target0
         glass_srgb        = saturate(glass_srgb + (ign - 0.5f) * (1.0f / 255.0f));
         glass_lin         = srgb_to_linear(glass_srgb);
 
-        float d         = sd_rounded_box(p_rel, half_size, input.radii);
+        float d         = sd_rounded_box(p_rel, half_size, input.radii, (flags & ETCH_FLAG_ROUND_CAP) != 0u);
         float border_w  = input.grad_params.z;
         float softness  = input.grad_params.w;
         float inv_aa    = 1.0f / max(softness, 0.5f);

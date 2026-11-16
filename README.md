@@ -1,4 +1,4 @@
-# Etch v0.10.1
+# Etch v0.11.0
 
 Etch is a Pure-GPU UI Engine for desktop applications on Windows, Linux, and
 macOS. It combines immediate UI construction, Clay layout, Unicode text
@@ -202,3 +202,30 @@ Width zero is unlimited. `spring(id, target, initial_value)` returns the
 initial value on the first frame and animates toward the target on later frames.
 C99 equivalents use the same descriptor fields plus `etch_create_desktop_window`
 and `etch_spring_from`; initialize descriptors with their `*_default()` functions.
+
+### Surface and typography controls
+
+`BoxDesc::continuous_corners = true` and `RectDrawDesc::continuous_corners = true`
+use exponent-4 superellipse corner segments with zero curvature at straight joins.
+This is a gradient-normalized distance approximation, not an exact Apple corner profile.
+Box fills, borders, shadows and uniform-radius child clips share the mode. Child clips
+still store one radius (the minimum of the four); asymmetric/nested intersections do
+not preserve four independent corner radii. Circular corners remain the default.
+
+For a downward card shadow use `shadow_offset = {0, 12}`, `shadow_blur = 20`,
+`shadow_spread = -6`; box values are logical pixels. Low-level `Prim::make_shadow`
+accepts offset/spread in physical pixels. A spread that collapses the shadow omits it.
+
+`kFontMedium` (14) and `kFontSemiBold` (15) lazily probe static faces; Windows
+SemiBold probes `seguisb.ttf`. Missing faces render with Sans, and
+`is_font_loaded(ctx, slot)` reports whether the requested face actually loaded.
+Applications can load their own 500/600 faces into these slots. Automatic custom
+font allocation uses 3–13; variable-font axis selection is not implemented.
+Before starting a frame, call `set_font_tabular_numbers(ctx, font_id, true)` to
+request OpenType `tnum` consistently in measured and rendered text. The font must
+provide the feature; it is not synthesized. Load a separate custom slot if prose
+and numeric columns need different numeral settings for the same face.
+
+Tables accept `show_column_lines = false` and `header_font_size_px = 14` for a
+line-free header with existing configurable zebra rows. Scroll edge fade masks
+are not implemented. C99 exposes the corresponding descriptors and font API.
