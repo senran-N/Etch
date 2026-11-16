@@ -4,6 +4,14 @@ All notable changes to Etch are documented here. This file follows
 [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.1] - 2026-11-16
+
+### Fixed
+- Continuous antialiasing at flat RingArc radial cuts.
+- Shared physical-pixel alignment for layout geometry and clip bounds; subpixel rectangles retain their positive dimensions if snapping would collapse them.
+- Width-limited immediate text without ellipsis preserves right/center alignment of the full line, clipping the corresponding visible portion.
+- Desktop windows probe density at a small hidden size, recenter after sizing, and scale existing SDL minimum dimensions when DPI changes.
+
 ## [0.10.0] - 2026-11-16
 
 ### Added

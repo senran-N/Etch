@@ -13,14 +13,17 @@ void sync_desktop_window(SDL_Window* window) noexcept {
     if (std::fabs(scale - old_scale) < 0.0001f) return;
     SDL_SetFloatProperty(props, kDesktopScale, scale);
     const SDL_WindowFlags flags = SDL_GetWindowFlags(window);
+    int w = 0, h = 0, min_w = 0, min_h = 0;
+    SDL_GetWindowSize(window, &w, &h);
+    SDL_GetWindowMinimumSize(window, &min_w, &min_h);
+    SDL_SetWindowMinimumSize(window, static_cast<int>(std::round(min_w * scale / old_scale)),
+        static_cast<int>(std::round(min_h * scale / old_scale)));
     if ((flags & (SDL_WINDOW_FULLSCREEN | SDL_WINDOW_MAXIMIZED | SDL_WINDOW_MINIMIZED)) != 0) return;
 #if defined(SDL_PLATFORM_WINDOWS)
     // SDL 3.4+ accepts the OS-suggested DPI-scaled rectangle for resizable windows.
     // Applying our ratio again would double-scale the client area.
     if ((flags & SDL_WINDOW_RESIZABLE) != 0 && SDL_GetVersion() >= SDL_VERSIONNUM(3, 4, 0)) return;
 #endif
-    int w = 0, h = 0;
-    SDL_GetWindowSize(window, &w, &h);
     SDL_SetWindowSize(window, static_cast<int>(std::round(w * scale / old_scale)),
         static_cast<int>(std::round(h * scale / old_scale)));
 }
@@ -31,11 +34,8 @@ SDL_Window* create_desktop_window(const char* title, float logical_w, float logi
     if (!display) return nullptr;
     SDL_Rect usable = {};
     if (!SDL_GetDisplayUsableBounds(display, &usable)) return nullptr;
-    float estimate = SDL_GetDisplayContentScale(display);
-    if (estimate <= 0) estimate = 1;
-    // Hidden until per-window density is known; macOS window coordinates are points.
-    SDL_Window* window = SDL_CreateWindow(title, static_cast<int>(std::fmin(logical_w * estimate, static_cast<float>(usable.w))),
-        static_cast<int>(std::fmin(logical_h * estimate, static_cast<float>(usable.h))), flags | SDL_WINDOW_HIGH_PIXEL_DENSITY | SDL_WINDOW_HIDDEN);
+    // Probe window-coordinate density before applying logical dimensions (Retina uses points).
+    SDL_Window* window = SDL_CreateWindow(title, 1, 1, flags | SDL_WINDOW_HIGH_PIXEL_DENSITY | SDL_WINDOW_HIDDEN);
     if (!window) return nullptr;
     SDL_SetWindowPosition(window, SDL_WINDOWPOS_CENTERED_DISPLAY(display), SDL_WINDOWPOS_CENTERED_DISPLAY(display));
     const float scale = desktop_coordinate_scale(window);
@@ -48,6 +48,7 @@ SDL_Window* create_desktop_window(const char* title, float logical_w, float logi
     if (!SDL_SetWindowSize(window, w, h) || !SDL_SetFloatProperty(SDL_GetWindowProperties(window), kDesktopScale, scale)) {
         SDL_DestroyWindow(window); return nullptr;
     }
+    SDL_SetWindowPosition(window, SDL_WINDOWPOS_CENTERED_DISPLAY(display), SDL_WINDOWPOS_CENTERED_DISPLAY(display));
     if ((flags & SDL_WINDOW_HIDDEN) == 0) SDL_ShowWindow(window);
     return window;
 }

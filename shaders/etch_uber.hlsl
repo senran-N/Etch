@@ -769,7 +769,12 @@ float4 ps_main(VSOut input) : SV_Target0
                 float2 sc    = float2(sin(alpha), cos(alpha));
                 if (sc.y * q.x <= sc.x * q.y)
                 {
-                    d = abs(length(q) - radius) - half_w;
+                    float d_rad = abs(length(q) - radius) - half_w;
+                    d = d_rad;
+                    if ((flags & ETCH_FLAG_ROUND_CAP) == 0u) {
+                        float proj = clamp(dot(q, sc), max(radius - half_w, 0.0f), radius + half_w);
+                        d = max(d_rad, -length(q - sc * proj));
+                    }
                 }
                 else if ((flags & ETCH_FLAG_ROUND_CAP) != 0u)
                 {

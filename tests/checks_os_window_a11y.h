@@ -582,6 +582,18 @@ inline bool verify_os_window_a11y_checks() noexcept {
     }
     set_current_context(wctx);
 
+    // Simulate an old monitor scale through the helper's window-local state.
+    SDL_SetWindowMinimumSize(win,120,80);
+    const float coordinate_scale=SDL_GetWindowDisplayScale(win)/SDL_GetWindowPixelDensity(win);
+    SDL_SetFloatProperty(SDL_GetWindowProperties(win),"etch.desktop.coordinate_scale",coordinate_scale*.5f);
+    SDL_Event dpi_event={};dpi_event.type=SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED;dpi_event.window.windowID=SDL_GetWindowID(win);
+    process_event(wctx,dpi_event);
+    int min_w=0,min_h=0;SDL_GetWindowMinimumSize(win,&min_w,&min_h);
+    check(min_w==240 && min_h==160,__LINE__);
+    process_event(wctx,dpi_event);SDL_GetWindowMinimumSize(win,&min_w,&min_h);
+    check(min_w==240 && min_h==160,__LINE__); // Duplicate events must not rescale twice.
+    SDL_SetWindowMinimumSize(win,0,0);
+
     // 3a. Chrome + safe insets + windowed vs fullscreen hit-testing
     set_window_chrome({
         .enabled = true,

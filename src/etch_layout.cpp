@@ -254,7 +254,7 @@ void emit_draw_text_cmd(
         }
 
         const bool elided = tc.max_width_px > 0 && line_w_logical > tc.max_width_px;
-        if (elided) line_w_logical = tc.max_width_px;
+        if (elided && tc.ellipsis) line_w_logical = tc.max_width_px;
         float start_x_logical = tc.pos.x;
         if (tc.align_x == AlignX::Center) {
             start_x_logical -= line_w_logical * 0.5f;
@@ -267,7 +267,9 @@ void emit_draw_text_cmd(
 
         const ClipEntry text_clip = clip;
         const uint32_t first_text_prim = ctx->prim_count;
-        const float clip_left = pen_x;
+        float clip_left = origin.x + tc.pos.x * scale;
+        if (tc.align_x == AlignX::Right) clip_left -= tc.max_width_px * scale;
+        else if (tc.align_x == AlignX::Center) clip_left -= tc.max_width_px * scale * 0.5f;
         if (elided && tc.ellipsis) {
             emit_elided_line(ctx, tc.text.chars + pos, seg_len, tc.font_id, tc.size, tc.letter_spacing,
                 pen_x / scale, base_y / scale, tc.max_width_px, text_clip, tc.color, scale);
@@ -555,12 +557,13 @@ void emit_draw_list_command(
                 if ((!im.texture && im.sprite_id == kInvalidSprite) || im.tint.a == 0u || im.rect.w <= 0.0f || im.rect.h <= 0.0f) {
                     break;
                 }
-                const Rect target_px = {
+                Rect target_px = {
                     .x = origin.x + im.rect.x * scale,
                     .y = origin.y + im.rect.y * scale,
                     .w = im.rect.w * scale,
                     .h = im.rect.h * scale,
                 };
+                if (ctx->active_ui->pixel_snap) target_px = snap_pixel_rect(target_px);
                 Vec2 uv_min = { im.uv_rect.x, im.uv_rect.y };
                 Vec2 uv_max = { im.uv_rect.x + im.uv_rect.w, im.uv_rect.y + im.uv_rect.h };
                 if (im.sprite_id != kInvalidSprite && !resolve_sprite_uv_rect(ctx, im.sprite_id, uv_min, uv_max, &uv_min, &uv_max)) break;

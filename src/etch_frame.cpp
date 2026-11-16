@@ -57,13 +57,14 @@ void end_frame(Context* ctx_arg) noexcept {
             continue;
         }
         const ClipEntry& cur_clip = clip_stack.entries[clip_stack.depth - 1u];
-        const Rect box_px = {
+        const Rect raw_box_px = {
             .x = cmd->boundingBox.x * dpi,
             .y = cmd->boundingBox.y * dpi,
             .w = cmd->boundingBox.width * dpi,
             .h = cmd->boundingBox.height * dpi,
         };
 
+        const Rect box_px = ctx->active_ui->pixel_snap && cmd->commandType != CLAY_RENDER_COMMAND_TYPE_TEXT ? snap_pixel_rect(raw_box_px) : raw_box_px;
         switch (cmd->commandType) {
             case CLAY_RENDER_COMMAND_TYPE_CUSTOM: {
                 const BoxExtra* extra = static_cast<const BoxExtra*>(cmd->renderData.custom.customData);
@@ -83,7 +84,7 @@ void end_frame(Context* ctx_arg) noexcept {
                     } else if (extra->kind == CustomCmdKind::CanvasWire && extra->canvas_wire) {
                         emit_canvas_wire_command(ctx, extra->canvas_wire, cmd->boundingBox, cur_clip, dpi);
                     } else if (extra->kind == CustomCmdKind::Icon) {
-                        emit_vector_icon_quad(ctx, extra->icon_desc.icon_id, box_px, extra->icon_desc.color, cur_clip);
+                        emit_vector_icon_quad(ctx, extra->icon_desc.icon_id, raw_box_px, extra->icon_desc.color, cur_clip);
                     } else {
                         if (extra->desc.attach_to != AttachTo::None && !extra->desc.pointer_passthrough &&
                             reserve_span_hits(&ctx->active_ui->span_hits, &ctx->active_ui->span_hit_cap, ctx->active_ui->span_hit_count, 256u)) {
@@ -131,7 +132,7 @@ void end_frame(Context* ctx_arg) noexcept {
                                 }
                                 draw_clip = ClipEntry{ .rect = clipped_rect, .radius = cr };
                             }
-                            emit_draw_list_command(ctx, extra->draw_head, box_px, draw_clip, dpi);
+                            emit_draw_list_command(ctx, extra->draw_head, raw_box_px, draw_clip, dpi);
                         }
                     }
                 }
@@ -227,7 +228,7 @@ void end_frame(Context* ctx_arg) noexcept {
                     break;
                 }
                 if (extra->fg_draw_head) {
-                    emit_draw_list_command(ctx, extra->fg_draw_head, box_px, cur_clip, dpi);
+                    emit_draw_list_command(ctx, extra->fg_draw_head, raw_box_px, cur_clip, dpi);
                 }
                 const BoxDesc& d = extra->desc;
                 const bool is_scroll = d.scroll_x || d.scroll_y || extra->is_virtual_list;

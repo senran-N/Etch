@@ -1,4 +1,4 @@
-# Etch v0.10.0
+# Etch v0.10.1
 
 Etch is a Pure-GPU UI Engine for desktop applications on Windows, Linux, and
 macOS. It combines immediate UI construction, Clay layout, Unicode text
@@ -180,10 +180,13 @@ has been dedicated to the public domain and requires credit for distribution:
 high-density window from logical dimensions, fitting its client area to the primary
 usable display. Pass SDL events to `process_event` and use `begin_window_frame`;
 helper-created normal windows resize proportionally when the display scale changes.
-Maximized/fullscreen windows retain OS-managed sizes. Destroy with `SDL_DestroyWindow`.
+Maximized/fullscreen windows retain OS-managed sizes. Existing minimum sizes set with
+`SDL_SetWindowMinimumSize` follow subsequent DPI changes on helper-created windows.
+Destroy with `SDL_DestroyWindow`.
 
 `FrameDesc::pixel_snap` / `WindowFrameDesc::pixel_snap` default to true. Rectangle
-edges and border widths snap after DPI conversion; text, rotated shapes, shadows,
+edges, layout clip bounds and border widths snap after DPI conversion; subpixel
+rectangles keep their original bounds when snapping would collapse them. Text, rotated shapes, shadows,
 and soft rectangles retain fractional positioning. Set false for continuous animation.
 `RectDrawDesc::softness` is a physical-pixel AA width (minimum 0.5), for solid and
 gradient axis-aligned rectangles. Borders occupy the inside of the rectangle.
@@ -192,8 +195,10 @@ Use `.shrink_width = true` on a Fit/Grow content box in a toolbar to let it shri
 below its intrinsic text width and clip overflow; give a trailing close button a
 fixed width. Fixed and Percent items retain their explicit sizing rules.
 `TextDrawDesc{..., .max_width_px = 100, .ellipsis = true}` limits each drawn line in
-logical pixels using the shared cluster-safe text engine. Alignment uses the limited
-line width; width zero is unlimited. `spring(id, target, initial_value)` returns the
+logical pixels using the shared cluster-safe BiDi text engine. With ellipsis, alignment
+uses the elided line width. Without ellipsis, alignment positions the original line:
+right alignment keeps the trailing portion and center alignment keeps its middle.
+Width zero is unlimited. `spring(id, target, initial_value)` returns the
 initial value on the first frame and animates toward the target on later frames.
 C99 equivalents use the same descriptor fields plus `etch_create_desktop_window`
 and `etch_spring_from`; initialize descriptors with their `*_default()` functions.

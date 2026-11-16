@@ -584,6 +584,13 @@ void etch_clay_error_handler(Clay_ErrorData error) noexcept {
         error.errorText.chars ? error.errorText.chars : "");
 }
 
+// Preserve subpixel primitives when rounding would collapse either dimension.
+Rect snap_pixel_rect(Rect r) noexcept {
+    const float x = std::round(r.x), y = std::round(r.y);
+    const float w = std::round(r.x + r.w) - x, h = std::round(r.y + r.h) - y;
+    return w > 0 && h > 0 ? Rect{x, y, w, h} : r;
+}
+
 void push_prim(
     Context* ctx,
     Prim prim,
@@ -603,10 +610,8 @@ void push_prim(
     // Raster-only snapping preserves logical layout and text positioning.
     if (ctx->active_ui->pixel_snap && static_cast<PrimKind>(prim.style.x & 15u) == PrimKind::Rect &&
         unpack_f16_cpu(static_cast<uint16_t>(prim.style.w >> 16)) <= 1.0f) {
-        const float right = std::round(prim.bounds.x + prim.bounds.z);
-        const float bottom = std::round(prim.bounds.y + prim.bounds.w);
-        prim.bounds.x = std::round(prim.bounds.x); prim.bounds.y = std::round(prim.bounds.y);
-        prim.bounds.z = right - prim.bounds.x; prim.bounds.w = bottom - prim.bounds.y;
+        const Rect r = snap_pixel_rect({prim.bounds.x, prim.bounds.y, prim.bounds.z, prim.bounds.w});
+        prim.bounds = {r.x, r.y, r.w, r.h};
         const float width = unpack_f16_cpu(static_cast<uint16_t>(prim.style.w));
         if (width > 0) prim.style.w = (prim.style.w & 0xFFFF0000u) | pack_f16(std::fmax(1.0f, std::round(width)));
     }
