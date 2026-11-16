@@ -115,13 +115,13 @@ Str text_buffer_line(const TextBuffer* b,uint32_t i,Arena* scratch) noexcept {
     tb_copy(b,a,z,p);p[z-a]=0;return {p,z-a};
 }
 TextLineCol text_buffer_line_col(const TextBuffer* b,uint32_t p) noexcept {
-    if(!b || !b->data)return {};p=tb_clamp(b,p);
+    if(!b || !b->data) { return {}; } p=tb_clamp(b,p);
     uint32_t lo=0,hi=tb_lines(b);
     while(lo+1<hi){const uint32_t m=lo+(hi-lo)/2;if(tb_start(b,m)<=p)lo=m;else hi=m;}
     return {lo,p-tb_start(b,lo)};
 }
 uint32_t text_buffer_byte_offset(const TextBuffer* b,uint32_t i,uint32_t col) noexcept {
-    if(!b || !b->data)return 0;i=i<tb_lines(b)?i:tb_lines(b)-1;
+    if(!b || !b->data) { return 0; } i=i<tb_lines(b)?i:tb_lines(b)-1;
     const uint32_t a=tb_start(b,i),n=text_buffer_line_end(b,i)-a;return tb_clamp(b,a+(col<n?col:n));
 }
 namespace {
@@ -168,18 +168,18 @@ bool text_buffer_replace(TextBuffer* b,uint32_t a,uint32_t z,Str s,bool record,u
     return tb_replace_impl(b,a,z,s,true,record,bc,ba,ac,aa,group,time);
 }
 bool text_buffer_undo(TextBuffer* b,uint32_t* c,uint32_t* a) noexcept {
-    if(!b || !b->data || !b->undo_cursor)return false;const auto e=b->undo_ops[b->undo_cursor-1];
+    if(!b || !b->data || !b->undo_cursor) { return false; } const auto e=b->undo_ops[b->undo_cursor-1];
     if(!tb_replace_impl(b,e.start,e.start+e.inserted,{b->undo_blob+e.blob,e.removed},false,false,0,0,0,0,0,0))return false;
     --b->undo_cursor;if(c)*c=e.before_cursor;if(a)*a=e.before_anchor;return true;
 }
 bool text_buffer_redo(TextBuffer* b,uint32_t* c,uint32_t* a) noexcept {
-    if(!b || !b->data || b->undo_cursor==b->undo_count)return false;const auto e=b->undo_ops[b->undo_cursor];
+    if(!b || !b->data || b->undo_cursor==b->undo_count) { return false; } const auto e=b->undo_ops[b->undo_cursor];
     if(!tb_replace_impl(b,e.start,e.start+e.removed,{b->undo_blob+(e.blob+e.removed),e.inserted},false,false,0,0,0,0,0,0))return false;
     ++b->undo_cursor;if(c)*c=e.after_cursor;if(a)*a=e.after_anchor;return true;
 }
 namespace {
 uint32_t tokenize_cpp_hlsl_with_theme(Str s,SyntaxToken* out,uint32_t cap,const Theme& thm) noexcept {
-    if(!s.chars || !out)return 0;uint32_t count=0,p=0;
+    if(!s.chars || !out) { return 0; } uint32_t count=0,p=0;
     while(p<s.length && count<cap){const uint32_t a=p;Color color=thm.text_code;const char c=s.chars[p++];
         if(c=='/' && p<s.length && s.chars[p]=='/'){p=s.length;color=thm.syntax_comment;}
         else if(c=='/' && p<s.length && s.chars[p]=='*'){++p;while(p<s.length){if(s.chars[p++]=='*' && p<s.length && s.chars[p]=='/'){++p;break;}}color=thm.syntax_comment;}

@@ -1,4 +1,4 @@
-# Etch v0.9.0
+# Etch v0.9.1
 
 Etch is a Pure-GPU UI Engine for desktop applications on Windows, Linux, and
 macOS. It combines immediate UI construction, Clay layout, Unicode text
@@ -24,8 +24,7 @@ trees, themes, and a virtual editor.
   `code_editor` support soft word-wrapping plus semantic `Theme` tokens.
 - [src/etch_a11y.cpp](src/etch_a11y.cpp) and [src/etch_a11y_os.cpp](src/etch_a11y_os.cpp)
   expose zero-heap A11y snapshots/actions, smooth live window resize,
-  multi-monitor DPI sync, and optional OS accessibility bridges (Windows UIA,
-  macOS NSAccessibility, Linux AT-SPI).
+  multi-monitor DPI sync, and optional OS accessibility bridges (Windows UIA).
 - `etch::Arena` supplies frame temporaries with O(1) reset and zero steady-state
   per-frame heap churn. Initialization and explicit/geometric capacity growth
   may allocate.

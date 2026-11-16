@@ -110,7 +110,7 @@ bool a11y_take_any(uint32_t id,uint32_t mask,PendingA11yAction* out) noexcept {
     for(uint32_t i=0;i<ui.frame_a11y_action_count;++i) {
         auto& act=ui.frame_a11y_actions[i];
         if(!act.consumed && act.id==id && (a11y_action_bit(act.action)&mask)!=0u) {
-            if(out)*out=act;act.consumed=true;return true;
+            if(out) { *out=act; } act.consumed=true;return true;
         }
     }
     return false;
@@ -141,13 +141,13 @@ void set_a11y_override(const A11yOverrideDesc& desc) noexcept {
     for(auto* b=ctx->a11y_first;b;b=b->next)if(b->node.id==desc.element_id)a11y_patch(b->node,p->desc);
 }
 std::span<const A11yNode> frame_a11y_nodes(const Context* ctx,SDL_Window* window) noexcept {
-    if(!ctx)ctx=current_context();if(!ctx)return {};const auto* ui=(!window && ctx->headless)?&ctx->headless_ui:window_ui(ctx,window);return ui?std::span<const A11yNode>(ui->a11y_nodes,ui->a11y_node_count):std::span<const A11yNode>{};
+    if(!ctx) { ctx=current_context(); } if(!ctx) { return {}; } const auto* ui=(!window && ctx->headless)?&ctx->headless_ui:window_ui(ctx,window);return ui?std::span<const A11yNode>(ui->a11y_nodes,ui->a11y_node_count):std::span<const A11yNode>{};
 }
 const A11yNode* find_a11y_node(uint32_t id,const Context* ctx,SDL_Window* window) noexcept {
-    for(const auto& n:frame_a11y_nodes(ctx,window))if(n.id==id)return &n;return nullptr;
+    for(const auto& n:frame_a11y_nodes(ctx,window)) { if(n.id==id) return &n; } return nullptr;
 }
 bool perform_a11y_action(uint32_t id,A11yAction action,float number,Str text,Context* ctx,SDL_Window* window) noexcept {
-    if(!ctx)ctx=current_context();if(!ctx || !id || static_cast<uint8_t>(action)>7 || !std::isfinite(number) || (text.length && !text.chars))return false;
+    if(!ctx) { ctx=current_context(); } if(!ctx || !id || static_cast<uint8_t>(action)>7 || !std::isfinite(number) || (text.length && !text.chars)) { return false; }
     auto* ui=(!window && ctx->headless)?&ctx->headless_ui:window_ui(ctx,window);const auto* n=find_a11y_node(id,ctx,window);
     if(!ui || !n || (n->state_flags&A11yState_Disabled) || !(n->actions_mask&a11y_action_bit(action)) || ui->a11y_action_count==16)return false;
     auto& c=ui->a11y_actions[ui->a11y_action_count++];c={};c.id=id;c.action=action;c.number=number;

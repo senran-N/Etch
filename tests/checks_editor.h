@@ -1,4 +1,8 @@
 // Shared sandbox [21] / Studio [S17] document and editor regression.
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+
 static bool verify_editor_checks(etch::Context* restore) noexcept {
     using namespace etch;
     bool ok=true;

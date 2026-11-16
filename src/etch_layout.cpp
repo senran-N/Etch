@@ -3450,7 +3450,7 @@ Rect element_bounds(uint32_t element_id) noexcept {
 
 uint16_t key_mods() noexcept {
     const Context* ctx = current_context();
-    return ctx ? ctx->active_ui->frame_key_mods : Mod_None;
+    return ctx ? ctx->active_ui->frame_key_mods : uint16_t(Mod_None);
 }
 
 bool key_pressed(uint32_t keycode, bool include_repeat) noexcept {

@@ -4,6 +4,14 @@ All notable changes to Etch are documented here. This file follows
 [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.1] - 2026-11-16
+
+### Fixed
+- **Linux GCC Compatibility & Warning Cleanup**: Added missing `<cstdlib>` (plus self-contained `<cstdio>` / `<cstring>` / `<cmath>`) includes across `examples/etch_studio.cpp` and `tests/checks_*.h` for strict `libstdc++` builds, and eliminated GCC `-Wall -Wextra -Wpedantic` warnings across `src/` and `tests/` (`-Wclass-memaccess`, `-Wmisleading-indentation`, `-Wextra` conditional enum mismatch, and `-Wmissing-field-initializers` on `SDL_GPU*` structs and `third_party/` headers).
+
+### Changed
+- **Documentation Sync**: Updated `README.md`, `CLAUDE.md`, and version metadata to `0.9.1`, clarifying that the active OS accessibility bridge targets Windows UIA.
+
 ## [0.9.0] - 2026-11-16
 
 ### Added

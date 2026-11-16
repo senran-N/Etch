@@ -230,14 +230,14 @@ void open_popup(uint32_t id, Vec2 anchor) noexcept {
     ui.popups[ui.popup_count++]={id,anchor,ui.frame_index,0};request_redraw(current_context());
 }
 void close_popup(uint32_t id) noexcept {
-    if(!current_context()) return;auto& ui=*current_context()->active_ui;
+    if(!current_context()) { return; } auto& ui=*current_context()->active_ui;
     if(!id) ui.popup_count=0;
     else for(uint32_t i=0;i<ui.popup_count;++i) if(ui.popups[i].id==id) {ui.popup_count=i;break;}
     if(!ui.popup_count) {ui.menu_open_id=0;ui.menu_owner=0;} request_redraw(current_context());
 }
 bool is_popup_open(uint32_t id) noexcept {
-    if(!current_context() || !id) return false;auto& ui=*current_context()->active_ui;
-    for(uint32_t i=0;i<ui.popup_count;++i) if(ui.popups[i].id==id) return true;return false;
+    if(!current_context() || !id) { return false; } auto& ui=*current_context()->active_ui;
+    for(uint32_t i=0;i<ui.popup_count;++i) { if(ui.popups[i].id==id) return true; } return false;
 }
 bool begin_popup(const PopupDesc& d) noexcept {
     if(!desktop_frame(d.id) || !is_popup_open(d.id)) return false;
@@ -332,7 +332,7 @@ bool combo_box(const ComboBoxDesc& d) noexcept {
             if(!just_opened && ui.focus_id != 0u && !combo_owns_focus) {close_popup(pop);break;}
             int& sel=p.selection;
             if(combo_owns_focus && !ime_active) {
-                if(key_pressed(SDLK_DOWN,true)) ++sel;if(key_pressed(SDLK_UP,true)) --sel;
+                if(key_pressed(SDLK_DOWN,true)) { ++sel; } if(key_pressed(SDLK_UP,true)) { --sel; }
             }
             sel=sel<0 ? 0 : sel>=int(d.items.size()) ? int(d.items.size())-1 : sel;index=sel;
             if(!just_opened && combo_owns_focus && !ime_active && (key_pressed(SDLK_RETURN) || key_pressed(SDLK_KP_ENTER))) {

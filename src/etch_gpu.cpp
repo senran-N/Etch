@@ -679,6 +679,7 @@ bool record_frame_commands(
             .type=SDL_GPU_TEXTURETYPE_2D, .format=SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB,
             .usage=SDL_GPU_TEXTUREUSAGE_SAMPLER, .width=atlas.width, .height=atlas.height,
             .layer_count_or_depth=1u, .num_levels=1u, .sample_count=SDL_GPU_SAMPLECOUNT_1,
+            .props=0u,
         };
         atlas.gpu_tex=SDL_CreateGPUTexture(ctx->device,&info);
         if (!atlas.gpu_tex) return false;
@@ -689,7 +690,7 @@ bool record_frame_commands(
         const uint32_t bytes=atlas.width*(atlas.dirty_y1-atlas.dirty_y0)*4u;
         if (ctx->atlas_tbuf_size<bytes) {
             if (ctx->atlas_transfer_buf) SDL_ReleaseGPUTransferBuffer(ctx->device,ctx->atlas_transfer_buf);
-            const SDL_GPUTransferBufferCreateInfo info={.usage=SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD,.size=bytes};
+            const SDL_GPUTransferBufferCreateInfo info={.usage=SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD,.size=bytes,.props=0u};
             ctx->atlas_transfer_buf=SDL_CreateGPUTransferBuffer(ctx->device,&info);
             ctx->atlas_tbuf_size=ctx->atlas_transfer_buf?bytes:0;
             if (!ctx->atlas_transfer_buf) return false;
@@ -708,8 +709,8 @@ bool record_frame_commands(
             if (!mapped) { SDL_EndGPUCopyPass(copy_pass); return false; }
             std::memcpy(mapped,atlas.pixels+size_t(atlas.dirty_y0)*atlas.width*4u,size_t(atlas.width)*rows*4u);
             SDL_UnmapGPUTransferBuffer(ctx->device,ctx->atlas_transfer_buf);
-            const SDL_GPUTextureTransferInfo src={.transfer_buffer=ctx->atlas_transfer_buf,.pixels_per_row=atlas.width,.rows_per_layer=rows};
-            const SDL_GPUTextureRegion dst={.texture=atlas.gpu_tex,.y=atlas.dirty_y0,.w=atlas.width,.h=rows,.d=1u};
+            const SDL_GPUTextureTransferInfo src={.transfer_buffer=ctx->atlas_transfer_buf,.offset=0u,.pixels_per_row=atlas.width,.rows_per_layer=rows};
+            const SDL_GPUTextureRegion dst={.texture=atlas.gpu_tex,.mip_level=0u,.layer=0u,.x=0u,.y=atlas.dirty_y0,.z=0u,.w=atlas.width,.h=rows,.d=1u};
             SDL_UploadToGPUTexture(copy_pass,&src,&dst,false);
             atlas.dirty=false;atlas.dirty_y0=UINT32_MAX;atlas.dirty_y1=0;
         }
@@ -877,6 +878,9 @@ bool record_frame_commands(
             .flip_mode = SDL_FLIP_NONE,
             .filter = SDL_GPU_FILTER_NEAREST,
             .cycle = false,
+            .padding1 = 0u,
+            .padding2 = 0u,
+            .padding3 = 0u,
         };
         SDL_BlitGPUTexture(cmd, &blit);
         return run_uber_render_pass(
@@ -1224,10 +1228,10 @@ bool ensure_gpu_device(Context* ctx) noexcept {
     ctx->slug_band_gpu_buf = SDL_CreateGPUBuffer(ctx->device, &slug_band_info);
 
     ctx->dyn_slug_curve_gpu_cap = 256;
-    const SDL_GPUBufferCreateInfo dyn_curve_info = {.usage = SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ, .size = 256u * sizeof(SlugCurveGpu)};
+    const SDL_GPUBufferCreateInfo dyn_curve_info = {.usage = SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ, .size = 256u * sizeof(SlugCurveGpu), .props = 0u};
     ctx->dyn_slug_curve_gpu_buf = SDL_CreateGPUBuffer(ctx->device, &dyn_curve_info);
     ctx->dyn_slug_band_gpu_cap = 256;
-    const SDL_GPUBufferCreateInfo dyn_band_info = {.usage = SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ, .size = 256u * sizeof(SlugBandEntryGpu)};
+    const SDL_GPUBufferCreateInfo dyn_band_info = {.usage = SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ, .size = 256u * sizeof(SlugBandEntryGpu), .props = 0u};
     ctx->dyn_slug_band_gpu_buf = SDL_CreateGPUBuffer(ctx->device, &dyn_band_info);
     if (!ctx->prim_gpu_buf || !ctx->prim_transfer_buf ||
         !ctx->atlas.gpu_tex || !ctx->atlas_transfer_buf ||

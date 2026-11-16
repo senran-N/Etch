@@ -240,7 +240,7 @@ bool init_font_slot_from_owned_bytes(
     destroy_font_slot(dst);
     if (prev_gen == 255u && atlas->slug_glyphs && atlas->slug_glyph_cap > 0u) {
         // Rare 255th slot reload: flush glyph hash table so wrapped generation 1 cannot hit stale glyphs.
-        std::memset(atlas->slug_glyphs, 0, size_t(atlas->slug_glyph_cap) * sizeof(SlugGlyphEntry));
+        for (uint32_t i = 0u; i < atlas->slug_glyph_cap; ++i) { atlas->slug_glyphs[i] = {}; }
         atlas->slug_glyph_count = 0u;
     }
     next.generation = (prev_gen == 255u) ? 1u : static_cast<uint8_t>(prev_gen + 1u);

@@ -1,4 +1,8 @@
 // Shared desktop integration regression, exercised by sandbox [20] and Studio [S16].
+#include <cmath>
+#include <cstdio>
+#include <cstring>
+
 static bool verify_desktop_checks(etch::Context* restore) noexcept {
     using namespace etch;
     Context* test=create_context({.headless=true}); if(!test) return false;
@@ -41,7 +45,7 @@ static bool verify_desktop_checks(etch::Context* restore) noexcept {
         if(begin_popup({.id=id_index(id("desktop_test"),110)})) {menu_item({.id=id_index(id("desktop_test"),111),.label=str_lit("Popup action")});end_popup();}
         if(begin_context_menu(id_index(id("desktop_test"),112),id_index(id("desktop_test"),105))) {menu_item({.id=id_index(id("desktop_test"),113),.label=str_lit("Context action")});end_context_menu();}
         begin_dock_space({.id=dock,.width=Sizing::fixed(800),.height=Sizing::fixed(400)});
-        while(next_dock_pane()) text(str_lit("Dock content"));end_dock_space();
+        while(next_dock_pane()) { text(str_lit("Dock content")); } end_dock_space();
         if(begin_modal({.id=id_index(id("desktop_test"),114),.open=&modal,.title=str_lit("Modal")})) {
             button({.id=id_index(id("desktop_test"),115),.label=str_lit("First")});
             modal_input=text_input({.id=id_index(id("desktop_test"),117),.buffer=modal_text,.capacity=sizeof(modal_text)});

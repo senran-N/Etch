@@ -1087,7 +1087,7 @@ bool dock_split_node(uint32_t id, uint32_t node, Axis axis, float ratio,
     n.split_id = split_id ? split_id : id_index(id, kDockSplitTagBase + s->split_seq++);
     n.min_first = min_a; n.min_second = min_b;
     set_split_ratio(n.split_id, ratio);
-    if (out_a) *out_a = a; if (out_b) *out_b = b; return true;
+    if (out_a) { *out_a = a; } if (out_b) { *out_b = b; } return true;
 }
 bool dock_add_pane(uint32_t id, uint32_t leaf, const DockPaneDesc& pane) noexcept {
     Context* ctx = current_context();
@@ -1112,7 +1112,7 @@ bool dock_add_pane(uint32_t id, uint32_t leaf, const DockPaneDesc& pane) noexcep
         t.title_cap = cap;
     }
     char* title = t.title_heap ? t.title_heap : t.title_inline;
-    if (len) std::memcpy(title, pane.title.chars, len); title[len] = 0;
+    if (len) { std::memcpy(title, pane.title.chars, len); } title[len] = 0;
     t.id = pane.id; t.leaf = leaf; t.icon_id = pane.icon_id; t.closable = pane.closable; t.open = pane.default_open;
     s->nodes[leaf - 1u].active = dock_visible(s, leaf); return true;
 }
