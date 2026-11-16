@@ -288,7 +288,7 @@ bool begin_popup(const PopupDesc& d) noexcept {
     begin_box({.id=d.id,.axis=Axis::Col,.width=d.match_trigger_width && d.trigger_id ? Sizing::percent(1) : d.width,.height=d.height,.padding=d.padding,.gap=d.gap,
         .background=resolve_theme_color(d.background, thm.bg_popup),
         .border_color=resolve_theme_color(d.border_color, thm.border_control),.border_width=1,
-        .radius=resolve_theme_corners(d.radius, Corners::all(thm.radius_control_px)),.scroll_y=d.height.kind==SizingKind::Fixed,
+        .radius=resolve_theme_corners(d.radius, Corners::all(thm.radius_control_px)),.scroll_y=d.scroll_y && d.height.kind==SizingKind::Fixed,
         .attach_to=d.attach_to_trigger && d.trigger_id ? AttachTo::Element : AttachTo::Root,.attach_element_id=d.trigger_id,
         .anchor_parent=d.attach_to_trigger && d.trigger_id ? Anchor::BottomLeft : Anchor::TopLeft,.floating_offset=d.attach_to_trigger && d.trigger_id ? Vec2{} : pop.anchor,.z_index=d.z_index,.clamp_to_viewport=true});
     a11y_semantic(d.id,A11yRole::Menu,{},0,64u);
@@ -341,7 +341,7 @@ bool menu_item(const MenuItemDesc& d) noexcept {
 }
 void menu_separator() noexcept {begin_box({.width=Sizing::grow(),.height=Sizing::fixed(1),.background=active_theme(current_context()).border_control});end_box();}
 bool combo_box(const ComboBoxDesc& d) noexcept {
-    if(!desktop_frame(d.id) || !d.selected_index || d.items.empty() || d.items.size()>uint32_t(INT32_MAX)) return false;
+    if(!desktop_frame(d.id) || !d.selected_index || d.items.empty() || d.items.size()>uint32_t(INT32_MAX) || !std::isfinite(d.max_popup_height_px) || d.max_popup_height_px<40 || d.max_popup_height_px>16384) return false;
     const Theme& thm = active_theme(current_context());
     const Color bg = resolve_theme_color(d.background, thm.surface_control);
     const Color hbg = resolve_theme_color(d.hover_bg, thm.surface_hover);
@@ -364,8 +364,9 @@ bool combo_box(const ComboBoxDesc& d) noexcept {
     if(expanded && !is_popup_open(pop)){const Rect r=element_bounds(d.id);open_popup(pop,{r.x,r.y+r.h});request_focus(d.id);}
     if(!expanded && is_popup_open(pop))close_popup(pop);
     auto& ui=*current_context()->active_ui;int index=*d.selected_index;
-    bool combo_owns_focus=focused(d.id);
-    for(uint32_t i=0;i<d.items.size();++i) if(ui.focus_id==id_index(pop,i+1)) combo_owns_focus=true;
+    const WidgetState* focus=state_map_find(&current_context()->active_ui->states,ui.focus_id);
+    const bool combo_owns_focus=focused(d.id) || (focus && focus->popup_owner==pop);
+    bool reveal=false;
     const bool ime_active=ui.ime_comp_len != 0u || ui.frame_escape_consumed_by_ime;
     if(is_popup_open(pop)) {
         for(uint32_t i=0;i<ui.popup_count;++i) if(ui.popups[i].id==pop) {
@@ -374,7 +375,15 @@ bool combo_box(const ComboBoxDesc& d) noexcept {
             if(!just_opened && ui.focus_id != 0u && !combo_owns_focus) {close_popup(pop);break;}
             int& sel=p.selection;
             if(combo_owns_focus && !ime_active) {
-                if(key_pressed(SDLK_DOWN,true)) { ++sel; } if(key_pressed(SDLK_UP,true)) { --sel; }
+                const int previous=sel;
+                if(key_pressed(SDLK_DOWN,true) && sel<int(d.items.size())-1) ++sel;
+                if(key_pressed(SDLK_UP,true) && sel>0) --sel;
+                const int page=static_cast<int>(std::fmax(1,std::floor((d.max_popup_height_px-12)/28)));
+                if(key_pressed(SDLK_PAGEUP,true)) sel=sel>page ? sel-page : 0;
+                if(key_pressed(SDLK_PAGEDOWN,true)) sel=int(d.items.size())-1-sel>page ? sel+page : int(d.items.size())-1;
+                if(key_pressed(SDLK_HOME)) sel=0;
+                if(key_pressed(SDLK_END)) sel=int(d.items.size())-1;
+                reveal=sel!=previous;
             }
             sel=sel<0 ? 0 : sel>=int(d.items.size()) ? int(d.items.size())-1 : sel;index=sel;
             if(!just_opened && combo_owns_focus && !ime_active && (key_pressed(SDLK_RETURN) || key_pressed(SDLK_KP_ENTER))) {
@@ -392,10 +401,23 @@ bool combo_box(const ComboBoxDesc& d) noexcept {
         }
     }
     if(is_popup_open(pop)) {
-        const float h=float(d.items.size())*28+12;
-        if(begin_popup({.id=pop,.trigger_id=d.id,.height=Sizing::fixed(h<d.max_popup_height_px ? h : d.max_popup_height_px),.attach_to_trigger=true,.match_trigger_width=true})) {
-            for(uint32_t i=0;i<d.items.size();++i) if(menu_item({.id=id_index(pop,i+1),.label=d.items[i],.checked=int(i)==index})) {*d.selected_index=int(i);changed=true;}
-            end_popup();
+        const float height=std::fmin(float(d.items.size())*28+12,d.max_popup_height_px);
+        const uint32_t list=id_index(pop,0xC011u);
+        bool opened=false;
+        for(uint32_t i=0;i<ui.popup_count;++i) if(ui.popups[i].id==pop) opened=ui.popups[i].opened_frame==ui.frame_index;
+        if(begin_popup({.id=pop,.trigger_id=d.id,.height=Sizing::fixed(height),.attach_to_trigger=true,.match_trigger_width=true,.scroll_y=false})) {
+            if((opened || reveal) && index>=0) {
+                auto* ws=state_map_get_or_insert(&current_context()->active_ui->states,list,ui.frame_index);
+                ws->viewport_dim.y=height-12;ws->vlist_stride=28;
+                const double top=double(index)*28,bottom=top+26;
+                if(opened || top<ws->vscroll_pos_y || bottom>ws->vscroll_pos_y+height-12)
+                    virtual_list_scroll_to_row(list,uint32_t(index),28,top<ws->vscroll_pos_y ? AlignY::Top : AlignY::Bottom);
+            }
+            const VirtualListSlice slice=begin_virtual_list({.id=list,.item_count=uint32_t(d.items.size()),.item_height_px=26,.row_gap_px=2,
+                .width=Sizing::grow(),.height=Sizing::fixed(height-12),.background=Color::transparent()});
+            for(uint32_t i=slice.first_index;i<slice.end_index;++i)
+                if(menu_item({.id=id_index(pop,i+1),.label=d.items[i],.checked=int(i)==index})) {*d.selected_index=int(i);changed=true;}
+            end_virtual_list();end_popup();
         }
     }
     a11y_semantic(d.id,A11yRole::ComboBox,d.label,is_popup_open(pop)?A11yState_Expanded:0u,51u);

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(etch VERSION 0.12.0 LANGUAGES C CXX)
+project(etch VERSION 0.13.0 LANGUAGES C CXX)
 
 option(ETCH_BUILD_EXAMPLES "Build Etch sandbox and etch_studio examples" ${PROJECT_IS_TOP_LEVEL})
 option(ETCH_BUILD_TESTS "Build Etch CTest suite" ${PROJECT_IS_TOP_LEVEL})

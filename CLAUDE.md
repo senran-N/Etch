@@ -1,4 +1,4 @@
-# CLAUDE.md — Etch Architecture Constitution (v0.12.0)
+# CLAUDE.md — Etch Architecture Constitution (v0.13.0)
 
 ## 1. Project Identity & End-State Goals
 - **Codename**: `Etch` (Namespace `etch::`, C ABI prefix `etch_` / `Etch`, Macro prefix `ETCH_`, Library `etch` / `libetch`)
@@ -111,7 +111,7 @@ pure C99 `c99_abi_smoke`, `repo_guardrails`, and C++/C99 `downstream_consumers`)
    - Every struct uploaded to an HLSL `StructuredBuffer` or Uniform Buffer MUST carry explicit `alignas(16)` and `static_assert(sizeof(T) % 16 == 0)`.
    - Fields inside GPU structs are restricted to `Vec4`, `Uint4`, or explicitly aligned 32-bit scalars. **NEVER put a 12-byte `float3` / `Vec3` in a GPU struct.**
    - `etch::Prim` is strictly **64 bytes** (`4 x 16B`: `bounds`, `clip`, `payload`, `style`) with `alignas(16)` so `Prim[]` can pack directly into a shared `SDL_GPUTransferBuffer` after 32-byte `GlobalsUniform` with zero copy overhead.
-   - `etch_uber.hlsl` binds 4 fixed sampler slots (`Slot 0` solid white fallback, `Slot 1..3` external textures/backdrop blur) plus 4 fragment `StructuredBuffer` storage slots (`t4..t7`: Slug curves & band directory) to stay within 1–3 draw calls without Bindless, and decodes sRGB `RGBA8` colors to linear space for physically accurate blending and stem darkening.
+   - `etch_uber.hlsl` binds 9 fixed sampler slots (`Slot 0` solid white fallback, `Slot 1..8` external textures/backdrop blur) plus 5 fragment `StructuredBuffer` storage slots (`t9..t13`: Slug curves, band directory and indexed rounded clips) to stay within 1–3 draw calls without Bindless, and decodes sRGB `RGBA8` colors to linear space for physically accurate blending and stem darkening.
 4. **Headless Visual Verification Loop**:
    - `sandbox --headless` must render a test frame offscreen without creating a visible window and write `frame_check.png` via `third_party/stb_image_write.h`.
    - After modifying shaders, batching, or layout code, rebuild, run `sandbox --headless`, and inspect `frame_check.png` for clipping offsets, alignment bugs, or AA artifacts.

@@ -388,8 +388,8 @@ void emit_uber_batches(
     SDL_GPUBuffer* storage_bufs[1] = { ctx->prim_gpu_buf };
     SDL_BindGPUVertexStorageBuffers(render_pass, 0u, storage_bufs, 1u);
 
-    SDL_GPUBuffer* slug_bufs[4] = { ctx->slug_curve_gpu_buf, ctx->slug_band_gpu_buf, ctx->dyn_slug_curve_gpu_buf, ctx->dyn_slug_band_gpu_buf };
-    SDL_BindGPUFragmentStorageBuffers(render_pass, 0u, slug_bufs, 4u);
+    SDL_GPUBuffer* slug_bufs[5] = { ctx->slug_curve_gpu_buf, ctx->slug_band_gpu_buf, ctx->dyn_slug_curve_gpu_buf, ctx->dyn_slug_band_gpu_buf,ctx->clip_shape_gpu };
+    SDL_BindGPUFragmentStorageBuffers(render_pass, 0u, slug_bufs, 5u);
 
     const uint32_t manual_srgb_bit = is_srgb_gpu_format(target_fmt) ? 0u : (1u << 31);
     const float inv_w = 1.0f / static_cast<float>(target_w);
@@ -409,13 +409,10 @@ void emit_uber_batches(
             return t ? t : ctx->atlas.gpu_tex;
         };
 
-        SDL_GPUTextureSamplerBinding bindings[4] = {
-            { ctx->atlas.gpu_tex, ctx->linear_sampler },
-            { resolve_tex(batch.ext_textures[0]), ctx->linear_sampler },
-            { resolve_tex(batch.ext_textures[1]), ctx->linear_sampler },
-            { resolve_tex(batch.ext_textures[2]), ctx->linear_sampler },
-        };
-        SDL_BindGPUFragmentSamplers(render_pass, 0u, bindings, 4u);
+        SDL_GPUTextureSamplerBinding bindings[9]={};
+        bindings[0]={ctx->atlas.gpu_tex,ctx->linear_sampler};
+        for(uint32_t i=0;i<8;++i) bindings[i+1]={resolve_tex(batch.ext_textures[i]),ctx->linear_sampler};
+        SDL_BindGPUFragmentSamplers(render_pass,0u,bindings,9u);
 
         const GlobalsUniform globals = {
             .viewport_size = { static_cast<float>(target_w), static_cast<float>(target_h) },
@@ -623,6 +620,7 @@ bool record_frame_commands(
     if (!ctx || !cmd || !target_tex || target_w == 0u || target_h == 0u) {
         return false;
     }
+    if(!flush_texture_uploads(ctx)) return false;
     clear_color = resolve_theme_color(clear_color, active_theme(ctx).bg_canvas);
 
     SDL_GPUGraphicsPipeline* pipeline = get_or_create_pipeline(ctx, target_fmt);
@@ -659,6 +657,10 @@ bool record_frame_commands(
         return false;
     }
 
+    uint32_t clip_uploaded=0;
+    if(!ensure_slug_storage_pair(ctx->device,ctx->clip_shape_count,sizeof(ClipShapeGpu),&ctx->clip_shape_gpu,&ctx->clip_shape_gpu_capacity,
+        &ctx->clip_shape_transfer,&ctx->clip_shape_transfer_capacity,&clip_uploaded)) return false;
+    const ClipShapeGpu empty_clip={};
     uint32_t dyn_curves_uploaded = 0u;
     uint32_t dyn_bands_uploaded = 0u;
     if (ctx->dyn_slug_curve_count > 0u && !ensure_slug_storage_pair(ctx->device,
@@ -697,12 +699,15 @@ bool record_frame_commands(
             if (!ctx->atlas_transfer_buf) return false;
         }
     }
-    if (ctx->atlas.dirty || ctx->prim_count > 0u || slug_curves_pending || slug_bands_pending ||
+    if (ctx->clip_shape_count || ctx->atlas.dirty || ctx->prim_count > 0u || slug_curves_pending || slug_bands_pending ||
         ctx->dyn_slug_curve_count > 0u || ctx->dyn_slug_band_count > 0u) {
         SDL_GPUCopyPass* copy_pass = SDL_BeginGPUCopyPass(cmd);
         if (!copy_pass) {
             return false;
         }
+
+        if(!upload_slug_delta(ctx->device,copy_pass,ctx->clip_shapes ? ctx->clip_shapes : &empty_clip,sizeof(ClipShapeGpu),ctx->clip_shape_count,
+            &clip_uploaded,ctx->clip_shape_gpu,ctx->clip_shape_transfer,true)) {SDL_EndGPUCopyPass(copy_pass);return false;}
 
         if (atlas.dirty && atlas.dirty_y1>atlas.dirty_y0) {
             const uint32_t rows=atlas.dirty_y1-atlas.dirty_y0;
@@ -1013,6 +1018,10 @@ bool ensure_gpu_device(Context* ctx) noexcept {
         if (ctx->atlas.gpu_tex) SDL_ReleaseGPUTexture(ctx->device, ctx->atlas.gpu_tex);
         ctx->atlas.gpu_tex = nullptr;
         if (ctx->atlas_transfer_buf) SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->atlas_transfer_buf);
+        if(ctx->texture_upload_cmd) {SDL_CancelGPUCommandBuffer(ctx->texture_upload_cmd);ctx->texture_upload_cmd=nullptr;}
+        if(ctx->clip_shape_gpu) SDL_ReleaseGPUBuffer(ctx->device,ctx->clip_shape_gpu);
+        if(ctx->clip_shape_transfer) SDL_ReleaseGPUTransferBuffer(ctx->device,ctx->clip_shape_transfer);
+        ctx->clip_shape_gpu=nullptr;ctx->clip_shape_transfer=nullptr;ctx->clip_shape_gpu_capacity=ctx->clip_shape_transfer_capacity=0;
         if (ctx->texture_upload_buf) SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->texture_upload_buf);
         ctx->atlas_transfer_buf = nullptr;
         ctx->texture_upload_buf=nullptr;ctx->texture_upload_cap=0;
@@ -1115,9 +1124,9 @@ bool ensure_gpu_device(Context* ctx) noexcept {
         .entrypoint = "ps_main",
         .format = chosen_fmt,
         .stage = SDL_GPU_SHADERSTAGE_FRAGMENT,
-        .num_samplers = 4u,
+        .num_samplers = 9u,
         .num_storage_textures = 0u,
-        .num_storage_buffers = 4u,
+        .num_storage_buffers = 5u,
         .num_uniform_buffers = 0u,
         .props = 0u,
     };
@@ -1408,6 +1417,10 @@ void destroy_context(Context* ctx) noexcept {
         if (ctx->slug_curve_tbuf) SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->slug_curve_tbuf);
         if (ctx->slug_band_tbuf) SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->slug_band_tbuf);
         if (ctx->atlas_transfer_buf) SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->atlas_transfer_buf);
+        if(ctx->texture_upload_cmd) {SDL_CancelGPUCommandBuffer(ctx->texture_upload_cmd);ctx->texture_upload_cmd=nullptr;}
+        if(ctx->clip_shape_gpu) SDL_ReleaseGPUBuffer(ctx->device,ctx->clip_shape_gpu);
+        if(ctx->clip_shape_transfer) SDL_ReleaseGPUTransferBuffer(ctx->device,ctx->clip_shape_transfer);
+        ctx->clip_shape_gpu=nullptr;ctx->clip_shape_transfer=nullptr;ctx->clip_shape_gpu_capacity=ctx->clip_shape_transfer_capacity=0;
         if (ctx->texture_upload_buf) SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->texture_upload_buf);
         if (ctx->atlas.gpu_tex) SDL_ReleaseGPUTexture(ctx->device, ctx->atlas.gpu_tex);
         release_blur_targets(ctx);
@@ -1432,6 +1445,7 @@ void destroy_context(Context* ctx) noexcept {
     std::free(ctx->clipboard_fallback);
     ctx->clipboard_fallback = nullptr;
     ctx->clipboard_fallback_cap = 0u;
+    std::free(ctx->clip_shapes);
     std::free(ctx->dyn_slug_curves);
     std::free(ctx->dyn_slug_bands);
     std::free(ctx->prims);
@@ -1643,16 +1657,10 @@ bool upload_rgba_rows(
     }
     SDL_UnmapGPUTransferBuffer(ctx->device, tbuf);
 
-    SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(ctx->device);
-    if (!cmd) {
-        return false;
-    }
-
-    SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(cmd);
-    if (!copy) {
-        SDL_CancelGPUCommandBuffer(cmd);
-        return false;
-    }
+    if(!ctx->texture_upload_cmd) ctx->texture_upload_cmd=SDL_AcquireGPUCommandBuffer(ctx->device);
+    if(!ctx->texture_upload_cmd) return false;
+    SDL_GPUCopyPass* copy=SDL_BeginGPUCopyPass(ctx->texture_upload_cmd);
+    if(!copy) return false;
 
     const SDL_GPUTextureTransferInfo src_info = {
         .transfer_buffer = tbuf,
@@ -1674,12 +1682,18 @@ bool upload_rgba_rows(
     SDL_UploadToGPUTexture(copy, &src_info, &dst_reg, cycle);
     SDL_EndGPUCopyPass(copy);
 
-    const bool ok = SDL_SubmitGPUCommandBuffer(cmd);
-    return ok;
+    return true;
 }
 
 
 } // namespace
+
+bool flush_texture_uploads(Context* ctx) noexcept {
+    if(!ctx || !ctx->device) return false;
+    if(!ctx->texture_upload_cmd) return true;
+    SDL_GPUCommandBuffer* cmd=ctx->texture_upload_cmd;ctx->texture_upload_cmd=nullptr;
+    return SDL_SubmitGPUCommandBuffer(cmd);
+}
 
 void release_window(Context* ctx, SDL_Window* window) noexcept {
     if (!ctx || !window || ctx->in_frame) return;
@@ -1770,7 +1784,7 @@ bool update_texture_rgba(
     const void* rgba_pixels,
     uint32_t row_pitch_bytes) noexcept
 {
-    if (!ctx || !ctx->device || !texture || width == 0u || height == 0u || !rgba_pixels) {
+    if (!ctx || !ctx->device || !texture || width == 0u || height == 0u || width>16384 || height>16384 || !rgba_pixels) {
         return false;
     }
     const uint32_t tight_pitch = width * 4u;
@@ -1800,6 +1814,7 @@ void destroy_texture(Context* ctx, LoadedTexture* tex) noexcept {
         return;
     }
     if (ctx && ctx->device && tex->texture) {
+        flush_texture_uploads(ctx);
         SDL_ReleaseGPUTexture(ctx->device, tex->texture);
     }
     tex->texture = nullptr;
@@ -1809,6 +1824,7 @@ void destroy_texture(Context* ctx, LoadedTexture* tex) noexcept {
 
 void destroy_texture(Context* ctx, SDL_GPUTexture* tex) noexcept {
     if (ctx && ctx->device && tex) {
+        flush_texture_uploads(ctx);
         SDL_ReleaseGPUTexture(ctx->device, tex);
     }
 }

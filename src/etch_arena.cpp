@@ -46,6 +46,7 @@ struct WidgetState {
     bool     is_focusable = false;
     bool window_drag_passthrough = false;
     uint32_t focus_scope = 0;
+    uint32_t popup_owner = 0;
     bool     pressed_down = false;
     bool     pressed_this_frame = false;
     bool     clicked_this_frame = false;
@@ -57,6 +58,7 @@ struct WidgetState {
     bool     spring_initialized = false;
     float    spring_pos = 0.0f;
     float    spring_vel = 0.0f;
+    bool show_scrollbar = true;
     bool     is_scroll_x = false;
     bool     is_scroll_y = false;
     Vec2     scroll_pos = {};
@@ -96,6 +98,7 @@ struct WidgetState {
     float collapsible_content_h = 0.0f;
     bool tree_initialized = false;
     bool tree_open = false;
+    uint32_t table_focus_row = UINT32_MAX, table_anchor_row = UINT32_MAX;
     bool table_initialized = false;
     bool table_sort_descending = false;
     bool table_sort_changed = false;
@@ -291,7 +294,7 @@ struct FontAtlas {
 struct DrawBatch {
     uint32_t        first_prim = 0;
     uint32_t        prim_count = 0;
-    SDL_GPUTexture* ext_textures[3] = {}; // Slots 1..3; slot 0 is always FontAtlas::gpu_tex
+    SDL_GPUTexture* ext_textures[8] = {}; // Slots 1..8; slot 0 is always FontAtlas::gpu_tex
     uint32_t        ext_count = 0;
 };
 
@@ -416,6 +419,7 @@ struct SplitStackEntry {
     Axis     axis = Axis::Row;
     float    ratio = 0.5f;
     float    divider_size_px = 6.0f;
+    float    divider_hit_px = 8.0f;
     float    min_first_px = 120.0f;
     float    min_second_px = 120.0f;
     Color    divider_color = {};
@@ -486,10 +490,18 @@ struct SpanHitRegion {
     bool     has_clip = false;
 };
 
+struct alignas(16) ClipShapeGpu {
+    Vec4 bounds = {}, radii = {};
+    Uint4 meta = {};
+};
+static_assert(sizeof(ClipShapeGpu)==48 && sizeof(ClipShapeGpu)%16==0);
+
 struct ClipEntry {
     Rect  rect = {};
 
     float radius = 0.0f;
+    uint32_t shape = 0;
+    bool indexed = false;
 };
 
 // Shared internal entry points; definitions precede the editor in the unity TU.
@@ -832,6 +844,7 @@ struct ClaimedWindowSlot {
     bool hit_test_attached = false;
     bool macos_chrome_applied = false;
     void* native_chrome_proc = nullptr;
+    uintptr_t native_chrome_style = 0; bool native_frame_applied = false;
     Context* chrome_context = nullptr;
     bool native_max_press = false, native_max_hover = false;
     void* os_a11y = nullptr;
@@ -850,6 +863,10 @@ struct Context {
     SDL_Window* mouse_capture_window = nullptr;
     SDL_Window* ime_active_window = nullptr;
     bool in_frame = false;
+    ClipShapeGpu* clip_shapes = nullptr;
+    uint32_t clip_shape_count = 1, clip_shape_capacity = 0, render_clip_index = 0;
+    SDL_GPUBuffer* clip_shape_gpu = nullptr; SDL_GPUTransferBuffer* clip_shape_transfer = nullptr;
+    uint32_t clip_shape_gpu_capacity = 0, clip_shape_transfer_capacity = 0;
     BoxExtra* layout_draw_target = nullptr;
     float layout_draw_scale = 1;
     uint32_t wake_event_type = 0;
@@ -898,6 +915,7 @@ struct Context {
     SDL_GPUBuffer*           prim_gpu_buf = nullptr;
     SDL_GPUTransferBuffer*   prim_transfer_buf = nullptr;
     SDL_GPUTransferBuffer*   atlas_transfer_buf = nullptr;
+    SDL_GPUCommandBuffer*    texture_upload_cmd = nullptr;
     SDL_GPUTransferBuffer*   texture_upload_buf = nullptr; uint32_t texture_upload_cap = 0;
     uint32_t atlas_tbuf_size = 0;
     SDL_GPUBuffer*           slug_curve_gpu_buf = nullptr;

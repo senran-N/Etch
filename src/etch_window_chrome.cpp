@@ -8,6 +8,7 @@ namespace etch {
 namespace {
 #if defined(_WIN32)
 constexpr const wchar_t* kChromeSlotProperty=L"Etch.ChromeSlot";
+constexpr LONG_PTR kNativeFrameStyle=WS_CAPTION | WS_THICKFRAME | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX;
 void chrome_mouse_event(ClaimedWindowSlot* slot, UINT msg, POINT point) noexcept {
     SDL_Event event={};
     const Uint32 window_id=SDL_GetWindowID(slot->window);
@@ -26,6 +27,17 @@ void chrome_mouse_event(ClaimedWindowSlot* slot, UINT msg, POINT point) noexcept
 LRESULT CALLBACK chrome_window_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) noexcept {
     auto* slot=reinterpret_cast<ClaimedWindowSlot*>(GetPropW(hwnd,kChromeSlotProperty));
     const WNDPROC original=reinterpret_cast<WNDPROC>(slot->native_chrome_proc);
+    if(slot->native_frame_applied && msg==WM_NCCALCSIZE && wparam) {
+        if(IsZoomed(hwnd)) {
+            auto* params=reinterpret_cast<NCCALCSIZE_PARAMS*>(lparam);
+            MONITORINFO monitor={};monitor.cbSize=sizeof(monitor);
+            if(GetMonitorInfoW(MonitorFromRect(&params->rgrc[0],MONITOR_DEFAULTTONEAREST),&monitor)) params->rgrc[0]=monitor.rcWork;
+        }
+        return 0;
+    }
+    if(slot->native_frame_applied && (msg==WM_ACTIVATE || msg==WM_DWMCOMPOSITIONCHANGED)) {
+        const MARGINS margins={1,1,1,1};DwmExtendFrameIntoClientArea(hwnd,&margins);
+    }
     if (msg==WM_NCHITTEST) {
         POINT point={static_cast<short>(LOWORD(lparam)),static_cast<short>(HIWORD(lparam))};
         ScreenToClient(hwnd,&point);
@@ -82,6 +94,22 @@ void apply_win32_chrome(Context* ctx, ClaimedWindowSlot* slot) noexcept {
         slot->native_chrome_proc=reinterpret_cast<void*>(SetWindowLongPtrW(hwnd,GWLP_WNDPROC,reinterpret_cast<LONG_PTR>(chrome_window_proc)));
         if (!slot->native_chrome_proc) { RemovePropW(hwnd,kChromeSlotProperty);return; }
     }
+    const SDL_WindowFlags flags=SDL_GetWindowFlags(slot->window);
+    const bool native=slot->ui.chrome_desc.enabled && (flags&SDL_WINDOW_BORDERLESS)!=0 && (flags&SDL_WINDOW_FULLSCREEN)==0;
+    if(native!=slot->native_frame_applied) {
+        if(native) {
+            slot->native_chrome_style=uintptr_t(GetWindowLongPtrW(hwnd,GWL_STYLE)&kNativeFrameStyle);slot->native_frame_applied=true;
+            SetWindowLongPtrW(hwnd,GWL_STYLE,GetWindowLongPtrW(hwnd,GWL_STYLE) | kNativeFrameStyle);
+        } else {
+            slot->native_frame_applied=false;SetWindowLongPtrW(hwnd,GWL_STYLE,(GetWindowLongPtrW(hwnd,GWL_STYLE)&~kNativeFrameStyle)|LONG_PTR(slot->native_chrome_style));
+            const MARGINS margins={};DwmExtendFrameIntoClientArea(hwnd,&margins);
+        }
+        SetWindowPos(hwnd,nullptr,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOZORDER|SWP_NOACTIVATE|SWP_FRAMECHANGED);
+    }
+    if(native) {
+        const DWMNCRENDERINGPOLICY policy=DWMNCRP_ENABLED;DwmSetWindowAttribute(hwnd,DWMWA_NCRENDERING_POLICY,&policy,sizeof(policy));
+        const MARGINS margins={1,1,1,1};DwmExtendFrameIntoClientArea(hwnd,&margins);
+    }
     const DWM_WINDOW_CORNER_PREFERENCE corners=slot->ui.chrome_desc.enabled?DWMWCP_ROUND:DWMWCP_DEFAULT;
     DwmSetWindowAttribute(hwnd,DWMWA_WINDOW_CORNER_PREFERENCE,&corners,sizeof(corners));
     const Color bg=active_theme(ctx).bg_canvas;
@@ -96,6 +124,11 @@ void detach_win32_chrome(ClaimedWindowSlot* slot) noexcept {
     if (!slot->native_chrome_proc) return;
     HWND hwnd=static_cast<HWND>(SDL_GetPointerProperty(SDL_GetWindowProperties(slot->window),SDL_PROP_WINDOW_WIN32_HWND_POINTER,nullptr));
     if (hwnd) {
+        if(slot->native_frame_applied) {
+            slot->native_frame_applied=false;SetWindowLongPtrW(hwnd,GWL_STYLE,(GetWindowLongPtrW(hwnd,GWL_STYLE)&~kNativeFrameStyle)|LONG_PTR(slot->native_chrome_style));
+            const MARGINS margins={};DwmExtendFrameIntoClientArea(hwnd,&margins);
+            SetWindowPos(hwnd,nullptr,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOZORDER|SWP_NOACTIVATE|SWP_FRAMECHANGED);
+        }
         SetWindowLongPtrW(hwnd,GWLP_WNDPROC,reinterpret_cast<LONG_PTR>(slot->native_chrome_proc));
         RemovePropW(hwnd,kChromeSlotProperty);
     }

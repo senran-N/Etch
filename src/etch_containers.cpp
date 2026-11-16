@@ -6,7 +6,9 @@ namespace etch {
 SplitResult begin_split(const SplitDesc& desc) noexcept {
     Context* ctx = current_context();
     const float fallback_ratio = clamp_range(desc.default_ratio, 0.02f, 0.98f);
-    if (!ctx || !ctx->in_frame || desc.id == 0u || ctx->active_ui->split_depth >= kMaxSplitDepth) {
+    if (!ctx || !ctx->in_frame || desc.id == 0u || ctx->active_ui->split_depth >= kMaxSplitDepth ||
+        !std::isfinite(desc.default_ratio) || !std::isfinite(desc.divider_size_px) || !std::isfinite(desc.divider_hit_px) ||
+        !std::isfinite(desc.keyboard_step_px) || desc.keyboard_step_px<0 || !std::isfinite(desc.min_first_px) || !std::isfinite(desc.min_second_px) || desc.min_first_px<0 || desc.min_second_px<0) {
         return SplitResult{ .ratio = fallback_ratio, .dragging = false };
     }
 
@@ -52,6 +54,23 @@ SplitResult begin_split(const SplitDesc& desc) noexcept {
         request_redraw(ctx);
     }
 
+    PendingA11yAction action={};
+    while(a11y_take_any(div_id,140u,&action)) {
+        const float step=avail>1 ? desc.keyboard_step_px/avail : .01f;
+        if(action.action==A11yAction::SetValue) ws_split->split_ratio=action.number;
+        else ws_split->split_ratio+=action.action==A11yAction::Increment ? step : -step;
+        request_redraw(ctx);
+    }
+
+    if(focused(div_id) && avail>1) {
+        float delta=0;
+        if(key_pressed(desc.axis==Axis::Row ? SDLK_LEFT : SDLK_UP,true)) delta=-desc.keyboard_step_px;
+        if(key_pressed(desc.axis==Axis::Row ? SDLK_RIGHT : SDLK_DOWN,true)) delta=desc.keyboard_step_px;
+        if(delta!=0) {ws_split->split_ratio+=delta/avail;request_redraw(ctx);}
+        if(key_pressed(SDLK_HOME)) ws_split->split_ratio=0;
+        if(key_pressed(SDLK_END)) ws_split->split_ratio=1;
+    }
+
     if (avail > 1.0f) {
         float min_r = desc.min_first_px / avail;
         float max_r = 1.0f - (desc.min_second_px / avail);
@@ -79,6 +98,7 @@ SplitResult begin_split(const SplitDesc& desc) noexcept {
         .axis = desc.axis,
         .ratio = ratio,
         .divider_size_px = div_sz,
+        .divider_hit_px = std::fmax(div_sz,desc.divider_hit_px),
         .min_first_px = desc.min_first_px,
         .min_second_px = desc.min_second_px,
         .divider_color = resolve_theme_color(desc.divider_color, thm.border_subtle),
@@ -97,6 +117,8 @@ SplitResult begin_split(const SplitDesc& desc) noexcept {
     });
 
     Clay__GetOpenLayoutElement()->config.layout.percentAfterFixed = true;
+    Clay__GetOpenLayoutElement()->config.layout.percentMinFirst = desc.min_first_px;
+    Clay__GetOpenLayoutElement()->config.layout.percentMinSecond = desc.min_second_px;
     const Sizing first_primary = Sizing::percent(ratio);
     begin_box(BoxDesc{
         .axis = Axis::Col,
@@ -136,7 +158,6 @@ void split_second() noexcept {
         : (hovered_div ? se.grip_hover_color : se.grip_idle_color);
 
     begin_box(BoxDesc{
-        .id = div_id,
         .axis = se.axis,
         .width = (se.axis == Axis::Row) ? Sizing::fixed(se.divider_size_px) : Sizing::grow(),
         .height = (se.axis == Axis::Col) ? Sizing::fixed(se.divider_size_px) : Sizing::grow(),
@@ -144,9 +165,13 @@ void split_second() noexcept {
         .align_y = AlignY::Center,
         .background = div_col,
     });
+    box({.id=div_id,.width=se.axis==Axis::Row ? Sizing::fixed(se.divider_hit_px) : Sizing::grow(),
+        .height=se.axis==Axis::Col ? Sizing::fixed(se.divider_hit_px) : Sizing::grow(),.focusable=true,
+        .attach_to=AttachTo::Parent,.anchor_element=Anchor::Center,.anchor_parent=Anchor::Center,.z_index=2,.clip_to_parent=false});
+    a11y_semantic(div_id,A11yRole::Slider,str_lit("Pane divider"),0,141u,se.ratio,0,1);
     box(BoxDesc{
-        .width = Sizing::fixed((se.axis == Axis::Row) ? 2.0f : 28.0f),
-        .height = Sizing::fixed((se.axis == Axis::Col) ? 2.0f : 28.0f),
+        .width = Sizing::fixed((se.axis == Axis::Row) ? std::fmin(2.0f,se.divider_size_px) : 28.0f),
+        .height = Sizing::fixed((se.axis == Axis::Col) ? std::fmin(2.0f,se.divider_size_px) : 28.0f),
         .background = grip_col,
         .radius = Corners::all(1.0f),
     });
@@ -398,6 +423,7 @@ VirtualListSlice begin_virtual_list_with_c_measure(const VirtualListDesc& desc, 
     ws->is_scroll_x = false;
     ws->is_scroll_y = false;
     ws->is_virtual_list = true;
+    ws->show_scrollbar = desc.show_scrollbar;
     ws->vlist_stride = static_cast<float>(stride);
     ws->owner_canvas_id = (ctx->active_ui->canvas_depth > 0u)
         ? ctx->active_ui->canvas_stack[ctx->active_ui->canvas_depth - 1u].id
@@ -1341,13 +1367,41 @@ void paint_table_header(Rect bounds, void* data) noexcept {
         draw_line({.from={x,y+dir},.to={x+3,y-dir},.color=p.accent});
     }
 }
+bool table_row_selected(const TableSelection& s,uint32_t row) noexcept {
+    if(s.selected_words && row/64<s.word_count) return (s.selected_words[row/64] & (uint64_t(1)<<(row%64)))!=0;
+    return s.focused_row && *s.focused_row==row;
+}
+namespace {
+void table_select_row(const TableDesc& d,uint32_t row,bool extend,bool toggle) noexcept {
+    auto* ws=state_map_find(&current_context()->active_ui->states,d.id);
+    const TableSelection& s=d.selection;
+    uint32_t& focus=s.focused_row ? *s.focused_row : ws->table_focus_row;
+    uint32_t& anchor=s.anchor_row ? *s.anchor_row : ws->table_anchor_row;
+    if(anchor>=d.item_count || !extend) anchor=row;
+    focus=row;
+    if(d.selected_row) *d.selected_row=row;
+    if(s.selected_words) {
+        if(!extend && !toggle) std::memset(s.selected_words,0,size_t(s.word_count)*sizeof(uint64_t));
+        if(extend) {
+            if(!toggle) std::memset(s.selected_words,0,size_t(s.word_count)*sizeof(uint64_t));
+            const uint32_t first=std::min(row,anchor),last=std::max(row,anchor);
+            for(uint32_t i=first;i<=last;++i) s.selected_words[i/64]|=uint64_t(1)<<(i%64);
+        } else if(toggle) s.selected_words[row/64]^=uint64_t(1)<<(row%64);
+        else s.selected_words[row/64]|=uint64_t(1)<<(row%64);
+    }
+    request_redraw(current_context());
+}
+}
 TableResult begin_table(const TableDesc& desc_in) noexcept {
     Context* ctx = current_context();
     if (!ctx || !ctx->in_frame || !desc_in.id || desc_in.columns.empty() || desc_in.columns.size() > kMaxTableColumns || ctx->active_ui->table_depth == 8 ||
         !std::isfinite(desc_in.header_font_size_px) || desc_in.header_font_size_px <= 0 || !std::isfinite(desc_in.row_height_px) || desc_in.row_height_px <= 0) return {};
+    if(desc_in.selection.selected_words && desc_in.selection.word_count < (uint64_t(desc_in.item_count)+63)/64) return {};
     for (const auto& col : desc_in.columns) if (!std::isfinite(col.width) || !std::isfinite(col.min_width) || !std::isfinite(col.max_width) || col.min_width < 0 || col.max_width < col.min_width) return {};
     const Theme& thm = active_theme(ctx);
     TableDesc desc = desc_in;
+    desc.row_height_px=clamp_range(desc.row_height_px,1,16384);
+    desc.row_gap_px=std::isfinite(desc.row_gap_px) && desc.row_gap_px>0 ? float(to_u16_round(desc.row_gap_px)) : 0;
     desc.background = resolve_theme_color(desc.background, thm.bg_table);
     desc.header_background = resolve_theme_color(desc.header_background, thm.bg_elevated);
     desc.zebra_color = resolve_theme_color(desc.zebra_color, thm.zebra_row);
@@ -1377,6 +1431,30 @@ TableResult begin_table(const TableDesc& desc_in) noexcept {
     }
     TableResult result = { .sort_column = ws->table_sort_column, .sort_descending = ws->table_sort_descending, .sort_changed = ws->table_sort_changed };
     ws->table_sort_changed = false;
+    if(desc.keyboard_navigation && focused(desc.id) && desc.item_count) {
+        const uint32_t current=desc.selection.focused_row ? *desc.selection.focused_row : desc.selected_row ? *desc.selected_row : ws->table_focus_row;
+        uint32_t next=current<desc.item_count ? current : 0;
+        const uint32_t page=uint32_t(std::fmax(1,std::floor(ws->viewport_dim.y/(desc.row_height_px+desc.row_gap_px))));
+        bool moved=false;
+        if(key_pressed(SDLK_DOWN,true)) {if(current<desc.item_count && next+1<desc.item_count) ++next;moved=true;}
+        if(key_pressed(SDLK_UP,true)) {if(next>0) --next;moved=true;}
+        if(key_pressed(SDLK_PAGEDOWN,true)) {next+=std::min(page,desc.item_count-1-next);moved=true;}
+        if(key_pressed(SDLK_PAGEUP,true)) {next-=std::min(page,next);moved=true;}
+        if(key_pressed(SDLK_HOME)) {next=0;moved=true;}
+        if(key_pressed(SDLK_END)) {next=desc.item_count-1;moved=true;}
+        if(moved) {
+            table_select_row(desc,next,(key_mods()&Mod_Shift)!=0,(key_mods()&Mod_Primary)!=0);
+            const double top=double(next)*(desc.row_height_px+desc.row_gap_px);
+            if(top<ws->vscroll_pos_y || top+desc.row_height_px>ws->vscroll_pos_y+ws->viewport_dim.y)
+                table_scroll_to_row(desc.id,next,desc.row_height_px,top<ws->vscroll_pos_y ? AlignY::Top : AlignY::Bottom);
+        }
+        if((key_mods()&Mod_Primary) && key_pressed(SDLK_A) && desc.selection.selected_words) {
+            const uint32_t words=desc.item_count/64u+(desc.item_count%64u!=0);
+            std::memset(desc.selection.selected_words,0xFF,size_t(words)*sizeof(uint64_t));
+            if(desc.item_count%64) desc.selection.selected_words[words-1]&=(uint64_t(1)<<(desc.item_count%64))-1;
+            request_redraw(ctx);
+        }
+    }
     const uint32_t outer_id = id_index(desc.id, kTableOuterTag);
     const float gutter = desc.show_scrollbar ? 10.0f : 0;
     bool resizing = false;
@@ -1406,10 +1484,15 @@ TableResult begin_table(const TableDesc& desc_in) noexcept {
             t.col_widths[c] = cw->column_width > 0 ? cw->column_width : col.min_width;
         }
     }
+    float content_min=desc.padding.left+desc.padding.right+gutter;
+    for(uint32_t c=0;c<t.count;++c) content_min+=t.tracks[c].kind==SizingKind::Fixed ? t.col_widths[c] : t.columns[c].min_width;
+    if(!desc.horizontal_scroll) content_min=0;
     begin_box({ .id = id_index(desc.id,0x7402u), .axis = Axis::Col, .width = desc.width.kind == SizingKind::Grow ? Sizing::percent(1) : desc.width, .height = desc.height });
     begin_box({ .id = outer_id, .axis = Axis::Col, .width = desc.width, .height = desc.height,
-        .background = desc.background, .border_color = desc.border_color, .border_width = desc.border_width, .radius = desc.radius, .clip_children = true });
-    begin_box({ .id = id_index(desc.id, kTableHeaderTag), .width = Sizing::grow(), .height = Sizing::fixed(desc.header_height_px),
+        .padding={0,0,0,desc.horizontal_scroll ? 12.0f : 0.0f},
+        .background = desc.background, .border_color = desc.border_color, .border_width = desc.border_width, .radius = desc.radius,
+        .clip_children = true, .scroll_x=desc.horizontal_scroll,.show_scrollbar=desc.show_scrollbar });
+    begin_box({ .id = id_index(desc.id, kTableHeaderTag), .width = Sizing::grow(content_min), .height = Sizing::fixed(desc.header_height_px),
         .padding = {desc.padding.left, desc.padding.right + gutter, 0, 0}, .background = desc.header_background, .grid_tracks = {t.tracks,t.count}, .shrink_width = true });
     for (uint32_t c = 0; c < t.count; ++c) {
         const auto& col = t.columns[c]; const uint32_t cid = table_col_id(desc, c), hid = id_index(cid, 0x7601u), rid = id_index(cid, 0x7600u);
@@ -1434,13 +1517,16 @@ TableResult begin_table(const TableDesc& desc_in) noexcept {
     ws = state_map_find(&ctx->active_ui->states, desc.id);
     ws->table_sort_column = result.sort_column; ws->table_sort_descending = result.sort_descending; metadata->count = t.count;
     for (uint32_t c = 0; c < t.count; ++c) { metadata->widths[c] = t.col_widths[c]; metadata->column_ids[c] = table_col_id(desc,c); metadata->min_widths[c] = t.columns[c].min_width; metadata->max_widths[c] = t.columns[c].max_width; }
-    begin_box({ .axis = Axis::Col, .width = Sizing::grow(), .height = Sizing::grow(), .shrink_width = true });
+    begin_box({ .axis = Axis::Col, .width = Sizing::grow(content_min), .height = Sizing::grow(), .shrink_width = true, .shrink_height=true });
     result.slice = begin_virtual_list({ .id = desc.id, .item_count = desc.item_count, .item_height_px = desc.row_height_px,
         .row_gap_px = desc.row_gap_px, .overscan_rows = desc.overscan_rows, .width = Sizing::grow(), .height = Sizing::grow(),
         .padding = desc.padding, .background = Color::transparent(), .border_width = 0, .show_scrollbar = desc.show_scrollbar });
     Clay__GetOpenLayoutElement()->config.layout.shrinkWidth = true;
     // Rows own the horizontal insets, including the scrollbar gutter. Keep the list's vertical padding.
-    a11y_semantic(desc.id,A11yRole::Table);
+    ws=state_map_find(&ctx->active_ui->states,desc.id);
+    ws->is_focusable=desc.keyboard_navigation;
+    if(desc.keyboard_navigation && reserve_focus(ctx->active_ui)) ctx->active_ui->focus_order[ctx->active_ui->focus_count++]=desc.id;
+    a11y_semantic(desc.id,A11yRole::Table,{},0,desc.keyboard_navigation ? 1u : 0u);
     Clay__GetOpenLayoutElement()->config.layout.padding.left = 0;
     Clay__GetOpenLayoutElement()->config.layout.padding.right = 0;
     t.cursor_row = result.slice.first_index; t.end_row = result.slice.end_index;
@@ -1452,9 +1538,14 @@ bool table_next_row(uint32_t* out, Color bg, Color border) noexcept {
     if (t.cursor_row >= t.end_row) return false;
     const auto& d = t.desc; const uint32_t row = t.cursor_row++, rid = id_index(d.id, 0x100000u + row);
     if (out) *out = row;
-    if (d.selected_row && clicked(rid)) { *d.selected_row = row; request_redraw(ctx); }
+    if(clicked(rid)) {
+        table_select_row(d,row,(key_mods()&Mod_Shift)!=0,(key_mods()&Mod_Primary)!=0);
+        if(d.keyboard_navigation) request_focus(d.id);
+    }
     Color row_color = bg.a ? bg : ((row & 1u) ? d.zebra_color : Color{});
-    if (d.selected_row && *d.selected_row == row) row_color = d.selected_row_color;
+    const bool selected=(d.selection.selected_words || d.selection.focused_row) ? table_row_selected(d.selection,row)
+        : d.selected_row && *d.selected_row==row;
+    if(selected) row_color=d.selected_row_color;
     if (hovered(rid)) {
         const Color under = row_color.a ? row_color : d.background;
         row_color = Color::blend_over(under,d.hover_row_color);

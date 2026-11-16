@@ -370,6 +370,8 @@ void emit_draw_list_command(
     const ClipEntry& clip,
     float dpi) noexcept
 {
+    const uint32_t previous_clip=ctx->render_clip_index;
+    ctx->render_clip_index=clip.indexed ? clip.shape : 0;
     const Vec2 origin = { box_px.x, box_px.y };
     for (const DrawCmdNode* node = head; node != nullptr; node = node->next) {
         const float scale = node->world_scale * dpi;
@@ -389,14 +391,15 @@ void emit_draw_list_command(
             case DrawCmdKind::Fill: emit_vector_fill(ctx, node->fill_cmd, origin, scale, clip); break;
             case DrawCmdKind::Rect: {
                 const RectDrawDesc& rd = node->rect;
-                const Rect r_px = {
+                Rect r_px = {
                     .x = origin.x + rd.rect.x * scale,
                     .y = origin.y + rd.rect.y * scale,
                     .w = rd.rect.w * scale,
                     .h = rd.rect.h * scale,
                 };
-                const Corners rad_px = scale_corners(rd.radius, scale);
+                Corners rad_px = scale_corners(rd.radius, scale);
                 const float bw_px = rd.border_width * scale;
+                align_border_bounds(&r_px,&rad_px,bw_px,rd.border_align);
                 const bool has_grad = (rd.fill_end.pack_rgba8() != 0u) || rd.radial_gradient;
                 if (std::fabs(rd.angle_rad) > 1e-5f) {
                     push_prim(ctx, continuous_prim(Prim::make_rotated_rect(r_px, clip.rect, rd.fill, rd.angle_rad,
@@ -603,6 +606,7 @@ void emit_draw_list_command(
             }
         }
     }
+    ctx->render_clip_index=previous_clip;
 }
 
 // End internal unity-build helpers.
@@ -1093,6 +1097,7 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
     ctx->active_ui->active_vlists = nullptr;
     ctx->active_ui->active_vlist_count = 0;
     ++ctx->arena_epoch;
+    ctx->clip_shape_count=1;ctx->render_clip_index=0;
     ctx->dyn_slug_curve_count = 0;
     ctx->dyn_slug_band_count = 0;
     ctx->prim_count = 0u;
@@ -1263,24 +1268,23 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
             bool handled_scrollbar = false;
             for (int32_t i = over.length - 1; i >= 0; --i) {
                 WidgetState* ws = state_map_find(&ctx->active_ui->states, over.internalArray[i].id);
-                if (!ws || !ws->is_user_element || (!ws->is_scroll_y && !ws->is_virtual_list && !ws->is_multiline_input)) {
-                    continue;
-                }
-                const ScrollbarGeom sb = compute_vscrollbar_geom(ws);
-                if (sb.visible && sb.hit_track.contains(pointer_pos)) {
-                    ctx->active_ui->active_id = id_index(ws->key, kScrollbarYTag);
-                    ws->scroll_vel.y = 0.0f;
-                    ws->vscroll_vel_y = 0.0;
-                    if (pointer_pos.y >= sb.thumb.y && pointer_pos.y <= (sb.thumb.y + sb.thumb.h)) {
-                        ctx->active_ui->scrollbar_drag_grab_offset = pointer_pos.y - sb.thumb.y;
-                    } else {
-                        ctx->active_ui->scrollbar_drag_grab_offset = 0.5f * sb.thumb.h;
-                        apply_scrollbar_drag(ws, pointer_pos.y, ctx->active_ui->scrollbar_drag_grab_offset);
+                if (!ws || !ws->is_user_element) continue;
+                for(uint32_t axis=0;axis<2;++axis) {
+                    const bool horizontal=axis==1;
+                    const ScrollbarGeom sb=horizontal ? compute_hscrollbar_geom(ws) : compute_vscrollbar_geom(ws);
+                    if(!sb.visible || !sb.hit_track.contains(pointer_pos)) continue;
+                    ctx->active_ui->active_id=id_index(ws->key,horizontal ? kScrollbarXTag : kScrollbarYTag);
+                    ws->scroll_vel={};ws->vscroll_vel_y=0;
+                    const float pointer=horizontal ? pointer_pos.x : pointer_pos.y;
+                    const float start=horizontal ? sb.thumb.x : sb.thumb.y,length=horizontal ? sb.thumb.w : sb.thumb.h;
+                    ctx->active_ui->scrollbar_drag_grab_offset=clamp_range(pointer-start,0,length);
+                    if(pointer<start || pointer>start+length) {
+                        ctx->active_ui->scrollbar_drag_grab_offset=length*.5f;
+                        apply_scrollbar_drag(ws,pointer,length*.5f,horizontal);
                     }
-                    request_redraw(ctx);
-                    handled_scrollbar = true;
-                    break;
+                    request_redraw(ctx);handled_scrollbar=true;break;
                 }
+                if(handled_scrollbar) break;
             }
             if (!handled_scrollbar) {
                 uint32_t top_hit = 0u;
@@ -1376,7 +1380,8 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
             }
         }
         if (WidgetState* sb_ws = find_scrollbar_owner(ctx, ctx->active_ui->active_id)) {
-            apply_scrollbar_drag(sb_ws, pointer_pos.y, ctx->active_ui->scrollbar_drag_grab_offset);
+            const bool horizontal=ctx->active_ui->active_id==id_index(sb_ws->key,kScrollbarXTag);
+            apply_scrollbar_drag(sb_ws,horizontal ? pointer_pos.x : pointer_pos.y,ctx->active_ui->scrollbar_drag_grab_offset,horizontal);
             ctx->active_ui->desired_cursor = Cursor::Hand;
         }
     } else if (released_this_frame) {
@@ -1651,8 +1656,10 @@ void begin_box(const BoxDesc& desc_in) noexcept {
         if (box_ws) {
             box_ws->is_user_element = !desc.pointer_passthrough;
             box_ws->window_drag_passthrough = desc.window_drag_passthrough;
+            box_ws->popup_owner=ctx->active_ui->popup_depth ? ctx->active_ui->popup_build_ids[ctx->active_ui->popup_depth-1] : 0;
             box_ws->is_focusable = desc.focusable;
             box_ws->focus_scope = ctx->active_ui->modal_scope && focus_scope_contains(*ctx->active_ui, ctx->active_ui->modal_scope) ? ctx->active_ui->modal_scope : ctx->active_ui->focus_scope;
+            box_ws->show_scrollbar = desc.show_scrollbar;
             box_ws->is_scroll_x = desc.scroll_x;
             box_ws->is_scroll_y = desc.scroll_y;
             box_ws->is_text_input_writable = false;
@@ -1693,7 +1700,7 @@ void begin_box(const BoxDesc& desc_in) noexcept {
 
     const bool focus_ring = eff_desc.focusable && keyboard_focus_visible(eff_desc.id);
     const bool is_scroll = eff_desc.scroll_x || eff_desc.scroll_y;
-    const bool any_clip = eff_desc.clip_children || is_scroll || eff_desc.shrink_width;
+    const bool any_clip = eff_desc.clip_children || is_scroll || eff_desc.shrink_width || eff_desc.shrink_height;
     const bool is_floating_blocker = (eff_desc.attach_to != AttachTo::None && !eff_desc.pointer_passthrough);
     const bool has_border = (eff_desc.border_width > 0.0f && eff_desc.border_color.a > 0u);
     const bool has_scrollbar = is_scroll && eff_desc.show_scrollbar;
@@ -1732,6 +1739,7 @@ void begin_box(const BoxDesc& desc_in) noexcept {
     decl.aspectRatio.aspectRatio = std::isfinite(desc.aspect_ratio) && desc.aspect_ratio > 0 ? desc.aspect_ratio : 0;
     decl.layout.wrap = desc.wrap;
     decl.layout.shrinkWidth = desc.shrink_width;
+    decl.layout.shrinkHeight = desc.shrink_height;
     decl.layout.crossChildGap = to_u16_round(std::isfinite(desc.row_gap) && desc.row_gap >= 0 ? desc.row_gap : desc.gap);
     decl.layout.gridColumns = desc.grid_columns > 128 ? 128 : desc.grid_columns;
     decl.layout.gridColSpan = desc.grid_col_span > 0 ? desc.grid_col_span : 1;
@@ -1783,7 +1791,7 @@ void begin_box(const BoxDesc& desc_in) noexcept {
     }
     if (any_clip) {
         decl.clip.horizontal = desc.clip_children || desc.scroll_x || desc.shrink_width;
-        decl.clip.vertical = desc.clip_children || desc.scroll_y;
+        decl.clip.vertical = desc.clip_children || desc.scroll_y || desc.shrink_height;
         if (is_scroll && box_ws) {
             decl.clip.childOffset = Clay_Vector2{ -box_ws->scroll_pos.x, -box_ws->scroll_pos.y };
         }

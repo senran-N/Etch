@@ -12,7 +12,7 @@
 #include <type_traits>
 
 #define ETCH_VERSION_MAJOR 0
-#define ETCH_VERSION_MINOR 12
+#define ETCH_VERSION_MINOR 13
 #define ETCH_VERSION_PATCH 0
 #define ETCH_VERSION_STR_DETAIL(x) #x
 #define ETCH_VERSION_STR(x) ETCH_VERSION_STR_DETAIL(x)
@@ -493,7 +493,7 @@ enum PrimFlags : uint8_t {
 //       float4 bounds;   // xy = top-left px, zw = width, height px
 //       float4 clip;     // xy = clip min px, zw = clip max px
 //       uint4  payload;  // xy = uv0/uv1 (UNORM16x2) OR (color1 RGBA8, f16x2 grad_dir); zw = f16x2 radii
-//       uint4  style;    // x = header [kind:4 | flags:6 | tex_slot:9 | continuous_clip:1 | clip_r_q2:12];
+//       uint4  style;    // x = header [kind:4 | flags:6 | tex_slot:4 | clip_index_hi:4 | indexed_clip:1 | continuous_clip:1 | clip_r_q2_or_index_lo:12];
 //                        // y = color0 sRGB RGBA8; z = border sRGB RGBA8; w = f16x2(border_width, softness)
 //   };
 struct alignas(16) Prim {
@@ -514,7 +514,7 @@ struct alignas(16) Prim {
         const uint32_t clip_r_q2 = static_cast<uint32_t>(clamped_r * 4.0f + 0.5f) & 0xFFFu;
         return (static_cast<uint32_t>(kind) & 0xFu) |
                ((static_cast<uint32_t>(flags) & 0x3Fu) << 4) |
-               ((static_cast<uint32_t>(tex_slot) & 0x1FFu) << 10) |
+               ((static_cast<uint32_t>(tex_slot) & 0xFu) << 10) |
                (clip_radius_px < 0 ? (1u << 19) : 0u) |
                (clip_r_q2 << 20);
     }
@@ -1175,6 +1175,8 @@ struct GridTrack {
     static constexpr GridTrack percent(float v, float lo = 0, float hi = 0) noexcept { return {SizingKind::Percent, v, lo, hi}; }
 };
 
+enum class BorderAlign : uint8_t { Inside=0, Center=1, Outside=2 };
+
 struct BoxDesc {
     uint32_t id = 0;
     Axis axis = Axis::Row;
@@ -1216,18 +1218,20 @@ struct BoxDesc {
     std::span<const GridTrack> grid_tracks = {}; // Copied into frame storage by begin_box.
     uint16_t grid_col_span = 1;
     bool shrink_width = false; // Fit/Grow may shrink below content width; clips overflow.
+    bool shrink_height = false; // Symmetric content-independent vertical minimum and clipping.
     bool continuous_corners = false; // Exponent-4 superellipse corners.
     float shadow_spread = 0.0f; // Logical pixels; negative values inset the shadow.
     bool window_drag_passthrough = false; // Allow caption dragging through this pointer target.
+    BorderAlign border_align = BorderAlign::Inside;
 };
 
 inline constexpr uint16_t kFontSans       = 0u;
 inline constexpr uint16_t kFontBold       = 1u;
 inline constexpr uint16_t kFontMono       = 2u;
 inline constexpr uint16_t kFontMedium = 14u, kFontSemiBold = 15u; // Lazy static faces; missing faces fall back to Sans.
-inline constexpr uint16_t kMaxFontSlots   = 16u;
+inline constexpr uint16_t kMaxFontSlots   = 64u;
 inline constexpr uint16_t kInvalidFont    = 0xFFFFu;
-inline constexpr uint16_t kMaxVectorIcons = 256u;
+inline constexpr uint16_t kMaxVectorIcons = 1024u;
 inline constexpr uint32_t kInvalidSprite = 0u;
 inline constexpr uint16_t kInvalidIcon    = 0xFFFFu;
 
@@ -1345,6 +1349,7 @@ struct RectDrawDesc {
     float   angle_rad = 0.0f;
     float   softness = 1.0f; // Physical-pixel AA width, minimum 0.5.
     bool continuous_corners = false; // Exponent-4 superellipse corners.
+    BorderAlign border_align = BorderAlign::Inside;
 };
 
 struct LineDesc {
@@ -1684,7 +1689,7 @@ struct PopupDesc {
     Padding padding = Padding::all(6); float gap = 2;
     Color background = Color::theme_auto(); Color border_color = Color::theme_auto();
     Corners radius = Corners::theme_auto(); int16_t z_index = 200;
-    bool attach_to_trigger = false; bool match_trigger_width = false;
+    bool attach_to_trigger = false; bool match_trigger_width = false; bool scroll_y = true;
 };
 struct MenuBarDesc { uint32_t id = 0; Sizing width = Sizing::grow(); float height_px = 28; Color background = Color::theme_auto(); };
 struct MenuDesc { uint32_t id = 0; Str label = {}; bool disabled = false; };
@@ -1732,6 +1737,8 @@ struct SplitDesc {
     Color divider_color = Color::theme_auto();
     Color divider_hover_color = Color::theme_auto();
     Color divider_active_color = Color::theme_auto();
+    float divider_hit_px = 8.0f; // Hit target is independent of divider_size_px.
+    float keyboard_step_px = 8.0f;
 };
 
 struct SplitResult {
@@ -1809,6 +1816,15 @@ struct TableColumnDesc {
     float width = 120.0f; float min_width = 48.0f; float max_width = 800.0f;
     AlignX align_x = AlignX::Left; bool resizable = true; bool sortable = true;
 };
+// Optional caller-owned multi-selection bitmap; one bit per row. Storage remains valid through end_table.
+// Explicit selection overrides legacy selected_row highlighting.
+struct TableSelection {
+    uint32_t* focused_row = nullptr;
+    uint32_t* anchor_row = nullptr;
+    uint64_t* selected_words = nullptr;
+    uint32_t word_count = 0;
+};
+bool table_row_selected(const TableSelection& selection, uint32_t row) noexcept;
 struct TableDesc {
     uint32_t id = 0; std::span<const TableColumnDesc> columns = {};
     uint32_t item_count = 0; float header_height_px = 30.0f; float row_height_px = 26.0f;
@@ -1823,6 +1839,8 @@ struct TableDesc {
     bool show_column_lines = true; float header_font_size_px = 12;
     uint32_t* selected_row = nullptr; // UINT32_MAX means no selection; click updates caller state.
     Color selected_row_color = Color::theme_auto();
+    bool horizontal_scroll = true; bool keyboard_navigation = true;
+    TableSelection selection = {};
 };
 struct TableResult {
     VirtualListSlice slice = {}; uint32_t sort_column = 0;
@@ -1999,6 +2017,10 @@ bool os_a11y_active(const Context* ctx = nullptr, SDL_Window* window = nullptr) 
 void end_frame(Context* ctx = nullptr) noexcept;
 // Main thread; caller destroys the returned window with SDL_DestroyWindow.
 SDL_Window* create_desktop_window(const char* title, float logical_w, float logical_h, uint64_t flags = 0) noexcept;
+// display_id=0 selects the primary display; pointer variant selects the cursor's display.
+SDL_Window* create_desktop_window_on_display(const char* title, float logical_w, float logical_h, uint32_t display_id, uint64_t flags = 0) noexcept;
+SDL_Window* create_desktop_window_at_pointer(const char* title, float logical_w, float logical_h, uint64_t flags = 0) noexcept;
+bool set_desktop_window_min_size(SDL_Window* window, float logical_w, float logical_h) noexcept;
 void begin_window_frame(Context* ctx, SDL_Window* window, float dt) noexcept;
 void begin_window_frame(Context* ctx, SDL_Window* window, const WindowFrameDesc& desc) noexcept;
 void end_window_frame(Context* ctx = nullptr) noexcept;
@@ -2079,6 +2101,9 @@ Vec2 sprite_size(const Context* ctx, uint32_t sprite_id) noexcept;
 uint32_t sprite_count(const Context* ctx) noexcept;
 
 LoadedTexture create_texture_rgba(Context* ctx, const TextureDesc& desc) noexcept;
+// Upload calls copy caller pixels immediately, share a queued GPU batch, and flush before Etch rendering.
+// Call explicitly before consuming updated textures with external SDL GPU commands (same owning thread).
+bool flush_texture_uploads(Context* ctx) noexcept;
 bool update_texture_rgba(
     Context* ctx,
     SDL_GPUTexture* texture,

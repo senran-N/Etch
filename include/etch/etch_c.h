@@ -8,7 +8,7 @@
 
 #ifndef ETCH_VERSION_MAJOR
 #define ETCH_VERSION_MAJOR 0
-#define ETCH_VERSION_MINOR 12
+#define ETCH_VERSION_MINOR 13
 #define ETCH_VERSION_PATCH 0
 #define ETCH_VERSION_STR_DETAIL(x) #x
 #define ETCH_VERSION_STR(x) ETCH_VERSION_STR_DETAIL(x)
@@ -56,9 +56,9 @@ enum {
     ETCH_FONT_BOLD = 1u,
     ETCH_FONT_MONO = 2u,
     ETCH_FONT_MEDIUM = 14u, ETCH_FONT_SEMIBOLD = 15u,
-    ETCH_MAX_FONT_SLOTS = 16u,
+    ETCH_MAX_FONT_SLOTS = 64u,
     ETCH_INVALID_FONT = 0xFFFFu,
-    ETCH_MAX_VECTOR_ICONS = 256u,
+    ETCH_MAX_VECTOR_ICONS = 1024u,
     ETCH_INVALID_ICON = 0xFFFFu,
     ETCH_INVALID_SPRITE = 0u,
     ETCH_MAX_TABLE_COLUMNS = 16u
@@ -769,6 +769,8 @@ typedef struct EtchFrameStats {
     uint32_t sprite_atlas_size;
 } EtchFrameStats;
 
+typedef enum EtchBorderAlign { ETCH_BORDER_INSIDE=0, ETCH_BORDER_CENTER=1, ETCH_BORDER_OUTSIDE=2 } EtchBorderAlign;
+
 typedef struct EtchBoxDesc {
     uint32_t id;
     EtchAxis axis;
@@ -811,9 +813,11 @@ typedef struct EtchBoxDesc {
     uint32_t grid_track_count;
     uint16_t grid_col_span;
     bool shrink_width;
+    bool shrink_height;
     bool continuous_corners;
     float shadow_spread;
     bool window_drag_passthrough;
+    EtchBorderAlign border_align;
 } EtchBoxDesc;
 
 typedef struct EtchTextDesc {
@@ -927,6 +931,7 @@ typedef struct EtchRectDrawDesc {
     float angle_rad;
     float softness;
     bool continuous_corners;
+    EtchBorderAlign border_align;
 } EtchRectDrawDesc;
 
 typedef struct EtchLineDesc {
@@ -1362,7 +1367,7 @@ typedef struct EtchPopupDesc {
     EtchColor border_color;
     EtchCorners radius;
     int16_t z_index;
-    bool attach_to_trigger, match_trigger_width;
+    bool attach_to_trigger, match_trigger_width, scroll_y;
 } EtchPopupDesc;
 
 typedef struct EtchMenuBarDesc {
@@ -1400,6 +1405,8 @@ typedef struct EtchSplitDesc {
     EtchColor divider_color;
     EtchColor divider_hover_color;
     EtchColor divider_active_color;
+    float divider_hit_px;
+    float keyboard_step_px;
 } EtchSplitDesc;
 
 typedef struct EtchSplitResult {
@@ -1472,6 +1479,13 @@ typedef struct EtchTableColumnDesc {
     bool sortable;
 } EtchTableColumnDesc;
 
+typedef struct EtchTableSelection {
+    uint32_t* focused_row;
+    uint32_t* anchor_row;
+    uint64_t* selected_words;
+    uint32_t word_count;
+} EtchTableSelection;
+bool etch_table_row_selected(const EtchTableSelection* selection, uint32_t row);
 typedef struct EtchTableDesc {
     uint32_t id;
     const EtchTableColumnDesc* columns;
@@ -1498,6 +1512,8 @@ typedef struct EtchTableDesc {
     bool show_column_lines; float header_font_size_px;
     uint32_t* selected_row;
     EtchColor selected_row_color;
+    bool horizontal_scroll, keyboard_navigation;
+    EtchTableSelection selection;
 } EtchTableDesc;
 
 typedef struct EtchTableResult {
@@ -1805,6 +1821,7 @@ EtchVec2 etch_sprite_size(const EtchContext* ctx, uint32_t sprite_id);
 uint32_t etch_sprite_count(const EtchContext* ctx);
 
 EtchLoadedTexture etch_create_texture_rgba(EtchContext* ctx, const EtchTextureDesc* desc);
+bool etch_flush_texture_uploads(EtchContext* ctx);
 bool etch_update_texture_rgba(EtchContext* ctx, struct SDL_GPUTexture* texture, uint32_t width, uint32_t height, const void* rgba_pixels, uint32_t row_pitch_bytes);
 EtchLoadedTexture etch_load_texture_file(EtchContext* ctx, const char* path, bool srgb);
 EtchLoadedTexture etch_load_texture_memory(EtchContext* ctx, const void* data, size_t size_bytes, bool srgb);
@@ -1928,6 +1945,9 @@ bool etch_peek_drag_payload(EtchDragPayloadView* out_view, uint32_t kind_hash);
 bool etch_accept_drag_payload(uint32_t target_id, uint32_t kind_hash, EtchDragPayloadView* out_view);
 
 struct SDL_Window* etch_create_desktop_window(const char* title, float logical_w, float logical_h, uint64_t flags);
+struct SDL_Window* etch_create_desktop_window_on_display(const char* title, float logical_w, float logical_h, uint32_t display_id, uint64_t flags);
+struct SDL_Window* etch_create_desktop_window_at_pointer(const char* title, float logical_w, float logical_h, uint64_t flags);
+bool etch_set_desktop_window_min_size(struct SDL_Window* window, float logical_w, float logical_h);
 float etch_spring_from(uint32_t anim_id, float target, float initial_value, EtchSpringSpec spec);
 float etch_spring(uint32_t anim_id, float target, EtchSpringSpec spec);
 EtchVec2 etch_spring_vec2(uint32_t anim_id, EtchVec2 target, EtchSpringSpec spec);

@@ -221,6 +221,7 @@ constexpr SDL_SystemCursor to_sdl_system_cursor(Cursor c) noexcept {
     return SDL_SYSTEM_CURSOR_DEFAULT;
 }
 
+inline constexpr uint32_t kScrollbarXTag   = 0x53435258u;
 inline constexpr uint32_t kScrollbarYTag   = 0x53435259u;
 inline constexpr uint32_t kSplitDividerTag = 0x53504C54u;
 inline constexpr float    kSbMargin      = 4.0f;
@@ -238,7 +239,7 @@ struct ScrollbarGeom {
 
 ScrollbarGeom compute_vscrollbar_geom(const WidgetState* ws) noexcept {
     ScrollbarGeom g = {};
-    if (!ws || (!ws->is_scroll_y && !ws->is_virtual_list && !ws->is_multiline_input)) {
+    if (!ws || !ws->show_scrollbar || (!ws->is_scroll_y && !ws->is_virtual_list && !ws->is_multiline_input)) {
         return g;
     }
     if(ws->edit_text_buffer && !ws->editor_show_scrollbar)return g;
@@ -336,6 +337,20 @@ bool step_scroll_axis_d(double* pos, double* vel, double max_val, double decay, 
 
 // Measures a single-line UTF-8 segment (no '\n') in logical px.
 // Computes total line width and, optionally, the x offsets at `stop_a` and `stop_b` relative to `seg`.
+ScrollbarGeom compute_hscrollbar_geom(const WidgetState* ws) noexcept {
+    ScrollbarGeom g={};
+    if(!ws->show_scrollbar || !ws->is_scroll_x || ws->scroll_max.x<=.5f) return g;
+    const Rect b=ws->last_box_logical;
+    const float track=b.w-2*kSbMargin-(ws->is_scroll_y && ws->scroll_max.y>.5f ? kSbHitWidth : 0);
+    if(b.h<=kSbHitWidth+4 || track<=kSbMinThumbH) return g;
+    const float thumb=clamp_range(track*ws->viewport_dim.x/ws->content_dim.x,kSbMinThumbH,track);
+    const float travel=track-thumb,y=b.y+b.h-kSbMargin-kSbThumbWidth;
+    g.visible=true;g.track={b.x+kSbMargin,y,track,kSbThumbWidth};
+    g.hit_track={g.track.x,b.y+b.h-kSbMargin-kSbHitWidth,track,kSbHitWidth+kSbMargin};
+    g.thumb={g.track.x+travel*ws->scroll_pos.x/ws->scroll_max.x,y,thumb,kSbThumbWidth};g.travel_h=travel;
+    return g;
+}
+
 void measure_line_segment_x(
     Context* ctx,
     uint16_t font_id,
@@ -594,6 +609,28 @@ Rect snap_pixel_rect(Rect r) noexcept {
     return w > 0 && h > 0 ? Rect{x, y, w, h} : r;
 }
 
+ClipEntry make_box_clip(Context* ctx,const ClipEntry& parent,Rect bounds,Corners radii,bool continuous) noexcept {
+    ClipEntry result={rect_intersect(parent.rect,bounds),0,parent.shape,parent.indexed || parent.shape!=0};
+    const float radius=min4f(radii.tl,radii.tr,radii.br,radii.bl);
+    result.radius=continuous ? -radius : radius;
+    if(radii.tl==0 && radii.tr==0 && radii.br==0 && radii.bl==0) {
+        if(result.rect.x==parent.rect.x && result.rect.y==parent.rect.y && result.rect.w==parent.rect.w && result.rect.h==parent.rect.h) result.radius=parent.radius;
+        return result;
+    }
+    if(ctx->clip_shape_count==ctx->clip_shape_capacity || ctx->clip_shape_capacity==0) {
+        const uint32_t capacity=ctx->clip_shape_capacity ? std::min(65536u,ctx->clip_shape_capacity*2) : 128;
+        if(ctx->clip_shape_count>=65536) {SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,"Rounded clip shape limit exceeded");return result;}
+        auto* grown=static_cast<ClipShapeGpu*>(std::realloc(ctx->clip_shapes,size_t(capacity)*sizeof(ClipShapeGpu)));
+        if(!grown) return result;
+        ctx->clip_shapes=grown;ctx->clip_shape_capacity=capacity;ctx->clip_shapes[0]={};
+    }
+    const uint32_t index=ctx->clip_shape_count++;
+    ctx->clip_shapes[index]={{bounds.x,bounds.y,bounds.w,bounds.h},{radii.tl,radii.tr,radii.br,radii.bl},{parent.shape,continuous ? 1u : 0u,0,0}};
+    result.shape=index;
+    result.indexed=parent.shape!=0 || radii.tl!=radii.tr || radii.tr!=radii.br || radii.br!=radii.bl;
+    return result;
+}
+
 void push_prim(
     Context* ctx,
     Prim prim,
@@ -611,12 +648,18 @@ void push_prim(
         ctx->max_prims = cap;
     }
     // Raster-only snapping preserves logical layout and text positioning.
-    if (ctx->active_ui->pixel_snap && static_cast<PrimKind>(prim.style.x & 15u) == PrimKind::Rect &&
-        unpack_f16_cpu(static_cast<uint16_t>(prim.style.w >> 16)) <= 1.0f) {
+    const PrimKind snap_kind=static_cast<PrimKind>(prim.style.x&15u);
+    const bool snap_rect=snap_kind==PrimKind::Rect && unpack_f16_cpu(static_cast<uint16_t>(prim.style.w>>16))<=1;
+    const bool snap_image=(snap_kind==PrimKind::Texture && (prim.style.x & (uint32_t(PrimFlag_TextClip)<<4))==0) || snap_kind==PrimKind::BlurGlass;
+    if (ctx->active_ui->pixel_snap && (snap_rect || snap_image)) {
         const Rect r = snap_pixel_rect({prim.bounds.x, prim.bounds.y, prim.bounds.z, prim.bounds.w});
         prim.bounds = {r.x, r.y, r.w, r.h};
         const float width = unpack_f16_cpu(static_cast<uint16_t>(prim.style.w));
-        if (width > 0) prim.style.w = (prim.style.w & 0xFFFF0000u) | pack_f16(std::fmax(1.0f, std::round(width)));
+        if (snap_rect && width > 0) prim.style.w = (prim.style.w & 0xFFFF0000u) | pack_f16(std::fmax(1.0f, std::round(width)));
+    }
+    if(ctx->render_clip_index) {
+        const uint32_t index=ctx->render_clip_index;
+        prim.style.x=(prim.style.x & 0x3FFFu) | (1u<<18) | ((index&0xFFFu)<<20) | ((index>>12)<<14);
     }
     // CPU-side offscreen clip culling: drop primitives completely outside their active clip rect.
     if (prim.clip.z <= prim.clip.x || prim.clip.w <= prim.clip.y ||
@@ -663,7 +706,7 @@ void push_prim(
             }
         }
         if (!found) {
-            if (cur->ext_count < 3u) {
+            if (cur->ext_count < 8u) {
                 cur->ext_textures[cur->ext_count] = ext_tex;
                 tex_slot = static_cast<uint16_t>(cur->ext_count + 1u);
                 ++cur->ext_count;
@@ -684,7 +727,7 @@ void push_prim(
     }
 
     Prim final_p = prim;
-    final_p.style.x = (final_p.style.x & ~(0x1FFu << 10)) | ((static_cast<uint32_t>(tex_slot) & 0x1FFu) << 10);
+    final_p.style.x = (final_p.style.x & ~(0xFu << 10)) | ((static_cast<uint32_t>(tex_slot) & 0xFu) << 10);
     ctx->prims[ctx->prim_count++] = final_p;
     ++cur->prim_count;
 
@@ -759,6 +802,17 @@ void emit_canvas_grid_command(
     const ClipEntry& clip,
     float dpi) noexcept;
 
+void align_border_bounds(Rect* bounds,Corners* corners,float width,BorderAlign align) noexcept {
+    const float spread=align==BorderAlign::Outside ? width : align==BorderAlign::Center ? width*.5f : 0;
+    if(spread==0) return;
+    bounds->x-=spread;bounds->y-=spread;bounds->w+=2*spread;bounds->h+=2*spread;
+    // Square corners remain square; rounded outlines preserve the inner contour.
+    if(corners->tl>0) corners->tl+=spread;
+    if(corners->tr>0) corners->tr+=spread;
+    if(corners->br>0) corners->br+=spread;
+    if(corners->bl>0) corners->bl+=spread;
+}
+
 Prim continuous_prim(Prim prim, bool enabled) noexcept {
     if (enabled) prim.style.x |= uint32_t(PrimFlag_Continuous) << 4;
     return prim;
@@ -775,7 +829,7 @@ void emit_box_background_and_shadow(
         return;
     }
     const BoxDesc& d = extra->desc;
-    const Corners rad_px = scale_corners(d.radius, dpi);
+    Corners rad_px = scale_corners(d.radius, dpi);
     const bool has_grad = (d.background_end.a > 0u) || d.radial_gradient;
     const bool box_visible =
         clip.rect.w > 0.0f && clip.rect.h > 0.0f &&
@@ -808,8 +862,9 @@ void emit_box_background_and_shadow(
     }
 
     const bool has_fill = (d.background.a > 0u) || has_grad;
-    const bool any_clip = d.clip_children || d.scroll_x || d.scroll_y || d.shrink_width;
+    const bool any_clip = d.clip_children || d.scroll_x || d.scroll_y || d.shrink_width || d.shrink_height;
     const bool draw_border_here = !any_clip && d.border_width > 0.0f && d.border_color.a > 0u;
+    if(draw_border_here) align_border_bounds(&box_px,&rad_px,d.border_width*dpi,d.border_align);
     if (has_fill || draw_border_here || use_blur) {
         const Color border_col = draw_border_here ? d.border_color : Color{};
         const float border_w = draw_border_here ? (d.border_width * dpi) : 0.0f;
@@ -1538,22 +1593,24 @@ WidgetState* find_scrollbar_owner(Context* ctx, uint32_t thumb_active_id) noexce
     }
     for (uint32_t i = 0u; i < ctx->active_ui->states.capacity; ++i) {
         WidgetState& ws = ctx->active_ui->states.entries[i];
-        if (ws.key != 0u && (ws.is_scroll_y || ws.is_virtual_list || ws.is_multiline_input) && id_index(ws.key, kScrollbarYTag) == thumb_active_id) {
+        if (ws.key != 0u && (((ws.is_scroll_y || ws.is_virtual_list || ws.is_multiline_input) && id_index(ws.key, kScrollbarYTag) == thumb_active_id) || (ws.is_scroll_x && id_index(ws.key,kScrollbarXTag)==thumb_active_id))) {
             return &ws;
         }
     }
     return nullptr;
 }
 
-void apply_scrollbar_drag(WidgetState* ws, float pointer_y, float grab_offset) noexcept {
+void apply_scrollbar_drag(WidgetState* ws, float pointer_y, float grab_offset, bool horizontal = false) noexcept {
     if (!ws) {
         return;
     }
-    const ScrollbarGeom sb = compute_vscrollbar_geom(ws);
+    const ScrollbarGeom sb = horizontal ? compute_hscrollbar_geom(ws) : compute_vscrollbar_geom(ws);
     if (sb.visible && sb.travel_h > 0.0f) {
-        const float rel = (pointer_y - grab_offset) - sb.track.y;
+        const float rel = (pointer_y - grab_offset) - (horizontal ? sb.track.x : sb.track.y);
         const float ratio = clamp_range(rel / sb.travel_h, 0.0f, 1.0f);
-        if(ws->is_multiline_input) {
+        if(horizontal) {
+            ws->scroll_pos.x=ratio*ws->scroll_max.x;ws->scroll_vel.x=0;
+        } else if(ws->is_multiline_input) {
             ws->edit_scroll_y=ratio*ws->edit_max_scroll_y;ws->edit_reveal_caret=false;
         } else if (ws->is_virtual_list) {
             ws->vscroll_pos_y = static_cast<double>(ratio) * ws->vscroll_max_y;

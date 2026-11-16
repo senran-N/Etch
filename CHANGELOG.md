@@ -4,6 +4,23 @@ All notable changes to Etch are documented here. This file follows
 [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.0] - 2026-11-16
+
+### Added
+- Symmetric vertical shrink constraints, horizontal scrollbar interaction, accessible split hit regions and keyboard resizing.
+- Explicit display selection and logical minimum-size desktop window helpers.
+- Virtualized combo popups with keyboard selection reveal, page navigation and Home/End.
+- Shared horizontal table scrolling, keyboard row navigation and caller-owned multi-selection bitmaps.
+- Eight external texture slots per batch, 64 font slots and 1024 vector-icon slots.
+- Inside/center/outside borders and GPU clip chains preserving nested asymmetric rounded corners.
+
+### Changed
+- Texture uploads share a queued command buffer and reusable cycled staging storage; `flush_texture_uploads` supports consumers outside Etch rendering.
+- Axis-aligned image and glass bounds join rectangle/clip pixel snapping; text clipping uses glyph-local coordinates.
+- Borderless Windows chrome enables a native DWM frame while preserving unrelated runtime window styles on disable/release.
+- C99 descriptors and exports mirror every added public API. Regenerated DXIL, SPIR-V and offline Metal shader fallbacks share the updated bindings.
+- Historical audit implementation, regression evidence and remaining platform acceptance are recorded in `CLOSURE.md`.
+
 ## [0.12.0] - 2026-11-16
 
 ### Added

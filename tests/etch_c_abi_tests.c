@@ -465,9 +465,17 @@ int main(void) {
         return 1;
     }
 
+    uint32_t selected_focus=70u, selected_anchor=70u;
+    uint64_t selected_bits[2]={0u,64u};
+    EtchTableSelection selection={&selected_focus,&selected_anchor,selected_bits,2u};
+    const bool ok_closure=etch_table_row_selected(&selection,70u) &&
+        !etch_table_row_selected(&selection,69u) && !etch_table_row_selected(&selection,128u) &&
+        etch_table_desc_default().horizontal_scroll && etch_table_desc_default().keyboard_navigation &&
+        etch_split_desc_default().divider_hit_px==8.0f &&
+        !etch_box_desc_default().shrink_height && etch_rect_draw_desc_default().border_align==ETCH_BORDER_INSIDE;
     const bool ok_numerals = etch_set_font_tabular_numbers(ctx, ETCH_FONT_SANS, true) &&
         etch_set_font_tabular_numbers(ctx, ETCH_FONT_SANS, false);
-    const bool ok_layout = ok_numerals && test_layout_widgets_and_a11y(ctx);
+    const bool ok_layout = ok_closure && ok_numerals && test_layout_widgets_and_a11y(ctx);
     const bool ok_editor = test_text_buffer_and_code_editor(ctx);
     const bool ok_containers = test_containers_and_canvas(ctx);
 

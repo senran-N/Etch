@@ -361,7 +361,9 @@ typedef struct Clay_LayoutConfig {
     Clay_LayoutDirection layoutDirection; // Controls the direction in which child elements will be automatically laid out.
     bool wrap;
     bool percentAfterFixed;
-    bool shrinkWidth; // Etch: opt-in content-independent minimum for flexible items.
+    float percentMinFirst, percentMinSecond;
+    bool shrinkWidth;
+    bool shrinkHeight; // Etch: opt-in content-independent minimum for flexible items.
     uint16_t crossChildGap, gridColumns, gridTrackCount;
     const Clay__GridTrack *gridTracks;
     uint16_t gridColSpan;
@@ -2127,6 +2129,10 @@ void Clay__CloseElement(void) {
         openLayoutElement->minDimensions.width = leftRightPadding;
     }
 
+    if (layoutConfig->shrinkHeight && (layoutConfig->sizing.height.type == CLAY__SIZING_TYPE_FIT || layoutConfig->sizing.height.type == CLAY__SIZING_TYPE_GROW)) {
+        openLayoutElement->minDimensions.height = topBottomPadding;
+    }
+
     // Clamp element min and max width to the values configured in the layout
     if (layoutConfig->sizing.width.type != CLAY__SIZING_TYPE_PERCENT) {
         if (layoutConfig->sizing.width.size.minMax.max <= 0) { // Set the max size if the user didn't specify, makes calculations easier
@@ -2615,6 +2621,12 @@ void Clay__SizeContainersAlongAxis(bool xAxis, float deltaTime, Clay__int32_tArr
                         }
                     }
                     *childSize = CLAY__MAX(0,percentSpace) * childSizing.size.percent;
+                    if(sizingAlongAxis && parentLayoutConfig->percentAfterFixed) {
+                        float lo=CLAY__MIN(parentLayoutConfig->percentMinFirst,CLAY__MAX(0,percentSpace));
+                        float hi=CLAY__MAX(0,percentSpace-parentLayoutConfig->percentMinSecond);
+                        if(lo>hi) lo=hi=(lo+hi)*0.5f;
+                        *childSize=CLAY__MIN(hi,CLAY__MAX(lo,*childSize));
+                    }
                     if (sizingAlongAxis) {
                         innerContentSize += *childSize;
                     }
@@ -2632,7 +2644,7 @@ void Clay__SizeContainersAlongAxis(bool xAxis, float deltaTime, Clay__int32_tArr
                         for (int32_t i = 0; i < resizableContainerBuffer.length; ++i) {
                             int32_t index = resizableContainerBuffer.internalArray[i];
                             Clay_LayoutElement *child = Clay_LayoutElementArray_Get(&context->layoutElements, index);
-                            if (xAxis && ((child->isTextElement && child->textConfig.ellipsis) || child->config.layout.shrinkWidth))
+                            if ((xAxis && ((child->isTextElement && child->textConfig.ellipsis) || child->config.layout.shrinkWidth)) || (!xAxis && child->config.layout.shrinkHeight))
                                 resizableContainerBuffer.internalArray[kept++] = index;
                         }
                         resizableContainerBuffer.length = kept;
@@ -2731,7 +2743,7 @@ void Clay__SizeContainersAlongAxis(bool xAxis, float deltaTime, Clay__int32_tArr
                     float maxSize = parentSize - parentPadding;
                     // If we're laying out the children of a scroll panel, grow containers expand to the size of the inner content, not the outer container
                     if (((xAxis && parent->config.clip.horizontal) || (!xAxis && parent->config.clip.vertical)) &&
-                        !(xAxis && ((childElement->isTextElement && childElement->textConfig.ellipsis) || childElement->config.layout.shrinkWidth))) {
+                        !((xAxis && ((childElement->isTextElement && childElement->textConfig.ellipsis) || childElement->config.layout.shrinkWidth)) || (!xAxis && childElement->config.layout.shrinkHeight))) {
                         maxSize = CLAY__MAX(maxSize, innerContentSize);
                     }
                     if (childSizing.type == CLAY__SIZING_TYPE_GROW) {

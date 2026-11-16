@@ -1,4 +1,4 @@
-# Etch v0.12.0
+# Etch v0.13.0
 
 Etch is a Pure-GPU UI Engine for desktop applications on Windows, Linux, and
 macOS. It combines immediate UI construction, Clay layout, Unicode text
@@ -6,8 +6,8 @@ handling, a pure C99 ABI facade (`<etch/etch_c.h>`), and SDL3 GPU rendering. The
 sandbox is the regression harness; Etch Studio demonstrates docking, tables,
 trees, themes, and a virtual editor.
 
-The v0.12 workbench changes and audit corrections are tracked in
-[AUDIT_v0.12.md](AUDIT_v0.12.md). Descriptor additions require recompiling
+The historical audit closure and current verification boundaries are tracked in
+[CLOSURE.md](CLOSURE.md); the v0.12 corrections are in [AUDIT_v0.12.md](AUDIT_v0.12.md). Descriptor additions require recompiling
 consumers. Mark titlebar layout containers with `window_drag_passthrough=true`
 and register custom maximize controls with `window_maximize_button_region(id)`.
 
@@ -184,20 +184,25 @@ has been dedicated to the public domain and requires credit for distribution:
 high-density window from logical dimensions, fitting its client area to the primary
 usable display. Pass SDL events to `process_event` and use `begin_window_frame`;
 helper-created normal windows resize proportionally when the display scale changes.
-Maximized/fullscreen windows retain OS-managed sizes. Existing minimum sizes set with
-`SDL_SetWindowMinimumSize` follow subsequent DPI changes on helper-created windows.
+Maximized/fullscreen windows retain OS-managed sizes. Use `create_desktop_window_on_display` for a specific SDL display ID (0 means primary),
+or `create_desktop_window_at_pointer` for the cursor display.
+`set_desktop_window_min_size(window, logical_w, logical_h)` stores logical minima
+and reapplies them on DPI changes without repeated rounding drift. Existing raw minima
+set with `SDL_SetWindowMinimumSize` scale proportionally on helper-created windows.
 Destroy with `SDL_DestroyWindow`.
 
 `FrameDesc::pixel_snap` / `WindowFrameDesc::pixel_snap` default to true. Rectangle
-edges, layout clip bounds and border widths snap after DPI conversion; subpixel
+edges, images, glass bounds, layout clip bounds and border widths snap after DPI conversion; subpixel
 rectangles keep their original bounds when snapping would collapse them. Text, rotated shapes, shadows,
 and soft rectangles retain fractional positioning. Set false for continuous animation.
 `RectDrawDesc::softness` is a physical-pixel AA width (minimum 0.5), for solid and
-gradient axis-aligned rectangles. Borders occupy the inside of the rectangle.
+gradient axis-aligned rectangles. `border_align` selects Inside (default), Center or
+Outside for boxes and immediate rectangles; layout dimensions retain their original size.
 
 Use `.shrink_width = true` on a Fit/Grow content box in a toolbar to let it shrink
 below its intrinsic text width and clip overflow; give a trailing close button a
-fixed width. Fixed and Percent items retain their explicit sizing rules.
+fixed width. `shrink_height` applies the same rule to vertical workspaces, preserving
+a fixed footer below a flexible panel. Fixed and Percent items retain their explicit sizing rules.
 `TextDrawDesc{..., .max_width_px = 100, .ellipsis = true}` limits each drawn line in
 logical pixels using the shared cluster-safe BiDi text engine. With ellipsis, alignment
 uses the elided line width. Without ellipsis, alignment positions the original line:
@@ -212,9 +217,9 @@ and `etch_spring_from`; initialize descriptors with their `*_default()` function
 `BoxDesc::continuous_corners = true` and `RectDrawDesc::continuous_corners = true`
 use exponent-4 superellipse corner segments with zero curvature at straight joins.
 This is a gradient-normalized distance approximation, not an exact Apple corner profile.
-Box fills, borders, shadows and uniform-radius child clips share the mode. Child clips
-still store one radius (the minimum of the four); asymmetric/nested intersections do
-not preserve four independent corner radii. Circular corners remain the default.
+Box fills, borders, shadows and child clips share the mode. Nonuniform and nested
+rounded clips preserve all four corner radii through an indexed GPU clip chain, including
+zero-radius child clips inside a rounded parent. Circular corners remain the default.
 
 For a downward card shadow use `shadow_offset = {0, 12}`, `shadow_blur = 20`,
 `shadow_spread = -6`; box values are logical pixels. Low-level `Prim::make_shadow`
@@ -224,7 +229,8 @@ accepts offset/spread in physical pixels. A spread that collapses the shadow omi
 SemiBold probes `seguisb.ttf`. Missing faces render with Sans, and
 `is_font_loaded(ctx, slot)` reports whether the requested face actually loaded.
 Applications can load their own 500/600 faces into these slots. Automatic custom
-font allocation uses 3–13; variable-font axis selection is not implemented.
+font allocation uses slots 3–63, skipping reserved slots 14 and 15; up to 64 fonts
+and 1024 vector icons are supported. Variable-font axis selection is not implemented.
 Before starting a frame, call `set_font_tabular_numbers(ctx, font_id, true)` to
 request OpenType `tnum` consistently in measured and rendered text. The font must
 provide the feature; it is not synthesized. Load a separate custom slot if prose
@@ -233,3 +239,29 @@ and numeric columns need different numeral settings for the same face.
 Tables accept `show_column_lines = false` and `header_font_size_px = 14` for a
 line-free header with existing configurable zebra rows. Scroll edge fade masks
 are not implemented. C99 exposes the corresponding descriptors and font API.
+
+### Desktop navigation and texture uploads
+
+Tables share a horizontal viewport between header and rows. `horizontal_scroll`
+and `keyboard_navigation` default to true; `show_scrollbar = false` hides both thumbs.
+Use `TableSelection` with caller-owned focus/anchor rows and a bitmap of at least
+`ceil(item_count / 64)` words for Shift ranges, Primary toggles and Primary+A.
+Arrow keys, PageUp/PageDown and Home/End reveal the focused row. Initialize focus
+and anchor to `UINT32_MAX` for no selection. The existing `selected_row` API remains available; an explicit `selection` takes precedence
+for highlighting, so a cleared bitmap bit stays unselected even when legacy focus is retained.
+
+`SplitDesc::divider_size_px` sets visual thickness; `divider_hit_px` defaults to 8
+for a thin divider that remains easy to drag. Tab focus enables arrow-key resizing
+with `keyboard_step_px` (default 8), and Home/End obey pane minima. Combo popups
+virtualize visible rows and reveal keyboard selection, including PageUp/PageDown and Home/End.
+
+A batch accepts eight distinct external textures plus the atlas. Texture creation
+and updates copy caller pixels immediately into a reusable cycled staging buffer,
+then queue their GPU copies together. Etch flushes the upload command buffer before
+rendering. If another renderer consumes a texture first, call `flush_texture_uploads(ctx)`
+(`etch_flush_texture_uploads` in C99) on the owning GPU thread before submitting its commands.
+Destroying a texture flushes pending uploads; destroying the context cancels them.
+
+v0.13 extends C++/C99 descriptors and changes packed `Prim` header bindings while
+preserving its 64-byte size. Recompile downstream consumers and use matching shader
+headers. DXIL, SPIR-V and offline Metal fallbacks are regenerated from the same HLSL.

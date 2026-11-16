@@ -593,6 +593,19 @@ inline bool verify_os_window_a11y_checks() noexcept {
     process_event(wctx,dpi_event);SDL_GetWindowMinimumSize(win,&min_w,&min_h);
     check(min_w==240 && min_h==160,__LINE__); // Duplicate events must not rescale twice.
     SDL_SetWindowMinimumSize(win,0,0);
+    check(set_desktop_window_min_size(win,121,81),__LINE__);
+    SDL_GetWindowMinimumSize(win,&min_w,&min_h);
+    check(min_w==int(std::ceil(121*coordinate_scale)) && min_h==int(std::ceil(81*coordinate_scale)),__LINE__);
+    SDL_SetFloatProperty(SDL_GetWindowProperties(win),"etch.desktop.coordinate_scale",coordinate_scale*.5f);
+    process_event(wctx,dpi_event);SDL_GetWindowMinimumSize(win,&min_w,&min_h);
+    check(min_w==int(std::ceil(121*coordinate_scale)) && min_h==int(std::ceil(81*coordinate_scale)),__LINE__);
+    check(set_desktop_window_min_size(win,0,0),__LINE__);
+    SDL_Window* target=create_desktop_window_on_display("Display target",160,100,SDL_GetPrimaryDisplay(),SDL_WINDOW_HIDDEN);
+    check(target && SDL_GetDisplayForWindow(target)==SDL_GetPrimaryDisplay(),__LINE__);
+    if(target) SDL_DestroyWindow(target);
+    target=create_desktop_window_at_pointer("Pointer target",160,100,SDL_WINDOW_HIDDEN);
+    check(target!=nullptr,__LINE__);if(target)SDL_DestroyWindow(target);
+
 
     // 3a. Chrome + safe insets + windowed vs fullscreen hit-testing
     set_window_chrome({
@@ -633,6 +646,25 @@ inline bool verify_os_window_a11y_checks() noexcept {
         POINT point={LONG(100*factor),LONG(16*factor)};ClientToScreen(native,&point);
         check(SendMessageW(native,WM_NCHITTEST,0,MAKELPARAM(point.x,point.y))==HTMAXBUTTON,__LINE__);
     }
+#endif
+#if defined(_WIN32) && defined(ETCH_ENABLE_OS_A11Y) && ETCH_ENABLE_OS_A11Y
+    // Native frame changes preserve unrelated state and restore only frame style bits.
+    if(SDL_Window* borderless=SDL_CreateWindow("Native frame lifecycle",320,200,SDL_WINDOW_HIDDEN|SDL_WINDOW_BORDERLESS|SDL_WINDOW_RESIZABLE)) {
+        begin_window_frame(wctx,borderless,0);end_window_frame(wctx);
+        HWND native=static_cast<HWND>(SDL_GetPointerProperty(SDL_GetWindowProperties(borderless),SDL_PROP_WINDOW_WIN32_HWND_POINTER,nullptr));
+        const LONG_PTR mask=WS_CAPTION|WS_THICKFRAME|WS_SYSMENU|WS_MINIMIZEBOX|WS_MAXIMIZEBOX;
+        const LONG_PTR before=GetWindowLongPtrW(native,GWL_STYLE);
+        set_window_chrome({.enabled=true},borderless);
+        check((GetWindowLongPtrW(native,GWL_STYLE)&mask)==mask,__LINE__);
+        SetWindowLongPtrW(native,GWL_STYLE,GetWindowLongPtrW(native,GWL_STYLE)|WS_DISABLED);
+        set_window_chrome({.enabled=false},borderless);
+        check((GetWindowLongPtrW(native,GWL_STYLE)&mask)==(before&mask),__LINE__);
+        check((GetWindowLongPtrW(native,GWL_STYLE)&WS_DISABLED)!=0,__LINE__);
+        set_window_chrome({.enabled=true},borderless);release_window(wctx,borderless);
+        check((GetWindowLongPtrW(native,GWL_STYLE)&mask)==(before&mask),__LINE__);
+        check((GetWindowLongPtrW(native,GWL_STYLE)&WS_DISABLED)!=0,__LINE__);
+        SDL_DestroyWindow(borderless);
+    } else check(false,__LINE__);
 #endif
     const bool fs_ok = set_window_fullscreen(true, win);
     if (fs_ok && is_window_fullscreen(wctx, win)) {

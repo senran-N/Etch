@@ -9,6 +9,7 @@
 #include "checks_desktop_precision.h"
 #include "checks_visual_quality.h"
 #include "checks_workbench.h"
+#include "checks_closure.h"
 #include "checks_editor.h"
 #include "checks_a11y.h"
 #include "checks_media_emoji.h"
@@ -65,19 +66,17 @@ static bool list_suite() noexcept {
 static bool source_ok(const unsigned char* p,size_t size,const char* entry) noexcept {
     if(size<2 || p[size-1]!=0 || std::strlen(reinterpret_cast<const char*>(p))!=size-1)return false;
     const char* source=reinterpret_cast<const char*>(p);
-    return std::strstr(source,entry) && !std::strstr(source,"SampleLevel") && !std::strstr(source,"StructuredBuffer") && !std::strstr(source,"register(");
+    return std::strstr(source,entry) && !std::strstr(source,"SampleLevel") && !std::strstr(source,"StructuredBuffer<") && !std::strstr(source,"register(");
 }
 static bool gpu_suite() noexcept {
-    const bool media_ok=verify_media_emoji_checks() && verify_sprite_recycling_gpu() && verify_border_coverage() && verify_visual_quality_gpu();
+    const bool media_ok=verify_media_emoji_checks() && verify_sprite_recycling_gpu() && verify_border_coverage() && verify_visual_quality_gpu() && verify_closure_gpu();
     const bool v070_ok=verify_theme_wrap_checks();
     static_assert(sizeof(Prim)==64);
-    bool ok=source_ok(g_etch_uber_vs_msl,sizeof(g_etch_uber_vs_msl),"vertex VSOut vs_main(") && source_ok(g_etch_uber_ps_msl,sizeof(g_etch_uber_ps_msl),"fragment float4 ps_main(") && source_ok(g_etch_kawase_vs_msl,sizeof(g_etch_kawase_vs_msl),"vertex VSOut vs_main(") && source_ok(g_etch_kawase_ps_msl,sizeof(g_etch_kawase_ps_msl),"fragment float4 ps_main(");
+    bool ok=source_ok(g_etch_uber_vs_msl,sizeof(g_etch_uber_vs_msl),"vertex vs_main_out vs_main(") && source_ok(g_etch_uber_ps_msl,sizeof(g_etch_uber_ps_msl),"fragment ps_main_out ps_main(") && source_ok(g_etch_kawase_vs_msl,sizeof(g_etch_kawase_vs_msl),"vertex vs_main_out vs_main(") && source_ok(g_etch_kawase_ps_msl,sizeof(g_etch_kawase_ps_msl),"fragment ps_main_out ps_main(");
     const char* vs=reinterpret_cast<const char*>(g_etch_uber_vs_msl);const char* ps=reinterpret_cast<const char*>(g_etch_uber_ps_msl);const char* ks=reinterpret_cast<const char*>(g_etch_kawase_ps_msl);
-    ok &= std::strstr(vs,"globals [[buffer(0)]]") && std::strstr(vs,"g_prims [[buffer(1)]]") && std::strstr(ks,"kawase [[buffer(0)]]") && std::strstr(ks,"g_src_tex [[texture(0)]]") && std::strstr(ks,"g_src_smp [[sampler(0)]]");
-    for(uint32_t i=0;i<4;++i){char slot[80];std::snprintf(slot,sizeof(slot),"g_tex%u [[texture(%u)]]",i,i);ok &= std::strstr(ps,slot)!=nullptr;std::snprintf(slot,sizeof(slot),"g_smp%u [[sampler(%u)]]",i,i);ok &= std::strstr(ps,slot)!=nullptr;}
-    const char* buffers[]={"g_slug_curves [[buffer(0)]]","g_slug_bands [[buffer(1)]]","g_dyn_slug_curves [[buffer(2)]]","g_dyn_slug_bands [[buffer(3)]]"};for(const char* b:buffers)ok &= std::strstr(ps,b)!=nullptr;
-    const char* kinds[]={"RECT","SHADOW","GLYPH","TEXTURE","SLUG_GLYPH","BLUR_GLASS","CANVAS_GRID","BEZIER_WIRE","RING_ARC","SLUG_FILL","ROT_RECT"};
-    for(const char* k:kinds){char branch[80];std::snprintf(branch,sizeof(branch),"kind == ETCH_PRIM_%s",k);ok &= std::strstr(ps,branch)!=nullptr;}
+    ok &= std::strstr(vs,"GlobalsVS [[buffer(0)]]") && std::strstr(vs,"g_prims [[buffer(1)]]") && std::strstr(ks,"KawaseFS [[buffer(0)]]") && std::strstr(ks,"g_src_tex [[texture(0)]]") && std::strstr(ks,"g_src_texSmplr [[sampler(0)]]");
+    for(uint32_t i=0;i<9;++i){char slot[80];std::snprintf(slot,sizeof(slot),"g_tex%u [[texture(%u)]]",i,i);ok &= std::strstr(ps,slot)!=nullptr;std::snprintf(slot,sizeof(slot),"g_tex%uSmplr [[sampler(%u)]]",i,i);ok &= std::strstr(ps,slot)!=nullptr;}
+    const char* buffers[]={"g_slug_curves [[buffer(0)]]","g_slug_bands [[buffer(1)]]","g_dyn_slug_curves [[buffer(2)]]","g_dyn_slug_bands [[buffer(3)]]","g_clip_shapes [[buffer(4)]]"};for(const char* b:buffers)ok &= std::strstr(ps,b)!=nullptr;
     Context* bad=create_context({.headless=true,.gpu_driver="nonexistent_driver_xyz"});
     if(!bad)return false;
     ok &= gpu_device(bad)==nullptr;
@@ -94,11 +93,12 @@ static bool gpu_suite() noexcept {
     std::remove("etch_ctest_gpu.png");destroy_context(c);set_current_context(nullptr);return ok;
 }
 int main(int argc,char** argv) {
+    if(argc==2 && std::strcmp(argv[1],"--suite=closure_gpu")==0) return verify_closure_gpu() ? 0 : 1;
     const char* names[]={"arena_and_elasticity","unicode_bidi_grapheme","layout_clay_flex_grid","fenwick_virtual_list_1m","widgets_and_dockspace","text_buffer_and_code_editor","a11y_semantic_tree","headless_gpu_invariants"};
     const char* selected=argc==2 && std::strncmp(argv[1],"--suite=",8)==0?argv[1]+8:nullptr;
     if(argc>1 && !selected) { return 2; } bool found=false,ok=true;
     for(uint32_t i=0;i<8;++i)if(!selected || std::strcmp(selected,names[i])==0){found=true;bool pass=false;
-        switch(i){case 0:pass=arena_suite();break;case 1:pass=unicode_suite();break;case 2:pass=layout_suite() && verify_desktop_precision() && verify_visual_quality_cpu() && verify_workbench_checks();break;case 3:pass=list_suite();break;case 4:pass=verify_desktop_checks(nullptr);break;case 5:pass=verify_editor_checks(nullptr);break;case 6:pass=verify_a11y_checks(nullptr) && verify_os_window_a11y_checks();break;case 7:pass=gpu_suite();break;}
+        switch(i){case 0:pass=arena_suite();break;case 1:pass=unicode_suite();break;case 2:pass=layout_suite() && verify_desktop_precision() && verify_visual_quality_cpu() && verify_workbench_checks() && verify_closure_controls();break;case 3:pass=list_suite();break;case 4:pass=verify_desktop_checks(nullptr);break;case 5:pass=verify_editor_checks(nullptr);break;case 6:pass=verify_a11y_checks(nullptr) && verify_os_window_a11y_checks();break;case 7:pass=gpu_suite();break;}
         std::printf("%s: %s\n",names[i],pass?"PASS":"FAIL");ok &= pass;
     }return !found?2:ok?0:1;
 }

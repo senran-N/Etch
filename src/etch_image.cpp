@@ -112,7 +112,7 @@ bool grow_sprite_atlas(Context* ctx) noexcept {
         const float sx = float(a.width) / float(n), sy = float(a.height) / float(n);
         for (uint32_t i = 0; i < ctx->prim_count; ++i) {
             auto& p = ctx->prims[i];
-            if ((p.style.x & 0xFu) != uint32_t(PrimKind::Texture) || ((p.style.x >> 10) & 0x1FFu) != 0)
+            if ((p.style.x & 0xFu) != uint32_t(PrimKind::Texture) || ((p.style.x >> 10) & 0xFu) != 0)
                 continue;
             p.payload.x = pack_unorm16x2(float(p.payload.x & 65535u) / 65535.0f * sx,
                                          float(p.payload.x >> 16) / 65535.0f * sy);
@@ -148,7 +148,7 @@ bool compact_sprite_atlas(Context* ctx) noexcept {
     }
     for(uint32_t i=0;i<ctx->prim_count;++i) {
         auto& p=ctx->prims[i];
-        if((p.style.x&15u)!=uint32_t(PrimKind::Texture) || ((p.style.x>>10)&511u)!=0)continue;
+        if((p.style.x&15u)!=uint32_t(PrimKind::Texture) || ((p.style.x>>10)&15u)!=0)continue;
         const float u0=float(p.payload.x&65535u)/65535*float(a.width),v0=float(p.payload.x>>16)/65535*float(a.height);
         const float u1=float(p.payload.y&65535u)/65535*float(a.width),v1=float(p.payload.y>>16)/65535*float(a.height);
         const float mx=(u0+u1)*.5f,my=(v0+v1)*.5f;
@@ -326,7 +326,7 @@ bool update_sprite_rgba(Context* ctx, uint32_t id, uint32_t w, uint32_t h, const
         };
         for (uint32_t i = 0; i < ctx->prim_count; ++i) {
             auto& p = ctx->prims[i];
-            if ((p.style.x & 0xFu) != uint32_t(PrimKind::Texture) || ((p.style.x >> 10) & 0x1FFu) != 0)
+            if ((p.style.x & 0xFu) != uint32_t(PrimKind::Texture) || ((p.style.x >> 10) & 0xFu) != 0)
                 continue;
             const float u0 = float(p.payload.x & 65535u) / 65535.0f;
             const float v0 = float(p.payload.x >> 16) / 65535.0f;

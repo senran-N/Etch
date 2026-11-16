@@ -57,6 +57,7 @@ void end_frame(Context* ctx_arg) noexcept {
             continue;
         }
         const ClipEntry& cur_clip = clip_stack.entries[clip_stack.depth - 1u];
+        ctx->render_clip_index=cur_clip.indexed ? cur_clip.shape : 0;
         const Rect raw_box_px = {
             .x = cmd->boundingBox.x * dpi,
             .y = cmd->boundingBox.y * dpi,
@@ -117,21 +118,9 @@ void end_frame(Context* ctx_arg) noexcept {
                         if (extra->draw_head) {
                             ClipEntry draw_clip = cur_clip;
                             const bool box_clips =
-                                extra->desc.clip_children || extra->desc.scroll_x || extra->desc.scroll_y || extra->desc.shrink_width || extra->is_canvas;
+                                extra->desc.clip_children || extra->desc.scroll_x || extra->desc.scroll_y || extra->desc.shrink_width || extra->desc.shrink_height || extra->is_canvas;
                             if (box_clips) {
-                                const Rect clipped_rect = rect_intersect(cur_clip.rect, box_px);
-                                const Corners& c = extra->desc.radius;
-                                float cr = min4f(c.tl, c.tr, c.br, c.bl) * dpi;
-                                if (extra->desc.continuous_corners) cr = -cr;
-                                if (cr == 0.0f &&
-                                    clipped_rect.x == cur_clip.rect.x &&
-                                    clipped_rect.y == cur_clip.rect.y &&
-                                    clipped_rect.w == cur_clip.rect.w &&
-                                    clipped_rect.h == cur_clip.rect.h)
-                                {
-                                    cr = cur_clip.radius;
-                                }
-                                draw_clip = ClipEntry{ .rect = clipped_rect, .radius = cr };
+                                draw_clip=make_box_clip(ctx,cur_clip,box_px,scale_corners(extra->desc.radius,dpi),extra->desc.continuous_corners);
                             }
                             emit_draw_list_command(ctx, extra->draw_head, raw_box_px, draw_clip, dpi);
                         }
@@ -187,35 +176,13 @@ void end_frame(Context* ctx_arg) noexcept {
                     }
                 }
                 if (clip_stack.depth < kMaxClipDepth) {
-                    const Rect clipped_rect = rect_intersect(cur_clip.rect, box_px);
-                    float next_radius = 0.0f;
-                    if (extra) {
-                        const Corners& c = extra->desc.radius;
-                        next_radius = min4f(c.tl, c.tr, c.br, c.bl) * dpi;
-                        if (extra->desc.continuous_corners) next_radius = -next_radius;
-                        if (extra->is_canvas) {
-                            ctx->active_ui->last_canvas_clip_px = clipped_rect;
-                            ctx->active_ui->last_canvas_clip_radius_px = next_radius;
-                        }
-                    } else if (clipped_rect.x == ctx->active_ui->last_canvas_clip_px.x &&
-                               clipped_rect.y == ctx->active_ui->last_canvas_clip_px.y &&
-                               clipped_rect.w == ctx->active_ui->last_canvas_clip_px.w &&
-                               clipped_rect.h == ctx->active_ui->last_canvas_clip_px.h)
-                    {
-                        next_radius = ctx->active_ui->last_canvas_clip_radius_px;
+                    clip_stack.entries[clip_stack.depth]=extra ? make_box_clip(ctx,cur_clip,box_px,scale_corners(extra->desc.radius,dpi),extra->desc.continuous_corners)
+                        : ClipEntry{rect_intersect(cur_clip.rect,box_px),cur_clip.radius,cur_clip.shape,cur_clip.indexed};
+                    if(extra && extra->is_canvas) {
+                        ctx->active_ui->last_canvas_clip_px=clip_stack.entries[clip_stack.depth].rect;
+                        ctx->active_ui->last_canvas_clip_radius_px=clip_stack.entries[clip_stack.depth].radius;
                     }
-                    if (next_radius == 0.0f &&
-                        clipped_rect.x == cur_clip.rect.x &&
-                        clipped_rect.y == cur_clip.rect.y &&
-                        clipped_rect.w == cur_clip.rect.w &&
-                        clipped_rect.h == cur_clip.rect.h)
-                    {
-                        next_radius = cur_clip.radius;
-                    }
-                    clip_stack.entries[clip_stack.depth++] = ClipEntry{
-                        .rect = clipped_rect,
-                        .radius = next_radius,
-                    };
+                    ++clip_stack.depth;
                 }
                 break;
             }
@@ -235,13 +202,14 @@ void end_frame(Context* ctx_arg) noexcept {
                 }
                 const BoxDesc& d = extra->desc;
                 const bool is_scroll = d.scroll_x || d.scroll_y || extra->is_virtual_list;
-                const bool any_clip = d.clip_children || is_scroll || d.shrink_width;
+                const bool any_clip = d.clip_children || is_scroll || d.shrink_width || d.shrink_height;
 
-                if ((d.scroll_y || extra->is_virtual_list) && d.show_scrollbar && d.id != 0u) {
+                if ((d.scroll_x || d.scroll_y || extra->is_virtual_list) && d.show_scrollbar && d.id != 0u) {
                     if (const WidgetState* ws = state_map_find(&ctx->active_ui->states, d.id)) {
-                        const ScrollbarGeom sb = compute_vscrollbar_geom(ws);
+                        for(uint32_t axis=0;axis<2;++axis) {
+                        const ScrollbarGeom sb = axis ? compute_hscrollbar_geom(ws) : compute_vscrollbar_geom(ws);
                         if (sb.visible) {
-                            const uint32_t thumb_id = id_index(d.id, kScrollbarYTag);
+                            const uint32_t thumb_id = id_index(d.id,axis ? kScrollbarXTag : kScrollbarYTag);
                             const bool sb_active = (ctx->active_ui->active_id == thumb_id);
                             const bool sb_hover = (ctx->active_ui->active_id == 0u) && sb.hit_track.contains(ctx->active_ui->pointer_pos) &&
                                 Clay_PointerOver(make_clay_id(d.id));
@@ -257,7 +225,7 @@ void end_frame(Context* ctx_arg) noexcept {
                                     track_px,
                                     cur_clip.rect,
                                     track_col,
-                                    Corners::all(0.5f * track_px.w),
+                                    Corners::all(0.5f * std::fmin(track_px.w,track_px.h)),
                                     {},
                                     0.0f,
                                     1.0f,
@@ -268,11 +236,12 @@ void end_frame(Context* ctx_arg) noexcept {
                                     thumb_px,
                                     cur_clip.rect,
                                     thumb_col,
-                                    Corners::all(0.5f * thumb_px.w),
+                                    Corners::all(0.5f * std::fmin(thumb_px.w,thumb_px.h)),
                                     {},
                                     0.0f,
                                     1.0f,
                                     cur_clip.radius));
+                        }
                         }
                     }
                 }
@@ -282,13 +251,16 @@ void end_frame(Context* ctx_arg) noexcept {
                     const ClipEntry& parent_clip = (clip_stack.depth > 1u)
                         ? clip_stack.entries[clip_stack.depth - 2u]
                         : clip_stack.entries[0];
+                    ctx->render_clip_index=parent_clip.indexed ? parent_clip.shape : 0;
+                    Rect border_bounds=box_px;Corners border_corners=scale_corners(d.radius,dpi);
+                    align_border_bounds(&border_bounds,&border_corners,d.border_width*dpi,d.border_align);
                     push_prim(
                         ctx,
                         continuous_prim(Prim::make_rect(
-                            box_px,
+                            border_bounds,
                             parent_clip.rect,
                             Color::transparent(),
-                            scale_corners(d.radius, dpi),
+                            border_corners,
                             d.border_color,
                             d.border_width * dpi,
                             1.0f,

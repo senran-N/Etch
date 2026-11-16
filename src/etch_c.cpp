@@ -147,7 +147,7 @@ inline etch::BoxDesc to_cpp(const EtchBoxDesc& d) noexcept {
     out.border_color = to_cpp(d.border_color); out.border_width = d.border_width;
     out.radius = to_cpp(d.radius); out.shadow_color = to_cpp(d.shadow_color);
     out.shadow_spread = d.shadow_spread; out.shadow_blur = d.shadow_blur; out.shadow_offset = to_cpp(d.shadow_offset);
-    out.window_drag_passthrough = d.window_drag_passthrough; out.continuous_corners = d.continuous_corners; out.shrink_width = d.shrink_width; out.clip_children = d.clip_children; out.scroll_x = d.scroll_x; out.scroll_y = d.scroll_y;
+    out.border_align=static_cast<etch::BorderAlign>(d.border_align); out.window_drag_passthrough = d.window_drag_passthrough; out.continuous_corners = d.continuous_corners; out.shrink_width = d.shrink_width; out.shrink_height = d.shrink_height; out.clip_children = d.clip_children; out.scroll_x = d.scroll_x; out.scroll_y = d.scroll_y;
     out.show_scrollbar = d.show_scrollbar; out.focusable = d.focusable;
     out.attach_to = static_cast<etch::AttachTo>(d.attach_to);
     out.attach_element_id = d.attach_element_id;
@@ -255,7 +255,7 @@ EtchBoxDesc etch_box_desc_default(void) {
             static_cast<EtchAnchor>(d.anchor_element), static_cast<EtchAnchor>(d.anchor_parent),
             from_cpp(d.floating_offset), d.z_index, d.pointer_passthrough, d.clip_to_parent,
             d.backdrop_blur, d.clamp_to_viewport, d.wrap, d.row_gap, d.aspect_ratio,
-            d.grid_columns, nullptr, 0u, d.grid_col_span, d.shrink_width, d.continuous_corners, d.shadow_spread, d.window_drag_passthrough};
+            d.grid_columns, nullptr, 0u, d.grid_col_span, d.shrink_width, d.shrink_height, d.continuous_corners, d.shadow_spread, d.window_drag_passthrough,static_cast<EtchBorderAlign>(d.border_align)};
 }
 
 EtchTextDesc etch_text_desc_default(void) {
@@ -304,7 +304,7 @@ EtchRectDrawDesc etch_rect_draw_desc_default(void) {
     const etch::RectDrawDesc d{};
     return {from_cpp(d.rect), from_cpp(d.fill), from_cpp(d.fill_end), from_cpp(d.gradient_dir),
             d.radial_gradient, from_cpp(d.radius), from_cpp(d.border_color), d.border_width,
-            d.foreground, d.angle_rad, d.softness, d.continuous_corners};
+            d.foreground, d.angle_rad, d.softness, d.continuous_corners,static_cast<EtchBorderAlign>(d.border_align)};
 }
 
 EtchLineDesc etch_line_draw_desc_default(void) {
@@ -481,7 +481,7 @@ EtchComboBoxDesc etch_combo_box_desc_default(void) {
 EtchPopupDesc etch_popup_desc_default(void) {
     const etch::PopupDesc d{};
     return {d.id, d.trigger_id, from_cpp(d.width), from_cpp(d.height), from_cpp(d.padding),
-            d.gap, from_cpp(d.background), from_cpp(d.border_color), from_cpp(d.radius), d.z_index,d.attach_to_trigger,d.match_trigger_width};
+            d.gap, from_cpp(d.background), from_cpp(d.border_color), from_cpp(d.radius), d.z_index,d.attach_to_trigger,d.match_trigger_width,d.scroll_y};
 }
 
 EtchMenuBarDesc etch_menu_bar_desc_default(void) {
@@ -505,7 +505,7 @@ EtchSplitDesc etch_split_desc_default(void) {
     return {d.id, static_cast<EtchAxis>(d.axis), from_cpp(d.width), from_cpp(d.height),
             d.default_ratio, d.min_first_px, d.min_second_px, d.divider_size_px,
             from_cpp(d.divider_color), from_cpp(d.divider_hover_color),
-            from_cpp(d.divider_active_color)};
+            from_cpp(d.divider_active_color), d.divider_hit_px, d.keyboard_step_px};
 }
 
 EtchVirtualListDesc etch_virtual_list_desc_default(void) {
@@ -542,7 +542,7 @@ EtchTableDesc etch_table_desc_default(void) {
             d.overscan_rows, d.default_sort_column, d.default_sort_descending, d.cell_padding_x,
             from_cpp(d.width), from_cpp(d.height), from_cpp(d.padding), from_cpp(d.background),
             from_cpp(d.header_background), from_cpp(d.zebra_color), from_cpp(d.hover_row_color),
-            from_cpp(d.border_color), d.border_width, from_cpp(d.radius), d.show_scrollbar, d.show_column_lines, d.header_font_size_px, d.selected_row, from_cpp(d.selected_row_color)};
+            from_cpp(d.border_color), d.border_width, from_cpp(d.radius), d.show_scrollbar, d.show_column_lines, d.header_font_size_px, d.selected_row, from_cpp(d.selected_row_color),d.horizontal_scroll,d.keyboard_navigation,{d.selection.focused_row,d.selection.anchor_row,d.selection.selected_words,d.selection.word_count}};
 }
 
 EtchTreeNodeDesc etch_tree_node_desc_default(void) {
@@ -872,7 +872,7 @@ void etch_draw_rect(const EtchRectDrawDesc* desc) {
     if (!desc) return;
     etch::draw_rect({to_cpp(desc->rect), to_cpp(desc->fill), to_cpp(desc->fill_end),
                      to_cpp(desc->gradient_dir), desc->radial_gradient, to_cpp(desc->radius),
-                     to_cpp(desc->border_color), desc->border_width, desc->foreground, desc->angle_rad, desc->softness, desc->continuous_corners});
+                     to_cpp(desc->border_color), desc->border_width, desc->foreground, desc->angle_rad, desc->softness, desc->continuous_corners,static_cast<etch::BorderAlign>(desc->border_align)});
 }
 void etch_draw_line(const EtchLineDesc* desc) {
     if (!desc) return;
@@ -976,6 +976,7 @@ EtchLoadedTexture etch_create_texture_rgba(EtchContext* ctx, const EtchTextureDe
         desc->debug_name, desc->premultiplied_alpha});
     return {t.texture, t.width, t.height};
 }
+bool etch_flush_texture_uploads(EtchContext* ctx) {return etch::flush_texture_uploads(reinterpret_cast<etch::Context*>(ctx));}
 bool etch_update_texture_rgba(EtchContext* ctx, struct SDL_GPUTexture* texture, uint32_t width, uint32_t height, const void* rgba_pixels, uint32_t row_pitch_bytes) {
     return etch::update_texture_rgba(to_ctx(ctx), texture, width, height, rgba_pixels, row_pitch_bytes);
 }
@@ -1220,7 +1221,7 @@ bool etch_begin_popup(const EtchPopupDesc* desc) {
     if (!desc) return false;
     return etch::begin_popup({desc->id, desc->trigger_id, to_cpp(desc->width), to_cpp(desc->height),
                               to_cpp(desc->padding), desc->gap, to_cpp(desc->background),
-                              to_cpp(desc->border_color), to_cpp(desc->radius), desc->z_index,desc->attach_to_trigger,desc->match_trigger_width});
+                              to_cpp(desc->border_color), to_cpp(desc->radius), desc->z_index,desc->attach_to_trigger,desc->match_trigger_width,desc->scroll_y});
 }
 void etch_end_popup(void) { etch::end_popup(); }
 bool etch_begin_context_menu(uint32_t popup_id, uint32_t target_id) { return etch::begin_context_menu(popup_id, target_id); }
@@ -1319,6 +1320,9 @@ bool etch_accept_drag_payload(uint32_t target_id, uint32_t kind_hash, EtchDragPa
 }
 
 struct SDL_Window* etch_create_desktop_window(const char* title, float w, float h, uint64_t flags) { return etch::create_desktop_window(title, w, h, flags); }
+struct SDL_Window* etch_create_desktop_window_on_display(const char* title,float w,float h,uint32_t display,uint64_t flags) {return etch::create_desktop_window_on_display(title,w,h,display,flags);}
+struct SDL_Window* etch_create_desktop_window_at_pointer(const char* title,float w,float h,uint64_t flags) {return etch::create_desktop_window_at_pointer(title,w,h,flags);}
+bool etch_set_desktop_window_min_size(struct SDL_Window* window,float w,float h) {return etch::set_desktop_window_min_size(window,w,h);}
 float etch_spring_from(uint32_t anim_id, float target, float initial_value, EtchSpringSpec spec) { return etch::spring(anim_id, target, initial_value, to_cpp(spec)); }
 float etch_spring(uint32_t anim_id, float target, EtchSpringSpec spec) { return etch::spring(anim_id, target, to_cpp(spec)); }
 EtchVec2 etch_spring_vec2(uint32_t anim_id, EtchVec2 target, EtchSpringSpec spec) { return from_cpp(etch::spring_vec2(anim_id, to_cpp(target), to_cpp(spec))); }
@@ -1330,7 +1334,7 @@ EtchSplitResult etch_begin_split(const EtchSplitDesc* desc) {
     const etch::SplitResult r = etch::begin_split({
         desc->id, static_cast<etch::Axis>(desc->axis), to_cpp(desc->width), to_cpp(desc->height),
         desc->default_ratio, desc->min_first_px, desc->min_second_px, desc->divider_size_px,
-        to_cpp(desc->divider_color), to_cpp(desc->divider_hover_color), to_cpp(desc->divider_active_color)});
+        to_cpp(desc->divider_color), to_cpp(desc->divider_hover_color), to_cpp(desc->divider_active_color), desc->divider_hit_px, desc->keyboard_step_px});
     return {r.ratio, r.dragging};
 }
 void etch_split_second(void) { etch::split_second(); }
@@ -1391,6 +1395,9 @@ void etch_begin_dock_space(const EtchDockSpaceDesc* desc) {
 uint32_t etch_next_dock_pane(void) { return etch::next_dock_pane(); }
 void etch_end_dock_space(void) { etch::end_dock_space(); }
 
+bool etch_table_row_selected(const EtchTableSelection* s,uint32_t row) {
+    return s && etch::table_row_selected({s->focused_row,s->anchor_row,s->selected_words,s->word_count},row);
+}
 EtchTableResult etch_begin_table(const EtchTableDesc* desc) {
     if (!desc) return {};
     const etch::TableResult r = etch::begin_table({
@@ -1400,7 +1407,7 @@ EtchTableResult etch_begin_table(const EtchTableDesc* desc) {
         desc->overscan_rows, desc->default_sort_column, desc->default_sort_descending, desc->cell_padding_x,
         to_cpp(desc->width), to_cpp(desc->height), to_cpp(desc->padding), to_cpp(desc->background),
         to_cpp(desc->header_background), to_cpp(desc->zebra_color), to_cpp(desc->hover_row_color),
-        to_cpp(desc->border_color), desc->border_width, to_cpp(desc->radius), desc->show_scrollbar, desc->show_column_lines, desc->header_font_size_px, desc->selected_row, to_cpp(desc->selected_row_color)});
+        to_cpp(desc->border_color), desc->border_width, to_cpp(desc->radius), desc->show_scrollbar, desc->show_column_lines, desc->header_font_size_px, desc->selected_row, to_cpp(desc->selected_row_color),desc->horizontal_scroll,desc->keyboard_navigation,{desc->selection.focused_row,desc->selection.anchor_row,desc->selection.selected_words,desc->selection.word_count}});
     return {from_cpp(r.slice), r.sort_column, r.sort_descending, r.sort_changed};
 }
 bool etch_table_next_row(uint32_t* out_row_index, EtchColor row_bg_override, EtchColor row_border_override) {

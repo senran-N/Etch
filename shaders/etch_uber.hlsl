@@ -54,8 +54,8 @@ cbuffer GlobalsVS : register(b0, space1)
 };
 
 // Fragment stage bindings per SDL_CreateGPUShader:
-//   DXIL:  t0..t3, space2 + s0..s3, space2
-//   SPIRV: set 2 binding 0..3 combined image samplers
+//   DXIL:  t0..t8, space2 + s0..s8, space2
+//   SPIRV: set 2 binding 0..8 combined image samplers
 #ifdef __spirv__
 #define ETCH_COMBINED_SAMPLER(slot) [[vk::combinedImageSampler]] [[vk::binding(slot, 2)]]
 #else
@@ -74,22 +74,41 @@ ETCH_COMBINED_SAMPLER(2) SamplerState      g_smp2 : register(s2, space2);
 ETCH_COMBINED_SAMPLER(3) Texture2D<float4> g_tex3 : register(t3, space2);
 ETCH_COMBINED_SAMPLER(3) SamplerState      g_smp3 : register(s3, space2);
 
+ETCH_COMBINED_SAMPLER(4) Texture2D<float4> g_tex4 : register(t4, space2);
+ETCH_COMBINED_SAMPLER(4) SamplerState g_smp4 : register(s4, space2);
+ETCH_COMBINED_SAMPLER(5) Texture2D<float4> g_tex5 : register(t5, space2);
+ETCH_COMBINED_SAMPLER(5) SamplerState g_smp5 : register(s5, space2);
+ETCH_COMBINED_SAMPLER(6) Texture2D<float4> g_tex6 : register(t6, space2);
+ETCH_COMBINED_SAMPLER(6) SamplerState g_smp6 : register(s6, space2);
+ETCH_COMBINED_SAMPLER(7) Texture2D<float4> g_tex7 : register(t7, space2);
+ETCH_COMBINED_SAMPLER(7) SamplerState g_smp7 : register(s7, space2);
+ETCH_COMBINED_SAMPLER(8) Texture2D<float4> g_tex8 : register(t8, space2);
+ETCH_COMBINED_SAMPLER(8) SamplerState g_smp8 : register(s8, space2);
+
 #ifdef __spirv__
 #define ETCH_FRAG_STORAGE(slot) [[vk::binding(slot, 2)]]
 #else
 #define ETCH_FRAG_STORAGE(slot)
 #endif
 
-ETCH_FRAG_STORAGE(4) StructuredBuffer<uint4> g_slug_curves : register(t4, space2);
-ETCH_FRAG_STORAGE(5) StructuredBuffer<uint2> g_slug_bands  : register(t5, space2);
+ETCH_FRAG_STORAGE(9) StructuredBuffer<uint4> g_slug_curves : register(t9, space2);
+ETCH_FRAG_STORAGE(10) StructuredBuffer<uint2> g_slug_bands  : register(t10, space2);
 
-ETCH_FRAG_STORAGE(6) StructuredBuffer<uint4> g_dyn_slug_curves : register(t6, space2);
-ETCH_FRAG_STORAGE(7) StructuredBuffer<uint2> g_dyn_slug_bands : register(t7, space2);
+ETCH_FRAG_STORAGE(11) StructuredBuffer<uint4> g_dyn_slug_curves : register(t11, space2);
+ETCH_FRAG_STORAGE(12) StructuredBuffer<uint2> g_dyn_slug_bands : register(t12, space2);
+
+struct ClipShape {
+    float4 bounds;
+    float4 radii;
+    uint4 meta;
+};
+ETCH_FRAG_STORAGE(13) StructuredBuffer<ClipShape> g_clip_shapes : register(t13, space2);
 
 struct VSOut
 {
     float4 position        : SV_Position;
     nointerpolation float2 rotation : TEXCOORD11;
+    nointerpolation uint clip_index : TEXCOORD12;
     float2 pixel_pos       : TEXCOORD0;
     nointerpolation float4 bounds         : TEXCOORD1;
     nointerpolation float4 clip           : TEXCOORD2;
@@ -178,8 +197,8 @@ VSOut vs_main(uint vertex_id : SV_VertexID, uint instance_id : SV_InstanceID)
     uint header      = p.style.x;
     uint kind        = header & 0xFu;
     uint flags       = (header >> 4) & 0x3Fu;
-    uint tex_slot    = (header >> 10) & 0x1FFu;
-    float clip_r     = float((header >> 20) & 0xFFFu) * ((header & (1u << 19)) != 0u ? -0.25f : 0.25f);
+    uint tex_slot    = (header >> 10) & 0xFu;
+    float clip_r     = (header & (1u<<18)) != 0u ? 0.0f : float((header >> 20) & 0xFFFu) * ((header & (1u << 19)) != 0u ? -0.25f : 0.25f);
 
     float2 bw_soft   = unpack_f16x2_custom(p.style.w);
     float2 r_tl_tr   = unpack_f16x2_custom(p.payload.z);
@@ -271,6 +290,7 @@ VSOut vs_main(uint vertex_id : SV_VertexID, uint instance_id : SV_InstanceID)
         1.0f
     );
     o.rotation = float2(c, sn);
+    o.clip_index=(header & (1u<<18)) != 0u ? ((header>>20) | (((header>>14)&15u)<<12)) : 0u;
     o.pixel_pos    = px;
     o.bounds       = p.bounds;
     o.clip         = p.clip;
@@ -519,6 +539,11 @@ float4 sample_slot(uint slot, float2 uv)
     if (slot == 1u) return g_tex1.SampleLevel(g_smp1, uv, 0.0f);
     if (slot == 2u) return g_tex2.SampleLevel(g_smp2, uv, 0.0f);
     if (slot == 3u) return g_tex3.SampleLevel(g_smp3, uv, 0.0f);
+    if (slot == 4u) return g_tex4.SampleLevel(g_smp4, uv, 0.0f);
+    if (slot == 5u) return g_tex5.SampleLevel(g_smp5, uv, 0.0f);
+    if (slot == 6u) return g_tex6.SampleLevel(g_smp6, uv, 0.0f);
+    if (slot == 7u) return g_tex7.SampleLevel(g_smp7, uv, 0.0f);
+    if (slot == 8u) return g_tex8.SampleLevel(g_smp8, uv, 0.0f);
     return g_tex0.SampleLevel(g_smp0, uv, 0.0f);
 }
 
@@ -565,9 +590,21 @@ float4 ps_main(VSOut input) : SV_Target0
         clip_d = max(cq.x, cq.y);
     }
     float clip_cov = saturate(0.5f - clip_d);
+    uint clip_index=input.clip_index;
+    [loop] while(clip_index!=0u) {
+        ClipShape shape=g_clip_shapes[clip_index];
+        float2 half_shape=shape.bounds.zw*0.5f;
+        float2 relative=input.pixel_pos-shape.bounds.xy-half_shape;
+        float distance=sd_rounded_box(relative,half_shape,shape.radii,shape.meta.y!=0u);
+        clip_cov=min(clip_cov,saturate(0.5f-distance));
+        clip_index=shape.meta.x;
+    }
     // Glyph/emoji reuse the wire cap flag for a second, horizontal text clip.
-    if ((kind == ETCH_PRIM_SLUG_GLYPH || kind == ETCH_PRIM_TEXTURE) && (flags & ETCH_FLAG_ROUND_CAP) != 0u)
-        clip_cov *= saturate(0.5f + min(input.pixel_pos.x - input.grad_params.x, input.grad_params.y - input.pixel_pos.x));
+    if ((kind == ETCH_PRIM_SLUG_GLYPH || kind == ETCH_PRIM_TEXTURE) && (flags & ETCH_FLAG_ROUND_CAP) != 0u) {
+        float2 text_center=input.bounds.xy+input.bounds.zw*0.5f;
+        float text_x=text_center.x+dot(input.rotation,input.pixel_pos-text_center);
+        clip_cov *= saturate(0.5f + min(text_x-input.grad_params.x,input.grad_params.y-text_x));
+    }
     if (clip_cov <= 0.0f)
     {
         return float4(0.0f, 0.0f, 0.0f, 0.0f);

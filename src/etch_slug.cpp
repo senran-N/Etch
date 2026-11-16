@@ -93,8 +93,8 @@ uint16_t resolve_target_font_slot(const FontAtlas* atlas, uint16_t slot_hint) no
     }
     // Keep the built-in Sans/Bold/Mono slots available for lazy loading.
     if (slot_hint == kInvalidFont) {
-        for (uint16_t i = 3u; i < kFontMedium; ++i) {
-            if (!atlas->slots[i].loaded) {
+        for (uint16_t i = 3u; i < kMaxFontSlots; ++i) {
+            if (i != kFontMedium && i != kFontSemiBold && !atlas->slots[i].loaded) {
                 return i;
             }
         }
