@@ -1317,7 +1317,7 @@ uint32_t next_dock_pane() noexcept {
             }
             if (target && accept_drag_payload(leaf_id, kInternalDockDragKind, &payload)) { c.move_pane = payload.u32; c.target = target; c.zone = z; }
         }
-        begin_box({ .axis = Axis::Col, .width = Sizing::percent(1), .height = Sizing::grow() }); c.pane_open = true;
+        begin_box({ .axis = Axis::Col, .width = Sizing::percent(1), .height = Sizing::grow(), .shrink_height = true }); c.pane_open = true;
         if (n.active) return n.active;
         end_box(); end_box(); c.pane_open = false;
     }
@@ -1487,11 +1487,11 @@ TableResult begin_table(const TableDesc& desc_in) noexcept {
     float content_min=desc.padding.left+desc.padding.right+gutter;
     for(uint32_t c=0;c<t.count;++c) content_min+=t.tracks[c].kind==SizingKind::Fixed ? t.col_widths[c] : t.columns[c].min_width;
     if(!desc.horizontal_scroll) content_min=0;
-    begin_box({ .id = id_index(desc.id,0x7402u), .axis = Axis::Col, .width = desc.width.kind == SizingKind::Grow ? Sizing::percent(1) : desc.width, .height = desc.height });
+    begin_box({ .id = id_index(desc.id,0x7402u), .axis = Axis::Col, .width = desc.width.kind == SizingKind::Grow ? Sizing::percent(1) : desc.width, .height = desc.height, .shrink_height = true });
     begin_box({ .id = outer_id, .axis = Axis::Col, .width = desc.width, .height = desc.height,
         .padding={0,0,0,desc.horizontal_scroll ? 12.0f : 0.0f},
         .background = desc.background, .border_color = desc.border_color, .border_width = desc.border_width, .radius = desc.radius,
-        .clip_children = true, .scroll_x=desc.horizontal_scroll,.show_scrollbar=desc.show_scrollbar });
+        .clip_children = true, .scroll_x=desc.horizontal_scroll,.show_scrollbar=desc.show_scrollbar, .shrink_height = true });
     begin_box({ .id = id_index(desc.id, kTableHeaderTag), .width = Sizing::grow(content_min), .height = Sizing::fixed(desc.header_height_px),
         .padding = {desc.padding.left, desc.padding.right + gutter, 0, 0}, .background = desc.header_background, .grid_tracks = {t.tracks,t.count}, .shrink_width = true });
     for (uint32_t c = 0; c < t.count; ++c) {
@@ -1522,6 +1522,9 @@ TableResult begin_table(const TableDesc& desc_in) noexcept {
         .row_gap_px = desc.row_gap_px, .overscan_rows = desc.overscan_rows, .width = Sizing::grow(), .height = Sizing::grow(),
         .padding = desc.padding, .background = Color::transparent(), .border_width = 0, .show_scrollbar = desc.show_scrollbar });
     Clay__GetOpenLayoutElement()->config.layout.shrinkWidth = true;
+    // The list viewport must shrink inside the clipped table body. Its rows
+    // describe scrollable content, not a minimum height for the table.
+    Clay__GetOpenLayoutElement()->config.layout.shrinkHeight = true;
     // Rows own the horizontal insets, including the scrollbar gutter. Keep the list's vertical padding.
     ws=state_map_find(&ctx->active_ui->states,desc.id);
     ws->is_focusable=desc.keyboard_navigation;

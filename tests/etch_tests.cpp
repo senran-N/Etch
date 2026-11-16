@@ -58,10 +58,44 @@ static bool layout_suite() noexcept {
     const auto* l=find_a11y_node(id("left"),c);const auto* r=find_a11y_node(id("right"),c);
     const bool ok=l && r && l->bounds.w>0 && r->bounds.x>=l->bounds.x+l->bounds.w && l->parent_id==id("grid");destroy_context(c);set_current_context(nullptr);return ok;
 }
+static bool table_viewport_regression() noexcept {
+    Context* c=create_context({.headless=true});if(!c)return false;
+    const uint32_t table=id("bounded_table");
+    const uint32_t dock=id("bounded_table_dock"), pane=id("bounded_table_pane");
+    const uint32_t root=dock_reset_root(dock);
+    dock_add_pane(dock,root,{.id=pane,.title=str_lit("Table")});
+    const TableColumnDesc columns[]={{.title=str_lit("Name"),.sizing=TableColumnSizing::Stretch,.width=1}};
+    bool ok=true;
+    for(uint32_t f=0;f<90 && ok;++f) {
+        const uint32_t height=f<30 ? 480u : f<60 ? 240u : 720u;
+        begin_frame(c,{.viewport_w=800,.viewport_h=height});
+        begin_box({.axis=Axis::Col,.width=Sizing::grow(),.height=Sizing::grow(),.clip_children=true});
+        box({.height=Sizing::fixed(40)});
+        begin_dock_space({.id=dock});
+        if(next_dock_pane()!=pane) {ok=false;end_dock_space();end_box();end_frame(c);break;}
+        begin_box({.axis=Axis::Col,.width=Sizing::grow(),.height=Sizing::grow(),.shrink_height=true});
+        const auto result=begin_table({.id=table,.columns=columns,.item_count=1000000,.row_height_px=24,.horizontal_scroll=f<45});
+        uint32_t rows=0;
+        while(table_next_row()) {++rows;while(table_next_column())text(str_lit("cell"));}
+        end_table();end_box();
+        if(next_dock_pane()!=0) ok=false;
+        end_dock_space();end_box();end_frame(c);
+        const auto bounds=element_bounds(table);
+        // Slice calculation uses the previous frame's measured viewport on resize.
+        ok &= rows>0 && rows<720/24+10 && bounds.h>20 && bounds.y+bounds.h<=float(height)+.5f;
+        if(!ok) std::fprintf(stderr,"table viewport regression: frame=%u rows=%u y=%.1f h=%.1f viewport=%u\n",f,rows,bounds.y,bounds.h,height);
+        if(f==15 || f==45 || f==75) {
+            table_scroll_to_row(table,900000+f,24,AlignY::Top);
+        }
+        if(f==20 || f==50 || f==80) ok &= result.slice.first_index>899990;
+        if(f==29 || f==59 || f==89) ok &= !needs_redraw(c);
+    }
+    destroy_context(c);set_current_context(nullptr);return ok;
+}
 static bool list_suite() noexcept {
     Context* c=create_context({.headless=true});if(!c)return false;VirtualListSlice slice={};
     for(uint32_t i=0;i<3;++i){begin_frame(c,{.viewport_w=400,.viewport_h=200});slice=begin_virtual_list({.id=id("million"),.item_count=1000000,.item_height_px=20,.height=Sizing::fixed(200),.variable_height=true});end_virtual_list();end_frame(c);if(i==0)virtual_list_scroll_to_row(id("million"),999900,20,AlignY::Top);}
-    const bool ok=slice.first_index>999880 && slice.end_index-slice.first_index<20 && frame_stats(c).arena_used_bytes<1024*1024;destroy_context(c);set_current_context(nullptr);return ok;
+    const bool ok=slice.first_index>999880 && slice.end_index-slice.first_index<20 && frame_stats(c).arena_used_bytes<1024*1024;destroy_context(c);set_current_context(nullptr);return ok && table_viewport_regression();
 }
 static bool source_ok(const unsigned char* p,size_t size,const char* entry) noexcept {
     if(size<2 || p[size-1]!=0 || std::strlen(reinterpret_cast<const char*>(p))!=size-1)return false;
