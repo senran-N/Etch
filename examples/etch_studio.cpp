@@ -563,6 +563,7 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
         .padding = etch::Padding::all(10.0f),
         .gap = 8.0f,
         .background = etch::Color::rgb_hex(0x090C12),
+        .window_drag_passthrough = true,
     }) {
         if (etch::begin_menu_bar({.id=etch::id("studio_desktop_menu")})) {
             if (etch::begin_menu({.id=etch::id("studio_file_menu"),.label=etch::str_lit("File")})) {
@@ -620,6 +621,7 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
             .border_color = etch::Color::rgba8(148, 163, 184, 42),
             .border_width = 1.0f,
             .radius = etch::Corners::all(10.0f),
+            .window_drag_passthrough = true,
         }) {
             ETCH_BOX({
                 .axis = etch::Axis::Row,
@@ -734,6 +736,7 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
             };
             draw_chrome_btn(kBtnWinMin, app->ico_win_min, etch::Color::rgb_hex(0x1E293B));
             draw_chrome_btn(kBtnWinMax, app->ico_win_max, etch::Color::rgb_hex(0x1E293B));
+            etch::window_maximize_button_region(kBtnWinMax);
             draw_chrome_btn(kBtnWinClose, app->ico_win_close, etch::Color::rgb_hex(0xDC2626));
         }
 

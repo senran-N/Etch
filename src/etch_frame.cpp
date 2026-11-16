@@ -145,6 +145,7 @@ void end_frame(Context* ctx_arg) noexcept {
                     if (extra->is_virtual_list) {
                         if (WidgetState* ws = state_map_find(&ctx->active_ui->states, extra->desc.id)) {
                             const double view_h = static_cast<double>(cmd->boundingBox.height);
+                            if (std::fabs(ws->viewport_dim.x-cmd->boundingBox.width)>.5f || std::fabs(ws->viewport_dim.y-cmd->boundingBox.height)>.5f) request_redraw(ctx);
                             ws->viewport_dim = Vec2{ cmd->boundingBox.width, cmd->boundingBox.height };
                             ws->last_box_logical = Rect{
                                 cmd->boundingBox.x,
@@ -472,13 +473,17 @@ void end_frame(Context* ctx_arg) noexcept {
         for (uint32_t i = 0u; i < ctx->active_ui->span_hit_count && chrome_client_n < kMaxChromeClientRects; ++i) {
             const SpanHitRegion& r = ctx->active_ui->span_hits[i];
             if (r.id == 0u && r.rect.w > 0.0f && r.rect.h > 0.0f) {
-                ctx->active_ui->chrome_client_rects[chrome_client_n++] = r.rect;
+                for (uint32_t d=0;d<ctx->active_ui->chrome_drag_count;++d) {
+                    if (ctx->active_ui->chrome_drag_rects[d].intersects(r.rect)) {
+                        ctx->active_ui->chrome_client_rects[chrome_client_n++] = r.rect;break;
+                    }
+                }
             }
         }
         if (ctx->active_ui->states.entries) {
             for (uint32_t i = 0u; i < ctx->active_ui->states.capacity && chrome_client_n < kMaxChromeClientRects; ++i) {
                 const WidgetState& ws = ctx->active_ui->states.entries[i];
-                if (ws.key == 0u || ws.last_seen_frame != ctx->active_ui->frame_index || !ws.is_focusable) {
+                if (ws.key == 0u || ws.last_seen_frame != ctx->active_ui->frame_index || !ws.is_user_element || ws.window_drag_passthrough) {
                     continue;
                 }
                 const Rect r = ws.last_box_logical;
@@ -499,6 +504,9 @@ void end_frame(Context* ctx_arg) noexcept {
         }
     }
     ctx->active_ui->chrome_client_count = chrome_client_n;
+    ctx->active_ui->chrome_maximize_rect = ctx->active_ui->pending_chrome_maximize_id
+        ? element_bounds(ctx->active_ui->pending_chrome_maximize_id) : ctx->active_ui->pending_chrome_maximize_rect;
+    ctx->active_ui->pending_chrome_maximize_id=0;ctx->active_ui->pending_chrome_maximize_rect={};
 
     const uint64_t end_ticks = SDL_GetPerformanceCounter();
     const uint64_t freq = SDL_GetPerformanceFrequency();
@@ -555,7 +563,7 @@ void end_frame(Context* ctx_arg) noexcept {
         }
     }
 
-    if (ctx->active_ui->drag_active && ctx->active_ui->pointer_pos.x >= 0.0f && ctx->active_ui->pointer_pos.y >= 0.0f) {
+    if (ctx->active_ui->drag_active && ctx->active_ui->has_pointer) {
         const float vp_w = static_cast<float>(ctx->active_ui->viewport_w) / dpi;
         const float vp_h = static_cast<float>(ctx->active_ui->viewport_h) / dpi;
         const Str lbl = (ctx->active_ui->drag_label_len > 0u)
@@ -911,12 +919,26 @@ bool keyboard_focus_visible(uint32_t id) noexcept {
 namespace {
 void store_os_drop(WindowUiState& ui, Str value, bool text) noexcept {
     uint32_t& count = text ? ui.pending_text_drop_count : ui.pending_drop_count;
-    if (count == kMaxDroppedFiles || value.length >= kMaxDroppedPathBytes - ui.pending_drop_bytes) return;
-    const uint32_t offset = ui.pending_drop_bytes;
-    std::memcpy(ui.pending_drop_buf + offset, value.chars, value.length);
-    ui.pending_drop_buf[offset + value.length] = '\0';
-    (text ? ui.pending_text_drop_offsets : ui.pending_drop_offsets)[count] = static_cast<uint16_t>(offset);
-    (text ? ui.pending_text_drop_lengths : ui.pending_drop_lengths)[count++] = static_cast<uint16_t>(value.length);
+    uint32_t& capacity=text ? ui.pending_text_drop_cap : ui.pending_drop_cap;
+    DropRecord*& records=text ? ui.pending_text_drop_records : ui.pending_drop_records;
+    if(count==capacity) {
+        const uint32_t next=capacity ? capacity*2 : 32;
+        void* p=std::realloc(records,size_t(next)*sizeof(DropRecord));
+        if(!p) {SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,"Etch drop metadata allocation failed");return;}
+        records=static_cast<DropRecord*>(p);capacity=next;
+    }
+    const uint32_t needed=ui.pending_drop_bytes+value.length+1;
+    if(needed>ui.pending_drop_capacity) {
+        uint32_t next=ui.pending_drop_capacity ? ui.pending_drop_capacity : 4096;
+        while(next<needed) next*=2;
+        void* p=std::realloc(ui.pending_drop_buf,next);
+        if(!p) {SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,"Etch drop payload allocation failed");return;}
+        ui.pending_drop_buf=static_cast<char*>(p);ui.pending_drop_capacity=next;
+    }
+    const uint32_t offset=ui.pending_drop_bytes;
+    std::memcpy(ui.pending_drop_buf+offset,value.chars,value.length);
+    ui.pending_drop_buf[offset+value.length]='\0';
+    records[count++]={offset,value.length};
     ui.pending_drop_bytes += value.length + 1;
     ui.redraw_budget = 2;
 }

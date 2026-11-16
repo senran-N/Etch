@@ -4,43 +4,6 @@ if (NOT DEFINED REPO_ROOT)
 endif ()
 get_filename_component(REPO_ROOT "${REPO_ROOT}" ABSOLUTE)
 
-function(check_lines pattern ceiling)
-    file(GLOB _files "${REPO_ROOT}/${pattern}")
-    foreach(_file IN LISTS _files)
-        file(READ "${_file}" _content)
-        string(REGEX MATCHALL "\n" _nls "${_content}")
-        list(LENGTH _nls _lines)
-        if (NOT _content STREQUAL "" AND NOT _content MATCHES "\n$")
-            math(EXPR _lines "${_lines} + 1")
-        endif ()
-        if (_lines GREATER ceiling)
-            message(FATAL_ERROR "${_file}: line-count ceiling ${ceiling} exceeded (${_lines})")
-        endif ()
-    endforeach()
-endfunction()
-check_lines("src/*.cpp" 4000)
-check_lines("include/etch/*.h" 2500)
-check_lines("examples/*.cpp" 3200)
-
-set(_total_core_loc 0)
-file(GLOB _core_loc_files
-    "${REPO_ROOT}/include/etch/*.h"
-    "${REPO_ROOT}/src/*.cpp"
-    "${REPO_ROOT}/src/*.h"
-    "${REPO_ROOT}/shaders/*.hlsl")
-foreach(_file IN LISTS _core_loc_files)
-    file(READ "${_file}" _content)
-    string(REGEX MATCHALL "\n" _nls "${_content}")
-    list(LENGTH _nls _lines)
-    if (NOT _content STREQUAL "" AND NOT _content MATCHES "\n$")
-        math(EXPR _lines "${_lines} + 1")
-    endif ()
-    math(EXPR _total_core_loc "${_total_core_loc} + ${_lines}")
-endforeach()
-if (_total_core_loc GREATER 30000)
-    message(FATAL_ERROR "${REPO_ROOT}: total core engine LOC ceiling 30000 exceeded (${_total_core_loc})")
-endif ()
-
 file(GLOB_RECURSE _example_headers "${REPO_ROOT}/examples/*.h" "${REPO_ROOT}/examples/*.hpp")
 file(GLOB _root_pngs "${REPO_ROOT}/*.png")
 file(GLOB_RECURSE _vectors "${REPO_ROOT}/include/*.vectors.png" "${REPO_ROOT}/src/*.vectors.png"

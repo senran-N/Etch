@@ -178,7 +178,8 @@ bool text_buffer_redo(TextBuffer* b,uint32_t* c,uint32_t* a) noexcept {
     ++b->undo_cursor;if(c)*c=e.after_cursor;if(a)*a=e.after_anchor;return true;
 }
 namespace {
-uint32_t tokenize_cpp_hlsl_with_theme(Str s,SyntaxToken* out,uint32_t cap,const Theme& thm) noexcept {
+using TokenEmitFn=void (*)(void*,uint32_t,uint32_t,uint32_t,Color) noexcept;
+uint32_t tokenize_cpp_hlsl_emit(Str s,void* out,uint32_t cap,const Theme& thm,TokenEmitFn emit) noexcept {
     if(!s.chars || !out) { return 0; } uint32_t count=0,p=0;
     while(p<s.length && count<cap){const uint32_t a=p;Color color=thm.text_code;const char c=s.chars[p++];
         if(c=='/' && p<s.length && s.chars[p]=='/'){p=s.length;color=thm.syntax_comment;}
@@ -191,8 +192,13 @@ uint32_t tokenize_cpp_hlsl_with_theme(Str s,SyntaxToken* out,uint32_t cap,const 
             for(const char* w:words)if(std::strlen(w)==p-a && !std::memcmp(w,s.chars+a,p-a)){color=thm.syntax_keyword;break;}
             if(c=='#')color=thm.syntax_number;
         }
-        out[count++]={a,p,color,kFontMono};
+        if(color.pack_rgba8()!=thm.text_code.pack_rgba8()){emit(out,count,a,p,color);++count;}
     }return count;
+ }
+uint32_t tokenize_cpp_hlsl_with_theme(Str s,SyntaxToken* out,uint32_t cap,const Theme& thm) noexcept {
+    return tokenize_cpp_hlsl_emit(s,out,cap,thm,[](void* ptr,uint32_t i,uint32_t a,uint32_t z,Color color) noexcept {
+        static_cast<SyntaxToken*>(ptr)[i]={a,z,color,kFontMono};
+    });
 }
 }
 uint32_t tokenize_cpp_hlsl(uint32_t,Str s,SyntaxToken* out,uint32_t cap,void*) noexcept {
@@ -533,6 +539,8 @@ CodeEditorResult code_editor(const CodeEditorDesc& input) noexcept {
     uint32_t c = tb_clamp(b, ws->edit_cursor);
     uint32_t a = tb_clamp(b, ws->edit_sel_anchor);
     if (c != ws->edit_cursor) ws->edit_wrap_affinity = false;
+    const uint32_t menu_key=text_input_menu({.id=d.id,.read_only=d.read_only},tb_len(b),c!=a);
+    ws=state_map_find(&ui.states,d.id);
     const bool focus = ui.focus_id == d.id && (!ui.modal_scope || focus_scope_contains(ui, ui.modal_scope));
     bool changed = false;
 
@@ -722,8 +730,9 @@ CodeEditorResult code_editor(const CodeEditorDesc& input) noexcept {
     };
 
     if (focus) {
-        for (uint32_t i = 0u; i < ui.frame_text_op_count; ++i) {
-            const auto& op = ui.frame_text_ops[i];
+        const PendingTextOp menu_op={.kind=TextEditOpKind::KeyPress,.mod=SDL_KMOD_CTRL,.key=menu_key};
+        for (uint32_t i = 0u; i < ui.frame_text_op_count+(menu_key?1u:0u); ++i) {
+            const auto& op = i<ui.frame_text_op_count ? ui.frame_text_ops[i] : menu_op;
             uint32_t lo = c < a ? c : a;
             uint32_t hi = c > a ? c : a;
             if (op.kind == TextEditOpKind::InsertText) {
@@ -1180,7 +1189,7 @@ void emit_editor_token_slice(
     };
     uint32_t pos = slice_orig_start;
     const uint32_t clamp_lim = orig_str.length < slice_orig_end ? orig_str.length : slice_orig_end;
-    for (uint32_t t = 0u; t < token_count && t < 256u; ++t) {
+    for (uint32_t t = 0u; t < token_count; ++t) {
         const auto& tok = tokens[t];
         const uint32_t a = utf8_clamp_boundary(orig_str.chars, clamp_lim, tok.byte_start);
         const uint32_t z = utf8_clamp_boundary(orig_str.chars, clamp_lim, tok.byte_end);
@@ -1252,10 +1261,13 @@ void emit_code_editor_command(Context* ctx, const CodeEditorExtra* e, Clay_Bound
         }
 
         const uint32_t length = l.text.length;
-        SyntaxToken tokens[256];
-        const uint32_t count = (d.tokenizer == tokenize_cpp_hlsl)
-            ? tokenize_cpp_hlsl_with_theme(l.text, tokens, 256u, e->scoped_theme)
-            : (d.tokenizer ? d.tokenizer(l.index, l.text, tokens, 256u, d.tokenizer_user_data) : 0u);
+        SyntaxToken local_tokens[256];
+        const uint32_t token_capacity=l.text.length>256 ? l.text.length : 256;
+        SyntaxToken* tokens=token_capacity>256 ? ctx->frame_arena.alloc<SyntaxToken>(token_capacity) : local_tokens;
+        const uint32_t returned=tokens ? ((d.tokenizer == tokenize_cpp_hlsl)
+            ? tokenize_cpp_hlsl_with_theme(l.text,tokens,token_capacity,e->scoped_theme)
+            : (d.tokenizer ? d.tokenizer(l.index,l.text,tokens,token_capacity,d.tokenizer_user_data) : 0u)) : 0;
+        const uint32_t count=returned<token_capacity ? returned : token_capacity;
         const bool preedit = e->composition.length > 0u && l.index == e->active_line;
         const uint32_t caret = preedit && e->cursor >= l.start && e->cursor <= l.start + length ? e->cursor - l.start : length;
 
@@ -1276,7 +1288,7 @@ void emit_code_editor_command(Context* ctx, const CodeEditorExtra* e, Clay_Bound
                 glyph({ l.text.chars + a, z - a }, color, font, ox + editor_x(ctx, d, l.text, a) - e->scroll_x + (preedit && a >= caret ? preedit_width : 0.0f), y, clip);
             };
             uint32_t pos = 0u;
-            for (uint32_t t = 0u; t < count && t < 256u; ++t) {
+            for (uint32_t t = 0u; t < count; ++t) {
                 const auto& token = tokens[t];
                 const uint32_t a = utf8_clamp_boundary(l.text.chars, length, token.byte_start);
                 const uint32_t z = utf8_clamp_boundary(l.text.chars, length, token.byte_end);
@@ -1325,9 +1337,11 @@ void emit_code_editor_command(Context* ctx, const CodeEditorExtra* e, Clay_Bound
             const bool spans_nl = has_sel && (hi > l.start + length);
 
             // Remap tokens if preedit is spliced inline before suffix text.
-            SyntaxToken orig_prefix_tokens[256];
-            SyntaxToken orig_suffix_tokens[256];
-            for (uint32_t t = 0u; t < count && t < 256u; ++t) {
+            SyntaxToken local_prefix[256],local_suffix[256];
+            SyntaxToken* orig_prefix_tokens=count>256 ? ctx->frame_arena.alloc<SyntaxToken>(count) : local_prefix;
+            SyntaxToken* orig_suffix_tokens=count>256 ? ctx->frame_arena.alloc<SyntaxToken>(count) : local_suffix;
+            if(!orig_prefix_tokens || !orig_suffix_tokens) return;
+            for (uint32_t t = 0u; t < count; ++t) {
                 orig_prefix_tokens[t] = tokens[t];
                 orig_suffix_tokens[t] = tokens[t];
                 orig_suffix_tokens[t].byte_start = tokens[t].byte_start >= caret ? tokens[t].byte_start - caret : 0u;

@@ -8,7 +8,7 @@
 
 #ifndef ETCH_VERSION_MAJOR
 #define ETCH_VERSION_MAJOR 0
-#define ETCH_VERSION_MINOR 11
+#define ETCH_VERSION_MINOR 12
 #define ETCH_VERSION_PATCH 0
 #define ETCH_VERSION_STR_DETAIL(x) #x
 #define ETCH_VERSION_STR(x) ETCH_VERSION_STR_DETAIL(x)
@@ -248,7 +248,8 @@ typedef enum EtchWindowHit {
     ETCH_WIN_HIT_RESIZE_BOTTOM_RIGHT = 7,
     ETCH_WIN_HIT_RESIZE_BOTTOM = 8,
     ETCH_WIN_HIT_RESIZE_BOTTOM_LEFT = 9,
-    ETCH_WIN_HIT_RESIZE_LEFT = 10
+    ETCH_WIN_HIT_RESIZE_LEFT = 10,
+    ETCH_WIN_HIT_MAXIMIZE = 11
 } EtchWindowHit;
 
 typedef enum EtchButtonVariant {
@@ -571,6 +572,15 @@ static ETCH_C_INLINE EtchSizing etch_sizing_percent(float ratio_0_to_1) {
     return s;
 }
 
+static ETCH_C_INLINE EtchColor etch_color_blend_over(EtchColor under,EtchColor over) {
+    const float a=over.a/255.0f;
+    const float out=a+under.a/255.0f*(1.0f-a);
+    if(out==0)return etch_rgba8(0,0,0,0);
+    const float t=a/out;
+    return etch_rgba8((uint8_t)(under.r+(over.r-under.r)*t+0.5f),
+        (uint8_t)(under.g+(over.g-under.g)*t+0.5f),(uint8_t)(under.b+(over.b-under.b)*t+0.5f),(uint8_t)(out*255+0.5f));
+}
+
 typedef struct EtchGridTrack {
     EtchSizingKind kind;
     float value;
@@ -714,6 +724,8 @@ typedef struct EtchTheme {
     float radius_input_px;
     float radius_panel_px;
     float radius_pill_px;
+    EtchColor on_primary;
+    EtchColor on_error;
 } EtchTheme;
 
 typedef struct EtchFrameDesc {
@@ -801,6 +813,7 @@ typedef struct EtchBoxDesc {
     bool shrink_width;
     bool continuous_corners;
     float shadow_spread;
+    bool window_drag_passthrough;
 } EtchBoxDesc;
 
 typedef struct EtchTextDesc {
@@ -1171,6 +1184,7 @@ typedef struct EtchTextInputDesc {
     bool word_wrap;
     bool read_only;
     bool password;
+    bool context_menu, clear_button, escape_blurs;
 } EtchTextInputDesc;
 
 typedef struct EtchTextInputResult {
@@ -1197,6 +1211,7 @@ typedef struct EtchButtonDesc {
     EtchCorners radius;
     bool disabled;
     EtchStr shortcut_hint;
+    EtchAlignX align_x;
 } EtchButtonDesc;
 
 typedef struct EtchCheckboxDesc {
@@ -1347,6 +1362,7 @@ typedef struct EtchPopupDesc {
     EtchColor border_color;
     EtchCorners radius;
     int16_t z_index;
+    bool attach_to_trigger, match_trigger_width;
 } EtchPopupDesc;
 
 typedef struct EtchMenuBarDesc {
@@ -1480,6 +1496,8 @@ typedef struct EtchTableDesc {
     EtchCorners radius;
     bool show_scrollbar;
     bool show_column_lines; float header_font_size_px;
+    uint32_t* selected_row;
+    EtchColor selected_row_color;
 } EtchTableDesc;
 
 typedef struct EtchTableResult {
@@ -1718,6 +1736,8 @@ void etch_set_window_refresh_callback(EtchContext* ctx, EtchWindowRefreshFn fn, 
 void etch_set_window_chrome(const EtchWindowChromeDesc* desc, struct SDL_Window* window);
 void etch_window_drag_region(EtchRect rect_logical);
 void etch_window_client_region(EtchRect rect_logical);
+void etch_window_maximize_button_region(EtchRect rect_logical);
+void etch_window_maximize_button_element(uint32_t element_id);
 EtchWindowHit etch_evaluate_window_hit(const EtchContext* ctx, EtchVec2 logical_pos, struct SDL_Window* window);
 void etch_minimize_window(struct SDL_Window* window);
 void etch_maximize_window(struct SDL_Window* window);
@@ -1768,6 +1788,8 @@ void etch_draw_ring(const EtchRingDesc* desc);
 void etch_draw_icon(const EtchIconDrawDesc* desc);
 EtchVec2 etch_measure_text(EtchStr text, uint16_t font_id, float size, float letter_spacing);
 void etch_draw_text(const EtchTextDrawDesc* desc);
+typedef void (*EtchLayoutDrawFn)(EtchRect local_bounds, void* user_data);
+void etch_draw_after_layout(EtchLayoutDrawFn callback, void* user_data, bool foreground);
 void etch_draw_image(const EtchImageDrawDesc* desc);
 
 /* ============================================================================
@@ -1946,6 +1968,11 @@ void etch_end_dock_space(void);
 EtchTableResult etch_begin_table(const EtchTableDesc* desc);
 bool etch_table_next_row(uint32_t* out_row_index, EtchColor row_bg_override, EtchColor row_border_override);
 bool etch_table_next_column(void);
+typedef struct EtchTableRowResult {
+    uint32_t id;
+    bool hovered, pressed, clicked, double_clicked, right_clicked;
+} EtchTableRowResult;
+EtchTableRowResult etch_table_row_result(uint32_t table_id, uint32_t row_index);
 void etch_end_table(void);
 float etch_table_column_width(uint32_t table_id, uint32_t col_index);
 void etch_set_table_column_width(uint32_t table_id, uint32_t col_index, float width_px);

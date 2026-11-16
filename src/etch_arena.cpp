@@ -34,8 +34,6 @@ inline constexpr uint32_t kMaxTextOpsPerFrame = 32u;
 inline constexpr uint32_t kMaxPendingTextBytes = 1024u;
 inline constexpr uint32_t kMaxImeCompBytes = 256u;
 inline constexpr uint32_t kMaxKeyEventsPerFrame = 32u;
-inline constexpr uint32_t kMaxDroppedFiles = 16u;
-inline constexpr uint32_t kMaxDroppedPathBytes = 2048u;
 inline constexpr uint32_t kMaxChromeDragRects = 16u;
 inline constexpr uint32_t kMaxChromeClientRects = 128u;
 inline constexpr uint32_t kMaxDragLabelBytes = 64u;
@@ -46,6 +44,7 @@ struct WidgetState {
     uint32_t prev_seen_frame = 0;
     bool     is_user_element = false;
     bool     is_focusable = false;
+    bool window_drag_passthrough = false;
     uint32_t focus_scope = 0;
     bool     pressed_down = false;
     bool     pressed_this_frame = false;
@@ -53,6 +52,8 @@ struct WidgetState {
     bool     right_clicked_this_frame = false;
     bool     double_clicked_this_frame = false;
     bool     is_text_input_writable = false;
+    bool     is_multiline_input = false, edit_reveal_caret = true;
+    float    edit_max_scroll_y = 0;
     bool     spring_initialized = false;
     float    spring_pos = 0.0f;
     float    spring_vel = 0.0f;
@@ -335,6 +336,7 @@ enum class DrawCmdKind : uint8_t {
     Text = 6,
     Image = 7,
     Fill = 8,
+    Callback = 9,
 };
 
 struct DrawCmdNode {
@@ -356,6 +358,9 @@ struct DrawCmdNode {
     TextDrawDesc  text_cmd = {};
     ImageDrawDesc image_cmd = {};
     FilledPathDesc fill_cmd = {};
+    LayoutDrawFn callback = nullptr;
+    void* callback_data = nullptr;
+    Theme* callback_theme = nullptr;
 };
 
 SDL_HitTestResult SDLCALL etch_sdl_hit_test(SDL_Window* win, const SDL_Point* area, void* data) noexcept;
@@ -582,6 +587,7 @@ struct TableMetadata {
 };
 struct TableStackEntry {
     TableDesc desc = {}; TableColumnDesc columns[kMaxTableColumns] = {};
+    GridTrack tracks[kMaxTableColumns] = {};
     float col_widths[kMaxTableColumns] = {}; uint32_t count = 0;
     uint32_t cursor_row = 0; uint32_t end_row = 0; uint32_t col_cursor = 0;
     bool row_open = false; bool cell_open = false;
@@ -612,10 +618,12 @@ void free_vlist(VarVirtualListCache* c) noexcept {
     *c = {};
 }
 
-struct DesktopPopup { uint32_t id = 0; Vec2 anchor = {}; uint32_t opened_frame = 0; int selection = 0; };
+struct DesktopPopup { uint32_t id = 0; Vec2 anchor = {}; uint32_t opened_frame = 0; int selection = 0; uint32_t parent_id = 0; };
+struct DropRecord { uint32_t offset, length; };
 struct PendingA11yAction { uint32_t id = 0; A11yAction action = {}; bool consumed = false; uint8_t age = 0; float number = 0; uint32_t length = 0; char text[1024] = {}; };
 struct A11yBuild { A11yNode node = {}; A11yBuild* next = nullptr; A11yBuild* parent = nullptr; uint32_t index = 0, clay_id = 0; };
 struct A11yPatch { A11yOverrideDesc desc = {}; A11yPatch* next = nullptr; };
+struct A11yIndexEntry { uint32_t id = 0; A11yBuild* build = nullptr; A11yPatch* patches = nullptr; A11yPatch* tail = nullptr; };
 struct WindowUiState {
     Arena a11y_arena = {}; A11yNode* a11y_nodes = nullptr; uint32_t a11y_node_count = 0;
     PendingA11yAction a11y_actions[16] = {}; uint32_t a11y_action_count = 0;
@@ -627,7 +635,7 @@ struct WindowUiState {
     uint32_t drag_edit_pending_id = 0;
     char drag_edit_pending_buf[64] = {};
     uint32_t modal_depth = 0;
-    DesktopPopup popups[16] = {}; uint32_t popup_count = 0; uint32_t popup_depth = 0;
+    DesktopPopup popups[16] = {}; uint32_t popup_count = 0; uint32_t popup_depth = 0; uint32_t popup_build_ids[16] = {};
     TabBarDesc tab_bars[8] = {}; uint32_t tab_bar_depth = 0;
     uint32_t menu_bar_id = 0; uint32_t menu_owner = 0; uint32_t menu_open_id = 0;
     uint32_t tooltip_target = 0; float tooltip_start = 0;
@@ -657,10 +665,9 @@ struct WindowUiState {
     Vec2 os_drop_pos = {};
     Vec2 delivered_drop_pos = {};
     bool has_delivered_drop_pos = false;
-    uint16_t pending_text_drop_offsets[kMaxDroppedFiles] = {};
-    uint16_t pending_text_drop_lengths[kMaxDroppedFiles] = {};
+    DropRecord* pending_text_drop_records = nullptr; uint32_t pending_text_drop_cap = 0;
     uint32_t pending_text_drop_count = 0;
-    Str frame_text_drops[kMaxDroppedFiles] = {};
+    Str* frame_text_drops = nullptr;
     uint32_t frame_text_drop_count = 0;
     // Per-frame & input tracking
     uint32_t   viewport_w = 1280u;
@@ -683,6 +690,7 @@ struct WindowUiState {
     bool       prev_right_down = false;
     bool       prev_pan_button_down = false;
     Vec2       prev_pointer_pos = {-1.0f, -1.0f};
+    bool       has_pointer = false, had_pointer = false;
     Vec2       pointer_delta = {};
     bool       space_down = false;
 
@@ -744,14 +752,13 @@ struct WindowUiState {
     bool          pending_escape_consumed_by_ime = false;
     bool          frame_escape_consumed_by_ime = false;
 
-    uint16_t      pending_drop_offsets[kMaxDroppedFiles] = {};
-    uint16_t      pending_drop_lengths[kMaxDroppedFiles] = {};
+    DropRecord* pending_drop_records = nullptr; uint32_t pending_drop_cap = 0;
     uint32_t      pending_drop_count = 0;
-    char          pending_drop_buf[kMaxDroppedPathBytes] = {};
+    char*         pending_drop_buf = nullptr; uint32_t pending_drop_capacity = 0;
     uint32_t      pending_drop_bytes = 0;
-    Str           frame_drops[kMaxDroppedFiles] = {};
+    Str*          frame_drops = nullptr;
     uint32_t      frame_drop_count = 0;
-    char          frame_drop_buf[kMaxDroppedPathBytes] = {};
+    char*         frame_drop_buf = nullptr;
 
     TextUndoSlot* undo_pool = nullptr; uint32_t undo_cap = 0;
 
@@ -793,6 +800,8 @@ struct WindowUiState {
 
     // Frameless Custom Window Chrome (double-buffered for SDL_HitTest callback safety)
     WindowChromeDesc chrome_desc = {};
+    Rect chrome_maximize_rect = {}, pending_chrome_maximize_rect = {};
+    uint32_t pending_chrome_maximize_id = 0;
     Rect             chrome_drag_rects[kMaxChromeDragRects] = {};
     uint32_t         chrome_drag_count = 0;
     Rect             chrome_client_rects[kMaxChromeClientRects] = {};
@@ -822,11 +831,15 @@ struct ClaimedWindowSlot {
     SDL_Window* window = nullptr;
     bool hit_test_attached = false;
     bool macos_chrome_applied = false;
+    void* native_chrome_proc = nullptr;
+    Context* chrome_context = nullptr;
+    bool native_max_press = false, native_max_hover = false;
     void* os_a11y = nullptr;
     WindowUiState ui = {};
 };
 
 struct Context {
+    A11yIndexEntry* a11y_index = nullptr; uint32_t a11y_index_cap = 0, a11y_index_count = 0;
     A11yBuild* a11y_first = nullptr; A11yBuild* a11y_last = nullptr; A11yBuild* a11y_parent = nullptr;
     A11yPatch* a11y_patches = nullptr; uint32_t a11y_count = 0;
 
@@ -837,6 +850,8 @@ struct Context {
     SDL_Window* mouse_capture_window = nullptr;
     SDL_Window* ime_active_window = nullptr;
     bool in_frame = false;
+    BoxExtra* layout_draw_target = nullptr;
+    float layout_draw_scale = 1;
     uint32_t wake_event_type = 0;
     SDL_Cursor* system_cursors[kCursorCount] = {};
     Cursor applied_cursor = Cursor::Arrow;
@@ -883,6 +898,7 @@ struct Context {
     SDL_GPUBuffer*           prim_gpu_buf = nullptr;
     SDL_GPUTransferBuffer*   prim_transfer_buf = nullptr;
     SDL_GPUTransferBuffer*   atlas_transfer_buf = nullptr;
+    SDL_GPUTransferBuffer*   texture_upload_buf = nullptr; uint32_t texture_upload_cap = 0;
     uint32_t atlas_tbuf_size = 0;
     SDL_GPUBuffer*           slug_curve_gpu_buf = nullptr;
     uint32_t                 slug_curve_gpu_cap = 0;
@@ -1264,6 +1280,7 @@ FrameStats frame_stats(const Context* ctx) noexcept {
 namespace etch { namespace {
 void a11y_begin(Context* ctx) noexcept;
 void a11y_commit(Context* ctx) noexcept;
+A11yIndexEntry* a11y_index(Context* ctx, uint32_t id, bool insert = false) noexcept;
 A11yBuild* a11y_emit(Context* ctx, uint32_t id, A11yRole role, Str label = {}, Str value = {}, uint32_t states = 0, uint32_t actions = 0) noexcept;
 void a11y_semantic(uint32_t id, A11yRole role, Str label = {}, uint32_t states = 0, uint32_t actions = 0, float value = 0, float lo = 0, float hi = 0) noexcept;
 bool a11y_take_any(uint32_t id, uint32_t mask, PendingA11yAction* out = nullptr) noexcept;
@@ -1273,6 +1290,8 @@ void os_a11y_attach_window(Context* ctx, ClaimedWindowSlot* slot) noexcept;
 void os_a11y_detach_window(Context* ctx, ClaimedWindowSlot* slot) noexcept;
 void os_a11y_notify_commit(Context* ctx) noexcept;
 void apply_platform_window_chrome(Context* ctx, ClaimedWindowSlot* slot) noexcept;
+void apply_win32_chrome(Context* ctx, ClaimedWindowSlot* slot) noexcept;
+void detach_win32_chrome(ClaimedWindowSlot* slot) noexcept;
 void sync_window_event_watch(Context* ctx) noexcept;
 void detach_window_event_watch(Context* ctx) noexcept;
 bool sync_window_metrics_from_os(WindowUiState* ui, SDL_Window* window) noexcept;

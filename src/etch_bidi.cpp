@@ -139,6 +139,23 @@ std::span<const ShapedGlyph> shape_utf8_run(Context* ctx, uint16_t font_id, cons
     }
     hb_script_t inherited = HB_SCRIPT_LATIN;
     for (uint32_t i = 0; i < n; ++i) if (items[i].script != HB_SCRIPT_COMMON && items[i].script != HB_SCRIPT_INHERITED && items[i].script != HB_SCRIPT_UNKNOWN) { inherited = items[i].script; break; }
+    uint32_t script_brackets[32]={}, script_depth=0;
+    for (uint32_t i=0;i<n;++i) {
+        auto& it=items[i];
+        if (const auto* b=bidi_bracket(it.cp)) {
+            if (b->open) { if(script_depth<32) script_brackets[script_depth++]=i; }
+            else {
+                uint32_t match=script_depth;
+                while(match && items[script_brackets[match-1]].cp!=b->pair) --match;
+                if(match) {
+                    const uint32_t open=script_brackets[match-1];script_depth=match-1;
+                    hb_script_t script=inherited;
+                    for(uint32_t k=open+1;k<i;++k) if(items[k].script!=HB_SCRIPT_COMMON && items[k].script!=HB_SCRIPT_INHERITED && items[k].script!=HB_SCRIPT_UNKNOWN) {script=items[k].script;break;}
+                    items[open].script=it.script=script;
+                }
+            }
+        }
+    }
     uint32_t nr = 0; uint8_t max_level = base;
     for (uint32_t i = 0; i < n; ++i) {
         auto& it = items[i];

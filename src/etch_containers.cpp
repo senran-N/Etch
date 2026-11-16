@@ -96,9 +96,8 @@ SplitResult begin_split(const SplitDesc& desc) noexcept {
         .height = desc.height,
     });
 
-    const Sizing first_primary = (avail > 1.0f)
-        ? Sizing::fixed(avail * ratio)
-        : Sizing::percent(clamp_range(ratio, 0.02f, 0.95f));
+    Clay__GetOpenLayoutElement()->config.layout.percentAfterFixed = true;
+    const Sizing first_primary = Sizing::percent(ratio);
     begin_box(BoxDesc{
         .axis = Axis::Col,
         .width = (desc.axis == Axis::Row) ? first_primary : Sizing::grow(),
@@ -1224,19 +1223,19 @@ uint32_t next_dock_pane() noexcept {
             begin_box({ .id = tab_id, .height = Sizing::grow(), .padding = Padding::xy(10, 0), .gap = 6,
                 .align_y = AlignY::Center, .background = n.active == t.id ? d.tab_active_bg : (hovered(tab_id) ? d.tab_hover_bg : Color{}), .focusable = true });
             if (n.active == t.id) {
-                const float tab_w = element_bounds(tab_id).w;
-                draw_line({
-                    .from = {2.0f, d.tab_bar_height_px - 1.5f},
-                    .to = {(tab_w > 4.0f) ? (tab_w - 2.0f) : 58.0f, d.tab_bar_height_px - 1.5f},
-                    .color = d.tab_accent,
-                    .thickness = 2.0f,
-                });
+                auto* color=ctx->frame_arena.alloc<Color>();
+                if(color) {*color=d.tab_accent;draw_after_layout([](Rect r,void* data) noexcept {
+                    draw_line({.from={2,r.h-1.5f},.to={r.w-2,r.h-1.5f},.color=*static_cast<Color*>(data),.thickness=2});
+                },color);}
             }
             if (t.icon_id != kInvalidIcon) icon({ .icon_id = t.icon_id, .size_px = 14 });
             text(dock_tab_title(t), { .font_size_px = 12.5f, .wrap = false });
             if (t.closable) {
                 begin_box({ .id = close_id, .width = Sizing::fixed(14), .height = Sizing::fixed(20), .align_y = AlignY::Center });
-                text(str_lit("x"), { .font_size_px = 12 }); end_box();
+                if(hovered(close_id))set_cursor(Cursor::Hand);
+                const Color color=hovered(close_id)?active_theme(ctx).text_primary:active_theme(ctx).text_muted;
+                draw_line({.from={3,6},.to={11,14},.color=color,.thickness=1.5f});
+                draw_line({.from={11,6},.to={3,14},.color=color,.thickness=1.5f});end_box();
                 if (clicked(close_id)) { t.open = false; c.move_pane = t.id; c.target = 0; }
             }
             DragPayloadView tab_payload = {};
@@ -1292,8 +1291,7 @@ uint32_t next_dock_pane() noexcept {
             }
             if (target && accept_drag_payload(leaf_id, kInternalDockDragKind, &payload)) { c.move_pane = payload.u32; c.target = target; c.zone = z; }
         }
-        const float leaf_h = element_bounds(leaf_id).h;
-        begin_box({ .axis = Axis::Col, .width = Sizing::percent(1), .height = Sizing::fixed(leaf_h > d.tab_bar_height_px ? leaf_h-d.tab_bar_height_px : 1) }); c.pane_open = true;
+        begin_box({ .axis = Axis::Col, .width = Sizing::percent(1), .height = Sizing::grow() }); c.pane_open = true;
         if (n.active) return n.active;
         end_box(); end_box(); c.pane_open = false;
     }
@@ -1325,6 +1323,24 @@ void table_close_row(TableStackEntry& t) noexcept {
     if (t.row_open) { end_box(); t.row_open = false; }
 }
 }
+struct TableHeaderPaint {
+    uint32_t table_id, column;
+    bool lines, sorted, descending;
+    Color border, accent;
+};
+void paint_table_header(Rect bounds, void* data) noexcept {
+    const auto& p=*static_cast<const TableHeaderPaint*>(data);
+    Context* ctx=current_context();
+    auto* meta=table_metadata(ctx,p.table_id);
+    meta->widths[p.column]=bounds.w;
+    state_map_find(&ctx->active_ui->states,meta->column_ids[p.column])->column_width=bounds.w;
+    if (p.lines) draw_line({.from={bounds.w-1,0},.to={bounds.w-1,bounds.h},.color=p.border});
+    if (p.sorted) {
+        const float x=bounds.w-14,y=bounds.h*.5f,dir=p.descending?3.0f:-3.0f;
+        draw_line({.from={x-3,y-dir},.to={x,y+dir},.color=p.accent});
+        draw_line({.from={x,y+dir},.to={x+3,y-dir},.color=p.accent});
+    }
+}
 TableResult begin_table(const TableDesc& desc_in) noexcept {
     Context* ctx = current_context();
     if (!ctx || !ctx->in_frame || !desc_in.id || desc_in.columns.empty() || desc_in.columns.size() > kMaxTableColumns || ctx->active_ui->table_depth == 8 ||
@@ -1335,6 +1351,7 @@ TableResult begin_table(const TableDesc& desc_in) noexcept {
     desc.background = resolve_theme_color(desc.background, thm.bg_table);
     desc.header_background = resolve_theme_color(desc.header_background, thm.bg_elevated);
     desc.zebra_color = resolve_theme_color(desc.zebra_color, thm.zebra_row);
+    desc.selected_row_color = resolve_theme_color(desc.selected_row_color, thm.surface_selected);
     desc.hover_row_color = resolve_theme_color(desc.hover_row_color, thm.selection_hover);
     desc.border_color = resolve_theme_color(desc.border_color, thm.border_line);
     desc.radius = resolve_theme_corners(desc.radius, Corners::all(thm.radius_table_px));
@@ -1362,10 +1379,7 @@ TableResult begin_table(const TableDesc& desc_in) noexcept {
     ws->table_sort_changed = false;
     const uint32_t outer_id = id_index(desc.id, kTableOuterTag);
     const float gutter = desc.show_scrollbar ? 10.0f : 0;
-    float viewport = element_bounds(id_index(desc.id,0x7402u)).w;
-    if (viewport <= 0) viewport = desc.width.kind == SizingKind::Fixed ? desc.width.value : static_cast<float>(ctx->active_ui->viewport_w) / ctx->active_ui->dpi_scale;
-    float remaining = viewport - desc.padding.left - desc.padding.right - gutter;
-    float weights = 0; bool resizing = false;
+    bool resizing = false;
     for (uint32_t c = 0; c < t.count; ++c) {
         const auto& col = t.columns[c]; const uint32_t cid = table_col_id(desc, c), rid = id_index(cid, 0x7600u);
         state_map_get_or_insert(&ctx->active_ui->states, rid, ctx->active_ui->frame_index);
@@ -1386,30 +1400,17 @@ TableResult begin_table(const TableDesc& desc_in) noexcept {
         resizing = resizing || active || ended;
         if (cw->column_override || col.sizing == TableColumnSizing::Fixed) {
             t.col_widths[c] = clamp_range(cw->column_override ? cw->column_width : col.width, col.min_width, col.max_width);
-            remaining -= t.col_widths[c];
-        } else weights += col.width > 0 ? col.width : 1;
-    }
-    // Water-fill stretch columns, respecting each column's declared bounds.
-    bool resolved[kMaxTableColumns] = {};
-    for (uint32_t pass = 0; pass <= t.count; ++pass) {
-        bool clamped = false;
-        for (uint32_t c = 0; c < t.count; ++c) {
-            const auto& col = t.columns[c]; auto* cw = state_map_find(&ctx->active_ui->states, table_col_id(desc, c));
-            if (resolved[c] || cw->column_override || col.sizing != TableColumnSizing::Stretch) continue;
-            const float weight = col.width > 0 ? col.width : 1;
-            const float width = weights > 0 ? remaining * weight / weights : col.min_width;
-            if (pass == t.count || width < col.min_width || width > col.max_width) {
-                t.col_widths[c] = clamp_range(width, col.min_width, col.max_width);
-                remaining -= t.col_widths[c]; weights -= weight; resolved[c] = true; clamped = true;
-            } else t.col_widths[c] = width;
+            t.tracks[c] = GridTrack::px(t.col_widths[c]);
+        } else {
+            t.tracks[c] = GridTrack::fr(col.width > 0 ? col.width : 1,col.min_width,col.max_width);
+            t.col_widths[c] = cw->column_width > 0 ? cw->column_width : col.min_width;
         }
-        if (!clamped) break;
     }
     begin_box({ .id = id_index(desc.id,0x7402u), .axis = Axis::Col, .width = desc.width.kind == SizingKind::Grow ? Sizing::percent(1) : desc.width, .height = desc.height });
     begin_box({ .id = outer_id, .axis = Axis::Col, .width = desc.width, .height = desc.height,
         .background = desc.background, .border_color = desc.border_color, .border_width = desc.border_width, .radius = desc.radius, .clip_children = true });
     begin_box({ .id = id_index(desc.id, kTableHeaderTag), .width = Sizing::grow(), .height = Sizing::fixed(desc.header_height_px),
-        .padding = {desc.padding.left, desc.padding.right + gutter, 0, 0}, .background = desc.header_background });
+        .padding = {desc.padding.left, desc.padding.right + gutter, 0, 0}, .background = desc.header_background, .grid_tracks = {t.tracks,t.count}, .shrink_width = true });
     for (uint32_t c = 0; c < t.count; ++c) {
         const auto& col = t.columns[c]; const uint32_t cid = table_col_id(desc, c), hid = id_index(cid, 0x7601u), rid = id_index(cid, 0x7600u);
         auto* cw = state_map_find(&ctx->active_ui->states, cid); cw->column_width = t.col_widths[c];
@@ -1417,15 +1418,13 @@ TableResult begin_table(const TableDesc& desc_in) noexcept {
             result.sort_descending = result.sort_column == c ? !result.sort_descending : true;
             result.sort_column = c; result.sort_changed = true;
         }
-        begin_box({ .id = hid, .width = Sizing::fixed(t.col_widths[c]), .height = Sizing::grow(),
+        begin_box({ .id = hid, .width = Sizing::grow(), .height = Sizing::grow(),
             .padding = {desc.cell_padding_x, desc.cell_padding_x + (col.sortable && result.sort_column == c ? 18.0f : 0.0f), 0, 0}, .align_x = col.align_x, .align_y = AlignY::Center, .clip_children = true, .focusable = true });
-        text(col.title, { .font_size_px = desc.header_font_size_px, .wrap = false });
-        if (desc.show_column_lines) draw_line({ .from = {t.col_widths[c]-1,0}, .to = {t.col_widths[c]-1,desc.header_height_px}, .color = desc.border_color });
-        if (col.sortable && result.sort_column == c) {
-            const float x = t.col_widths[c] - 14, y = desc.header_height_px * .5f;
-            const float dir = result.sort_descending ? 3.0f : -3.0f;
-            draw_line({ .from = {x-3,y-dir}, .to = {x,y+dir}, .color = thm.accent });
-            draw_line({ .from = {x,y+dir}, .to = {x+3,y-dir}, .color = thm.accent });
+        text(col.title, { .font_size_px = desc.header_font_size_px, .wrap = false, .ellipsis = true });
+        auto* paint=ctx->frame_arena.alloc<TableHeaderPaint>();
+        if (paint) {
+            *paint={desc.id,c,desc.show_column_lines,col.sortable && result.sort_column==c,result.sort_descending,desc.border_color,thm.accent};
+            draw_after_layout(paint_table_header,paint);
         }
         if (col.resizable) box({ .id = rid, .width = Sizing::fixed(6), .height = Sizing::fixed(desc.header_height_px),
             .attach_to = AttachTo::Parent, .anchor_element = Anchor::TopRight, .anchor_parent = Anchor::TopRight, .floating_offset = {0,0} });
@@ -1435,13 +1434,11 @@ TableResult begin_table(const TableDesc& desc_in) noexcept {
     ws = state_map_find(&ctx->active_ui->states, desc.id);
     ws->table_sort_column = result.sort_column; ws->table_sort_descending = result.sort_descending; metadata->count = t.count;
     for (uint32_t c = 0; c < t.count; ++c) { metadata->widths[c] = t.col_widths[c]; metadata->column_ids[c] = table_col_id(desc,c); metadata->min_widths[c] = t.columns[c].min_width; metadata->max_widths[c] = t.columns[c].max_width; }
-    const float outer_h = element_bounds(outer_id).h;
-    const float table_h = outer_h > 0 ? outer_h : (desc.height.kind == SizingKind::Fixed ? desc.height.value : 1);
-    // Clay clipping permits child overflow. Bound the viewport independently of visible row content.
-    begin_box({ .axis = Axis::Col, .width = Sizing::grow(), .height = Sizing::fixed(table_h > desc.header_height_px ? table_h-desc.header_height_px : 1) });
+    begin_box({ .axis = Axis::Col, .width = Sizing::grow(), .height = Sizing::grow(), .shrink_width = true });
     result.slice = begin_virtual_list({ .id = desc.id, .item_count = desc.item_count, .item_height_px = desc.row_height_px,
         .row_gap_px = desc.row_gap_px, .overscan_rows = desc.overscan_rows, .width = Sizing::grow(), .height = Sizing::grow(),
         .padding = desc.padding, .background = Color::transparent(), .border_width = 0, .show_scrollbar = desc.show_scrollbar });
+    Clay__GetOpenLayoutElement()->config.layout.shrinkWidth = true;
     // Rows own the horizontal insets, including the scrollbar gutter. Keep the list's vertical padding.
     a11y_semantic(desc.id,A11yRole::Table);
     Clay__GetOpenLayoutElement()->config.layout.padding.left = 0;
@@ -1455,11 +1452,23 @@ bool table_next_row(uint32_t* out, Color bg, Color border) noexcept {
     if (t.cursor_row >= t.end_row) return false;
     const auto& d = t.desc; const uint32_t row = t.cursor_row++, rid = id_index(d.id, 0x100000u + row);
     if (out) *out = row;
+    if (d.selected_row && clicked(rid)) { *d.selected_row = row; request_redraw(ctx); }
+    Color row_color = bg.a ? bg : ((row & 1u) ? d.zebra_color : Color{});
+    if (d.selected_row && *d.selected_row == row) row_color = d.selected_row_color;
+    if (hovered(rid)) {
+        const Color under = row_color.a ? row_color : d.background;
+        row_color = Color::blend_over(under,d.hover_row_color);
+    }
     begin_box({ .id = rid, .width = Sizing::grow(), .height = Sizing::fixed(d.row_height_px),
         .padding = {d.padding.left, d.padding.right + (d.show_scrollbar ? 10.0f : 0.0f), 0, 0},
-        .background = bg.a ? bg : (hovered(rid) ? d.hover_row_color : ((row & 1u) ? d.zebra_color : Color{})),
-        .border_color = border, .border_width = border.a ? 1.0f : 0.0f });
+        .background = row_color,
+        .border_color = border, .border_width = border.a ? 1.0f : 0.0f, .grid_tracks = {t.tracks,t.count}, .shrink_width = true });
     t.col_cursor = 0; t.row_open = true; return true;
+}
+TableRowResult table_row_result(uint32_t table_id, uint32_t row_index) noexcept {
+    if (!table_id || row_index > UINT32_MAX - 0x100000u) return {};
+    const uint32_t rid = id_index(table_id, 0x100000u + row_index);
+    return {rid, hovered(rid), pressed(rid), clicked(rid), double_clicked(rid), right_clicked(rid)};
 }
 bool table_next_column() noexcept {
     Context* ctx = current_context(); if (!ctx || !ctx->in_frame || !ctx->active_ui->table_depth) return false;
@@ -1467,8 +1476,8 @@ bool table_next_column() noexcept {
     if (t.cell_open) { end_box(); t.cell_open = false; }
     if (t.col_cursor == t.count) return false;
     const uint32_t c = t.col_cursor++;
-    begin_box({ .id = id_index(id_index(t.desc.id, 0x100000u + t.cursor_row - 1),c), .width = Sizing::fixed(t.col_widths[c]), .height = Sizing::grow(),
-        .padding = Padding::xy(t.desc.cell_padding_x,0), .align_x = t.columns[c].align_x, .align_y = AlignY::Center, .clip_children = true });
+    begin_box({ .id = id_index(id_index(t.desc.id, 0x100000u + t.cursor_row - 1),c), .width = Sizing::grow(), .height = Sizing::grow(),
+        .padding = Padding::xy(t.desc.cell_padding_x,0), .align_x = t.columns[c].align_x, .align_y = AlignY::Center, .clip_children = true, .pointer_passthrough = true });
     t.cell_open = true; return true;
 }
 void end_table() noexcept {
@@ -1548,11 +1557,14 @@ TreeNodeResult begin_tree_node(const TreeNodeDesc& d_in) noexcept {
     text(d.label,{ .color = d.text_color, .font_size_px = d.font_size_px, .font_id = d.font_id, .wrap = false }); end_box();
     r.open = !d.leaf && open;
     if (r.open) {
-        for(auto* semantic=ctx->a11y_first;semantic;semantic=semantic->next)if(semantic->node.id==d.id){ctx->a11y_parent=semantic;break;}
+        if(auto* entry=a11y_index(ctx,d.id))ctx->a11y_parent=entry->build;
         begin_box({ .id = id_index(d.id,0x7EE1u), .axis = Axis::Col, .width = Sizing::grow(), .height = Sizing::fit() });
         if (d.show_indent_guide) {
             const float x = static_cast<float>(ctx->active_ui->tree_depth)*d.indent_px+8;
-            draw_line({ .from = {x,0}, .to = {x,element_bounds(id_index(d.id,0x7EE1u)).h}, .color = thm.grid_minor });
+            struct Guide {float x;Color color;};auto* guide=ctx->frame_arena.alloc<Guide>();
+            if(guide){*guide={x,thm.grid_minor};draw_after_layout([](Rect r,void* data) noexcept {
+                const auto& g=*static_cast<Guide*>(data);draw_line({.from={g.x,0},.to={g.x,r.h},.color=g.color});
+            },guide);}
         }
         ++ctx->active_ui->tree_depth;
     }

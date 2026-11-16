@@ -1052,6 +1052,7 @@ int run_headless(const char* out_png_path) noexcept {
                         .height = etch::Sizing::fixed(40.0f),
                         .padding = etch::Padding::xy(16.0f, 6.0f),
                         .gap = 12.0f,
+                        .window_drag_passthrough = true,
                     }) {
                         etch::window_drag_region(etch::Rect{ 0.0f, 0.0f, 1280.0f, 40.0f });
                         etch::window_client_region(etch::Rect{ 20.0f, 6.0f, 80.0f, 28.0f });

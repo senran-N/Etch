@@ -171,7 +171,7 @@ static bool verify_editor_checks(etch::Context* restore) noexcept {
     ev={};ev.type=SDL_EVENT_TEXT_EDITING;ev.edit.text="";
     process_event(test,ev);step();
     check(!result.composing && ime_cursor_rect(test).h>0 && ime_cursor_rect(test).w==2.0f && frame_stats(test).ime_cursor_offset_win==0,__LINE__);
-    SyntaxToken tokens[32];const uint32_t count=tokenize_cpp_hlsl(0,str_lit("float4 x = 1.0; // comment"),tokens,32,nullptr);check(count>3 && tokens[0].byte_start==0 && tokens[0].byte_end==6,__LINE__);
+    SyntaxToken tokens[32];const uint32_t count=tokenize_cpp_hlsl(0,str_lit("float4 x = 1.0; // comment"),tokens,32,nullptr);check(count==3 && tokens[0].byte_start==0 && tokens[0].byte_end==6 && tokens[2].byte_start==16,__LINE__);
     step(0,0,{-1,-1},false,1,true);check(text_buffer_byte_length(&b)==22,__LINE__);
     clear_text_selection(eid);request_focus(0);for(uint32_t i=0;i<120;++i)step();
     const auto stats=frame_stats(test);check(stats.draw_call_count<=3 && stats.idle_sleeping,__LINE__);

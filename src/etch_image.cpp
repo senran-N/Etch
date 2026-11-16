@@ -131,10 +131,44 @@ bool grow_sprite_atlas(Context* ctx) noexcept {
         ctx->stats.sprite_atlas_size = n;
     return true;
 }
+bool compact_sprite_atlas(Context* ctx) noexcept {
+    auto& a=ctx->atlas;
+    auto* plan=static_cast<SpriteSlot*>(std::malloc(size_t(a.sprite_used)*sizeof(SpriteSlot)));
+    auto* pixels=static_cast<uint8_t*>(std::calloc(size_t(a.width)*a.height,4));
+    if(!plan || !pixels) {std::free(plan);std::free(pixels);return false;}
+    std::memcpy(plan,a.sprites,size_t(a.sprite_used)*sizeof(SpriteSlot));
+    uint32_t x=0,y=8,shelf=0;
+    for(uint32_t i=1;i<a.sprite_used;++i) {
+        auto& s=plan[i];if(!s.live){s.alloc_w=s.alloc_h=0;continue;}
+        const uint32_t w=s.width+2,h=s.height+2;
+        if(x+w>a.width){x=0;y+=shelf;shelf=0;}
+        if(y+h>a.height){std::free(plan);std::free(pixels);return false;}
+        for(uint32_t row=0;row<h;++row) std::memcpy(pixels+(size_t(y+row)*a.width+x)*4,a.pixels+(size_t(s.y+row)*a.width+s.x)*4,size_t(w)*4);
+        s.x=x;s.y=y;s.alloc_w=w;s.alloc_h=h;x+=w;shelf=shelf>h?shelf:h;
+    }
+    for(uint32_t i=0;i<ctx->prim_count;++i) {
+        auto& p=ctx->prims[i];
+        if((p.style.x&15u)!=uint32_t(PrimKind::Texture) || ((p.style.x>>10)&511u)!=0)continue;
+        const float u0=float(p.payload.x&65535u)/65535*float(a.width),v0=float(p.payload.x>>16)/65535*float(a.height);
+        const float u1=float(p.payload.y&65535u)/65535*float(a.width),v1=float(p.payload.y>>16)/65535*float(a.height);
+        const float mx=(u0+u1)*.5f,my=(v0+v1)*.5f;
+        for(uint32_t j=1;j<a.sprite_used;++j) {
+            const auto& old=a.sprites[j];if(!old.live || mx<float(old.x) || mx>=float(old.x+old.alloc_w) || my<float(old.y) || my>=float(old.y+old.alloc_h))continue;
+            const float dx=float(plan[j].x)-float(old.x),dy=float(plan[j].y)-float(old.y);
+            p.payload.x=pack_unorm16x2((u0+dx)/float(a.width),(v0+dy)/float(a.height));
+            p.payload.y=pack_unorm16x2((u1+dx)/float(a.width),(v1+dy)/float(a.height));break;
+        }
+    }
+    for(uint32_t row=0;row<8;++row)std::memset(pixels+size_t(row)*a.width*4,255,32);
+    std::memcpy(a.sprites,plan,size_t(a.sprite_used)*sizeof(SpriteSlot));std::free(plan);std::free(a.pixels);a.pixels=pixels;
+    a.shelf_x=x;a.shelf_y=y;a.shelf_h=shelf;a.dirty=true;a.dirty_y0=0;a.dirty_y1=a.height;
+    return true;
+}
 bool allocate_sprite_rect(Context* ctx, uint32_t w, uint32_t h, SpriteSlot* s) noexcept {
     auto& a = ctx->atlas;
     if (a.width < 512 && !grow_sprite_atlas(ctx))
         return false;
+    bool compacted=false;
     for (;;) {
         uint32_t x = a.shelf_x, y = a.shelf_y, sh = a.shelf_h;
         if (x + w > a.width) {
@@ -152,8 +186,10 @@ bool allocate_sprite_rect(Context* ctx, uint32_t w, uint32_t h, SpriteSlot* s) n
             a.shelf_h = sh > h ? sh : h;
             return true;
         }
-        if (!grow_sprite_atlas(ctx))
-            return false;
+        if (!grow_sprite_atlas(ctx)) {
+            if(compacted || !compact_sprite_atlas(ctx))return false;
+            compacted=true;
+        }
     }
 }
 uint8_t encode_sprite_channel(float v) noexcept {
@@ -264,11 +300,12 @@ bool update_sprite_rgba(Context* ctx, uint32_t id, uint32_t w, uint32_t h, const
     auto* s = find_sprite(ctx, id);
     if (!s || !pixels || !w || !h || w > 2046 || h > 2046 || (pitch && pitch < w * 4))
         return false;
-    const SpriteSlot old = *s;
+    SpriteSlot old = *s;
     SpriteSlot next = old;
     if (w + 2 > next.alloc_w || h + 2 > next.alloc_h)
         if (!allocate_sprite_rect(ctx, w + 2, h + 2, &next))
             return false;
+    old=*s;
     next.width = w;
     next.height = h;
     *s = next;
@@ -333,6 +370,10 @@ void destroy_sprite(Context* ctx, uint32_t id) noexcept {
     if (!ctx)
         return;
     release_atlas_sprite(&ctx->atlas, id);
+    if(!ctx->atlas.sprite_live && !ctx->in_frame) {
+        auto& a=ctx->atlas;a.shelf_x=0;a.shelf_y=8;a.shelf_h=0;
+        for(uint32_t i=1;i<a.sprite_used;++i)a.sprites[i].alloc_w=a.sprites[i].alloc_h=0;
+    }
     if (!ctx->in_frame)
         ctx->stats.sprite_count = ctx->atlas.sprite_live;
 }

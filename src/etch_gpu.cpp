@@ -471,7 +471,8 @@ bool run_kawase_step(
     float texel_x,
     float texel_y,
     float offset,
-    uint32_t mode) noexcept
+    uint32_t mode,
+    Rect region = {}) noexcept
 {
     SDL_GPUColorTargetInfo ct = {};
     ct.texture = dst_tex;
@@ -495,12 +496,11 @@ bool run_kawase_step(
     };
     SDL_SetGPUViewport(pass, &viewport);
 
-    const SDL_Rect scissor = {
-        .x = 0,
-        .y = 0,
-        .w = static_cast<int>(dst_w),
-        .h = static_cast<int>(dst_h),
-    };
+    const int x=region.w>0 ? static_cast<int>(std::floor(clamp_range(region.x,0,float(dst_w)))) : 0;
+    const int y=region.h>0 ? static_cast<int>(std::floor(clamp_range(region.y,0,float(dst_h)))) : 0;
+    const int right=region.w>0 ? static_cast<int>(std::ceil(clamp_range(region.x+region.w,0,float(dst_w)))) : static_cast<int>(dst_w);
+    const int bottom=region.h>0 ? static_cast<int>(std::ceil(clamp_range(region.y+region.h,0,float(dst_h)))) : static_cast<int>(dst_h);
+    const SDL_Rect scissor={x,y,right-x,bottom-y};
     SDL_SetGPUScissor(pass, &scissor);
 
     const SDL_GPUTextureSamplerBinding smp = { src_tex, ctx->linear_sampler };
@@ -529,6 +529,7 @@ void destroy_window_ui_state(Context*, WindowUiState* ui) noexcept {
     for(uint32_t i=0;i<ui->undo_cap;++i) {std::free(ui->undo_pool[i].entries);std::free(ui->undo_pool[i].bytes);}
     std::free(ui->undo_pool);
     std::free(ui->drag_heap);
+    std::free(ui->pending_drop_records);std::free(ui->pending_text_drop_records);std::free(ui->pending_drop_buf);
     std::free(ui->dock_spaces); std::free(ui->dock_cursor.stack); std::free(ui->tables);
     std::free(ui->focus_order); std::free(ui->prev_focus_order);
     std::free(ui->span_hits); std::free(ui->drop_hits);
@@ -803,6 +804,12 @@ bool record_frame_commands(
         const uint32_t prev_batch = (s == 0u) ? 0u : ctx->blur_splits[s - 1u].split_batch;
         const uint32_t split_batch = ctx->blur_splits[s].split_batch;
         const float radius_px = ctx->blur_splits[s].blur_radius_px;
+        const Rect bounds=ctx->blur_splits[s].union_bounds;
+        const float margin=std::ceil(radius_px*2+32);
+        const auto region=[&](uint32_t w,uint32_t h) noexcept -> Rect {
+            const float sx=float(w)/float(target_w),sy=float(h)/float(target_h);
+            return {(bounds.x-margin)*sx,(bounds.y-margin)*sy,(bounds.w+2*margin)*sx,(bounds.h+2*margin)*sy};
+        };
 
         if (s == 0u || split_batch > prev_batch) {
             if (!run_uber_render_pass(
@@ -830,7 +837,7 @@ bool record_frame_commands(
                 ctx, cmd, kawase_pipe,
                 ctx->active_ui->scene_tex, ctx->active_ui->blur_ping_tex, half_w, half_h,
                 1.0f / static_cast<float>(target_w), 1.0f / static_cast<float>(target_h),
-                off_down1, 0u))
+                off_down1, 0u, region(half_w,half_h)))
         {
             return false;
         }
@@ -838,7 +845,7 @@ bool record_frame_commands(
                 ctx, cmd, kawase_pipe,
                 ctx->active_ui->blur_ping_tex, ctx->active_ui->blur_pong_tex, quarter_w, quarter_h,
                 1.0f / static_cast<float>(half_w), 1.0f / static_cast<float>(half_h),
-                off_down2, 0u))
+                off_down2, 0u, region(quarter_w,quarter_h)))
         {
             return false;
         }
@@ -846,7 +853,7 @@ bool record_frame_commands(
                 ctx, cmd, kawase_pipe,
                 ctx->active_ui->blur_pong_tex, ctx->active_ui->blur_ping_tex, half_w, half_h,
                 1.0f / static_cast<float>(quarter_w), 1.0f / static_cast<float>(quarter_h),
-                off_up, 1u))
+                off_up, 1u, region(half_w,half_h)))
         {
             return false;
         }
@@ -1006,7 +1013,9 @@ bool ensure_gpu_device(Context* ctx) noexcept {
         if (ctx->atlas.gpu_tex) SDL_ReleaseGPUTexture(ctx->device, ctx->atlas.gpu_tex);
         ctx->atlas.gpu_tex = nullptr;
         if (ctx->atlas_transfer_buf) SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->atlas_transfer_buf);
+        if (ctx->texture_upload_buf) SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->texture_upload_buf);
         ctx->atlas_transfer_buf = nullptr;
+        ctx->texture_upload_buf=nullptr;ctx->texture_upload_cap=0;
         if (ctx->slug_curve_gpu_buf) SDL_ReleaseGPUBuffer(ctx->device, ctx->slug_curve_gpu_buf);
         ctx->slug_curve_gpu_buf = nullptr;
         if (ctx->slug_band_gpu_buf) SDL_ReleaseGPUBuffer(ctx->device, ctx->slug_band_gpu_buf);
@@ -1399,6 +1408,7 @@ void destroy_context(Context* ctx) noexcept {
         if (ctx->slug_curve_tbuf) SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->slug_curve_tbuf);
         if (ctx->slug_band_tbuf) SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->slug_band_tbuf);
         if (ctx->atlas_transfer_buf) SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->atlas_transfer_buf);
+        if (ctx->texture_upload_buf) SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->texture_upload_buf);
         if (ctx->atlas.gpu_tex) SDL_ReleaseGPUTexture(ctx->device, ctx->atlas.gpu_tex);
         release_blur_targets(ctx);
         if (ctx->headless_tex) SDL_ReleaseGPUTexture(ctx->device, ctx->headless_tex);
@@ -1607,23 +1617,18 @@ bool upload_rgba_rows(
     const uint32_t src_pitch = (row_pitch_bytes != 0u) ? row_pitch_bytes : tight_pitch;
     const uint32_t total_bytes = tight_pitch * height;
 
-    const SDL_GPUTransferBufferCreateInfo tb_info = {
-        .usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD,
-        .size = total_bytes,
-        .props = 0u,
-    };
-    SDL_GPUTransferBuffer* tbuf = SDL_CreateGPUTransferBuffer(ctx->device, &tb_info);
-    if (!tbuf) {
-        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "SDL_CreateGPUTransferBuffer (upload) failed: %s", SDL_GetError());
-        return false;
+    if (ctx->texture_upload_cap < total_bytes) {
+        uint32_t capacity=ctx->texture_upload_cap ? ctx->texture_upload_cap : 4096;
+        while(capacity<total_bytes) capacity*=2;
+        const SDL_GPUTransferBufferCreateInfo info={.usage=SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD,.size=capacity,.props=0u};
+        auto* next=SDL_CreateGPUTransferBuffer(ctx->device,&info);
+        if(!next) return false;
+        if(ctx->texture_upload_buf) SDL_ReleaseGPUTransferBuffer(ctx->device,ctx->texture_upload_buf);
+        ctx->texture_upload_buf=next;ctx->texture_upload_cap=capacity;
     }
-
-    void* mapped = SDL_MapGPUTransferBuffer(ctx->device, tbuf, false);
-    if (!mapped) {
-        SDL_ReleaseGPUTransferBuffer(ctx->device, tbuf);
-        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "SDL_MapGPUTransferBuffer (upload) failed: %s", SDL_GetError());
-        return false;
-    }
+    SDL_GPUTransferBuffer* tbuf=ctx->texture_upload_buf;
+    void* mapped=SDL_MapGPUTransferBuffer(ctx->device,tbuf,true);
+    if(!mapped) return false;
 
     if (src_pitch == tight_pitch) {
         std::memcpy(mapped, rgba_pixels, total_bytes);
@@ -1640,14 +1645,12 @@ bool upload_rgba_rows(
 
     SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(ctx->device);
     if (!cmd) {
-        SDL_ReleaseGPUTransferBuffer(ctx->device, tbuf);
         return false;
     }
 
     SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(cmd);
     if (!copy) {
         SDL_CancelGPUCommandBuffer(cmd);
-        SDL_ReleaseGPUTransferBuffer(ctx->device, tbuf);
         return false;
     }
 
@@ -1672,7 +1675,6 @@ bool upload_rgba_rows(
     SDL_EndGPUCopyPass(copy);
 
     const bool ok = SDL_SubmitGPUCommandBuffer(cmd);
-    SDL_ReleaseGPUTransferBuffer(ctx->device, tbuf);
     return ok;
 }
 
@@ -1693,6 +1695,7 @@ void release_window(Context* ctx, SDL_Window* window) noexcept {
         }
         if (slot.hit_test_attached) SDL_SetWindowHitTest(window, nullptr, nullptr);
         os_a11y_detach_window(ctx, &slot);
+        detach_win32_chrome(&slot);
         WindowUiState* saved = ctx->active_ui;
         ctx->active_ui = &slot.ui;
         release_blur_targets(ctx);

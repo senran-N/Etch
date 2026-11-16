@@ -616,6 +616,24 @@ inline bool verify_os_window_a11y_checks() noexcept {
     check(evaluate_window_hit(wctx, {2.0f, 80.0f}, win) == WindowHit::ResizeLeft, __LINE__);
     check(evaluate_window_hit(wctx, {120.0f, 16.0f}, win) == WindowHit::Caption, __LINE__);
 
+    begin_window_frame(wctx,win,0);
+    window_drag_region({0,0,480,32});
+    begin_box({.width=Sizing::fixed(480),.height=Sizing::fixed(32)});
+    box({.id=id("chrome.click"),.width=Sizing::fixed(40),.height=Sizing::fixed(32)});
+    box({.id=id("chrome.pass"),.width=Sizing::fixed(40),.height=Sizing::fixed(32),.window_drag_passthrough=true});
+    box({.id=id("chrome.max"),.width=Sizing::fixed(40),.height=Sizing::fixed(32)});
+    window_maximize_button_region(id("chrome.max"));end_box();end_window_frame(wctx);
+    check(evaluate_window_hit(wctx,{20,16},win)==WindowHit::Client,__LINE__);
+    check(evaluate_window_hit(wctx,{60,16},win)==WindowHit::Caption,__LINE__);
+    check(evaluate_window_hit(wctx,{100,16},win)==WindowHit::Maximize,__LINE__);
+#if defined(_WIN32) && defined(ETCH_ENABLE_OS_A11Y) && ETCH_ENABLE_OS_A11Y
+    {
+        HWND native=static_cast<HWND>(SDL_GetPointerProperty(SDL_GetWindowProperties(win),SDL_PROP_WINDOW_WIN32_HWND_POINTER,nullptr));
+        const float factor=SDL_GetWindowDisplayScale(win)/SDL_GetWindowPixelDensity(win);
+        POINT point={LONG(100*factor),LONG(16*factor)};ClientToScreen(native,&point);
+        check(SendMessageW(native,WM_NCHITTEST,0,MAKELPARAM(point.x,point.y))==HTMAXBUTTON,__LINE__);
+    }
+#endif
     const bool fs_ok = set_window_fullscreen(true, win);
     if (fs_ok && is_window_fullscreen(wctx, win)) {
         check(evaluate_window_hit(wctx, {2.0f, 80.0f}, win) == WindowHit::Client, __LINE__);

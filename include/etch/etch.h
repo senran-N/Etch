@@ -12,7 +12,7 @@
 #include <type_traits>
 
 #define ETCH_VERSION_MAJOR 0
-#define ETCH_VERSION_MINOR 11
+#define ETCH_VERSION_MINOR 12
 #define ETCH_VERSION_PATCH 0
 #define ETCH_VERSION_STR_DETAIL(x) #x
 #define ETCH_VERSION_STR(x) ETCH_VERSION_STR_DETAIL(x)
@@ -155,6 +155,16 @@ struct Color {
                (static_cast<uint32_t>(g) << 8) |
                (static_cast<uint32_t>(b) << 16) |
                (static_cast<uint32_t>(a) << 24);
+    }
+
+    // Source-over compositing of straight RGBA colors; preserves RGB over transparency.
+    static constexpr Color blend_over(Color under, Color over) noexcept {
+        const float a = over.a / 255.0f;
+        const float out = a + under.a / 255.0f * (1.0f - a);
+        if (out == 0) return transparent();
+        Color c = lerp(under, over, a / out);
+        c.a = static_cast<uint8_t>(out * 255.0f + 0.5f);
+        return c;
     }
 
     static constexpr Color lerp(Color a, Color b, float t) noexcept {
@@ -1026,6 +1036,8 @@ struct Theme {
     static Theme light() noexcept;
     static Theme high_contrast() noexcept;
     static Theme industrial() noexcept;
+    Color on_primary = Color::white();
+    Color on_error = Color::white();
 };
 
 void set_theme(const Theme& t, Context* ctx = nullptr) noexcept;
@@ -1038,7 +1050,7 @@ struct FrameDesc {
     uint32_t viewport_h = 720;
     float dpi_scale = 1.0f;
     float dt_seconds = 0.0f;
-    Vec2 pointer_pos = {-1.0f, -1.0f};
+    Vec2 pointer_pos = {NAN, NAN}; // Unspecified; finite negative coordinates are valid.
     bool pointer_down = false;
     Vec2 scroll_delta = {};
     bool right_pointer_down = false;
@@ -1193,7 +1205,7 @@ struct BoxDesc {
     Anchor anchor_parent = Anchor::BottomLeft;
     Vec2 floating_offset = {};
     int16_t z_index = 10;
-    bool pointer_passthrough = false;
+    bool pointer_passthrough = false; // Layout ID only; descendants remain interactive. Floating boxes also pass through capture.
     bool clip_to_parent = false;
     float backdrop_blur = 0.0f;
     bool clamp_to_viewport = false;
@@ -1206,6 +1218,7 @@ struct BoxDesc {
     bool shrink_width = false; // Fit/Grow may shrink below content width; clips overflow.
     bool continuous_corners = false; // Exponent-4 superellipse corners.
     float shadow_spread = 0.0f; // Logical pixels; negative values inset the shadow.
+    bool window_drag_passthrough = false; // Allow caption dragging through this pointer target.
 };
 
 inline constexpr uint16_t kFontSans       = 0u;
@@ -1485,6 +1498,7 @@ enum class WindowHit : uint8_t {
     ResizeBottom = 8,
     ResizeBottomLeft = 9,
     ResizeLeft = 10,
+    Maximize = 11,
 };
 
 struct WindowChromeDesc {
@@ -1567,7 +1581,7 @@ void code_editor_scroll_to_line(uint32_t, uint32_t, AlignY align = AlignY::Cente
 
 struct TextInputDesc {
     uint32_t id = 0;
-    char* buffer = nullptr;            // Caller-owned mutable NUL-terminated UTF-8 buffer
+    char* buffer = nullptr;            // Writable NUL-terminated UTF-8; read_only permits bounded, unterminated memory.
     uint32_t capacity = 0;             // Total byte capacity of `buffer` (including trailing '\0')
     Str placeholder = {};              // Displayed when buffer & IME preedit are both empty
     Sizing width = Sizing::grow();
@@ -1591,6 +1605,9 @@ struct TextInputDesc {
     bool word_wrap = false;
     bool read_only = false;
     bool password = false;
+    bool context_menu = true;
+    bool clear_button = false;
+    bool escape_blurs = true;
 };
 
 struct TextInputResult {
@@ -1612,6 +1629,7 @@ struct ButtonDesc {
     Sizing width = Sizing::fit(); Sizing height = Sizing::fixed(32);
     Padding padding = Padding::xy(14, 0); float font_size_px = 13; uint16_t font_id = kFontSans;
     Corners radius = Corners::theme_auto(); bool disabled = false; Str shortcut_hint = {};
+    AlignX align_x = AlignX::Center;
 };
 struct CheckboxDesc {
     uint32_t id = 0; Str label = {}; bool* checked = nullptr; bool indeterminate = false;
@@ -1666,6 +1684,7 @@ struct PopupDesc {
     Padding padding = Padding::all(6); float gap = 2;
     Color background = Color::theme_auto(); Color border_color = Color::theme_auto();
     Corners radius = Corners::theme_auto(); int16_t z_index = 200;
+    bool attach_to_trigger = false; bool match_trigger_width = false;
 };
 struct MenuBarDesc { uint32_t id = 0; Sizing width = Sizing::grow(); float height_px = 28; Color background = Color::theme_auto(); };
 struct MenuDesc { uint32_t id = 0; Str label = {}; bool disabled = false; };
@@ -1687,7 +1706,7 @@ void set_tooltip(uint32_t target_id, Str text) noexcept;
 bool begin_modal(const ModalDesc& desc) noexcept;
 void end_modal() noexcept;
 bool combo_box(const ComboBoxDesc& desc) noexcept;
-void open_popup(uint32_t popup_id, Vec2 anchor_pos = {-1,-1}) noexcept;
+void open_popup(uint32_t popup_id, Vec2 anchor_pos = {NAN,NAN}) noexcept;
 void close_popup(uint32_t popup_id = 0) noexcept;
 bool is_popup_open(uint32_t popup_id) noexcept;
 bool begin_popup(const PopupDesc& desc) noexcept;
@@ -1802,6 +1821,8 @@ struct TableDesc {
     Color border_color = Color::theme_auto(); float border_width = 1.0f;
     Corners radius = Corners::theme_auto(); bool show_scrollbar = true;
     bool show_column_lines = true; float header_font_size_px = 12;
+    uint32_t* selected_row = nullptr; // UINT32_MAX means no selection; click updates caller state.
+    Color selected_row_color = Color::theme_auto();
 };
 struct TableResult {
     VirtualListSlice slice = {}; uint32_t sort_column = 0;
@@ -1810,6 +1831,11 @@ struct TableResult {
 TableResult begin_table(const TableDesc& desc) noexcept;
 bool table_next_row(uint32_t* out_row_index = nullptr, Color row_bg_override = {}, Color row_border_override = {}) noexcept;
 bool table_next_column() noexcept;
+struct TableRowResult {
+    uint32_t id = 0;
+    bool hovered = false, pressed = false, clicked = false, double_clicked = false, right_clicked = false;
+};
+TableRowResult table_row_result(uint32_t table_id, uint32_t row_index) noexcept;
 void end_table() noexcept;
 float table_column_width(uint32_t table_id, uint32_t col_index) noexcept;
 void set_table_column_width(uint32_t table_id, uint32_t col_index, float width_px) noexcept;
@@ -1993,6 +2019,9 @@ void set_window_refresh_callback(Context* ctx, WindowRefreshFn fn, void* user_da
 void set_window_chrome(const WindowChromeDesc& desc, SDL_Window* window = nullptr) noexcept;
 void window_drag_region(Rect rect_logical) noexcept;
 void window_client_region(Rect rect_logical) noexcept;
+// Register each frame. The ID overload resolves this frame's completed layout bounds.
+void window_maximize_button_region(Rect rect_logical) noexcept;
+void window_maximize_button_region(uint32_t element_id) noexcept;
 WindowHit evaluate_window_hit(const Context* ctx, Vec2 logical_pos, SDL_Window* window = nullptr) noexcept;
 void minimize_window(SDL_Window* window = nullptr) noexcept;
 void maximize_window(SDL_Window* window = nullptr) noexcept;
@@ -2033,6 +2062,11 @@ void draw_ring(const RingDesc& desc) noexcept;
 void draw_icon(const IconDrawDesc& desc) noexcept;
 Vec2 measure_text(Str text, uint16_t font_id = kFontSans, float size = 14.0f, float letter_spacing = 0.0f) noexcept;
 void draw_text(const TextDrawDesc& desc) noexcept;
+// Invoked at end_frame after layout, with local logical bounds from this frame.
+// The callback may measure/read state and call draw_*; it must not build layout or change UI state.
+// user_data must remain valid until end_frame returns. No second layout pass is required.
+using LayoutDrawFn = void (*)(Rect local_bounds, void* user_data) noexcept;
+void draw_after_layout(LayoutDrawFn callback, void* user_data = nullptr, bool foreground = false) noexcept;
 void draw_image(const ImageDrawDesc& desc) noexcept;
 
 uint32_t create_sprite_rgba(Context* ctx, const TextureDesc& desc) noexcept;

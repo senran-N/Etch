@@ -433,3 +433,24 @@ inline bool verify_media_emoji_checks(const char* temp_prefix = "_etch_v060") no
     set_current_context(previous);
     return ok;
 }
+
+inline bool verify_sprite_recycling_gpu() noexcept {
+    using namespace etch;Context* saved=current_context();Context* ctx=create_context({.headless=true});if(!ctx)return false;
+    bool ok=true;
+    uint32_t blue[64];for(auto& p:blue)p=Color::rgb_hex(0x1455EE).pack_rgba8();
+    const uint32_t keep=create_sprite_rgba(ctx,{.rgba_pixels=blue,.width=8,.height=8});
+    auto* red=static_cast<uint32_t*>(std::malloc(size_t(1600)*1600*4));
+    if(!red){destroy_context(ctx);set_current_context(saved);return false;}
+    for(uint32_t i=0;i<1600*1600;++i)red[i]=Color::rgb_hex(0xEE3311).pack_rgba8();
+    const uint32_t moving=create_sprite_rgba(ctx,{.rgba_pixels=red,.width=500,.height=500});
+    begin_frame(ctx,{.viewport_w=100,.viewport_h=50});begin_box({.width=Sizing::fixed(100),.height=Sizing::fixed(50)});
+    draw_image({.sprite_id=keep,.rect={0,0,30,30}});draw_image({.sprite_id=moving,.rect={40,0,30,30}});end_box();end_frame(ctx);
+    for(uint32_t side=520;side<=1500;side+=20)ok &= update_sprite_rgba(ctx,moving,side,side,red);
+    ok &= render_headless_png(ctx,100,50,"sprite_recycling.png");
+    SDL_Surface* rendered=SDL_LoadPNG("sprite_recycling.png");
+    ok &= media_emoji_checks::pixel(rendered,10,10,0x1455EE) && media_emoji_checks::pixel(rendered,50,10,0xEE3311);
+    if(rendered)SDL_DestroySurface(rendered);std::remove("sprite_recycling.png");
+    destroy_sprite(ctx,keep);destroy_sprite(ctx,moving);
+    const uint32_t reset=create_sprite_rgba(ctx,{.rgba_pixels=red,.width=1600,.height=1600});ok &= reset!=kInvalidSprite;
+    std::free(red);destroy_context(ctx);set_current_context(saved);return ok;
+}

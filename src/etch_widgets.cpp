@@ -4,12 +4,17 @@ namespace {
 bool desktop_frame(uint32_t id) noexcept { Context* c = current_context(); return c && c->in_frame && id; }
 bool desktop_activate(uint32_t id, bool disabled) noexcept {
     auto& ui = *current_context()->active_ui;
+    if (!disabled && hovered(id)) set_cursor(Cursor::Hand);
     return !disabled && (clicked(id) || (focused(id) && ui.ime_comp_len == 0u && !ui.frame_escape_consumed_by_ime &&
         (key_pressed(SDLK_RETURN) || key_pressed(SDLK_KP_ENTER) || key_pressed(SDLK_SPACE))));
 }
 Color desktop_bg(uint32_t id, Color bg, bool disabled) noexcept {
     const Theme& thm = active_theme(current_context());
-    return disabled ? thm.surface_disabled : hovered(id) ? thm.surface_hover : bg;
+    if (disabled) return thm.surface_disabled;
+    if (hovered(id)) set_cursor(Cursor::Hand);
+    Color overlay = thm.text_primary;
+    overlay.a = pressed(id) ? 51 : hovered(id) ? 26 : 0;
+    return Color::blend_over(bg, overlay);
 }
 void desktop_label(Str label, float size, uint16_t font, Color color = Color::theme_auto()) noexcept {
     text(label, {.color=color, .font_size_px=size, .font_id=font, .wrap=false});
@@ -109,8 +114,14 @@ bool desktop_number(uint32_t id, Str label, float* value, float lo, float hi, fl
     begin_box({.id=id,.width=width,.height=Sizing::fixed(height),.padding=Padding::xy(8,0),.gap=8,.align_y=AlignY::Center,
         .background=desktop_bg(id,bg,disabled),.radius=Corners::all(thm.radius_small_px),.focusable=!disabled});
     if (is_slider) {
-        const float w = element_bounds(id).w;
-        draw_rect({.rect={0,height-4,w*clamp_range((*value-lo)/(hi-lo),0,1),4},.fill=fill,.radius=Corners::all(2)});
+        struct Paint { float fraction; Color color; };
+        auto* paint=current_context()->frame_arena.alloc<Paint>();
+        if(paint) { *paint={clamp_range((*value-lo)/(hi-lo),0,1),fill};
+            draw_after_layout([](Rect r,void* data) noexcept {
+                const auto& p=*static_cast<Paint*>(data);
+                draw_rect({.rect={0,r.h-4,r.w*p.fraction,4},.fill=p.color,.radius=Corners::all(2)});
+            },paint);
+        }
     }
     a11y_semantic(id,is_slider?A11yRole::Slider:A11yRole::SpinButton,label,disabled?A11yState_Disabled:0u,141u,*value,lo,hi);
     desktop_label(label,12,kFontSans,fg);
@@ -129,8 +140,8 @@ bool button(const ButtonDesc& d) noexcept {
         : thm.surface_control;
     const Color label_col = d.disabled
         ? thm.text_disabled
-        : ((d.variant == ButtonVariant::Primary || d.variant == ButtonVariant::Danger) ? Color::white() : thm.text_primary);
-    begin_box({.id=d.id,.width=d.width,.height=d.height,.padding=d.padding,.gap=8,.align_x=(d.icon_id != kInvalidIcon && d.label.length == 0 && d.shortcut_hint.length == 0) ? AlignX::Center : AlignX::Left,.align_y=AlignY::Center,
+        : (d.variant == ButtonVariant::Primary ? thm.on_primary : d.variant == ButtonVariant::Danger ? thm.on_error : thm.text_primary);
+    begin_box({.id=d.id,.width=d.width,.height=d.height,.padding=d.padding,.gap=8,.align_x=d.align_x,.align_y=AlignY::Center,
         .background=desktop_bg(d.id,bg,d.disabled),.radius=resolve_theme_corners(d.radius,Corners::all(thm.radius_control_px)),.focusable=!d.disabled});
     a11y_semantic(d.id,A11yRole::Button,d.label,d.disabled?A11yState_Disabled:0u,3u);
     if (d.icon_id != kInvalidIcon) icon({.icon_id=d.icon_id,.size_px=d.font_size_px,.color=label_col});
@@ -147,10 +158,10 @@ bool checkbox(const CheckboxDesc& d) noexcept {
     a11y_semantic(d.id,A11yRole::Checkbox,d.label,(d.disabled?A11yState_Disabled:0u)|(*d.checked?A11yState_Checked:0u),3u);
     begin_box({.width=Sizing::fixed(d.box_size_px),.height=Sizing::fixed(d.box_size_px),.background=(*d.checked || d.indeterminate) ? accent : thm.surface_control,.radius=Corners::all(thm.radius_small_px * 0.6f)});
     const float b=d.box_size_px;
-    if (d.indeterminate) draw_line({.from={b*.25f,b*.5f},.to={b*.75f,b*.5f},.thickness=2});
+    if (d.indeterminate) draw_line({.from={b*.25f,b*.5f},.to={b*.75f,b*.5f},.color=thm.on_primary,.thickness=2});
     else if (*d.checked) {
-        draw_line({.from={b*.22f,b*.5f},.to={b*.43f,b*.72f},.thickness=2});
-        draw_line({.from={b*.43f,b*.72f},.to={b*.8f,b*.28f},.thickness=2});
+        draw_line({.from={b*.22f,b*.5f},.to={b*.43f,b*.72f},.color=thm.on_primary,.thickness=2});
+        draw_line({.from={b*.43f,b*.72f},.to={b*.8f,b*.28f},.color=thm.on_primary,.thickness=2});
     }
     end_box(); desktop_label(d.label,d.font_size_px,d.font_id,d.disabled ? thm.text_disabled : thm.text_primary); end_box(); return change;
 }
@@ -165,7 +176,7 @@ bool toggle_switch(const ToggleSwitchDesc& d) noexcept {
     begin_box({.id=d.id,.height=Sizing::fixed(d.track_height_px+8),.gap=8,.align_y=AlignY::Center,.focusable=!d.disabled});
     a11y_semantic(d.id,A11yRole::Switch,d.label,(d.disabled?A11yState_Disabled:0u)|(*d.value?A11yState_Checked:0u),3u);
     begin_box({.width=Sizing::fixed(d.track_width_px),.height=Sizing::fixed(d.track_height_px),.background=*d.value ? on_c : off_c,.radius=pill});
-    draw_rect({.rect={2+t*(d.track_width_px-d.track_height_px),2,d.track_height_px-4,d.track_height_px-4},.fill=Color::white(),.radius=pill});
+    draw_rect({.rect={2+t*(d.track_width_px-d.track_height_px),2,d.track_height_px-4,d.track_height_px-4},.fill=Color::white(),.radius=pill,.border_color=thm.border_control,.border_width=1});
     end_box(); desktop_label(d.label,d.font_size_px,d.font_id,d.disabled ? thm.text_disabled : thm.text_primary);end_box();return change;
 }
 void progress_bar(const ProgressBarDesc& d) noexcept {
@@ -208,8 +219,18 @@ TabItemResult tab_item(const TabItemDesc& d) noexcept {
     a11y_semantic(d.id,A11yRole::Tab,d.label,(d.disabled?A11yState_Disabled:0u)|(r.selected?A11yState_Selected:0u),3u);
     if(d.icon_id!=kInvalidIcon) icon({.icon_id=d.icon_id,.size_px=14,.color=r.selected ? bar.active_text_color : bar.text_color});
     desktop_label(d.label,bar.font_size_px,kFontSans,r.selected ? bar.active_text_color : bar.text_color);
-    if(d.closable) button({.id=close_id,.label=str_lit("x"),.variant=ButtonVariant::Ghost,.height=Sizing::fixed(24),.padding=Padding::xy(3,0),.disabled=d.disabled});
-    if(r.selected) draw_line({.from={0,bar.height_px-2},.to={element_bounds(d.id).w,bar.height_px-2},.color=bar.accent,.thickness=2});
+    if(d.closable) {
+        begin_box({.id=close_id,.width=Sizing::fixed(20),.height=Sizing::fixed(20),.background=desktop_bg(close_id,{},d.disabled),.radius=Corners::all(4)});
+        const Color color=d.disabled ? active_theme(current_context()).text_disabled : bar.text_color;
+        draw_line({.from={6,6},.to={14,14},.color=color,.thickness=1.5f});
+        draw_line({.from={14,6},.to={6,14},.color=color,.thickness=1.5f});end_box();
+    }
+    if(r.selected) {
+        auto* color=current_context()->frame_arena.alloc<Color>();
+        if(color) { *color=bar.accent;draw_after_layout([](Rect r,void* data) noexcept {
+            draw_line({.from={0,r.h-2},.to={r.w,r.h-2},.color=*static_cast<Color*>(data),.thickness=2});
+        },color); }
+    }
     end_box();return r;
 }
 void end_tab_bar() noexcept { if(current_context() && current_context()->active_ui->tab_bar_depth) {--current_context()->active_ui->tab_bar_depth;end_box();} }
@@ -222,17 +243,29 @@ bool drag_value(const DragValueDesc& d) noexcept {
     return desktop_number(d.id,d.label,d.value,d.min_value,d.max_value,d.step,d.speed,d.format,d.width,d.height_px,d.disabled,false,d.background,d.fill_color,d.text_color);
 }
 void open_popup(uint32_t id, Vec2 anchor) noexcept {
-    if(!current_context() || !id || !std::isfinite(anchor.x) || !std::isfinite(anchor.y)) return;
+    if(!current_context() || !id) return;
     auto& ui=*current_context()->active_ui;
     for(uint32_t i=0;i<ui.popup_count;++i) if(ui.popups[i].id==id) return;
     if(ui.popup_count==16) return;
-    if(anchor.x<0 || anchor.y<0) anchor=pointer_pos();
-    ui.popups[ui.popup_count++]={id,anchor,ui.frame_index,0};request_redraw(current_context());
+    if(std::isnan(anchor.x) && std::isnan(anchor.y)) anchor=pointer_pos();
+    if(!std::isfinite(anchor.x) || !std::isfinite(anchor.y)) return;
+    uint32_t parent=0;
+    if(ui.popup_depth) parent=ui.popup_build_ids[ui.popup_depth-1];
+    ui.popups[ui.popup_count++]={id,anchor,ui.frame_index,0,parent};request_redraw(current_context());
 }
 void close_popup(uint32_t id) noexcept {
     if(!current_context()) { return; } auto& ui=*current_context()->active_ui;
     if(!id) ui.popup_count=0;
-    else for(uint32_t i=0;i<ui.popup_count;++i) if(ui.popups[i].id==id) {ui.popup_count=i;break;}
+    else {
+        uint32_t removed[16]={id},count=1,write=0;
+        for(uint32_t i=0;i<ui.popup_count;++i) {
+            bool erase=ui.popups[i].id==id;
+            for(uint32_t j=0;j<count;++j) erase |= ui.popups[i].parent_id==removed[j];
+            if(erase) { if(ui.popups[i].id!=id) removed[count++]=ui.popups[i].id; }
+            else ui.popups[write++]=ui.popups[i];
+        }
+        ui.popup_count=write;
+    }
     if(!ui.popup_count) {ui.menu_open_id=0;ui.menu_owner=0;} request_redraw(current_context());
 }
 bool is_popup_open(uint32_t id) noexcept {
@@ -252,13 +285,14 @@ bool begin_popup(const PopupDesc& d) noexcept {
     }
     if(pop.opened_frame != ui.frame_index && !over_child && should_close_popover(d.id,d.trigger_id)) {close_popup(d.id);return false;}
     const Theme& thm = active_theme(current_context());
-    begin_box({.id=d.id,.axis=Axis::Col,.width=d.width,.height=d.height,.padding=d.padding,.gap=d.gap,
+    begin_box({.id=d.id,.axis=Axis::Col,.width=d.match_trigger_width && d.trigger_id ? Sizing::percent(1) : d.width,.height=d.height,.padding=d.padding,.gap=d.gap,
         .background=resolve_theme_color(d.background, thm.bg_popup),
         .border_color=resolve_theme_color(d.border_color, thm.border_control),.border_width=1,
         .radius=resolve_theme_corners(d.radius, Corners::all(thm.radius_control_px)),.scroll_y=d.height.kind==SizingKind::Fixed,
-        .attach_to=AttachTo::Root,.anchor_parent=Anchor::TopLeft,.floating_offset=pop.anchor,.z_index=d.z_index,.clamp_to_viewport=true});
+        .attach_to=d.attach_to_trigger && d.trigger_id ? AttachTo::Element : AttachTo::Root,.attach_element_id=d.trigger_id,
+        .anchor_parent=d.attach_to_trigger && d.trigger_id ? Anchor::BottomLeft : Anchor::TopLeft,.floating_offset=d.attach_to_trigger && d.trigger_id ? Vec2{} : pop.anchor,.z_index=d.z_index,.clamp_to_viewport=true});
     a11y_semantic(d.id,A11yRole::Menu,{},0,64u);
-    ++ui.popup_depth;return true;
+    ui.popup_build_ids[ui.popup_depth++]=d.id;return true;
 }
 void end_popup() noexcept {if(current_context() && current_context()->active_ui->popup_depth) {--current_context()->active_ui->popup_depth;end_box();}}
 bool begin_context_menu(uint32_t id, uint32_t target) noexcept {
@@ -281,7 +315,7 @@ bool begin_menu(const MenuDesc& d) noexcept {
     if(activate || (!d.disabled && hovered(trigger) && ui.menu_owner==ui.menu_bar_id && ui.menu_open_id && ui.menu_open_id!=d.id)) {
         close_popup();if(!activate || !was) {const Rect r=element_bounds(trigger);open_popup(d.id,{r.x,r.y+r.h});ui.menu_owner=ui.menu_bar_id;ui.menu_open_id=d.id;}
     }
-    return begin_popup({.id=d.id,.trigger_id=trigger});
+    return begin_popup({.id=d.id,.trigger_id=trigger,.attach_to_trigger=true});
 }
 void end_menu() noexcept {end_popup();}
 bool menu_item(const MenuItemDesc& d) noexcept {
@@ -292,7 +326,11 @@ bool menu_item(const MenuItemDesc& d) noexcept {
     begin_box({.id=d.id,.width=Sizing::grow(),.height=Sizing::fixed(26),.padding=Padding::xy(8,0),.gap=8,.align_y=AlignY::Center,
         .background=desktop_bg(d.id,Color{},d.disabled),.radius=Corners::all(thm.radius_small_px * 0.6f),.focusable=!d.disabled});
     a11y_semantic(d.id,A11yRole::MenuItem,d.label,(d.disabled?A11yState_Disabled:0u)|(d.checked?A11yState_Checked:0u),3u);
-    if(d.checked) desktop_label(str_lit("✓"),12,kFontSans,thm.accent);
+    if(d.checked) {
+        begin_box({.width=Sizing::fixed(12),.height=Sizing::fixed(12)});
+        draw_line({.from={1,6},.to={5,10},.color=thm.accent,.thickness=1.5f});
+        draw_line({.from={5,10},.to={11,2},.color=thm.accent,.thickness=1.5f});end_box();
+    }
     if(d.icon_id!=kInvalidIcon) icon({.icon_id=d.icon_id,.size_px=14,.color=fg});
     desktop_label(d.label,13,kFontSans,fg);
     begin_box({.width=Sizing::grow()});end_box();
@@ -311,10 +349,14 @@ bool combo_box(const ComboBoxDesc& d) noexcept {
     const uint32_t pop=id_index(d.id,0x2304);bool changed=false;
     Str label=*d.selected_index>=0 && size_t(*d.selected_index)<d.items.size() ? d.items[size_t(*d.selected_index)] : d.label;
     begin_box({.id=d.id,.width=d.width,.height=Sizing::fixed(d.height_px),.padding=Padding::xy(10,0),.gap=8,.align_y=AlignY::Center,
-        .background=d.disabled ? thm.surface_disabled : hovered(d.id) ? hbg : bg,.radius=Corners::all(thm.radius_control_px),.focusable=!d.disabled});
+        .background=d.disabled ? thm.surface_disabled : pressed(d.id) ? Color::lerp(bg,fg,.20f) : hovered(d.id) ? hbg : bg,.radius=Corners::all(thm.radius_control_px),.focusable=!d.disabled});
     a11y_semantic(d.id,A11yRole::ComboBox,d.label,d.disabled?A11yState_Disabled:0u,51u);
     desktop_label(label,13,kFontSans,d.disabled ? thm.text_disabled : fg);
-    begin_box({.width=Sizing::grow()});end_box();desktop_label(str_lit("▾"),12,kFontSans,d.disabled ? thm.text_disabled : fg);end_box();
+    begin_box({.width=Sizing::grow()});end_box();
+    begin_box({.width=Sizing::fixed(12),.height=Sizing::fixed(12)});
+    const Color arrow=d.disabled ? thm.text_disabled : fg;
+    draw_line({.from={2,4},.to={6,8},.color=arrow,.thickness=1.5f});
+    draw_line({.from={6,8},.to={10,4},.color=arrow,.thickness=1.5f});end_box();end_box();
     if(d.disabled) {if(is_popup_open(pop)) close_popup(pop);return false;}
     PendingA11yAction cb_act={};const bool got_cb=a11y_take_any(d.id,50u,&cb_act);
     bool expanded=is_popup_open(pop);
@@ -351,7 +393,7 @@ bool combo_box(const ComboBoxDesc& d) noexcept {
     }
     if(is_popup_open(pop)) {
         const float h=float(d.items.size())*28+12;
-        if(begin_popup({.id=pop,.trigger_id=d.id,.width=Sizing::fixed(element_bounds(d.id).w),.height=Sizing::fixed(h<d.max_popup_height_px ? h : d.max_popup_height_px)})) {
+        if(begin_popup({.id=pop,.trigger_id=d.id,.height=Sizing::fixed(h<d.max_popup_height_px ? h : d.max_popup_height_px),.attach_to_trigger=true,.match_trigger_width=true})) {
             for(uint32_t i=0;i<d.items.size();++i) if(menu_item({.id=id_index(pop,i+1),.label=d.items[i],.checked=int(i)==index})) {*d.selected_index=int(i);changed=true;}
             end_popup();
         }
@@ -377,7 +419,9 @@ bool begin_modal(const ModalDesc& d) noexcept {
     if(!desktop_frame(d.id) || !d.open || !*d.open || !std::isfinite(d.width_px) || d.width_px<=0 || current_context()->active_ui->modal_depth >= 32u) return false;
     const Theme& thm = active_theme(current_context());
     auto& ui=*current_context()->active_ui;const uint32_t backdrop=id_index(d.id,0x2306);
-    if((d.dismiss_on_escape && !ui.frame_escape_consumed_by_ime && key_pressed(SDLK_ESCAPE)) || (d.dismiss_on_backdrop && ui.left_pressed_this_frame && element_bounds(backdrop).contains(pointer_pos()) && !element_bounds(d.id).contains(pointer_pos()))) {*d.open=false;request_redraw(current_context());return false;}
+    bool over_popup = false;
+    for (uint32_t i=0;i<ui.popup_count;++i) over_popup |= element_bounds(ui.popups[i].id).contains(pointer_pos());
+    if((ui.popup_count==0 && d.dismiss_on_escape && !ui.frame_escape_consumed_by_ime && key_pressed(SDLK_ESCAPE)) || (!over_popup && d.dismiss_on_backdrop && ui.left_pressed_this_frame && element_bounds(backdrop).contains(pointer_pos()) && !element_bounds(d.id).contains(pointer_pos()))) {*d.open=false;request_redraw(current_context());return false;}
     if(a11y_take(d.id,A11yAction::Dismiss)){*d.open=false;return false;}
     const float dpi = ui.dpi_scale > 0.0f ? ui.dpi_scale : 1.0f;
     begin_box({.id=backdrop,.width=Sizing::fixed(float(ui.viewport_w)/dpi),.height=Sizing::fixed(float(ui.viewport_h)/dpi),.background=resolve_theme_color(d.backdrop_color,thm.backdrop),.attach_to=AttachTo::Root,.anchor_parent=Anchor::TopLeft,.z_index=d.z_index});

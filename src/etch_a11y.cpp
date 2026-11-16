@@ -1,6 +1,26 @@
 // Per-window immutable snapshots; transient builders and overrides use frame storage.
 namespace etch {
 namespace {
+A11yIndexEntry* a11y_index(Context* ctx, uint32_t id, bool insert) noexcept {
+    if (insert && (ctx->a11y_index_count + 1) * 2 >= ctx->a11y_index_cap) {
+        const uint32_t cap = ctx->a11y_index_cap ? ctx->a11y_index_cap * 2 : 256;
+        auto* entries = ctx->frame_arena.alloc<A11yIndexEntry>(cap);
+        if (!entries) return nullptr;
+        for (uint32_t i=0;i<cap;++i) entries[i]={};
+        for (uint32_t i=0;i<ctx->a11y_index_cap;++i) if (ctx->a11y_index[i].id) {
+            uint32_t slot = (ctx->a11y_index[i].id * 2654435761u) & (cap-1);
+            while (entries[slot].id) slot=(slot+1)&(cap-1);
+            entries[slot]=ctx->a11y_index[i];
+        }
+        ctx->a11y_index=entries;ctx->a11y_index_cap=cap;
+    }
+    if (!ctx->a11y_index_cap) return nullptr;
+    uint32_t slot=(id*2654435761u)&(ctx->a11y_index_cap-1);
+    while (ctx->a11y_index[slot].id && ctx->a11y_index[slot].id!=id) slot=(slot+1)&(ctx->a11y_index_cap-1);
+    auto* entry=&ctx->a11y_index[slot];
+    if (!entry->id) { if (!insert) return nullptr; entry->id=id;++ctx->a11y_index_count; }
+    return entry;
+}
 void a11y_patch(A11yNode& n,const A11yOverrideDesc& d) noexcept {
     if(d.has_role)n.role=d.role;
     if(d.has_label)n.label=d.label;
@@ -14,7 +34,10 @@ A11yBuild* a11y_emit(Context* ctx,uint32_t id,A11yRole role,Str label,Str value,
     b->node.label=ctx->frame_arena.push_str(label.chars,label.length);b->node.value_text=ctx->frame_arena.push_str(value.chars,value.length);
     b->parent=ctx->a11y_parent;b->index=ctx->a11y_count++;b->clay_id=id;
     if(ctx->a11y_last)ctx->a11y_last->next=b;else ctx->a11y_first=b;ctx->a11y_last=b;
-    for(auto* p=ctx->a11y_patches;p;p=p->next)if(p->desc.element_id==id)a11y_patch(b->node,p->desc);
+    if (auto* entry=a11y_index(ctx,id,true)) {
+        entry->build=b;
+        for(auto* p=entry->patches;p;p=p->next) a11y_patch(b->node,p->desc);
+    }
     return b;
 }
 void a11y_begin(Context* ctx) noexcept {
@@ -27,6 +50,7 @@ void a11y_begin(Context* ctx) noexcept {
         const auto* tws=(target==act.id)?ws:state_map_find(&ui.states,target);
         if(!ui.modal_scope || target==ui.modal_scope || (tws && tws->focus_scope==ui.modal_scope)){request_focus(target);act.consumed=true;}
     }
+    ctx->a11y_index=nullptr;ctx->a11y_index_cap=ctx->a11y_index_count=0;
     ctx->a11y_first=ctx->a11y_last=ctx->a11y_parent=nullptr;ctx->a11y_patches=nullptr;ctx->a11y_count=0;
     const uint32_t root=id_index(id("etch_a11y_window"),ctx->active_window?SDL_GetWindowID(ctx->active_window):0u);
     const char* title=ctx->active_window?SDL_GetWindowTitle(ctx->active_window):nullptr;
@@ -92,7 +116,7 @@ void a11y_commit(Context* ctx) noexcept {
         if(ui.focus_id==n.id)n.state_flags|=A11yState_Focused;
         if(hovered(n.id))n.state_flags|=A11yState_Hovered;
         if(active(n.id))n.state_flags|=A11yState_Pressed;
-        for(auto* p=ctx->a11y_patches;p;p=p->next)if(p->desc.element_id==n.id)
+        if (auto* entry=a11y_index(ctx,n.id)) for(auto* p=entry->patches;p;p=p->next)
             n.state_flags=(n.state_flags|p->desc.add_states)&~(p->desc.clear_states&~A11yState_Password);
     }
     ctx->stats.a11y_node_count=ui.a11y_node_count;
@@ -124,10 +148,11 @@ void a11y_toggle(uint32_t id,bool* open) noexcept {
 }
 void a11y_semantic(uint32_t id,A11yRole role,Str label,uint32_t states,uint32_t actions,float value,float lo,float hi) noexcept {
     auto* ctx=current_context();
-    for(auto* b=ctx->a11y_first;b;b=b->next)if(b->node.id==id) {
+    auto* entry=a11y_index(ctx,id);
+    if(auto* b=entry ? entry->build : nullptr) {
         b->node.role=role;b->node.label=ctx->frame_arena.push_str(label.chars,label.length);
         b->node.state_flags|=states;b->node.actions_mask=actions;b->node.value_num=value;b->node.min_value=lo;b->node.max_value=hi;
-        for(auto* p=ctx->a11y_patches;p;p=p->next)if(p->desc.element_id==id)a11y_patch(b->node,p->desc);
+        for(auto* p=entry->patches;p;p=p->next)a11y_patch(b->node,p->desc);
         return;
     }
     set_a11y_override({.element_id=id,.role=role,.label=label,.add_states=states,.actions_mask=actions,.has_role=true,.has_label=true,.has_actions_mask=true});
@@ -137,8 +162,9 @@ void set_a11y_override(const A11yOverrideDesc& desc) noexcept {
     auto* ctx=current_context();if(!ctx || !ctx->in_frame || !desc.element_id || (desc.label.length && !desc.label.chars) || (desc.value_text.length && !desc.value_text.chars))return;
     auto* p=ctx->frame_arena.alloc<A11yPatch>();if(!p)return;p->desc=desc;p->next=nullptr;
     p->desc.label=ctx->frame_arena.push_str(desc.label.chars,desc.label.length);p->desc.value_text=ctx->frame_arena.push_str(desc.value_text.chars,desc.value_text.length);
-    auto** tail=&ctx->a11y_patches;while(*tail)tail=&(*tail)->next;*tail=p;
-    for(auto* b=ctx->a11y_first;b;b=b->next)if(b->node.id==desc.element_id)a11y_patch(b->node,p->desc);
+    auto* entry=a11y_index(ctx,desc.element_id,true);if(!entry)return;
+    if(entry->tail)entry->tail->next=p;else entry->patches=p;entry->tail=p;
+    if(entry->build)a11y_patch(entry->build->node,p->desc);
 }
 std::span<const A11yNode> frame_a11y_nodes(const Context* ctx,SDL_Window* window) noexcept {
     if(!ctx) { ctx=current_context(); } if(!ctx) { return {}; } const auto* ui=(!window && ctx->headless)?&ctx->headless_ui:window_ui(ctx,window);return ui?std::span<const A11yNode>(ui->a11y_nodes,ui->a11y_node_count):std::span<const A11yNode>{};

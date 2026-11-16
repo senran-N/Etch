@@ -231,6 +231,8 @@ void apply_platform_window_chrome(Context* ctx, ClaimedWindowSlot* slot) noexcep
         reinterpret_cast<SetLongFn>(objc_msgSend)(ns_obj, sel_set_vis, 0L);
         slot->macos_chrome_applied = false;
     }
+#elif defined(_WIN32)
+    apply_win32_chrome(ctx,slot);
 #else
     (void)slot;
 #endif
@@ -1509,15 +1511,13 @@ void os_a11y_notify_commit(Context* ctx) noexcept {
     }
     auto* uia = static_cast<WinUiaSlot*>(slot->os_a11y);
     const WindowUiState& ui = slot->ui;
-    const std::span<const A11yNode> snap = frame_a11y_nodes(ctx, slot->window);
     uint32_t write = 0u;
     for (uint32_t i = 0u; i < uia->node_count; ++i) {
         WinUiaNode* n = uia->nodes[i];
         bool alive = n && n->is_root;
         if (n && !n->is_root) {
-            for (const A11yNode& an : snap) {
-                if (an.id == n->element_id) { alive = true; break; }
-            }
+            const auto* entry=a11y_index(ctx,n->element_id);
+            alive=entry && entry->build;
         }
         if (alive) {
             uia->nodes[write++] = n;

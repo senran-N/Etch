@@ -10,7 +10,7 @@ bool color_eq(Color a, Color b) noexcept {
 }
 
 bool theme_equals(const Theme& a, const Theme& b) noexcept {
-    return a.id == b.id &&
+    return a.id == b.id && color_eq(a.on_primary,b.on_primary) && color_eq(a.on_error,b.on_error) &&
         color_eq(a.bg_canvas, b.bg_canvas) &&
         color_eq(a.bg_surface, b.bg_surface) &&
         color_eq(a.bg_elevated, b.bg_elevated) &&
@@ -179,7 +179,7 @@ Theme Theme::high_contrast() noexcept {
         .text_disabled = Color::rgb_hex(0x9CA3AF),
         .accent = Color::rgb_hex(0x22D3EE),
         .accent_secondary = Color::rgb_hex(0xFACC15),
-        .accent_primary = Color::rgb_hex(0x0E7490),
+        .accent_primary = Color::rgb_hex(0x22D3EE),
         .focus_ring = Color::rgb_hex(0xFACC15),
         .danger = Color::rgb_hex(0xDC2626),
         .warning = Color::rgb_hex(0xFACC15),
@@ -218,6 +218,7 @@ Theme Theme::high_contrast() noexcept {
         .radius_input_px = 2.0f,
         .radius_panel_px = 2.0f,
         .radius_pill_px = 999.0f,
+        .on_primary = Color::rgba8(9,13,22,255),
     };
 }
 
@@ -249,7 +250,7 @@ Theme Theme::industrial() noexcept {
         .text_disabled = Color::rgb_hex(0x6B7280),
         .accent = Color::rgb_hex(0xF59E0B),
         .accent_secondary = Color::rgb_hex(0xFB923C),
-        .accent_primary = Color::rgb_hex(0xB45309),
+        .accent_primary = Color::rgb_hex(0xF59E0B),
         .focus_ring = Color::rgb_hex(0xFBBF24),
         .danger = Color::rgb_hex(0xDC2626),
         .warning = Color::rgb_hex(0xFBBF24),
@@ -288,6 +289,7 @@ Theme Theme::industrial() noexcept {
         .radius_input_px = 2.0f,
         .radius_panel_px = 3.0f,
         .radius_pill_px = 4.0f,
+        .on_primary = Color::rgba8(9,13,22,255),
     };
 }
 

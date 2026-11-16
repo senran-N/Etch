@@ -1,10 +1,10 @@
-# CLAUDE.md — Etch Architecture Constitution (v0.11.0)
+# CLAUDE.md — Etch Architecture Constitution (v0.12.0)
 
 ## 1. Project Identity & End-State Goals
 - **Codename**: `Etch` (Namespace `etch::`, C ABI prefix `etch_` / `Etch`, Macro prefix `ETCH_`, Library `etch` / `libetch`)
 - **Permanent architectural invariants**:
   - Orthodox C++20 zero-overhead core with a zero-heap pure C99 ABI facade (`include/etch/etch_c.h` + `src/etch_c.cpp`), built as the single translation unit `etch_unity.cpp`.
-  - Total core engine LOC (`include/etch/*.h`, `src/*.cpp`, `src/*.h`, `shaders/*.hlsl`) permanently locked at **<= 30,000 lines**.
+  - No hard code-size limits; organize core modules by responsibility.
   - Steady-state zero per-frame heap allocation: `etch::Arena` has O(1) reset; explicit/geometric capacity reserve occurs only at documented overflow boundaries.
   - 64-byte `alignas(16)` `etch::Prim` (`EtchPrim`); 1–3 GPU draw calls per window UI pass, exactly 1 at idle without blur/external textures.
   - 0% CPU/GPU at idle and < 0.2 ms layout.

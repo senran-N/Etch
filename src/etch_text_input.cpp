@@ -1320,7 +1320,7 @@ void update_text_scroll_and_ime(
 
     if (desc.multiline && view_h > 0.0f) {
         const float max_sy = (total_h > view_h) ? (total_h - view_h) : 0.0f;
-        if (is_focused) {
+        if (is_focused && (!ws || ws->edit_reveal_caret)) {
             if (caret_y + geom.line_h > sy + view_h) {
                 sy = (caret_y + geom.line_h) - view_h;
             }
@@ -1329,6 +1329,7 @@ void update_text_scroll_and_ime(
             }
         }
         sy = clamp_range(sy, 0.0f, max_sy);
+        if(ws) {ws->edit_max_scroll_y=max_sy;ws->viewport_dim.y=view_h;}
     } else {
         sy = 0.0f;
     }
@@ -1891,6 +1892,15 @@ void emit_text_input_command(
         caret_vy = cpos.y;
     }
 
+    if(desc.multiline && ws) {
+        const ScrollbarGeom sb=compute_vscrollbar_geom(ws);
+        if(sb.visible) {
+            const Theme& thm=active_theme(ctx);
+            const bool held=ctx->active_ui->active_id==id_index(desc.id,kScrollbarYTag);
+            const Rect thumb={sb.thumb.x*dpi,sb.thumb.y*dpi,sb.thumb.w*dpi,sb.thumb.h*dpi};
+            push_prim(ctx,Prim::make_rect(thumb,outer_clip.rect,held?thm.scrollbar_thumb_drag:thm.scrollbar_thumb,Corners::all(thumb.w*.5f)));
+        }
+    }
     // 3. Emit SDF caret
     if (is_focused && ctx->active_ui->caret_blink_on && desc.caret_color.a > 0u) {
         const float cw_px = (2.0f * dpi > 1.5f) ? (2.0f * dpi) : 1.5f;
@@ -2106,6 +2116,10 @@ bool undo_restore(
         return false;
     }
     const TextUndoRecord& rec = slot->entries[(slot->head + target_cur) % slot->entries_cap];
+    const uint32_t first_bytes = rec.length < slot->bytes_cap - rec.offset ? rec.length : slot->bytes_cap - rec.offset;
+    uint32_t hash = fnv1a_32_step(2166136261u, slot->bytes + rec.offset, first_bytes);
+    if (first_bytes < rec.length) hash = fnv1a_32_step(hash, slot->bytes, rec.length - first_bytes);
+    if (hash != rec.hash) return false;
     const uint32_t max_copy = cap - 1u;
     const uint32_t to_copy = (rec.length <= max_copy) ? rec.length : max_copy;
     if (to_copy > 0u) {
@@ -2136,6 +2150,31 @@ bool undo_restore(
     slot->cur = target_cur;
     slot->last_op_group = 0u;
     return true;
+}
+
+// Internal regression exercises wrap, coalescing, redo truncation, and corruption rejection.
+bool verify_text_undo_ring() noexcept {
+    TextUndoSlot slot={};slot.entries_cap=512;slot.bytes_cap=262144;
+    slot.entries=static_cast<TextUndoRecord*>(std::calloc(slot.entries_cap,sizeof(TextUndoRecord)));
+    slot.bytes=static_cast<char*>(std::malloc(slot.bytes_cap));
+    char* source=static_cast<char*>(std::malloc(60001));char* restored=static_cast<char*>(std::malloc(60001));
+    if(!slot.entries || !slot.bytes || !source || !restored) {std::free(slot.entries);std::free(slot.bytes);std::free(source);std::free(restored);return false;}
+    bool ok=true;uint32_t random=1234567;
+    for(uint32_t step=0;step<400 && ok;++step) {
+        random=random*1664525u+1013904223u;const uint32_t length=1+random%60000;
+        std::memset(source,'A'+int(step%26),length);
+        if(slot.count>2 && step%7==0)slot.cur=slot.count/2;
+        undo_push_snapshot(&slot,source,length,length,0,float(step)*.1f,uint8_t(step%3==0?0:1));
+        const uint32_t current=slot.cur;const uint8_t group=slot.last_op_group;
+        for(uint32_t i=0;i<slot.count;++i) {uint32_t n=0,c=0,a=0;ok &= undo_restore(&slot,i,restored,60001,&n,&c,&a);}
+        slot.cur=current;slot.last_op_group=group;
+    }
+    if(ok && slot.count) {
+        const auto& rec=slot.entries[slot.head];slot.bytes[rec.offset]^=1;
+        uint32_t n=0,c=0,a=0;restored[0]='!';const uint32_t current=slot.cur;
+        ok=!undo_restore(&slot,0,restored,60001,&n,&c,&a) && restored[0]=='!' && slot.cur==current;
+    }
+    std::free(slot.entries);std::free(slot.bytes);std::free(source);std::free(restored);return ok;
 }
 
 } // namespace etch

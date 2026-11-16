@@ -17,6 +17,11 @@ typedef char c_chk_u4[(sizeof(EtchUint4) == 16u) ? 1 : -1];
 typedef char c_chk_pr[(sizeof(EtchPrim) == 64u) ? 1 : -1];
 typedef char c_chk_gl[(sizeof(EtchGlobalsUniform) == 32u) ? 1 : -1];
 
+static void c_after_layout(EtchRect bounds,void* user_data) {
+    uint32_t* calls=(uint32_t*)user_data;
+    if(bounds.w>0 && bounds.h>0)++*calls;
+}
+
 typedef struct CustomTokState {
     uint32_t calls;
     uint32_t last_line;
@@ -214,6 +219,8 @@ static bool test_layout_widgets_and_a11y(EtchContext* ctx) {
     draw_box.width = etch_sizing_fixed(120.0f);
     draw_box.height = etch_sizing_fixed(60.0f);
     etch_begin_box(&draw_box);
+    uint32_t layout_calls=0;
+    etch_draw_after_layout(c_after_layout,&layout_calls,false);
     EtchRectDrawDesc rdd = etch_rect_draw_desc_default();
     rdd.rect = etch_rect(4.0f, 4.0f, 24.0f, 24.0f);
     rdd.fill = etch_rgb_hex(0x22D3EEu, 255u);
@@ -248,6 +255,7 @@ static bool test_layout_widgets_and_a11y(EtchContext* ctx) {
 
     etch_end_box();
     etch_end_frame(ctx);
+    if(layout_calls!=1)return 1;
 
     const uint32_t prim_count = etch_frame_prim_count(ctx);
     EtchPrim prim0;

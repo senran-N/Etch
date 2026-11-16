@@ -4,6 +4,33 @@ All notable changes to Etch are documented here. This file follows
 [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0] - 2026-11-16
+
+### Added
+- Layout-only pointer-passthrough boxes, table row event results and optional caller-owned row selection with hover overlays.
+- Post-layout drawing callbacks receive current-frame bounds; table grid tracks resolve stretch widths in the same layout pass.
+- Button content alignment, semantic `on_primary` / `on_error` tokens, pressed feedback and hand cursors for desktop controls; combo chevrons use vector lines.
+- Text-input and code-editor context editing menus, optional input clear affordance and Escape-to-blur without a selection.
+- Trigger-attached popups with current-frame positioning and width; multiline input wheel scrolling and a draggable vertical thumb.
+- Win32 native maximize-button hit regions and DWM corner/dark-mode preferences, independent of the accessibility bridge.
+- Source-over color compositing in both C++ and C99 APIs; geometric drop-batch storage and sprite-atlas compaction at saturation.
+
+### Fixed
+- Read-only inputs never modify caller memory; finite negative pointer coordinates and popup anchors remain valid.
+- Modal dismissal yields to active popups; closing a popup preserves independent siblings.
+- A11y semantic and UIA liveness queries use a frame-local ID index; single-line layout reuses whole-line measurement caches.
+- Rich-text ellipsis reserves the active span's metrics and trims pill backgrounds; paired brackets share script/font selection.
+- Slider fills, tab/dock active rules and tree guides draw with current-frame bounds; dock bodies grow on the first frame.
+- Syntax highlighting supports long lines through frame-arena token storage, omitting default-color punctuation/whitespace tokens.
+- Texture uploads reuse a cycled transfer buffer; Kawase passes scissor to an expanded glass region.
+- Undo restoration validates snapshot hashes before touching caller memory.
+- High Contrast/Industrial foreground tokens and checkbox/switch marks respect semantic contrast colors.
+- Whole-line no-wrap shaping metrics agree with ellipsis detection; explicit ellipsis and shrink items compress inside clipped containers.
+- Virtual-list viewport changes request settling redraws and non-focusable pointer targets are excluded from caption dragging by default.
+
+### Changed
+- Removed hard total and per-file LOC caps at the user's request. ABI, packaging, architecture and regression checks remain required. Recompile consumers for expanded descriptors.
+
 ## [0.11.0] - 2026-11-16
 
 ### Added

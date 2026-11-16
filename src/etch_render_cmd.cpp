@@ -238,14 +238,17 @@ struct ScrollbarGeom {
 
 ScrollbarGeom compute_vscrollbar_geom(const WidgetState* ws) noexcept {
     ScrollbarGeom g = {};
-    if (!ws || (!ws->is_scroll_y && !ws->is_virtual_list)) {
+    if (!ws || (!ws->is_scroll_y && !ws->is_virtual_list && !ws->is_multiline_input)) {
         return g;
     }
     if(ws->edit_text_buffer && !ws->editor_show_scrollbar)return g;
     double scroll_y = 0.0;
     double scroll_max_y = 0.0;
     double content_h = 0.0;
-    if (ws->is_virtual_list) {
+    if(ws->is_multiline_input) {
+        scroll_y=ws->edit_scroll_y;scroll_max_y=ws->edit_max_scroll_y;
+        content_h=ws->edit_max_scroll_y+ws->viewport_dim.y;
+    } else if (ws->is_virtual_list) {
         scroll_y = ws->vscroll_pos_y;
         scroll_max_y = ws->vscroll_max_y;
         content_h = ws->vscroll_total_h;
@@ -1307,6 +1310,29 @@ void emit_rich_text_command(
         }
     }
 
+    float visible_end_px=cmd->boundingBox.x*dpi;
+    const RichSpanInternal* ellipsis_span=&rich->spans[0];
+    const float full_limit_px=(cmd->boundingBox.x+(td.maxWidth>0?td.maxWidth:cmd->boundingBox.width))*dpi;
+    float text_limit_px=full_limit_px;
+    if(td.truncated) {
+        bool stop=false;
+        for(uint32_t ci=0;ci<chunk_count && !stop;++ci) {
+            const auto& ch=chunks[ci];const auto& sp=*ch.sp;
+            const Str dots=ellipsis_text(ctx,sp.font_id);float reserved=0;
+            for(const auto& g:shape_utf8_run(ctx,sp.font_id,dots.chars,dots.length)) reserved+=g.x_advance_1px*sp.font_size_px*dpi;
+            float pen=ch.start_x_px;
+            for(uint32_t gi=0;gi<ch.glyphs.size();) {
+                const uint32_t first=gi;float next=pen;
+                do {
+                    if(ch.trim_last_spacing && (ch.first_glyph_has_ls || gi>0))next+=sp.letter_spacing*dpi;
+                    next+=ch.glyphs[gi].x_advance_1px*sp.font_size_px*dpi+(ch.trim_last_spacing?0:sp.letter_spacing*dpi);++gi;
+                } while(gi<ch.glyphs.size() && ch.glyphs[gi].cluster==ch.glyphs[first].cluster);
+                if(next+reserved>full_limit_px+.01f) {stop=true;break;}
+                pen=next;visible_end_px=pen;ellipsis_span=&sp;
+            }
+        }
+        text_limit_px=visible_end_px;
+    }
     // Pass 1: Emit inline pill backgrounds + borders BEFORE all glyphs on this line.
     for (uint32_t i = 0u; i < seg_count; ++i) {
         const RichLineSeg& sg = segs[i];
@@ -1314,7 +1340,7 @@ void emit_rich_text_command(
         if (sp->background.a == 0u && sp->border_color.a == 0u) {
             continue;
         }
-        const float w_px = sg.x1_px - sg.x0_px;
+        const float w_px = (td.truncated ? std::fmin(sg.x1_px,visible_end_px) : sg.x1_px) - sg.x0_px;
         if (w_px <= 0.0f) {
             continue;
         }
@@ -1349,17 +1375,7 @@ void emit_rich_text_command(
                 effective_clip.radius));
     }
 
-    float visible_end_px = cmd->boundingBox.x*dpi;
-    const RichSpanInternal* ellipsis_span = &rich->spans[0];
-    float reserved_px=0;
-    if(td.truncated) {
-        for(uint32_t si=0;si<rich->span_count;++si) {
-            const auto& sp=rich->spans[si];const Str dots=ellipsis_text(ctx,sp.font_id);float width=0;
-            for(const auto& g:shape_utf8_run(ctx,sp.font_id,dots.chars,dots.length))width+=g.x_advance_1px*sp.font_size_px*dpi;
-            if(width>reserved_px)reserved_px=width;
-        }
-    }
-    const float text_limit_px=(cmd->boundingBox.x+(td.maxWidth>0?td.maxWidth:cmd->boundingBox.width))*dpi-reserved_px;
+    if(td.truncated) visible_end_px=cmd->boundingBox.x*dpi;
     bool elided=false;
     // Pass 2: Emit Slug glyphs, underline, and strikethrough decorations.
     for (uint32_t i = 0u; i < chunk_count; ++i) {
@@ -1522,7 +1538,7 @@ WidgetState* find_scrollbar_owner(Context* ctx, uint32_t thumb_active_id) noexce
     }
     for (uint32_t i = 0u; i < ctx->active_ui->states.capacity; ++i) {
         WidgetState& ws = ctx->active_ui->states.entries[i];
-        if (ws.key != 0u && (ws.is_scroll_y || ws.is_virtual_list) && id_index(ws.key, kScrollbarYTag) == thumb_active_id) {
+        if (ws.key != 0u && (ws.is_scroll_y || ws.is_virtual_list || ws.is_multiline_input) && id_index(ws.key, kScrollbarYTag) == thumb_active_id) {
             return &ws;
         }
     }
@@ -1537,7 +1553,9 @@ void apply_scrollbar_drag(WidgetState* ws, float pointer_y, float grab_offset) n
     if (sb.visible && sb.travel_h > 0.0f) {
         const float rel = (pointer_y - grab_offset) - sb.track.y;
         const float ratio = clamp_range(rel / sb.travel_h, 0.0f, 1.0f);
-        if (ws->is_virtual_list) {
+        if(ws->is_multiline_input) {
+            ws->edit_scroll_y=ratio*ws->edit_max_scroll_y;ws->edit_reveal_caret=false;
+        } else if (ws->is_virtual_list) {
             ws->vscroll_pos_y = static_cast<double>(ratio) * ws->vscroll_max_y;
             ws->vscroll_vel_y = 0.0;
         } else {

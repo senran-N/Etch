@@ -360,6 +360,7 @@ typedef struct Clay_LayoutConfig {
     Clay_ChildAlignment childAlignment; // Controls how child elements are aligned on each axis.
     Clay_LayoutDirection layoutDirection; // Controls the direction in which child elements will be automatically laid out.
     bool wrap;
+    bool percentAfterFixed;
     bool shrinkWidth; // Etch: opt-in content-independent minimum for flexible items.
     uint16_t crossChildGap, gridColumns, gridTrackCount;
     const Clay__GridTrack *gridTracks;
@@ -1623,6 +1624,9 @@ uint32_t Clay__HashStringContentsWithConfig(Clay_String *text, Clay_TextElementC
         hash = Clay__HashData((const uint8_t *)text->chars, text->length) % UINT32_MAX;
     }
 
+    hash += (uint32_t)config->wrapMode;
+    hash += (hash << 10);
+    hash ^= (hash >> 6);
     hash += config->fontId;
     hash += (hash << 10);
     hash ^= (hash >> 6);
@@ -1728,6 +1732,17 @@ Clay__MeasureTextCacheItem *Clay__MeasureTextCached(Clay_String *text, Clay_Text
         newItemIndex = context->measureTextHashMapInternal.length - 1;
     }
 
+    if (config->wrapMode == CLAY_TEXT_WRAP_NONE) {
+        int32_t length=0;
+        while(length<text->length && text->chars[length]!='\n') ++length;
+        measured->unwrappedDimensions=Clay__MeasureText(CLAY__INIT(Clay_StringSlice){.length=length,.chars=text->chars,.baseChars=text->chars},config,context->measureTextUserData);
+        measured->minWidth=0;
+        measured->containsNewlines=length<text->length;
+        measured->measuredWordsStartIndex=-1;
+        if(elementIndexPrevious!=0) Clay__MeasureTextCacheItemArray_Get(&context->measureTextHashMapInternal,elementIndexPrevious)->nextIndex=newItemIndex;
+        else context->measureTextHashMap.internalArray[hashBucket]=newItemIndex;
+        return measured;
+    }
     int32_t start = 0;
     int32_t end = 0;
     float lineWidth = 0;
@@ -2591,7 +2606,15 @@ void Clay__SizeContainersAlongAxis(bool xAxis, float deltaTime, Clay__int32_tArr
                 Clay_SizingAxis childSizing = Clay__GetElementSizing(childElement, xAxis);
                 float *childSize = xAxis ? &childElement->dimensions.width : &childElement->dimensions.height;
                 if (childSizing.type == CLAY__SIZING_TYPE_PERCENT) {
-                    *childSize = (parentSize - totalPaddingAndChildGaps) * childSizing.size.percent;
+                    float percentSpace=parentSize-totalPaddingAndChildGaps;
+                    if(sizingAlongAxis && parentLayoutConfig->percentAfterFixed) {
+                        for(int32_t k=0;k<parent->children.length;++k) {
+                            Clay_LayoutElement* sibling=Clay__RowChild(parent,k);
+                            if(Clay__GetElementSizing(sibling,xAxis).type==CLAY__SIZING_TYPE_FIXED)
+                                percentSpace-=xAxis?sibling->dimensions.width:sibling->dimensions.height;
+                        }
+                    }
+                    *childSize = CLAY__MAX(0,percentSpace) * childSizing.size.percent;
                     if (sizingAlongAxis) {
                         innerContentSize += *childSize;
                     }
@@ -2603,9 +2626,17 @@ void Clay__SizeContainersAlongAxis(bool xAxis, float deltaTime, Clay__int32_tArr
                 float sizeToDistribute = parentSize - parentPadding - innerContentSize;
                 // The content is too large, compress the children as much as possible
                 if (sizeToDistribute < 0) {
-                    // If the parent clips content in this axis direction, don't compress children, just leave them alone
-                    if (((xAxis && parent->config.clip.horizontal) || (!xAxis && parent->config.clip.vertical))) {
-                        continue;
+                    // Clipped content keeps its natural size unless a child explicitly requests shrinking.
+                    if ((xAxis && parent->config.clip.horizontal) || (!xAxis && parent->config.clip.vertical)) {
+                        int32_t kept = 0;
+                        for (int32_t i = 0; i < resizableContainerBuffer.length; ++i) {
+                            int32_t index = resizableContainerBuffer.internalArray[i];
+                            Clay_LayoutElement *child = Clay_LayoutElementArray_Get(&context->layoutElements, index);
+                            if (xAxis && ((child->isTextElement && child->textConfig.ellipsis) || child->config.layout.shrinkWidth))
+                                resizableContainerBuffer.internalArray[kept++] = index;
+                        }
+                        resizableContainerBuffer.length = kept;
+                        if (!kept) continue;
                     }
                     // Scrolling containers preferentially compress before others
                     while (sizeToDistribute < -CLAY__EPSILON && resizableContainerBuffer.length > 0) {
@@ -2699,7 +2730,8 @@ void Clay__SizeContainersAlongAxis(bool xAxis, float deltaTime, Clay__int32_tArr
 
                     float maxSize = parentSize - parentPadding;
                     // If we're laying out the children of a scroll panel, grow containers expand to the size of the inner content, not the outer container
-                    if (((xAxis && parent->config.clip.horizontal) || (!xAxis && parent->config.clip.vertical))) {
+                    if (((xAxis && parent->config.clip.horizontal) || (!xAxis && parent->config.clip.vertical)) &&
+                        !(xAxis && ((childElement->isTextElement && childElement->textConfig.ellipsis) || childElement->config.layout.shrinkWidth))) {
                         maxSize = CLAY__MAX(maxSize, innerContentSize);
                     }
                     if (childSizing.type == CLAY__SIZING_TYPE_GROW) {
@@ -2796,8 +2828,8 @@ void Clay__CalculateFinalLayout(float deltaTime, bool useStoredBoundingBoxes, bo
         if (singleLineMode) {
             int32_t length = 0;
             while (length < textElementData->text.length && textElementData->text.chars[length] != '\n') ++length;
-            Clay_Dimensions measured = Clay__MeasureText(CLAY__INIT(Clay_StringSlice) { .length = length, .chars = textElementData->text.chars, .baseChars = textElementData->text.chars }, &containerElement->textConfig, context->measureTextUserData);
-            const bool truncated = containerElement->textConfig.ellipsis && (measured.width > containerElement->dimensions.width || length < textElementData->text.length);
+            Clay_Dimensions measured = measureTextCacheItem->unwrappedDimensions;
+            const bool truncated = containerElement->textConfig.ellipsis && (measured.width > containerElement->dimensions.width + CLAY__EPSILON || length < textElementData->text.length);
             Clay__WrappedTextLineArray_Add(&context->wrappedTextLines, CLAY__INIT(Clay__WrappedTextLine) { { CLAY__MIN(measured.width, containerElement->dimensions.width), lineHeight }, { .length = length, .chars = textElementData->text.chars }, containerElement->dimensions.width, truncated });
             textElementData->wrappedLines.length = 1;
             containerElement->dimensions.height = lineHeight;

@@ -1,4 +1,4 @@
-# Etch v0.11.0
+# Etch v0.12.0
 
 Etch is a Pure-GPU UI Engine for desktop applications on Windows, Linux, and
 macOS. It combines immediate UI construction, Clay layout, Unicode text
@@ -6,12 +6,16 @@ handling, a pure C99 ABI facade (`<etch/etch_c.h>`), and SDL3 GPU rendering. The
 sandbox is the regression harness; Etch Studio demonstrates docking, tables,
 trees, themes, and a virtual editor.
 
+The v0.12 workbench changes and audit corrections are tracked in
+[AUDIT_v0.12.md](AUDIT_v0.12.md). Descriptor additions require recompiling
+consumers. Mark titlebar layout containers with `window_drag_passthrough=true`
+and register custom maximize controls with `window_maximize_button_region(id)`.
+
 ## Architecture
 
 - Orthodox C++20, without exceptions or RTTI, plus a zero-heap pure C99 ABI
   header ([include/etch/etch_c.h](include/etch/etch_c.h)). The engine compiles as
-  one translation unit, [src/etch_unity.cpp](src/etch_unity.cpp), keeping total
-  core source under 30,000 lines.
+  one translation unit, [src/etch_unity.cpp](src/etch_unity.cpp), with cohesive core modules and no hard code-size limits.
 - GPU geometry uses 64-byte, `alignas(16)` `etch::Prim` (`EtchPrim`) records.
   UI geometry, glyphs, and small sprite thumbnails/images packed into the
   dynamic sprite atlas batch into 1–3 draw calls per window UI pass through
@@ -91,7 +95,7 @@ ctest --test-dir build --output-on-failure -R "^(repo_guardrails|downstream_cons
 ```
 
 With tests and installation enabled, full CTest runs eleven suites, including GPU
-invariants. `repo_guardrails` checks architecture, 30,000-line core LOC ceiling,
+invariants. `repo_guardrails` checks architecture,
 versions, pure C99 header includes, artifacts and OSS notices;
 `downstream_consumers` installs Etch and builds/runs strict C++20 and pure C99
 public-API consumers using both `find_package` and `add_subdirectory`. The five

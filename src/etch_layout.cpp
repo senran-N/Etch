@@ -45,28 +45,33 @@ DrawCmdNode* append_open_box_draw_cmd(Context* ctx, bool foreground) noexcept {
     if (!ctx || !ctx->in_frame || !ctx->active_ui->clay_ctx) {
         return nullptr;
     }
-    Clay_SetCurrentContext(ctx->active_ui->clay_ctx);
-    if (ctx->active_ui->clay_ctx->openLayoutElementStack.length < 2) {
-        return nullptr;
-    }
-    Clay_LayoutElement* open_elem = Clay__GetOpenLayoutElement();
-    if (!open_elem || open_elem->isTextElement) {
-        return nullptr;
-    }
-    BoxExtra* extra = static_cast<BoxExtra*>(open_elem->config.userData);
+    BoxExtra* extra = ctx->layout_draw_target;
     if (!extra) {
-        extra = ctx->frame_arena.alloc<BoxExtra>();
-        if (!extra) {
+        Clay_SetCurrentContext(ctx->active_ui->clay_ctx);
+        if (ctx->active_ui->clay_ctx->openLayoutElementStack.length < 2) {
             return nullptr;
         }
-        extra->kind = CustomCmdKind::Box;
-        open_elem->config.userData = extra;
+        Clay_LayoutElement* open_elem = Clay__GetOpenLayoutElement();
+        if (!open_elem || open_elem->isTextElement) {
+            return nullptr;
+        }
+        extra = static_cast<BoxExtra*>(open_elem->config.userData);
+        if (!extra) {
+            extra = ctx->frame_arena.alloc<BoxExtra>();
+            if (!extra) {
+                return nullptr;
+            }
+            extra->kind = CustomCmdKind::Box;
+            open_elem->config.userData = extra;
+        }
     }
-    if (!foreground) {
+    if (!ctx->layout_draw_target && !foreground) {
+        Clay_LayoutElement* open_elem = Clay__GetOpenLayoutElement();
         if (open_elem->config.custom.customData == nullptr) {
             open_elem->config.custom.customData = extra;
         }
-    } else {
+    } else if (!ctx->layout_draw_target) {
+        Clay_LayoutElement* open_elem = Clay__GetOpenLayoutElement();
         const Clay_BorderWidth& bw = open_elem->config.border.width;
         if (bw.left == 0u && bw.right == 0u && bw.top == 0u && bw.bottom == 0u && bw.betweenChildren == 0u) {
             open_elem->config.border.color = Clay_Color{255.0f, 255.0f, 255.0f, 1.0f};
@@ -78,7 +83,7 @@ DrawCmdNode* append_open_box_draw_cmd(Context* ctx, bool foreground) noexcept {
         return nullptr;
     }
     *node = DrawCmdNode{};
-    node->world_scale = current_world_scale(ctx);
+    node->world_scale = ctx->layout_draw_target ? ctx->layout_draw_scale : current_world_scale(ctx);
     if (!foreground) {
         if (!extra->draw_head) {
             extra->draw_head = node;
@@ -369,6 +374,18 @@ void emit_draw_list_command(
     for (const DrawCmdNode* node = head; node != nullptr; node = node->next) {
         const float scale = node->world_scale * dpi;
         switch (node->kind) {
+            case DrawCmdKind::Callback: {
+                BoxExtra target = {};
+                ctx->layout_draw_target = &target;
+                ctx->layout_draw_scale = node->world_scale;
+                push_theme(*node->callback_theme);
+                node->callback({0,0,box_px.w / scale,box_px.h / scale},node->callback_data);
+                pop_theme();
+                ctx->layout_draw_target = nullptr;
+                emit_draw_list_command(ctx,target.draw_head,box_px,clip,dpi);
+                emit_draw_list_command(ctx,target.fg_draw_head,box_px,clip,dpi);
+                break;
+            }
             case DrawCmdKind::Fill: emit_vector_fill(ctx, node->fill_cmd, origin, scale, clip); break;
             case DrawCmdKind::Rect: {
                 const RectDrawDesc& rd = node->rect;
@@ -996,28 +1013,6 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
         }
     }
 
-    ctx->active_ui->frame_drop_count = 0;
-    ctx->active_ui->frame_text_drop_count = 0;
-    if (!ctx->active_ui->os_dragging &&
-        (ctx->active_ui->pending_drop_count > 0 || ctx->active_ui->pending_text_drop_count > 0)) {
-        ctx->active_ui->frame_drop_count = ctx->active_ui->pending_drop_count;
-        if (ctx->active_ui->pending_drop_bytes > 0u) {
-            std::memcpy(ctx->active_ui->frame_drop_buf, ctx->active_ui->pending_drop_buf, ctx->active_ui->pending_drop_bytes);
-            for (uint32_t i = 0u; i < ctx->active_ui->frame_drop_count; ++i) {
-                ctx->active_ui->frame_drops[i] = Str{
-                    ctx->active_ui->frame_drop_buf + ctx->active_ui->pending_drop_offsets[i],
-                    ctx->active_ui->pending_drop_lengths[i],
-                };
-            }
-        }
-        ctx->active_ui->frame_text_drop_count = ctx->active_ui->pending_text_drop_count;
-        for (uint32_t i = 0; i < ctx->active_ui->frame_text_drop_count; ++i)
-            ctx->active_ui->frame_text_drops[i] = Str{ctx->active_ui->frame_drop_buf + ctx->active_ui->pending_text_drop_offsets[i], ctx->active_ui->pending_text_drop_lengths[i]};
-        ctx->active_ui->pending_text_drop_count = 0;
-        ctx->active_ui->pending_drop_count = 0u;
-        ctx->active_ui->pending_drop_bytes = 0u;
-    }
-
     ctx->active_ui->prev_focus_count = ctx->active_ui->focus_count;
     if (ctx->active_ui->prev_focus_count > 0u) {
         std::memcpy(ctx->active_ui->prev_focus_order, ctx->active_ui->focus_order, size_t(ctx->active_ui->prev_focus_count) * sizeof(uint32_t));
@@ -1062,6 +1057,38 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
     }
 
     ctx->frame_arena.reset();
+    ctx->active_ui->frame_drop_count = 0;
+    ctx->active_ui->frame_text_drop_count = 0;
+    if (!ctx->active_ui->os_dragging &&
+        (ctx->active_ui->pending_drop_count > 0 || ctx->active_ui->pending_text_drop_count > 0)) {
+        ctx->active_ui->frame_drop_count = ctx->active_ui->pending_drop_count;
+        ctx->active_ui->frame_drops=ctx->frame_arena.alloc<Str>(ctx->active_ui->pending_drop_count);
+        ctx->active_ui->frame_text_drops=ctx->frame_arena.alloc<Str>(ctx->active_ui->pending_text_drop_count);
+        ctx->active_ui->frame_drop_buf=ctx->frame_arena.alloc<char>(ctx->active_ui->pending_drop_bytes);
+        if(!ctx->active_ui->frame_drop_buf || (ctx->active_ui->pending_drop_count && !ctx->active_ui->frame_drops) ||
+            (ctx->active_ui->pending_text_drop_count && !ctx->active_ui->frame_text_drops)) {
+            ctx->active_ui->frame_drop_count=0;
+            ctx->active_ui->pending_drop_count=ctx->active_ui->pending_text_drop_count=0;
+            ctx->active_ui->pending_drop_bytes=0;
+        }
+        if (ctx->active_ui->pending_drop_bytes > 0u) {
+            std::memcpy(ctx->active_ui->frame_drop_buf, ctx->active_ui->pending_drop_buf, ctx->active_ui->pending_drop_bytes);
+            for (uint32_t i = 0u; i < ctx->active_ui->frame_drop_count; ++i) {
+                ctx->active_ui->frame_drops[i] = Str{
+                    ctx->active_ui->frame_drop_buf + ctx->active_ui->pending_drop_records[i].offset,
+                    ctx->active_ui->pending_drop_records[i].length,
+                };
+            }
+        }
+        ctx->active_ui->frame_text_drop_count = ctx->active_ui->pending_text_drop_count;
+        for (uint32_t i = 0; i < ctx->active_ui->frame_text_drop_count; ++i)
+            ctx->active_ui->frame_text_drops[i] = Str{ctx->active_ui->frame_drop_buf + ctx->active_ui->pending_text_drop_records[i].offset, ctx->active_ui->pending_text_drop_records[i].length};
+        ctx->active_ui->pending_text_drop_count = 0;
+        ctx->active_ui->pending_drop_count = 0u;
+        ctx->active_ui->pending_drop_bytes = 0u;
+    }
+
+
     a11y_begin(ctx);
     ctx->active_ui->active_vlists = nullptr;
     ctx->active_ui->active_vlist_count = 0;
@@ -1108,14 +1135,15 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
     };
     Clay_SetLayoutDimensions(logical_dims);
 
+    ctx->active_ui->had_pointer = ctx->active_ui->has_pointer;
     ctx->active_ui->prev_pointer_pos = ctx->active_ui->pointer_pos;
     Vec2 pointer_pos = desc.pointer_pos;
-    if (pointer_pos.x < 0.0f && pointer_pos.y < 0.0f && ctx->active_ui->has_event_pointer) {
+    if ((!std::isfinite(pointer_pos.x) || !std::isfinite(pointer_pos.y)) && ctx->active_ui->has_event_pointer) {
         pointer_pos = ctx->active_ui->event_pointer_pos;
     }
+    ctx->active_ui->has_pointer = std::isfinite(pointer_pos.x) && std::isfinite(pointer_pos.y);
     ctx->active_ui->pointer_pos = pointer_pos;
-    if (ctx->active_ui->prev_pointer_pos.x >= 0.0f && ctx->active_ui->prev_pointer_pos.y >= 0.0f &&
-        pointer_pos.x >= 0.0f && pointer_pos.y >= 0.0f)
+    if (ctx->active_ui->had_pointer && ctx->active_ui->has_pointer)
     {
         ctx->active_ui->pointer_delta = Vec2{ pointer_pos.x - ctx->active_ui->prev_pointer_pos.x, pointer_pos.y - ctx->active_ui->prev_pointer_pos.y };
     } else {
@@ -1154,7 +1182,7 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
     ctx->active_ui->event_scroll_delta = {};
 
     // Update Clay hit-test results against the previous frame's tree BEFORE Clay_BeginLayout() resets it.
-    Clay_SetPointerState(Clay_Vector2{pointer_pos.x, pointer_pos.y}, pointer_down);
+    Clay_SetPointerState(ctx->active_ui->has_pointer ? Clay_Vector2{pointer_pos.x, pointer_pos.y} : Clay_Vector2{-FLT_MAX,-FLT_MAX}, pointer_down);
     Clay_UpdateScrollContainers(false, Clay_Vector2{0.0f, 0.0f}, 0.0f);
 
     state_map_clear_flags(&ctx->active_ui->states, true, false);
@@ -1184,7 +1212,7 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
         }
     }
     if (right_down && !ctx->active_ui->right_drag_exceeded &&
-        ctx->active_ui->right_press_origin.x >= 0.0f && pointer_pos.x >= 0.0f)
+        ctx->active_ui->has_pointer)
     {
         const float dx = pointer_pos.x - ctx->active_ui->right_press_origin.x;
         const float dy = pointer_pos.y - ctx->active_ui->right_press_origin.y;
@@ -1200,7 +1228,7 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
         }
     } else if (right_released_this_frame) {
         bool drag_exceeded = ctx->active_ui->right_drag_exceeded;
-        if (!drag_exceeded && ctx->active_ui->right_press_origin.x >= 0.0f && pointer_pos.x >= 0.0f) {
+        if (!drag_exceeded && ctx->active_ui->has_pointer) {
             const float dx = pointer_pos.x - ctx->active_ui->right_press_origin.x;
             const float dy = pointer_pos.y - ctx->active_ui->right_press_origin.y;
             drag_exceeded = (dx * dx + dy * dy > 16.0f);
@@ -1235,7 +1263,7 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
             bool handled_scrollbar = false;
             for (int32_t i = over.length - 1; i >= 0; --i) {
                 WidgetState* ws = state_map_find(&ctx->active_ui->states, over.internalArray[i].id);
-                if (!ws || !ws->is_user_element || (!ws->is_scroll_y && !ws->is_virtual_list)) {
+                if (!ws || !ws->is_user_element || (!ws->is_scroll_y && !ws->is_virtual_list && !ws->is_multiline_input)) {
                     continue;
                 }
                 const ScrollbarGeom sb = compute_vscrollbar_geom(ws);
@@ -1318,7 +1346,7 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
     }
 
     if (pointer_down && ctx->active_ui->active_id != 0u) {
-        if (ctx->active_ui->left_press_origin.x >= 0.0f && pointer_pos.x >= 0.0f) {
+        if (ctx->active_ui->has_pointer) {
             const float dx = pointer_pos.x - ctx->active_ui->left_press_origin.x;
             const float dy = pointer_pos.y - ctx->active_ui->left_press_origin.y;
             const float d2 = dx * dx + dy * dy;
@@ -1326,7 +1354,7 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
                 ctx->active_ui->left_max_drag_dist_sq = d2;
             }
         }
-        if (ctx->active_ui->marquee_canvas_id != 0u && pointer_pos.x >= 0.0f && pointer_pos.y >= 0.0f) {
+        if (ctx->active_ui->marquee_canvas_id != 0u && ctx->active_ui->has_pointer) {
             if (WidgetState* mws = state_map_find(&ctx->active_ui->states, ctx->active_ui->marquee_canvas_id)) {
                 const Vec2 p0 = mws->canvas_marquee_start_world;
                 const Vec2 p1 = canvas_screen_to_world(mws, pointer_pos);
@@ -1358,7 +1386,7 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
         }
         if (ctx->active_ui->marquee_canvas_id != 0u) {
             if (WidgetState* mws = state_map_find(&ctx->active_ui->states, ctx->active_ui->marquee_canvas_id)) {
-                if (pointer_pos.x >= 0.0f && pointer_pos.y >= 0.0f) {
+                if (ctx->active_ui->has_pointer) {
                     const Vec2 p0 = mws->canvas_marquee_start_world;
                     const Vec2 p1 = canvas_screen_to_world(mws, pointer_pos);
                     const float x0 = (p0.x < p1.x) ? p0.x : p1.x;
@@ -1412,7 +1440,7 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
             }
         }
         if (WidgetState* cws = state_map_find(&ctx->active_ui->states, ctx->active_ui->pan_canvas_id)) {
-            if (!pan_started_this_frame && ctx->active_ui->prev_pointer_pos.x >= 0.0f && pointer_pos.x >= 0.0f) {
+            if (!pan_started_this_frame && ctx->active_ui->had_pointer && ctx->active_ui->has_pointer) {
                 cws->canvas_pan.x += pointer_pos.x - ctx->active_ui->prev_pointer_pos.x;
                 cws->canvas_pan.y += pointer_pos.y - ctx->active_ui->prev_pointer_pos.y;
             }
@@ -1438,6 +1466,10 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
             WidgetState* ws = state_map_find(&ctx->active_ui->states, over.internalArray[i].id);
             if (!ws || !ws->is_user_element) {
                 continue;
+            }
+            if (ws->is_multiline_input && ws->edit_max_scroll_y>0) {
+                ws->edit_scroll_y=clamp_range(ws->edit_scroll_y-scroll.y*48,0,ws->edit_max_scroll_y);
+                ws->edit_reveal_caret=false;request_redraw(ctx);break;
             }
             if (ws->is_virtual_list) {
                 if (!fallback_scroll) {
@@ -1510,7 +1542,7 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
             const float factor = std::pow(1.12f, scroll.y);
             const float new_z = clamp_range(old_z * factor, target_canvas->canvas_min_zoom, target_canvas->canvas_max_zoom);
             const Rect vp = target_canvas->last_box_logical;
-            if (vp.w > 0.0f && vp.h > 0.0f && pointer_pos.x >= 0.0f && pointer_pos.y >= 0.0f) {
+            if (vp.w > 0.0f && vp.h > 0.0f && ctx->active_ui->has_pointer) {
                 const Vec2 local_ptr = Vec2{ pointer_pos.x - vp.x, pointer_pos.y - vp.y };
                 const Vec2 world_under_ptr = (local_ptr - target_canvas->canvas_pan) * (1.0f / old_z);
                 target_canvas->canvas_zoom = new_z;
@@ -1617,7 +1649,8 @@ void begin_box(const BoxDesc& desc_in) noexcept {
     if (desc.id != 0u) {
         box_ws = state_map_get_or_insert(&ctx->active_ui->states, desc.id, ctx->active_ui->frame_index);
         if (box_ws) {
-            box_ws->is_user_element = true;
+            box_ws->is_user_element = !desc.pointer_passthrough;
+            box_ws->window_drag_passthrough = desc.window_drag_passthrough;
             box_ws->is_focusable = desc.focusable;
             box_ws->focus_scope = ctx->active_ui->modal_scope && focus_scope_contains(*ctx->active_ui, ctx->active_ui->modal_scope) ? ctx->active_ui->modal_scope : ctx->active_ui->focus_scope;
             box_ws->is_scroll_x = desc.scroll_x;
@@ -2317,6 +2350,17 @@ Vec2 measure_text(Str text, uint16_t font_id, float size, float letter_spacing) 
     return measure_multiline_text_metrics(ctx, text, font_id, size, letter_spacing, nullptr, nullptr);
 }
 
+void draw_after_layout(LayoutDrawFn callback, void* user_data, bool foreground) noexcept {
+    Context* ctx=current_context();
+    if (!ctx || !ctx->in_frame || !callback || ctx->layout_draw_target) return;
+    if (DrawCmdNode* node=append_open_box_draw_cmd(ctx,foreground)) {
+        node->callback_theme=ctx->frame_arena.alloc<Theme>();
+        if (!node->callback_theme) return;
+        *node->callback_theme=active_theme(ctx);
+        node->kind=DrawCmdKind::Callback;node->callback=callback;node->callback_data=user_data;
+    }
+}
+
 void draw_text(const TextDrawDesc& desc) noexcept {
     Context* ctx = current_context();
     if (!ctx || !desc.text.chars || desc.text.length == 0u || !std::isfinite(desc.size) || desc.size <= 0.0f || !std::isfinite(desc.max_width_px) || desc.max_width_px < 0) {
@@ -2367,6 +2411,7 @@ SDL_HitTestResult SDLCALL etch_sdl_hit_test(SDL_Window* win, const SDL_Point* ar
         case WindowHit::ResizeBottom:      return SDL_HITTEST_RESIZE_BOTTOM;
         case WindowHit::ResizeBottomLeft:  return SDL_HITTEST_RESIZE_BOTTOMLEFT;
         case WindowHit::ResizeLeft:        return SDL_HITTEST_RESIZE_LEFT;
+        case WindowHit::Maximize:
         case WindowHit::Normal:
         case WindowHit::Client:
         default:                           return SDL_HITTEST_NORMAL;
@@ -2437,6 +2482,18 @@ void window_client_region(Rect rect_logical) noexcept {
         rect_logical);
 }
 
+void window_maximize_button_region(Rect rect_logical) noexcept {
+    Context* ctx=current_context();
+    if (!ctx || !ctx->in_frame || !std::isfinite(rect_logical.x) || !std::isfinite(rect_logical.y) ||
+        !std::isfinite(rect_logical.w) || !std::isfinite(rect_logical.h) || rect_logical.w<0 || rect_logical.h<0) return;
+    ctx->active_ui->pending_chrome_maximize_rect=rect_logical;ctx->active_ui->pending_chrome_maximize_id=0;
+}
+void window_maximize_button_region(uint32_t element_id) noexcept {
+    Context* ctx=current_context();
+    if (!ctx || !ctx->in_frame) return;
+    ctx->active_ui->pending_chrome_maximize_id=element_id;ctx->active_ui->pending_chrome_maximize_rect={};
+}
+
 WindowHit evaluate_window_hit(const Context* ctx, Vec2 logical_pos, SDL_Window* window) noexcept {
     const WindowUiState* ui = ctx ? window_ui(ctx, window ? window : ctx->active_window) : nullptr;
     if (!ui || !ui->chrome_desc.enabled) {
@@ -2498,6 +2555,7 @@ WindowHit evaluate_window_hit(const Context* ctx, Vec2 logical_pos, SDL_Window* 
         }
     }
 
+    if (ui->chrome_desc.resizable && ui->chrome_maximize_rect.contains(logical_pos)) return WindowHit::Maximize;
     for (uint32_t i = 0u; i < ui->chrome_client_count; ++i) {
         if (ui->chrome_client_rects[i].contains(logical_pos)) {
             return WindowHit::Client;
@@ -2774,6 +2832,22 @@ Rect ime_cursor_rect(const Context* ctx_arg) noexcept {
     return ctx ? ctx->active_ui->ime_cursor_logical : Rect{};
 }
 
+uint32_t text_input_menu(const TextInputDesc& d, uint32_t length, bool selection) noexcept {
+    if (!d.context_menu || !d.id) return 0;
+    const uint32_t popup=id_index(d.id,0xED1700u);
+    if (right_clicked(d.id)) { request_focus(d.id);open_popup(popup); }
+    uint32_t key=0;
+    if (begin_popup({.id=popup,.trigger_id=d.id})) {
+        if (menu_item({.id=id_index(popup,1),.label=str_lit("Cut"),.shortcut_hint=str_lit("Ctrl+X"),.disabled=d.read_only || d.password || !selection})) key=SDLK_X;
+        if (menu_item({.id=id_index(popup,2),.label=str_lit("Copy"),.shortcut_hint=str_lit("Ctrl+C"),.disabled=d.password || !selection})) key=SDLK_C;
+        if (menu_item({.id=id_index(popup,3),.label=str_lit("Paste"),.shortcut_hint=str_lit("Ctrl+V"),.disabled=d.read_only})) key=SDLK_V;
+        if (menu_item({.id=id_index(popup,4),.label=str_lit("Select all"),.shortcut_hint=str_lit("Ctrl+A"),.disabled=length==0})) key=SDLK_A;
+        end_popup();
+    }
+    if (key) request_focus(d.id);
+    return key;
+}
+
 TextInputResult text_input(const TextInputDesc& desc_in) noexcept {
     Context* ctx = current_context();
     if (!ctx || !ctx->in_frame) {
@@ -2821,12 +2895,14 @@ TextInputResult text_input(const TextInputDesc& desc_in) noexcept {
     if (ws) {
         ws->edit_text_buffer = nullptr;
         ws->is_text_input_writable = writable;
+        ws->is_multiline_input = desc.multiline;
+        if (ws->pressed_this_frame || ctx->active_ui->frame_text_op_count || ctx->active_ui->ime_comp_len) ws->edit_reveal_caret = true;
     }
     if (buf && cap > 0u) {
-        while (len + 1u < cap && buf[len] != '\0') {
+        while (len < (desc.read_only ? cap : cap - 1u) && buf[len] != '\0') {
             ++len;
         }
-        buf[len] = '\0';
+        if (!desc.read_only) buf[len] = '\0';
     }
 
     uint32_t cursor = len;
@@ -2861,7 +2937,13 @@ TextInputResult text_input(const TextInputDesc& desc_in) noexcept {
         }
     }
 
-    const bool is_focused = (desc.id != 0u && ctx->active_ui->focus_id == desc.id &&
+    const uint32_t clear_id=id_index(desc.id,0xED1701u);
+    const bool show_clear=desc.clear_button && writable && len>0;
+    uint32_t menu_key=text_input_menu(desc,len,cursor!=anchor);
+    ws=desc.id ? state_map_find(&ctx->active_ui->states,desc.id) : nullptr;
+    if (show_clear && (clicked(clear_id) || a11y_take(clear_id,A11yAction::Press))) { request_focus(desc.id);anchor=0;cursor=len;menu_key=SDLK_DELETE; }
+    if (show_clear) desc.padding.right += 24;
+    bool is_focused = (desc.id != 0u && ctx->active_ui->focus_id == desc.id &&
         (!ctx->active_ui->modal_scope || focus_scope_contains(*ctx->active_ui, ctx->active_ui->modal_scope)));
     const bool is_hovered = (desc.id != 0u && Clay_PointerOver(make_clay_id(desc.id)));
     if (is_hovered || (desc.id != 0u && ctx->active_ui->active_id == desc.id)) {
@@ -2978,8 +3060,9 @@ TextInputResult text_input(const TextInputDesc& desc_in) noexcept {
             cur_rec.cursor = cursor;
             cur_rec.anchor = anchor;
         }
-        for (uint32_t oi = 0u; oi < ctx->active_ui->frame_text_op_count; ++oi) {
-            const PendingTextOp& op = ctx->active_ui->frame_text_ops[oi];
+        const PendingTextOp menu_op={.kind=TextEditOpKind::KeyPress,.mod=static_cast<uint16_t>(menu_key==SDLK_DELETE ? 0 : SDL_KMOD_CTRL),.key=menu_key};
+        for (uint32_t oi = 0u; oi < ctx->active_ui->frame_text_op_count + (menu_key ? 1u : 0u) && is_focused; ++oi) {
+            const PendingTextOp& op = oi < ctx->active_ui->frame_text_op_count ? ctx->active_ui->frame_text_ops[oi] : menu_op;
             const uint32_t sel_min = (cursor < anchor) ? cursor : anchor;
             const uint32_t sel_max = (cursor < anchor) ? anchor : cursor;
             const bool has_sel = (sel_max > sel_min);
@@ -3255,9 +3338,8 @@ TextInputResult text_input(const TextInputDesc& desc_in) noexcept {
                     }
                     break;
                 case SDLK_ESCAPE:
-                    if (has_sel) {
-                        anchor = cursor;
-                    }
+                    if (has_sel) anchor = cursor;
+                    else if (desc.escape_blurs) { request_focus(0);is_focused=false; }
                     if (ws) {
                         ws->edit_wrap_affinity = false;
                     }
@@ -3289,6 +3371,7 @@ TextInputResult text_input(const TextInputDesc& desc_in) noexcept {
         ws->sel_text_epoch = ctx->arena_epoch;
         ws->sel_text_static = false;
     }
+    if (!is_focused && ctx->active_ui->ime_focused_id==desc.id) ctx->active_ui->ime_focused_id=0;
     const bool composing = is_focused && !desc.read_only && !desc.password && ctx->active_ui->ime_comp_len > 0u;
     if (is_focused && ws && ws->last_box_logical.w > 0.0f && !desc.read_only && !desc.password) {
         const TextInnerGeom pre_geom = compute_text_inner_geom(ws->last_box_logical, desc);
@@ -3333,6 +3416,16 @@ TextInputResult text_input(const TextInputDesc& desc_in) noexcept {
     }
 
     Clay__ConfigureOpenElement(decl);
+    if (show_clear) {
+        begin_box({.id=clear_id,.width=Sizing::fixed(20),.height=Sizing::fixed(20),.align_y=AlignY::Center,
+            .attach_to=AttachTo::Parent,.anchor_element=Anchor::CenterRight,.anchor_parent=Anchor::CenterRight,.floating_offset={-4,0}});
+        if (hovered(clear_id)) set_cursor(Cursor::Hand);
+        const Color color=desc.text_color;
+        draw_line({.from={6,6},.to={14,14},.color=color,.thickness=1.5f});
+        draw_line({.from={14,6},.to={6,14},.color=color,.thickness=1.5f});
+        a11y_semantic(clear_id,A11yRole::Button,str_lit("Clear"),0,3u);
+        end_box();
+    }
     const uint32_t semantic_id=Clay__GetOpenLayoutElement()->id;
     Clay__CloseElement();
 
