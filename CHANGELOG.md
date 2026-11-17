@@ -6,6 +6,8 @@ All notable changes to Etch are documented here. This file follows
 
 ## [0.16.0] - 2026-11-17
 
+- Preserve variable-list measured heights across append/truncate, defer callback invalidation until the updated descriptor, and retain explicit-height/scroll ordering for streamed document consumers.
+
 ### Added
 - Cached procedural shader surfaces with generation handles, bounded frame rates, window ownership and C99 parity.
 - Exported `etch_compile_hlsl_surface` CMake helper for DXIL, SPIR-V and optional offline Metal headers.

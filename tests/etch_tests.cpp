@@ -98,10 +98,38 @@ static bool table_viewport_regression() noexcept {
     }
     destroy_context(c);set_current_context(nullptr);return ok;
 }
+static float stream_height(uint32_t, void* value) noexcept { return value ? *static_cast<float*>(value) : 300; }
+static bool list_append_regression() noexcept {
+    Context* c=create_context({.headless=true});if(!c)return false;
+    const uint32_t list=id("append_heights");bool ok=true;double before=0;
+    for(uint32_t f=0;f<8;++f) {
+        begin_frame(c,{.viewport_w=400,.viewport_h=200});
+        if(f==4)virtual_list_invalidate_heights(list);
+        const auto slice=begin_virtual_list({.id=list,.item_count=f<4 ? 255u : 260u,.height=Sizing::fixed(200),.measure_height_fn=stream_height,.variable_height=true});
+        end_virtual_list();end_frame(c);
+        if(f==2)virtual_list_scroll_to_row(list,240,300,AlignY::Top);
+        if(f==3)before=virtual_list_scroll_offset(list);
+        if(f>=4)ok &= slice.first_index>=235 && std::fabs(virtual_list_scroll_offset(list)-before)<1;
+    }
+    float height=1;
+    begin_frame(c,{.viewport_w=400,.viewport_h=200});
+    begin_virtual_list({.id=id("invalidate_scroll"),.item_count=256,.height=Sizing::fixed(200),.measure_height_fn=stream_height,.measure_user_data=&height,.variable_height=true});end_virtual_list();end_frame(c);
+    height=300;virtual_list_invalidate_heights(id("invalidate_scroll"));virtual_list_scroll_to_row(id("invalidate_scroll"),255,28,AlignY::Top);
+    ok &= std::fabs(virtual_list_scroll_offset(id("invalidate_scroll"))-76500)<1;
+    begin_frame(c,{.viewport_w=400,.viewport_h=200});
+    begin_virtual_list({.id=id("explicit_heights"),.item_count=2,.height=Sizing::fixed(200),.measure_height_fn=stream_height,.variable_height=true});end_virtual_list();end_frame(c);
+    virtual_list_invalidate_heights(id("explicit_heights"));virtual_list_set_item_height(id("explicit_heights"),0,420);
+    set_virtual_list_scroll_offset(id("explicit_heights"),10000);
+    ok &= std::fabs(virtual_list_scroll_offset(id("explicit_heights"))-520)<1;
+    begin_frame(c,{.viewport_w=400,.viewport_h=200});begin_virtual_list({.id=id("explicit_heights"),.item_count=2,.height=Sizing::fixed(200),.measure_height_fn=stream_height,.variable_height=true});end_virtual_list();end_frame(c);
+    virtual_list_scroll_to_row(id("explicit_heights"),1,28,AlignY::Top);
+    ok &= std::fabs(virtual_list_scroll_offset(id("explicit_heights"))-420)<1;
+    destroy_context(c);set_current_context(nullptr);return ok;
+}
 static bool list_suite() noexcept {
     Context* c=create_context({.headless=true});if(!c)return false;VirtualListSlice slice={};
     for(uint32_t i=0;i<3;++i){begin_frame(c,{.viewport_w=400,.viewport_h=200});slice=begin_virtual_list({.id=id("million"),.item_count=1000000,.item_height_px=20,.height=Sizing::fixed(200),.variable_height=true});end_virtual_list();end_frame(c);if(i==0)virtual_list_scroll_to_row(id("million"),999900,20,AlignY::Top);}
-    const bool ok=slice.first_index>999880 && slice.end_index-slice.first_index<20 && frame_stats(c).arena_used_bytes<1024*1024;destroy_context(c);set_current_context(nullptr);return ok && table_viewport_regression();
+    const bool ok=slice.first_index>999880 && slice.end_index-slice.first_index<20 && frame_stats(c).arena_used_bytes<1024*1024;destroy_context(c);set_current_context(nullptr);return ok && table_viewport_regression() && list_append_regression();
 }
 static bool source_ok(const unsigned char* p,size_t size,const char* entry) noexcept {
     if(size<2 || p[size-1]!=0 || std::strlen(reinterpret_cast<const char*>(p))!=size-1)return false;

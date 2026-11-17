@@ -267,6 +267,36 @@ VarVirtualListCache* prepare_vlist_raw(
         }
         c = &ui->vlists[ui->vlist_count++]; *c = {};
     }
+    if (!uncapped && c->list_id != 0 && c->item_count != item_count && c->default_height == h && c->gap_px == gap && c->measure_fn == measure_fn && c->c_measure_fn == c_measure_fn && c->measure_user_data == user_data && c->uncapped_heights == uncapped) {
+        const uint32_t count = item_count / 256 + (item_count % 256 != 0);
+        auto** chunks = c->chunks;
+        auto* tree = c->fenwick;
+        if (count != c->chunk_count) {
+            chunks = static_cast<float**>(std::calloc(count ? count : 1, sizeof(float*)));
+            tree = static_cast<double*>(std::calloc(size_t(count) + 1, sizeof(double)));
+            if (!chunks || !tree) { std::free(chunks); std::free(tree); return nullptr; }
+            for (uint32_t i = 0; i < c->chunk_count; ++i) {
+                if (i < count) chunks[i] = c->chunks[i]; else std::free(c->chunks[i]);
+            }
+            std::free(c->chunks); std::free(c->fenwick);
+        } else std::memset(tree, 0, (size_t(count) + 1) * sizeof(double));
+        const uint32_t old_count = c->item_count;
+        c->chunks = chunks; c->fenwick = tree; c->chunk_count = count; c->item_count = item_count; c->total_stride_sum = 0;
+        for (uint32_t chunk = 0; chunk < count; ++chunk) {
+            const uint32_t end = std::min(item_count, (chunk + 1) * 256);
+            double sum = chunks[chunk] ? 0 : double(end - chunk * 256) * (double(h) + gap);
+            for (uint32_t row = chunk * 256; chunks[chunk] && row < end; ++row) {
+                float height = h;
+                if (row >= old_count) {
+                    height = measure_fn ? measure_fn(row, user_data) : (c_measure_fn ? c_measure_fn(row, user_data) : h);
+                    height = std::isfinite(height) ? clamp_range(height, 1, 16384) : h;
+                    chunks[chunk][row % 256] = height;
+                } else height = chunks[chunk][row % 256];
+                sum += double(height) + gap;
+            }
+            fenwick_add(c, chunk, sum);
+        }
+    }
     if (c->list_id == 0 || c->item_count != item_count || c->default_height != h || c->gap_px != gap || c->measure_fn != measure_fn || c->c_measure_fn != c_measure_fn || c->measure_user_data != user_data || c->uncapped_heights != uncapped) {
         free_vlist(c); c->list_id = list_id; c->item_count = item_count; c->chunk_count = item_count / 256 + (item_count % 256 != 0);
         c->default_height = h; c->gap_px = gap; c->measure_fn = measure_fn; c->c_measure_fn = c_measure_fn; c->measure_user_data = user_data; c->uncapped_heights = uncapped;
@@ -274,6 +304,22 @@ VarVirtualListCache* prepare_vlist_raw(
         c->fenwick = static_cast<double*>(std::calloc(size_t(c->chunk_count) + 1, sizeof(double)));
         if (!c->chunks || !c->fenwick) { std::free(c->chunks); std::free(c->fenwick); *c = {}; return nullptr; }
         reset_vlist_heights(c);
+    }
+    if (c->dirty) {
+        if (c->measure_fn || c->c_measure_fn) {
+            for (uint32_t chunk = 0; chunk < c->chunk_count; ++chunk) {
+                if (!c->chunks[chunk]) continue;
+                const uint32_t end = std::min(c->item_count, (chunk + 1) * 256);
+                for (uint32_t row = chunk * 256; row < end; ++row) {
+                    float measured = c->measure_fn ? c->measure_fn(row, c->measure_user_data) : c->c_measure_fn(row, c->measure_user_data);
+                    measured = std::isfinite(measured) ? (c->uncapped_heights ? std::fmax(measured, 1.f) : clamp_range(measured, 1, 16384)) : c->default_height;
+                    const float old = c->chunks[chunk][row % 256];
+                    c->chunks[chunk][row % 256] = measured;
+                    fenwick_add(c, chunk, double(measured) - old);
+                }
+            }
+        } else reset_vlist_heights(c);
+        c->dirty = false;
     }
     return c;
 }
@@ -381,16 +427,27 @@ void vlist_set_row_height_direct(VarVirtualListCache* c, uint32_t row, float h) 
 void virtual_list_set_item_height(uint32_t id, uint32_t row, float height) noexcept {
     Context* ctx = current_context(); if (!ctx || !id || !std::isfinite(height) || height < 1) return;
     auto* c = find_vlist(ctx->active_ui,id); if (!c || row >= c->item_count) return;
+    if (c->dirty) {
+        const double previous_total = c->total_stride_sum;
+        reset_vlist_heights(c); c->dirty = false;
+        if (auto* ws = state_map_find(&ctx->active_ui->states,id)) {
+            ws->vscroll_total_h += c->total_stride_sum-previous_total;
+            ws->vscroll_max_y = std::fmax(ws->vscroll_total_h-ws->viewport_dim.y,0.0);
+        }
+    }
     update_vlist_height(ctx,c,row,clamp_range(height,1,16384)); request_redraw(ctx);
 }
 void virtual_list_invalidate_heights(uint32_t id) noexcept {
     Context* ctx = current_context(); if (!ctx || !id) return;
     auto* c = find_vlist(ctx->active_ui,id); if (!c) return;
-    const double previous_total = c->total_stride_sum;
-    reset_vlist_heights(c);
-    if (auto* ws = state_map_find(&ctx->active_ui->states,id)) {
-        ws->vscroll_total_h += c->total_stride_sum-previous_total;
-        ws->vscroll_max_y = ws->vscroll_total_h > ws->viewport_dim.y ? ws->vscroll_total_h-ws->viewport_dim.y : 0;
+    if (!c->measure_fn && !c->c_measure_fn) {
+        const double previous_total = c->total_stride_sum;
+        reset_vlist_heights(c);
+        if (auto* ws = state_map_find(&ctx->active_ui->states,id)) {
+            ws->vscroll_total_h += c->total_stride_sum-previous_total;
+            ws->vscroll_max_y = std::fmax(ws->vscroll_total_h-ws->viewport_dim.y,0.0);
+        }
+        request_redraw(ctx); return;
     }
     c->dirty = true; request_redraw(ctx);
 }
@@ -639,9 +696,10 @@ void virtual_list_scroll_to_row(
         return;
     }
     auto* cache = find_vlist(ctx->active_ui,list_id);
+    const double previous_total = cache ? cache->total_stride_sum : 0;
+    if (cache && cache->dirty) { reset_vlist_heights(cache); cache->dirty = false; }
     if (cache && cache->item_count == 0) return;
     if (cache && row_index >= cache->item_count) row_index = cache->item_count-1;
-    const double previous_total = cache ? cache->total_stride_sum : 0;
     const float item_h = cache ? vlist_height(cache,row_index) : (std::isfinite(item_height_px) && item_height_px > 1 ? item_height_px : 1);
     const double stride = (ws->vlist_stride >= item_h)
         ? static_cast<double>(ws->vlist_stride)
