@@ -13,7 +13,8 @@ ETCH_KAWASE_UNIFORM_FS(0) cbuffer KawaseFS : register(b0, space3)
 {
     float2 g_texel_size;
     float  g_offset;
-    uint   g_mode; // 0 = 5-tap downsample, 1 = 8-tap tent upsample, 2 = linear-to-sRGB present
+    uint   g_mode; // 0 downsample, 1 upsample, 2 present, 3 emissive threshold, 4 additive bloom
+    float4 g_bloom; // threshold, intensity, reserved, reserved
 };
 
 struct VSOut
@@ -44,6 +45,14 @@ float3 linear_to_srgb(float3 c)
 float4 ps_main(VSOut input) : SV_Target0
 {
     float2 uv = input.uv;
+    if (g_mode == 3u)
+    {
+        float4 c = g_src_tex.SampleLevel(g_src_smp, uv, 0.0f);
+        float luminance = dot(c.rgb, float3(0.2126f, 0.7152f, 0.0722f));
+        float weight = saturate((luminance - g_bloom.x) / max(1.0f - g_bloom.x, 0.001f));
+        return float4(c.rgb * weight, max(c.r, max(c.g, c.b)) * weight);
+    }
+    if (g_mode == 4u) return g_src_tex.SampleLevel(g_src_smp, uv, 0.0f) * g_bloom.y;
     if (g_mode == 0u)
     {
         float2 d = g_texel_size * g_offset;

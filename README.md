@@ -1,4 +1,4 @@
-# Etch v0.15.0
+# Etch v0.16.0
 
 Etch is a Pure-GPU UI Engine for desktop applications on Windows, Linux, and
 macOS. It combines immediate UI construction, Clay layout, Unicode text
@@ -307,3 +307,27 @@ the destination, preserving surrounding texels. The caller supplies a region
 inside the texture and a byte row pitch (zero means tightly packed); source
 pixels may be reused immediately after the call. `flush_texture_uploads` submits
 queued uploads for consumers outside Etch's frame rendering.
+
+## Materials and workbench primitives
+
+`etch_showcase --headless output.png` renders the dashboard, shared hero pill,
+procedural aurora, agent nodes, terminal and snap sheet. Run without arguments
+for the interactive demo. UI primitives remain batched; shader surfaces and
+opt-in bloom use additional material/postprocessing passes.
+
+Create shader surfaces outside a UI frame, evaluate once during their owner
+window's frame, then draw the borrowed RGBA16F texture. Keep the surface alive
+until rendering finishes. Revision/parameter changes invalidate its cache;
+continuous surfaces honor `max_fps`, reduced motion, paused time and hidden or
+minimized windows. Destroy surfaces outside frames. The exported CMake helper
+`etch_compile_hlsl_surface(TARGET app SOURCE /absolute/aurora.hlsl NAME aurora)`
+requires DXC and optionally shadercross for Metal. Fragment input is TEXCOORD0;
+uniform b0/space3 contains viewport/time and four float4 parameters (80 bytes).
+
+`terminal_grid` consumes a physical row ring of caller-owned Unicode cells;
+ANSI parsing belongs to the application. Width 2 marks a wide leading cell and
+width 0 its continuation. `begin_sheet`/`end_sheet` supports bottom, left and
+right edges, normalized snap fractions and velocity-aware release projection.
+`WindowBackdrop` selects Mica/Acrylic on supported Windows versions; create an
+SDL transparent window for alpha composition. Other platforms retain their
+normal SDL window behavior.

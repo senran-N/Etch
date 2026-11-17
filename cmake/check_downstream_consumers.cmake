@@ -30,6 +30,8 @@ forward_arg(-DCMAKE_C_COMPILER "${ETCH_TEST_C_COMPILER}")
 forward_arg(-DCMAKE_CXX_COMPILER "${ETCH_TEST_CXX_COMPILER}")
 forward_arg(-DCMAKE_TOOLCHAIN_FILE "${ETCH_TEST_TOOLCHAIN_FILE}")
 forward_arg(-DVCPKG_TARGET_TRIPLET "${ETCH_TEST_VCPKG_TRIPLET}")
+forward_arg(-DETCH_DXC_EXE "${ETCH_TEST_DXC_EXE}")
+forward_arg(-DETCH_SHADERCROSS_EXE "${ETCH_TEST_SHADERCROSS_EXE}")
 forward_arg(-DSDL3_DIR "${ETCH_TEST_SDL3_DIR}")
 forward_arg(-Dharfbuzz_DIR "${ETCH_TEST_HARFBUZZ_DIR}")
 forward_arg(-DCMAKE_OSX_ARCHITECTURES "${ETCH_TEST_OSX_ARCHITECTURES}")
@@ -101,6 +103,9 @@ else ()
     target_compile_options(@TARGET@ PRIVATE -Wall -Wextra -Wpedantic -Werror -fno-exceptions -fno-rtti)
 endif ()
 target_link_libraries(@TARGET@ PRIVATE Etch::etch)
+if (ETCH_DXC_EXE)
+    etch_compile_hlsl_surface(TARGET @TARGET@ SOURCE "@ETCH_TEST_REPO_ROOT@/shaders/etch_surface_demo.hlsl" NAME consumer_surface)
+endif ()
 set_target_properties(@TARGET@ PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "@BIN_DIR@"
     RUNTIME_OUTPUT_DIRECTORY_RELEASE "@BIN_DIR@"
@@ -126,6 +131,9 @@ else ()
     target_compile_options(@TARGET@_c PRIVATE -Wall -Wextra -Wpedantic -Werror)
 endif ()
 target_link_libraries(@TARGET@_c PRIVATE Etch::etch)
+if (ETCH_DXC_EXE)
+    etch_compile_hlsl_surface(TARGET @TARGET@_c SOURCE "@ETCH_TEST_REPO_ROOT@/shaders/etch_surface_demo.hlsl" NAME consumer_surface_c)
+endif ()
 set_target_properties(@TARGET@_c PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "@BIN_DIR@"
     RUNTIME_OUTPUT_DIRECTORY_RELEASE "@BIN_DIR@"

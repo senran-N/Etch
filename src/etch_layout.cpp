@@ -193,7 +193,7 @@ void emit_draw_text_cmd(
     const TextDrawDesc& tc,
     Vec2 origin,
     float scale,
-    const ClipEntry& clip) noexcept
+    const ClipEntry& clip, const uint32_t* terminal_columns = nullptr, float terminal_cell_width = 0) noexcept
 {
     if (!ctx || !ctx->atlas.font_valid || !tc.text.chars || tc.text.length == 0u || tc.size <= 0.0f || tc.color.a == 0u) {
         return;
@@ -293,7 +293,12 @@ void emit_draw_text_cmd(
                 ++run_end;
             }
             const std::span<const ShapedGlyph> glyphs = shape_utf8_run(ctx, primary_slot, tc.text.chars + run_pos, run_end - run_pos);
+            uint32_t last_cluster = UINT32_MAX;
             for (const ShapedGlyph& g : glyphs) {
+                if (terminal_columns && g.cluster != last_cluster) {
+                    pen_x = origin.x + (start_x_logical + float(terminal_columns[run_pos + g.cluster]) * terminal_cell_width) * scale;
+                    last_cluster = g.cluster;
+                }
                 emit_slug_glyph_quad(
                     ctx,
                     g.font_slot,
@@ -595,7 +600,7 @@ void emit_draw_list_command(
                 break;
             }
             case DrawCmdKind::Text: {
-                emit_draw_text_cmd(ctx, node->text_cmd, origin, scale, clip);
+                emit_draw_text_cmd(ctx, node->text_cmd, origin, scale, clip, node->terminal_columns, node->terminal_cell_width);
                 break;
             }
             case DrawCmdKind::Image: {
@@ -625,7 +630,7 @@ void emit_draw_list_command(
                         im.tint,
                         Color{},
                         0.0f,
-                        im.sprite_id != kInvalidSprite ? PrimFlag_Premultiplied : PrimFlag_None,
+                        (im.sprite_id != kInvalidSprite || surface_texture_premultiplied(ctx, im.texture)) ? PrimFlag_Premultiplied : PrimFlag_None,
                         clip.radius),
                     im.sprite_id != kInvalidSprite ? nullptr : im.texture);
                 break;
@@ -646,7 +651,7 @@ bool needs_redraw(const Context* ctx) noexcept {
         const ClaimedWindowSlot& slot = *ctx->claimed_windows[i];
         if (slot.window && (slot.ui.redraw_budget || slot.ui.active_anim_count)) return true;
     }
-    return false;
+    return shader_surface_timeout(ctx, nullptr, true, -1) == 0;
 }
 
 void request_redraw(Context* ctx_arg) noexcept {
@@ -674,26 +679,45 @@ bool wait_events(Context* ctx, SDL_Event* first_event_out, int32_t timeout_ms) n
     if (!first_event_out) {
         return false;
     }
-    if (needs_redraw(ctx)) {
-        return SDL_PollEvent(first_event_out);
-    }
     WindowUiState* caret_ui = ctx ? window_ui(ctx, ctx->ime_active_window) : nullptr;
-    if (ctx && caret_ui->ime_focused_id != 0u && caret_ui->caret_blink_cycles < 20u && (timeout_ms < 0 || timeout_ms > 500)) {
-        if (SDL_WaitEventTimeout(first_event_out, 500)) {
-            return true;
+    if (caret_ui && caret_ui->ime_focused_id != 0u && caret_ui->caret_blink_cycles < 20u) {
+        const uint64_t now = SDL_GetTicks();
+        if (!caret_ui->caret_blink_tick) caret_ui->caret_blink_tick = now;
+        const uint64_t elapsed = now - caret_ui->caret_blink_tick;
+        if (elapsed >= 500) {
+            caret_ui->caret_blink_on = !caret_ui->caret_blink_on;
+            ++caret_ui->caret_blink_cycles;
+            if (caret_ui->caret_blink_cycles == 20u) caret_ui->caret_blink_on = true;
+            caret_ui->caret_blink_tick = now;
+            caret_ui->redraw_budget = 2;
         }
-        caret_ui->caret_blink_on = !caret_ui->caret_blink_on;
-        ++caret_ui->caret_blink_cycles;
-        if (caret_ui->caret_blink_cycles >= 20u) {
-            caret_ui->caret_blink_on = true;
-        }
-        caret_ui->redraw_budget = 2;
-        return false;
+        const int32_t remaining = elapsed >= 500 ? 500 : int32_t(500 - elapsed);
+        if (timeout_ms < 0 || remaining < timeout_ms) timeout_ms = remaining;
     }
+    if (needs_redraw(ctx)) return SDL_PollEvent(first_event_out);
+    if (ctx) timeout_ms = shader_surface_timeout(ctx, nullptr, true, timeout_ms);
     if (timeout_ms < 0) {
         return SDL_WaitEvent(first_event_out);
     }
     return SDL_WaitEventTimeout(first_event_out, timeout_ms);
+}
+
+bool verify_caret_deadline() noexcept {
+    Context* ctx=create_context({.headless=true});
+    if(!ctx)return false;
+    auto& ui=ctx->headless_ui;
+    ui.ime_focused_id=1;
+    ui.caret_blink_on=true;
+    ui.caret_blink_tick=SDL_GetTicks()-501;
+    SDL_Event event={};
+    wait_events(ctx,&event,0); // A short shader/event deadline must not starve blinking.
+    const bool hidden=!ui.caret_blink_on && ui.caret_blink_cycles==1;
+    ui.caret_blink_tick=SDL_GetTicks()-501;
+    wait_events(ctx,&event,0);
+    const bool shown=ui.caret_blink_on && ui.caret_blink_cycles==2;
+    destroy_context(ctx);
+    set_current_context(nullptr);
+    return hidden && shown;
 }
 
 static void process_window_event(Context* ctx, const SDL_Event& event) noexcept {
@@ -723,6 +747,7 @@ static void process_window_event(Context* ctx, const SDL_Event& event) noexcept 
                     ctx->active_ui->last_mouse_clicks = (event.button.clicks > 0u) ? event.button.clicks : 1u;
                     ctx->active_ui->caret_blink_on = true;
                     ctx->active_ui->caret_blink_cycles = 0u;
+                    ctx->active_ui->caret_blink_tick = SDL_GetTicks();
                 }
                 request_redraw(ctx);
             } else if (event.button.button == SDL_BUTTON_MIDDLE) {
@@ -777,6 +802,7 @@ static void process_window_event(Context* ctx, const SDL_Event& event) noexcept 
                     event.edit.length);
             ctx->active_ui->caret_blink_on = true;
             ctx->active_ui->caret_blink_cycles = 0u;
+            ctx->active_ui->caret_blink_tick = SDL_GetTicks();
             ctx->active_ui->pending_ime_comp_edited = true;
             request_redraw(ctx);
             break;
@@ -791,6 +817,7 @@ static void process_window_event(Context* ctx, const SDL_Event& event) noexcept 
             }
             ctx->active_ui->caret_blink_on = true;
             ctx->active_ui->caret_blink_cycles = 0u;
+            ctx->active_ui->caret_blink_tick = SDL_GetTicks();
             request_redraw(ctx);
             break;
         }
@@ -835,6 +862,7 @@ static void process_window_event(Context* ctx, const SDL_Event& event) noexcept 
             }
             ctx->active_ui->caret_blink_on = true;
             ctx->active_ui->caret_blink_cycles = 0u;
+            ctx->active_ui->caret_blink_tick = SDL_GetTicks();
             if (ctx->active_ui->ime_comp_len > 0u) {
                 if (event.key.key == SDLK_ESCAPE) {
                     clear_ime_composition(ctx);
@@ -978,6 +1006,8 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
     ctx->in_frame = true;
     ctx->theme_depth = 0u;
     ctx->theme_overflow = 0u;
+    ctx->active_ui->bloom_intensity = std::isfinite(desc.bloom_intensity) ? clamp_range(desc.bloom_intensity,0,8) : 0;
+    ctx->active_ui->bloom_threshold = std::isfinite(desc.bloom_threshold) ? clamp_range(desc.bloom_threshold,0,1) : .7f;
     ctx->draw_list_window = ctx->active_window;
     ctx->active_ui->current_layer=nullptr;
     Clay_SetCullingEnabled(true);
@@ -1093,6 +1123,7 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
         ctx->active_ui->keyboard_focus_active = true;
         ctx->active_ui->caret_blink_on = true;
         ctx->active_ui->caret_blink_cycles = 0u;
+        ctx->active_ui->caret_blink_tick = SDL_GetTicks();
         request_redraw(ctx);
     }
 
@@ -3090,6 +3121,7 @@ TextInputResult text_input(const TextInputDesc& desc_in) noexcept {
         if (ws->pressed_this_frame) {
             ctx->active_ui->caret_blink_on = true;
             ctx->active_ui->caret_blink_cycles = 0u;
+            ctx->active_ui->caret_blink_tick = SDL_GetTicks();
             bool hit_aff = false;
             uint32_t hit_byte = visual_point_to_byte(ctx, desc, cur_text, local_x, local_y, ptr_wrap_w, &hit_aff);
             if (hit_byte && hit_byte < len) {
@@ -3626,6 +3658,7 @@ void request_focus(uint32_t element_id) noexcept {
         ctx->active_ui->focus_id = element_id;
         ctx->active_ui->caret_blink_on = true;
         ctx->active_ui->caret_blink_cycles = 0u;
+        ctx->active_ui->caret_blink_tick = SDL_GetTicks();
         request_redraw(ctx);
     }
 }

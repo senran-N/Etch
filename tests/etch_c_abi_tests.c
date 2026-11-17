@@ -484,7 +484,14 @@ int main(void) {
         !etch_box_desc_default().shrink_height && etch_rect_draw_desc_default().border_align==ETCH_BORDER_INSIDE;
     const bool ok_numerals = etch_set_font_tabular_numbers(ctx, ETCH_FONT_SANS, true) &&
         etch_set_font_tabular_numbers(ctx, ETCH_FONT_SANS, false);
-    const bool ok_layout = ok_closure && ok_numerals && test_layout_widgets_and_a11y(ctx);
+    const EtchShaderSurfaceCreateDesc surface=etch_shader_surface_create_desc_default();
+    const EtchShaderSurfaceEvalDesc eval=etch_shader_surface_eval_desc_default();
+    const EtchTerminalCell cell=etch_terminal_cell_default();
+    const EtchSheetDesc sheet=etch_sheet_desc_default();
+    const bool ok_material_defaults=surface.max_fps==60 && surface.spirv.entrypoint!=NULL &&
+        eval.width==1 && eval.enabled && cell.width==1 && sheet.snap_count==3 &&
+        etch_window_chrome_desc_default().backdrop==ETCH_BACKDROP_OPAQUE;
+    const bool ok_layout = ok_material_defaults && ok_closure && ok_numerals && test_layout_widgets_and_a11y(ctx);
     const bool ok_editor = test_text_buffer_and_code_editor(ctx);
     const bool ok_containers = test_containers_and_canvas(ctx);
 

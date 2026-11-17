@@ -8,7 +8,7 @@
 
 #ifndef ETCH_VERSION_MAJOR
 #define ETCH_VERSION_MAJOR 0
-#define ETCH_VERSION_MINOR 15
+#define ETCH_VERSION_MINOR 16
 #define ETCH_VERSION_PATCH 0
 #define ETCH_VERSION_STR_DETAIL(x) #x
 #define ETCH_VERSION_STR(x) ETCH_VERSION_STR_DETAIL(x)
@@ -307,6 +307,29 @@ typedef struct ETCH_C_ALIGN16 EtchVec4 {
     float w;
 } EtchVec4;
 
+typedef uint32_t EtchShaderSurfaceId;
+typedef struct EtchShaderSurfaceCode {
+    const void* data;
+    size_t size;
+    const char* entrypoint;
+} EtchShaderSurfaceCode;
+typedef struct EtchShaderSurfaceCreateDesc {
+    EtchShaderSurfaceCode spirv, dxil, msl;
+    bool continuous_time;
+    float max_fps;
+} EtchShaderSurfaceCreateDesc;
+typedef struct EtchShaderSurfaceEvalDesc {
+    uint32_t width, height;
+    uint64_t revision;
+    EtchVec4 params[4];
+    bool enabled;
+    uint8_t reserved[15];
+} EtchShaderSurfaceEvalDesc;
+EtchShaderSurfaceCreateDesc etch_shader_surface_create_desc_default(void);
+EtchShaderSurfaceEvalDesc etch_shader_surface_eval_desc_default(void);
+EtchShaderSurfaceId etch_create_shader_surface(EtchContext*, const EtchShaderSurfaceCreateDesc*);
+void etch_destroy_shader_surface(EtchContext*, EtchShaderSurfaceId);
+struct SDL_GPUTexture* etch_eval_shader_surface(EtchContext*, EtchShaderSurfaceId, const EtchShaderSurfaceEvalDesc*);
 typedef struct ETCH_C_ALIGN16 EtchUint4 {
     uint32_t x;
     uint32_t y;
@@ -745,12 +768,14 @@ typedef struct EtchFrameDesc {
     uint16_t key_mods;
     uint32_t key_pressed_code;
     bool pixel_snap;
+    float bloom_intensity, bloom_threshold;
 } EtchFrameDesc;
 
 typedef struct EtchWindowFrameDesc {
     float dt;
     float min_scale;
     bool pixel_snap;
+    float bloom_intensity, bloom_threshold;
 } EtchWindowFrameDesc;
 
 typedef struct EtchFrameStats {
@@ -1129,6 +1154,9 @@ typedef struct EtchLoadedTexture {
     uint32_t height;
 } EtchLoadedTexture;
 
+typedef enum EtchWindowBackdrop {
+    ETCH_BACKDROP_OPAQUE, ETCH_BACKDROP_TRANSPARENT, ETCH_BACKDROP_SYSTEM_MICA, ETCH_BACKDROP_SYSTEM_ACRYLIC
+} EtchWindowBackdrop;
 typedef struct EtchWindowChromeDesc {
     bool enabled;
     bool resizable;
@@ -1136,6 +1164,7 @@ typedef struct EtchWindowChromeDesc {
     float corner_size;
     bool macos_traffic_lights;
     float traffic_light_inset_px;
+    EtchWindowBackdrop backdrop;
 } EtchWindowChromeDesc;
 
 typedef struct EtchDragPayloadView {
@@ -1769,6 +1798,46 @@ EtchLayerDesc etch_layer_desc_default(void);
 void etch_push_layer(const EtchLayerDesc* desc);
 void etch_pop_layer(void);
 typedef struct EtchPresenceResult { bool visible; float opacity; bool exiting; } EtchPresenceResult;
+typedef enum EtchTerminalColorMode { ETCH_TERMINAL_DEFAULT, ETCH_TERMINAL_ANSI16, ETCH_TERMINAL_ANSI256, ETCH_TERMINAL_TRUE_COLOR } EtchTerminalColorMode;
+typedef struct EtchTerminalColor { EtchTerminalColorMode mode; uint32_t value; } EtchTerminalColor;
+typedef struct EtchTerminalCell {
+    uint32_t codepoint;
+    EtchTerminalColor foreground, background;
+    uint8_t width;
+    bool bold, underline, inverse;
+} EtchTerminalCell;
+typedef struct EtchTerminalGridDesc {
+    uint32_t id;
+    const EtchTerminalCell* cells;
+    size_t cell_count;
+    uint32_t columns, rows, first_row;
+    float cell_width_px, line_height_px, font_size_px;
+    uint16_t font_id;
+    EtchColor foreground, background;
+    int32_t cursor_column, cursor_row;
+    EtchColor cursor_color;
+    EtchSpringSpec cursor_motion;
+} EtchTerminalGridDesc;
+typedef enum EtchSheetEdge { ETCH_SHEET_BOTTOM, ETCH_SHEET_LEFT, ETCH_SHEET_RIGHT } EtchSheetEdge;
+typedef struct EtchSheetDesc {
+    uint32_t id;
+    bool open;
+    EtchSheetEdge edge;
+    float extent_px;
+    float snap_points[8];
+    uint32_t snap_count;
+    uint32_t* snap_index;
+    EtchColor background;
+    EtchSpringSpec motion;
+    int16_t z_index;
+} EtchSheetDesc;
+EtchTerminalGridDesc etch_terminal_grid_desc_default(void);
+EtchTerminalCell etch_terminal_cell_default(void);
+void etch_terminal_grid(const EtchTerminalGridDesc*);
+EtchSheetDesc etch_sheet_desc_default(void);
+bool etch_begin_sheet(const EtchSheetDesc*);
+void etch_end_sheet(void);
+
 EtchPresenceResult etch_presence(uint32_t id, bool mounted, EtchSpringSpec spec);
 void etch_set_time_scale(EtchContext* ctx, float scale);
 EtchTheme etch_theme_high_contrast(void);

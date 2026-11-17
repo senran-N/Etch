@@ -329,7 +329,7 @@ void end_frame(Context* ctx_arg) noexcept {
                             idesc.tint,
                             idesc.border_color,
                             idesc.border_width * dpi,
-                            idesc.sprite_id != kInvalidSprite ? PrimFlag_Premultiplied : PrimFlag_None,
+                            (idesc.sprite_id != kInvalidSprite || surface_texture_premultiplied(ctx, idesc.texture)) ? PrimFlag_Premultiplied : PrimFlag_None,
                             cur_clip.radius),
                         idesc.sprite_id != kInvalidSprite ? nullptr : idesc.texture);
                 }
@@ -836,7 +836,7 @@ bool system_dark_mode(bool fallback) noexcept {
 }
 bool needs_window_redraw(const Context* ctx, SDL_Window* window) noexcept {
     const WindowUiState* ui = ctx ? window_ui(ctx, window) : nullptr;
-    return ui && (ui->redraw_budget || ui->active_anim_count);
+    return ui && (ui->redraw_budget || ui->active_anim_count || shader_surface_timeout(ctx, window, false, -1) == 0);
 }
 void request_window_redraw(Context* ctx, SDL_Window* window) noexcept {
     WindowUiState* ui = ctx ? window_ui(ctx, window) : nullptr;
@@ -897,7 +897,7 @@ void begin_window_frame(Context* ctx, SDL_Window* window, const WindowFrameDesc&
     if (scale <= 0) scale = 1;
     if (scale < ctx->active_ui->min_dpi_scale) scale = ctx->active_ui->min_dpi_scale;
     begin_bound_frame(ctx, FrameDesc{.viewport_w = static_cast<uint32_t>(w > 0 ? w : 1),
-        .viewport_h = static_cast<uint32_t>(h > 0 ? h : 1), .dpi_scale = scale, .dt_seconds = desc.dt, .pixel_snap = desc.pixel_snap});
+        .viewport_h = static_cast<uint32_t>(h > 0 ? h : 1), .dpi_scale = scale, .dt_seconds = desc.dt, .pixel_snap = desc.pixel_snap,.bloom_intensity=desc.bloom_intensity,.bloom_threshold=desc.bloom_threshold});
 }
 void end_window_frame(Context* ctx) noexcept { end_frame(ctx); }
 void begin_focus_scope(uint32_t scope_id, bool trap_tab) noexcept {

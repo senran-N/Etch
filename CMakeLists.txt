@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(etch VERSION 0.15.0 LANGUAGES C CXX)
+project(etch VERSION 0.16.0 LANGUAGES C CXX)
 
 option(ETCH_BUILD_EXAMPLES "Build Etch sandbox and etch_studio examples" ${PROJECT_IS_TOP_LEVEL})
 option(ETCH_BUILD_TESTS "Build Etch CTest suite" ${PROJECT_IS_TOP_LEVEL})
@@ -70,6 +70,8 @@ endif ()
 
 find_program(ETCH_SHADERCROSS_EXE NAMES shadercross
     HINTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/SDL_shadercross/bin")
+
+include(cmake/EtchShaderTools.cmake)
 
 if (ETCH_COMPILE_SHADERS AND ETCH_DXC_EXE)
     execute_process(
@@ -231,6 +233,20 @@ set_source_files_properties(examples/sandbox.cpp examples/etch_studio.cpp tests/
     PROPERTIES OBJECT_DEPENDS "${_etch_common_dependencies};${_etch_check_dependencies}")
 
 if (ETCH_BUILD_EXAMPLES)
+    add_executable(etch_showcase examples/etch_showcase.cpp)
+    etch_configure_orthodox_cpp(etch_showcase)
+    target_link_libraries(etch_showcase PRIVATE etch)
+    target_include_directories(etch_showcase PRIVATE src/shaders_gen)
+    if (ETCH_COMPILE_SHADERS AND ETCH_DXC_EXE)
+        etch_compile_hlsl_surface(TARGET etch_showcase SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/shaders/etch_surface_demo.hlsl" NAME etch_surface_demo)
+    endif ()
+    if (WIN32)
+        add_custom_command(TARGET etch_showcase POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E $<IF:$<BOOL:$<TARGET_RUNTIME_DLLS:etch_showcase>>,copy_if_different,true>
+                    $<TARGET_RUNTIME_DLLS:etch_showcase>
+                    $<$<BOOL:$<TARGET_RUNTIME_DLLS:etch_showcase>>:$<TARGET_FILE_DIR:etch_showcase>>
+            COMMAND_EXPAND_LISTS VERBATIM)
+    endif ()
     add_executable(sandbox
         examples/sandbox.cpp
     )
@@ -269,6 +285,9 @@ endif ()
 if (ETCH_BUILD_TESTS)
     enable_testing()
     add_executable(etch_tests tests/etch_tests.cpp)
+    if (ETCH_COMPILE_SHADERS AND ETCH_DXC_EXE)
+        etch_compile_hlsl_surface(TARGET etch_tests SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/shaders/etch_surface_demo.hlsl" NAME etch_surface_demo)
+    endif ()
     etch_configure_orthodox_cpp(etch_tests)
     target_link_libraries(etch_tests PRIVATE etch)
     target_include_directories(etch_tests PRIVATE "${ETCH_SHADER_OUT_DIR}" src src/shaders_gen tests)
@@ -341,6 +360,8 @@ if (ETCH_BUILD_TESTS)
             "set(ETCH_TEST_TOOLCHAIN_FILE [=[${CMAKE_TOOLCHAIN_FILE}]=])\n"
             "set(ETCH_TEST_VCPKG_TRIPLET [=[${VCPKG_TARGET_TRIPLET}]=])\n"
             "set(ETCH_TEST_PREFIX_PATH [=[${CMAKE_PREFIX_PATH}]=])\n"
+            "set(ETCH_TEST_DXC_EXE [=[${ETCH_DXC_EXE}]=])\n"
+            "set(ETCH_TEST_SHADERCROSS_EXE [=[${ETCH_SHADERCROSS_EXE}]=])\n"
             "set(ETCH_TEST_SDL3_DIR [=[${SDL3_DIR}]=])\n"
             "set(ETCH_TEST_HARFBUZZ_DIR [=[${harfbuzz_DIR}]=])\n"
             "set(ETCH_TEST_OSX_ARCHITECTURES [=[${CMAKE_OSX_ARCHITECTURES}]=])\n"
@@ -372,5 +393,6 @@ if (ETCH_INSTALL)
         DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/Etch")
     install(FILES "${CMAKE_CURRENT_BINARY_DIR}/EtchConfig.cmake"
         "${CMAKE_CURRENT_BINARY_DIR}/EtchConfigVersion.cmake"
+        "cmake/EtchShaderTools.cmake" "cmake/embed_msl.cmake"
         DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/Etch")
 endif ()

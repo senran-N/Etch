@@ -240,12 +240,12 @@ EtchFrameDesc etch_frame_desc_default(void) {
     const etch::FrameDesc d{};
     return {d.viewport_w, d.viewport_h, d.dpi_scale, d.dt_seconds, from_cpp(d.pointer_pos),
             d.pointer_down, from_cpp(d.scroll_delta), d.right_pointer_down, d.pointer_clicks,
-            d.key_mods, d.key_pressed_code, d.pixel_snap};
+            d.key_mods, d.key_pressed_code, d.pixel_snap, d.bloom_intensity, d.bloom_threshold};
 }
 
 EtchWindowFrameDesc etch_window_frame_desc_default(void) {
     const etch::WindowFrameDesc d{};
-    return {d.dt, d.min_scale, d.pixel_snap};
+    return {d.dt, d.min_scale, d.pixel_snap,d.bloom_intensity,d.bloom_threshold};
 }
 
 EtchBoxDesc etch_box_desc_default(void) {
@@ -384,7 +384,7 @@ EtchTextureDesc etch_texture_desc_default(void) {
 EtchWindowChromeDesc etch_window_chrome_desc_default(void) {
     const etch::WindowChromeDesc d{};
     return {d.enabled, d.resizable, d.border_thickness, d.corner_size,
-            d.macos_traffic_lights, d.traffic_light_inset_px};
+            d.macos_traffic_lights, d.traffic_light_inset_px, static_cast<EtchWindowBackdrop>(d.backdrop)};
 }
 
 EtchCodeEditorDesc etch_code_editor_desc_default(void) {
@@ -726,7 +726,7 @@ void etch_begin_frame(EtchContext* ctx, const EtchFrameDesc* desc) {
     if (desc) {
         f = {desc->viewport_w, desc->viewport_h, desc->dpi_scale, desc->dt_seconds,
              to_cpp(desc->pointer_pos), desc->pointer_down, to_cpp(desc->scroll_delta),
-             desc->right_pointer_down, desc->pointer_clicks, desc->key_mods, desc->key_pressed_code, desc->pixel_snap};
+             desc->right_pointer_down, desc->pointer_clicks, desc->key_mods, desc->key_pressed_code, desc->pixel_snap, desc->bloom_intensity, desc->bloom_threshold};
     }
     etch::begin_frame(to_ctx(ctx), f);
 }
@@ -735,7 +735,7 @@ void etch_end_frame(EtchContext* ctx) { etch::end_frame(to_ctx(ctx)); }
 bool etch_frame_in_progress(const EtchContext* ctx) { return etch::frame_in_progress(to_ctx(ctx)); }
 
 void etch_begin_window_frame(EtchContext* ctx, struct SDL_Window* window, const EtchWindowFrameDesc* desc) {
-    const etch::WindowFrameDesc w = desc ? etch::WindowFrameDesc{desc->dt, desc->min_scale, desc->pixel_snap} : etch::WindowFrameDesc{};
+    const etch::WindowFrameDesc w = desc ? etch::WindowFrameDesc{desc->dt, desc->min_scale, desc->pixel_snap,desc->bloom_intensity,desc->bloom_threshold} : etch::WindowFrameDesc{};
     etch::begin_window_frame(to_ctx(ctx), window, w);
 }
 
@@ -784,7 +784,7 @@ void etch_set_window_refresh_callback(EtchContext* ctx_arg, EtchWindowRefreshFn 
 void etch_set_window_chrome(const EtchWindowChromeDesc* desc, struct SDL_Window* window) {
     if (!desc) return;
     etch::set_window_chrome({desc->enabled, desc->resizable, desc->border_thickness, desc->corner_size,
-                             desc->macos_traffic_lights, desc->traffic_light_inset_px}, window);
+                             desc->macos_traffic_lights, desc->traffic_light_inset_px, static_cast<etch::WindowBackdrop>(desc->backdrop)}, window);
 }
 void etch_window_drag_region(EtchRect rect_logical) { etch::window_drag_region(to_cpp(rect_logical)); }
 void etch_window_maximize_button_region(EtchRect rect_logical) { etch::window_maximize_button_region(to_cpp(rect_logical)); }
@@ -1524,3 +1524,64 @@ extern "C" EtchLayerDesc etch_layer_desc_default(void) {
 }
 extern "C" void etch_push_layer(const EtchLayerDesc* d) {etch::push_layer(d ? etch::LayerDesc{d->opacity,to_cpp(d->translate),to_cpp(d->scale),to_cpp(d->pivot_norm),to_cpp(d->pivot_px),d->animating} : etch::LayerDesc{});}
 extern "C" void etch_pop_layer(void) {etch::pop_layer();}
+
+EtchShaderSurfaceCreateDesc etch_shader_surface_create_desc_default(void) {
+    EtchShaderSurfaceCreateDesc d = {};
+    d.spirv.entrypoint = d.dxil.entrypoint = d.msl.entrypoint = "ps_main";
+    d.max_fps = 60;
+    return d;
+}
+EtchShaderSurfaceEvalDesc etch_shader_surface_eval_desc_default(void) {
+    EtchShaderSurfaceEvalDesc d = {}; d.width = d.height = 1; d.enabled = true; return d;
+}
+EtchShaderSurfaceId etch_create_shader_surface(EtchContext* ctx, const EtchShaderSurfaceCreateDesc* d) {
+    if (!d) return 0;
+    return etch::create_shader_surface(to_ctx(ctx), {{d->spirv.data,d->spirv.size,d->spirv.entrypoint},
+        {d->dxil.data,d->dxil.size,d->dxil.entrypoint}, {d->msl.data,d->msl.size,d->msl.entrypoint}, d->continuous_time,d->max_fps});
+}
+void etch_destroy_shader_surface(EtchContext* ctx, EtchShaderSurfaceId id) { etch::destroy_shader_surface(to_ctx(ctx),id); }
+SDL_GPUTexture* etch_eval_shader_surface(EtchContext* ctx, EtchShaderSurfaceId id, const EtchShaderSurfaceEvalDesc* d) {
+    if (!d) return nullptr;
+    etch::ShaderSurfaceEvalDesc eval = {}; eval.width=d->width; eval.height=d->height; eval.revision=d->revision; eval.enabled=d->enabled;
+    for (uint32_t i=0;i<4;++i) eval.params[i]=to_cpp(d->params[i]);
+    return etch::eval_shader_surface(to_ctx(ctx),id,eval);
+}
+
+EtchTerminalGridDesc etch_terminal_grid_desc_default(void) {
+    const etch::TerminalGridDesc d;
+    return {d.id,nullptr,0,d.columns,d.rows,d.first_row,d.cell_width_px,d.line_height_px,d.font_size_px,d.font_id,
+        from_cpp(d.foreground),from_cpp(d.background),d.cursor_column,d.cursor_row,from_cpp(d.cursor_color),from_cpp(d.cursor_motion)};
+}
+EtchTerminalCell etch_terminal_cell_default(void) {
+    return {' ',{ETCH_TERMINAL_DEFAULT,0},{ETCH_TERMINAL_DEFAULT,0},1,false,false,false};
+}
+namespace {
+etch::TerminalCell read_c_terminal_cell(const void* data,size_t index) noexcept {
+    const auto& c=static_cast<const EtchTerminalCell*>(data)[index];
+    return {c.codepoint,{static_cast<etch::TerminalColorMode>(c.foreground.mode),c.foreground.value},
+        {static_cast<etch::TerminalColorMode>(c.background.mode),c.background.value},c.width,c.bold,c.underline,c.inverse};
+}
+}
+void etch_terminal_grid(const EtchTerminalGridDesc* d) {
+    if(!d || !d->cells) return;
+    const etch::TerminalGridDesc desc={.id=d->id,.columns=d->columns,.rows=d->rows,.first_row=d->first_row,
+        .cell_width_px=d->cell_width_px,.line_height_px=d->line_height_px,.font_size_px=d->font_size_px,.font_id=d->font_id,
+        .foreground=to_cpp(d->foreground),.background=to_cpp(d->background),.cursor_column=d->cursor_column,
+        .cursor_row=d->cursor_row,.cursor_color=to_cpp(d->cursor_color),.cursor_motion=to_cpp(d->cursor_motion)};
+    if(etch::terminal_grid_valid(desc,d->cell_count)) etch::terminal_grid_run(desc,d->cells,d->cell_count,read_c_terminal_cell);
+}
+EtchSheetDesc etch_sheet_desc_default(void) {
+    const etch::SheetDesc d;
+    EtchSheetDesc result={d.id,d.open,static_cast<EtchSheetEdge>(d.edge),d.extent_px,{},d.snap_count,nullptr,
+        from_cpp(d.background),from_cpp(d.motion),d.z_index};
+    for(uint32_t i=0;i<8;++i) result.snap_points[i]=d.snap_points[i];
+    return result;
+}
+bool etch_begin_sheet(const EtchSheetDesc* d) {
+    if(!d) return false;
+    etch::SheetDesc desc={.id=d->id,.open=d->open,.edge=static_cast<etch::SheetEdge>(d->edge),.extent_px=d->extent_px,
+        .snap_count=d->snap_count,.snap_index=d->snap_index,.background=to_cpp(d->background),.motion=to_cpp(d->motion),.z_index=d->z_index};
+    for(uint32_t i=0;i<8;++i) desc.snap_points[i]=d->snap_points[i];
+    return etch::begin_sheet(desc);
+}
+void etch_end_sheet(void) {etch::end_sheet();}

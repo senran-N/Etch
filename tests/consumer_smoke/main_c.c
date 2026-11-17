@@ -61,7 +61,16 @@ int main(void) {
     if(etch_update_texture_region_rgba(NULL,NULL,0,0,1,1,NULL,0)) return 1;
     etch_end_box();
 
+    EtchTerminalCell cell=etch_terminal_cell_default();
+    EtchTerminalGridDesc terminal=etch_terminal_grid_desc_default();
+    terminal.id=etch_id("terminal_c");terminal.cells=&cell;terminal.cell_count=1;terminal.columns=1;terminal.rows=1;
+    etch_terminal_grid(&terminal);
+    EtchSheetDesc sheet=etch_sheet_desc_default();sheet.id=etch_id("sheet_c");sheet.open=false;
+    if(etch_begin_sheet(&sheet))etch_end_sheet();
+    EtchShaderSurfaceEvalDesc eval=etch_shader_surface_eval_desc_default();
+    if(etch_eval_shader_surface(ctx,0,&eval)!=NULL)return 1;
     etch_end_frame(ctx);
+    etch_destroy_shader_surface(ctx,0);
 
     EtchA11yNode node;
     node.id = 0u;

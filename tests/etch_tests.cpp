@@ -9,6 +9,8 @@
 #include "checks_perceptual_color.h"
 #include "checks_motion.h"
 #include "checks_gpu_materials.h"
+#include "checks_shader_surface.h"
+#include "checks_workbench_materials.h"
 #include "checks_desktop_precision.h"
 #include "checks_visual_quality.h"
 #include "checks_workbench.h"
@@ -55,6 +57,7 @@ static bool unicode_suite() noexcept {
     destroy_context(c);set_current_context(nullptr);return ok;
 }
 static bool layout_suite() noexcept {
+    if(!verify_snap_sheet() || !verify_caret_deadline())return false;
     Context* c=create_context({.headless=true});if(!c)return false;
     begin_frame(c,{.viewport_w=400,.viewport_h=200});begin_box({.id=id("grid"),.width=Sizing::fixed(400),.height=Sizing::fixed(200),.gap=10,.grid_columns=2});
     box({.id=id("left"),.width=Sizing::grow(),.height=Sizing::fixed(40)});box({.id=id("right"),.width=Sizing::grow(),.height=Sizing::fixed(40)});end_box();end_frame(c);
@@ -106,7 +109,7 @@ static bool source_ok(const unsigned char* p,size_t size,const char* entry) noex
     return std::strstr(source,entry) && !std::strstr(source,"SampleLevel") && !std::strstr(source,"StructuredBuffer<") && !std::strstr(source,"register(");
 }
 static bool gpu_suite() noexcept {
-    const bool media_ok=verify_texture_regions_gpu() && verify_mesh_gpu() && verify_punch_gpu() && verify_beam_fade_gpu() && verify_media_emoji_checks() && verify_sprite_recycling_gpu() && verify_border_coverage() && verify_visual_quality_gpu() && verify_closure_gpu();
+    const bool media_ok=verify_workbench_materials_gpu() && verify_shader_surface_gpu() && verify_texture_regions_gpu() && verify_mesh_gpu() && verify_punch_gpu() && verify_beam_fade_gpu() && verify_media_emoji_checks() && verify_sprite_recycling_gpu() && verify_border_coverage() && verify_visual_quality_gpu() && verify_closure_gpu();
     const bool v070_ok=verify_theme_wrap_checks();
     static_assert(sizeof(Prim)==64);
     bool ok=source_ok(g_etch_uber_vs_msl,sizeof(g_etch_uber_vs_msl),"vertex vs_main_out vs_main(") && source_ok(g_etch_uber_ps_msl,sizeof(g_etch_uber_ps_msl),"fragment ps_main_out ps_main(") && source_ok(g_etch_kawase_vs_msl,sizeof(g_etch_kawase_vs_msl),"vertex vs_main_out vs_main(") && source_ok(g_etch_kawase_ps_msl,sizeof(g_etch_kawase_ps_msl),"fragment ps_main_out ps_main(");
@@ -132,6 +135,9 @@ static bool gpu_suite() noexcept {
 int main(int argc,char** argv) {
     if(argc==2 && std::strcmp(argv[1],"--suite=mesh_grad")==0) return verify_mesh_gpu() ? 0 : 1;
     if(argc==2 && std::strcmp(argv[1],"--suite=punch_hole")==0) return verify_punch_gpu() ? 0 : 1;
+    if(argc==2 && std::strcmp(argv[1],"--suite=workbench_materials")==0) return verify_workbench_materials_gpu() ? 0 : 1;
+    if(argc==2 && std::strcmp(argv[1],"--suite=snap_sheet")==0) return verify_snap_sheet() ? 0 : 1;
+    if(argc==2 && std::strcmp(argv[1],"--suite=shader_surface")==0) return verify_shader_surface_gpu() ? 0 : 1;
     if(argc==2 && std::strcmp(argv[1],"--suite=beam_fade")==0) return verify_beam_fade_gpu() ? 0 : 1;
     if(argc==2 && std::strcmp(argv[1],"--suite=texture_regions")==0) return verify_texture_regions_gpu() ? 0 : 1;
     if(argc==2 && std::strcmp(argv[1],"--suite=motion_layers_presence")==0) return verify_motion_checks() ? 0 : 1;

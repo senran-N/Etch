@@ -44,8 +44,9 @@ struct alignas(16) KawaseUniform {
     float    texel_size[2];
     float    offset;
     uint32_t mode;
+    Vec4 bloom;
 };
-static_assert(sizeof(KawaseUniform) == 16);
+static_assert(sizeof(KawaseUniform) == 32);
 static_assert(sizeof(KawaseUniform) % 16 == 0);
 
 inline float clampf_blur(float v, float lo, float hi) noexcept {
@@ -57,16 +58,16 @@ SDL_GPUGraphicsPipeline* create_graphics_pipeline(
     SDL_GPUShader* vs,
     SDL_GPUShader* ps,
     SDL_GPUTextureFormat target_fmt,
-    bool enable_blend, bool punch = false) noexcept
+    bool enable_blend, bool punch = false, bool additive = false) noexcept
 {
     SDL_GPUColorTargetBlendState blend = {};
     blend.enable_blend = enable_blend;
     if (enable_blend) {
         blend.src_color_blendfactor = punch ? SDL_GPU_BLENDFACTOR_ZERO : SDL_GPU_BLENDFACTOR_ONE;
-        blend.dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+        blend.dst_color_blendfactor = additive ? SDL_GPU_BLENDFACTOR_ONE : SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
         blend.color_blend_op = SDL_GPU_BLENDOP_ADD;
         blend.src_alpha_blendfactor = punch ? SDL_GPU_BLENDFACTOR_ZERO : SDL_GPU_BLENDFACTOR_ONE;
-        blend.dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+        blend.dst_alpha_blendfactor = additive ? SDL_GPU_BLENDFACTOR_ONE : SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
         blend.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
     }
     blend.color_write_mask =
@@ -483,7 +484,7 @@ bool run_kawase_step(
 {
     SDL_GPUColorTargetInfo ct = {};
     ct.texture = dst_tex;
-    ct.load_op = SDL_GPU_LOADOP_DONT_CARE;
+    ct.load_op = mode == 4u ? SDL_GPU_LOADOP_LOAD : SDL_GPU_LOADOP_DONT_CARE;
     ct.store_op = SDL_GPU_STOREOP_STORE;
 
     SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(cmd, &ct, 1u, nullptr);
@@ -517,6 +518,7 @@ bool run_kawase_step(
         .texel_size = { texel_x, texel_y },
         .offset = offset,
         .mode = mode,
+        .bloom = {ctx->active_ui->bloom_threshold,ctx->active_ui->bloom_intensity,0,0},
     };
     SDL_PushGPUFragmentUniformData(cmd, 0u, &u, static_cast<Uint32>(sizeof(u)));
     SDL_DrawGPUPrimitives(pass, 3u, 1u, 0u, 0u);
@@ -631,6 +633,7 @@ bool record_frame_commands(
         return false;
     }
     if(!flush_texture_uploads(ctx)) return false;
+    if (!record_shader_surfaces(ctx, cmd)) return false;
     clear_color = resolve_theme_color(clear_color, active_theme(ctx).bg_canvas);
 
     SDL_GPUGraphicsPipeline* pipeline = get_or_create_pipeline(ctx, target_fmt);
@@ -787,7 +790,8 @@ bool record_frame_commands(
         SDL_EndGPUCopyPass(copy_pass);
     }
 
-    if (ctx->blur_split_count == 0u) {
+    const bool bloom = ctx->active_ui->bloom_intensity > 0;
+    if (ctx->blur_split_count == 0u && !bloom) {
         return run_uber_render_pass(
             ctx,
             cmd,
@@ -877,7 +881,22 @@ bool record_frame_commands(
         }
     }
 
-    const uint32_t last_batch = ctx->blur_splits[ctx->blur_split_count - 1u].split_batch;
+    const uint32_t last_batch = ctx->blur_split_count ? ctx->blur_splits[ctx->blur_split_count - 1u].split_batch : 0;
+    if (bloom) {
+        if (!run_uber_render_pass(ctx,cmd,ctx->active_ui->scene_tex,kBlurTexFormat,target_w,target_h,scene_pipe,
+                ctx->blur_split_count ? SDL_GPU_LOADOP_LOAD : SDL_GPU_LOADOP_CLEAR,clear_color,last_batch,ctx->batch_count)) return false;
+        if (!ctx->bloom_pipe) ctx->bloom_pipe=create_graphics_pipeline(ctx->device,ctx->kawase_vs_shader,ctx->kawase_ps_shader,kBlurTexFormat,true,false,true);
+        if (!ctx->bloom_pipe) return false;
+        if (!run_kawase_step(ctx,cmd,kawase_pipe,ctx->active_ui->scene_tex,ctx->active_ui->blur_ping_tex,
+                half_w,half_h,1.f/float(target_w),1.f/float(target_h),1,3)) return false;
+        if (!run_kawase_step(ctx,cmd,kawase_pipe,ctx->active_ui->blur_ping_tex,ctx->active_ui->blur_pong_tex,
+                quarter_w,quarter_h,1.f/float(half_w),1.f/float(half_h),2,0)) return false;
+        if (!run_kawase_step(ctx,cmd,kawase_pipe,ctx->active_ui->blur_pong_tex,ctx->active_ui->blur_ping_tex,
+                half_w,half_h,1.f/float(quarter_w),1.f/float(quarter_h),1,1)) return false;
+        if (!run_kawase_step(ctx,cmd,ctx->bloom_pipe,ctx->active_ui->blur_ping_tex,ctx->active_ui->scene_tex,
+                target_w,target_h,1.f/float(half_w),1.f/float(half_h),0,4)) return false;
+        ctx->stats.blur_pass_count += 4;
+    }
     if (target_srgb) {
         const SDL_GPUBlitInfo blit = {
             .source = {
@@ -918,11 +937,11 @@ bool record_frame_commands(
             pipeline,
             SDL_GPU_LOADOP_LOAD,
             clear_color,
-            last_batch,
+            bloom ? ctx->batch_count : last_batch,
             ctx->batch_count);
     }
 
-    if (!run_uber_render_pass(
+    if (!bloom && !run_uber_render_pass(
             ctx,
             cmd,
             ctx->active_ui->scene_tex,
@@ -1413,6 +1432,7 @@ void destroy_context(Context* ctx) noexcept {
         if (ctx->claimed_windows[i]) release_window(ctx, ctx->claimed_windows[i]->window);
     ctx->active_ui = &ctx->headless_ui;
     if (ctx->device) {
+        release_shader_surfaces(ctx);
         for(uint32_t i=0;i<ctx->punch_pipeline_count;++i) {
             SDL_ReleaseGPUGraphicsPipeline(ctx->device,ctx->punch_pipelines[i].pipeline);
             ctx->punch_pipelines[i]={};
@@ -1429,6 +1449,7 @@ void destroy_context(Context* ctx) noexcept {
             }
         }
         if (ctx->kawase_pipe) SDL_ReleaseGPUGraphicsPipeline(ctx->device, ctx->kawase_pipe);
+        if (ctx->bloom_pipe) SDL_ReleaseGPUGraphicsPipeline(ctx->device, ctx->bloom_pipe);
         if (ctx->vs_shader) SDL_ReleaseGPUShader(ctx->device, ctx->vs_shader);
         if (ctx->ps_shader) SDL_ReleaseGPUShader(ctx->device, ctx->ps_shader);
         if (ctx->kawase_vs_shader) SDL_ReleaseGPUShader(ctx->device, ctx->kawase_vs_shader);
@@ -1534,11 +1555,13 @@ bool render_window(Context* ctx, Color clear_color, SDL_Window* window_override)
     ctx->active_ui = saved_ui;
     ctx->active_window = saved_win;
     if (!recorded) {
-        SDL_SubmitGPUCommandBuffer(cmd);
+        const bool submitted = SDL_SubmitGPUCommandBuffer(cmd);
+        complete_shader_surfaces(ctx, target_win, submitted);
         return false;
     }
 
     const bool submitted = SDL_SubmitGPUCommandBuffer(cmd);
+    complete_shader_surfaces(ctx, target_win, submitted);
     const uint64_t t1 = SDL_GetPerformanceCounter();
     const uint64_t freq = SDL_GetPerformanceFrequency();
     ctx->stats.draw_call_count = ctx->batch_count;
@@ -1612,6 +1635,7 @@ bool render_headless_png(
     SDL_EndGPUCopyPass(dl_pass);
 
     SDL_GPUFence* fence = SDL_SubmitGPUCommandBufferAndAcquireFence(cmd);
+    complete_shader_surfaces(ctx, ctx->active_window, fence != nullptr);
     if (!fence) {
         return false;
     }
@@ -1729,6 +1753,7 @@ void release_window(Context* ctx, SDL_Window* window) noexcept {
         if (!ctx->claimed_windows[i]) continue;
         ClaimedWindowSlot& slot = *ctx->claimed_windows[i];
         if (slot.window != window) continue;
+        detach_shader_surface_window(ctx, window);
         if (ctx->ime_active_window == window) {
             SDL_StopTextInput(window); ctx->ime_active_window = nullptr;
         }

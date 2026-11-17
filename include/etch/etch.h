@@ -12,7 +12,7 @@
 #include <type_traits>
 
 #define ETCH_VERSION_MAJOR 0
-#define ETCH_VERSION_MINOR 15
+#define ETCH_VERSION_MINOR 16
 #define ETCH_VERSION_PATCH 0
 #define ETCH_VERSION_STR_DETAIL(x) #x
 #define ETCH_VERSION_STR(x) ETCH_VERSION_STR_DETAIL(x)
@@ -986,6 +986,7 @@ struct WindowFrameDesc {
     float dt = 0.0f;
     float min_scale = 0.0f;
     bool pixel_snap = true;
+    float bloom_intensity = 0, bloom_threshold = .7f;
 };
 
 enum class SystemTheme : uint8_t { Unknown = 0, Light = 1, Dark = 2 };
@@ -1095,6 +1096,8 @@ struct FrameDesc {
     uint16_t key_mods = Mod_None;
     uint32_t key_pressed_code = 0;   // Optional single-frame SDL_Keycode injection
     bool pixel_snap = true; // Align axis-aligned rectangle edges to physical pixels.
+    float bloom_intensity = 0; // Opt-in whole-frame emissive bloom.
+    float bloom_threshold = .7f; // Linear luminance threshold in [0,1].
 };
 
 struct FrameStats {
@@ -1607,6 +1610,7 @@ enum class WindowHit : uint8_t {
     Maximize = 11,
 };
 
+enum class WindowBackdrop : uint8_t { Opaque, Transparent, SystemMica, SystemAcrylic };
 struct WindowChromeDesc {
     bool  enabled = false;
     bool  resizable = true;
@@ -1614,6 +1618,7 @@ struct WindowChromeDesc {
     float corner_size = 12.0f;
     bool  macos_traffic_lights = true;
     float traffic_light_inset_px = 76.0f;
+    WindowBackdrop backdrop = WindowBackdrop::Opaque; // Alpha composition requires SDL_WINDOW_TRANSPARENT at creation.
 };
 
 struct DragPayloadView {
@@ -2165,6 +2170,70 @@ bool render_headless_png(
     Color clear_color = Color::theme_auto()) noexcept;
 
 // Implicit-context declarative UI flow (operates on current_context()).
+using ShaderSurfaceId = uint32_t; // Zero is invalid; handles carry a slot generation.
+struct ShaderSurfaceCode {
+    const void* data = nullptr;
+    size_t size = 0;
+    const char* entrypoint = "ps_main";
+};
+struct ShaderSurfaceCreateDesc {
+    ShaderSurfaceCode spirv = {}, dxil = {}, msl = {};
+    bool continuous_time = false;
+    float max_fps = 60;
+};
+struct ShaderSurfaceEvalDesc {
+    uint32_t width = 1, height = 1;
+    uint64_t revision = 0;
+    Vec4 params[4] = {};
+    bool enabled = true;
+    uint8_t reserved[15] = {};
+};
+// Fragment shaders receive TEXCOORD0 UV and one 80-byte uniform at b0,space3:
+// float4 viewport_time (width,height,time,frame), followed by float4 params[4].
+// Output is premultiplied linear RGBA16F. Bytecode is copied by SDL at creation.
+ShaderSurfaceId create_shader_surface(Context*, const ShaderSurfaceCreateDesc&) noexcept;
+void destroy_shader_surface(Context*, ShaderSurfaceId) noexcept;
+// Evaluate once per frame, before drawing the returned borrowed texture. A surface
+// belongs to its first window until release_window(); keep it alive through render.
+SDL_GPUTexture* eval_shader_surface(Context*, ShaderSurfaceId, const ShaderSurfaceEvalDesc&) noexcept;
+
+enum class TerminalColorMode : uint8_t { Default, Ansi16, Ansi256, TrueColor };
+struct TerminalColor { TerminalColorMode mode = TerminalColorMode::Default; uint32_t value = 0; }; // TrueColor: 0xRRGGBB
+struct TerminalCell {
+    uint32_t codepoint = ' ';
+    TerminalColor foreground = {}, background = {};
+    uint8_t width = 1; // 2 for a wide leading cell, 0 for its continuation.
+    bool bold = false, underline = false, inverse = false;
+};
+struct TerminalGridDesc {
+    uint32_t id = 0;
+    std::span<const TerminalCell> cells = {}; // Caller-owned physical row ring; no parser or retained copy.
+    uint32_t columns = 80, rows = 24, first_row = 0;
+    float cell_width_px = 9, line_height_px = 20, font_size_px = 14;
+    uint16_t font_id = kFontMono;
+    Color foreground = Color::theme_auto(), background = Color::theme_auto();
+    int32_t cursor_column = -1, cursor_row = -1;
+    Color cursor_color = Color::theme_auto();
+    SpringSpec cursor_motion = SpringSpec::snappy();
+};
+void terminal_grid(const TerminalGridDesc&) noexcept;
+
+enum class SheetEdge : uint8_t { Bottom, Left, Right };
+struct SheetDesc {
+    uint32_t id = 0;
+    bool open = true;
+    SheetEdge edge = SheetEdge::Bottom;
+    float extent_px = 360;
+    float snap_points[8] = {0,.5f,1}; // Strictly increasing normalized visible fractions.
+    uint32_t snap_count = 3;
+    uint32_t* snap_index = nullptr; // Optional caller-owned selection; updated after a drag.
+    Color background = Color::theme_auto();
+    SpringSpec motion = SpringSpec::fluid();
+    int16_t z_index = 16000;
+};
+bool begin_sheet(const SheetDesc&) noexcept; // Call end_sheet only when true.
+void end_sheet() noexcept;
+
 void begin_box(const BoxDesc& desc = {}) noexcept;
 void end_box() noexcept;
 void box(const BoxDesc& desc = {}) noexcept;

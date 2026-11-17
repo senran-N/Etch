@@ -17,4 +17,5 @@ elseif ("@ETCH_INSTALL_HB_MODE@" STREQUAL "PKGCONFIG")
 endif ()
 
 include("${CMAKE_CURRENT_LIST_DIR}/EtchTargets.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/EtchShaderTools.cmake")
 check_required_components(Etch)

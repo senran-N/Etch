@@ -31,7 +31,12 @@ int main() {
     etch::punch_hole({.rect={4,4,8,8}});
     etch::end_box();
     if(etch::update_texture_region_rgba(nullptr,nullptr,0,0,1,1,nullptr)) return 1;
+    const etch::TerminalCell cells[2]={};
+    etch::terminal_grid({.id=etch::id("terminal"),.cells=cells,.columns=2,.rows=1});
+    if(etch::begin_sheet({.id=etch::id("sheet"),.open=false}))etch::end_sheet();
+    if(etch::eval_shader_surface(ctx,0,{})!=nullptr)return 1;
     etch::end_frame(ctx);
+    etch::destroy_shader_surface(ctx,0);
     const bool found = etch::find_a11y_node(etch::id("smoke"), ctx) != nullptr;
     etch::destroy_context(ctx);
     etch::set_current_context(nullptr);

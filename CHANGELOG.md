@@ -4,6 +4,15 @@ All notable changes to Etch are documented here. This file follows
 [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.0] - 2026-11-17
+
+### Added
+- Cached procedural shader surfaces with generation handles, bounded frame rates, window ownership and C99 parity.
+- Exported `etch_compile_hlsl_surface` CMake helper for DXIL, SPIR-V and optional offline Metal headers.
+- Opt-in emissive threshold Kawase bloom and Windows Mica/Acrylic backdrop selection.
+- Caller-owned terminal cell rings with ANSI/true-color runs and spring cursors, and draggable bottom/side snap sheets.
+- Headless material/workbench showcase and GPU cache, bloom, palette and sheet regressions.
+
 ## [0.15.0] - 2026-11-17
 
 ### Added

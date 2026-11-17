@@ -56,6 +56,11 @@ struct WidgetState {
     bool     is_multiline_input = false, edit_reveal_caret = true;
     float    edit_max_scroll_y = 0;
     float hover_t=0, hover_vel=0, press_t=0, press_vel=0;
+    Vec2 terminal_cursor = {}, terminal_velocity = {};
+    bool terminal_initialized = false;
+    float sheet_pos = 0, sheet_velocity = 0, sheet_last_pointer = 0;
+    uint32_t sheet_snap = 0;
+    bool sheet_initialized = false, sheet_dragging = false;
     Rect anim_rect = {};
     Vec2 anim_vel_pos = {}, anim_vel_size = {};
     uint32_t anim_seen_frame=0;
@@ -389,6 +394,8 @@ struct DrawCmdNode {
     RingDesc      ring = {};
     IconDrawDesc  icon = {};
     TextDrawDesc  text_cmd = {};
+    const uint32_t* terminal_columns = nullptr;
+    float terminal_cell_width = 0;
     ImageDrawDesc image_cmd = {};
     FilledPathDesc fill_cmd = {};
     LayoutDrawFn callback = nullptr;
@@ -725,6 +732,7 @@ struct WindowUiState {
     bool       pixel_snap = true;
     float      min_dpi_scale = 0.0f;
     float      applied_dpi_scale = 1.0f;
+    float bloom_intensity = 0, bloom_threshold = .7f;
     float      elapsed_seconds = 0.0f;
     uint32_t   frame_index = 0;
     uint32_t   prev_a11y_focus_id = 0u;
@@ -838,6 +846,7 @@ struct WindowUiState {
 
     bool          caret_blink_on = true;
     uint32_t      caret_blink_cycles = 0;
+    uint64_t      caret_blink_tick = 0;
 
     uint32_t      applied_font_revision = 0;
     SpanHitRegion* drop_hits = nullptr;
@@ -888,7 +897,20 @@ struct ClaimedWindowSlot {
     WindowUiState ui = {};
 };
 
+struct ShaderSurfaceSlot {
+    SDL_GPUShader* shader = nullptr;
+    SDL_GPUGraphicsPipeline* pipeline = nullptr;
+    SDL_GPUTexture* texture = nullptr;
+    SDL_Window* window = nullptr;
+    ShaderSurfaceEvalDesc eval = {};
+    uint64_t last_render_tick = 0;
+    uint32_t generation = 1, seen_frame = 0;
+    float max_fps = 60;
+    bool continuous_time = false, owner_bound = false, initialized = false, dirty = true, recorded = false;
+};
+
 struct Context {
+    ShaderSurfaceSlot shader_surfaces[64] = {};
     const VisualLayerNode* active_render_layer = nullptr;
     float time_scale = 1;
     bool reduced_motion = false;
@@ -950,6 +972,7 @@ struct Context {
     CachedPipeline punch_pipelines[kMaxCachedPipelines] = {};
     uint32_t punch_pipeline_count = 0;
     SDL_GPUGraphicsPipeline* kawase_pipe = nullptr;
+    SDL_GPUGraphicsPipeline* bloom_pipe = nullptr;
     CachedPipeline           present_pipelines[kMaxCachedPipelines] = {};
     uint32_t                 present_pipeline_count = 0;
     uint32_t prim_gpu_cap = 0;
@@ -1355,4 +1378,10 @@ void detach_win32_chrome(ClaimedWindowSlot* slot) noexcept;
 void sync_window_event_watch(Context* ctx) noexcept;
 void detach_window_event_watch(Context* ctx) noexcept;
 bool sync_window_metrics_from_os(WindowUiState* ui, SDL_Window* window) noexcept;
+int32_t shader_surface_timeout(const Context* ctx, SDL_Window* window, bool all_windows, int32_t timeout) noexcept;
+bool surface_texture_premultiplied(const Context* ctx, SDL_GPUTexture* texture) noexcept;
+bool record_shader_surfaces(Context* ctx, SDL_GPUCommandBuffer* cmd) noexcept;
+void complete_shader_surfaces(Context* ctx, SDL_Window* window, bool submitted) noexcept;
+void detach_shader_surface_window(Context* ctx, SDL_Window* window) noexcept;
+void release_shader_surfaces(Context* ctx) noexcept;
 } }

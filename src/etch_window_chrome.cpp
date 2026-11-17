@@ -94,6 +94,10 @@ void apply_win32_chrome(Context* ctx, ClaimedWindowSlot* slot) noexcept {
         slot->native_chrome_proc=reinterpret_cast<void*>(SetWindowLongPtrW(hwnd,GWLP_WNDPROC,reinterpret_cast<LONG_PTR>(chrome_window_proc)));
         if (!slot->native_chrome_proc) { RemovePropW(hwnd,kChromeSlotProperty);return; }
     }
+    const WindowBackdrop backdrop=slot->ui.chrome_desc.backdrop;
+    const DWM_SYSTEMBACKDROP_TYPE material=backdrop==WindowBackdrop::SystemMica ? DWMSBT_MAINWINDOW :
+        backdrop==WindowBackdrop::SystemAcrylic ? DWMSBT_TRANSIENTWINDOW : DWMSBT_NONE;
+    DwmSetWindowAttribute(hwnd,DWMWA_SYSTEMBACKDROP_TYPE,&material,sizeof(material));
     const SDL_WindowFlags flags=SDL_GetWindowFlags(slot->window);
     const bool native=slot->ui.chrome_desc.enabled && (flags&SDL_WINDOW_BORDERLESS)!=0 && (flags&SDL_WINDOW_FULLSCREEN)==0;
     if(native!=slot->native_frame_applied) {
