@@ -151,6 +151,55 @@ inline bool verify_motion_checks() noexcept {
     end_frame(c);
     ok &= frame_prims(c).size()==1 && frame_prims(c)[0].bounds.x==30 && frame_prims(c)[0].bounds.z==40;
 
+    // Portal bridge: combine Canvas zoom, nested visual layers and logical DPI.
+    const uint32_t portal = id("portal_bridge");
+    for (uint32_t f=0; f<2; ++f) {
+        begin_frame(c,{.viewport_w=1000,.viewport_h=800,.dpi_scale=2,.dt_seconds=1.f/60});
+        begin_canvas({.id=id("bridge_canvas"),.width=Sizing::fixed(400),.height=Sizing::fixed(300),
+                      .default_pan={120,80},.default_zoom=.65f,.show_grid=false});
+        begin_canvas_node({.id=id("bridge_node"),.pos_value={20,30},.width_world=Sizing::fixed(200),.height_world=Sizing::fixed(150)});
+        ETCH_LAYER({.translate={4,6},.scale={1.5f,2},.pivot_px={0,0}}) {
+            ETCH_LAYER({.translate={3,2},.scale={2,.5f},.pivot_px={0,0}}) {
+                box({.id=portal,.width=Sizing::fixed(80),.height=Sizing::fixed(60),.background=Color::white()});
+            }
+        }
+        end_canvas_node();end_canvas();end_frame(c);
+        ElementGeometry g;
+        ok &= element_geometry(portal,&g);
+        ok &= std::fabs(g.local_scale.x-1.95f)<.001f && std::fabs(g.local_scale.y-.65f)<.001f;
+        ElementGeometry node_geometry;
+        ok &= element_geometry(id("bridge_node"),&node_geometry) && std::fabs(node_geometry.local_scale.x-.65f)<.001f;
+        Vec2 local = {};
+        ok &= screen_to_element_local(portal,{g.bounds.x+g.local_scale.x*17,g.bounds.y+g.local_scale.y*23},&local);
+        ok &= std::fabs(local.x-17)<.001f && std::fabs(local.y-23)<.001f;
+        EtchElementGeometry cg = {};
+        EtchVec2 cp = {};
+        ok &= etch_element_geometry(portal,&cg) && etch_screen_to_element_local(portal,{g.bounds.x,g.bounds.y},&cp);
+        ok &= cg.bounds.x==g.bounds.x && cg.local_scale.x==g.local_scale.x && cp.x==0 && cp.y==0;
+        ok &= g.visible_bounds.w<=g.bounds.w && g.visible_bounds.h<=g.bounds.h;
+    }
+    ElementGeometry canvas_geometry;
+    ok &= element_geometry(id("bridge_canvas"),&canvas_geometry) && canvas_geometry.local_scale.x==1;
+    begin_frame(c,{.viewport_w=500,.viewport_h=200});
+    box({.id=id("culled_bridge"),.width=Sizing::fixed(40),.height=Sizing::fixed(30),
+         .attach_to=AttachTo::Root,.floating_offset={800,900}});
+    begin_virtual_list({.id=id("bridge_list"),.item_count=1,.item_height_px=20});end_virtual_list();
+    end_frame(c);
+    ElementGeometry culled, list_geometry;
+    ok &= element_geometry(id("culled_bridge"),&culled) && culled.bounds.x==800 && culled.visible_bounds.w==0;
+    ok &= element_geometry(id("bridge_list"),&list_geometry) && list_geometry.local_scale.x==1;
+    Vec2 captured={};
+    ok &= screen_to_element_local(id("culled_bridge"),{culled.bounds.x+10,culled.bounds.y+20},&captured) && captured.x==10 && captured.y==20;
+    Vec2 untouched={7,9};
+    ok &= !screen_to_element_local(0,{},&untouched) && untouched.x==7 && untouched.y==9;
+    ok &= !screen_to_element_local(portal,{NAN,0},&untouched) && untouched.x==7;
+    ok &= !element_geometry(portal,nullptr);
+    begin_frame(c,{.viewport_w=500,.viewport_h=200});
+    ElementGeometry previous;
+    ok &= element_geometry(id("culled_bridge"),&previous); // Snapshot survives the build phase.
+    end_frame(c);
+    ok &= !element_geometry(id("culled_bridge"),&previous); // Omitted elements have no stale geometry.
+
     // Rehash repeatedly while earlier layers retain source boxes, never WidgetState pointers.
     begin_frame(c,{.viewport_w=500,.viewport_h=200,.dt_seconds=1.f/60});
     for(uint32_t i=0;i<5000;++i) {

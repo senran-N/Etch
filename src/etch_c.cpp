@@ -1298,6 +1298,20 @@ bool etch_focused(uint32_t element_id) { return etch::focused(element_id); }
 uint32_t etch_focused_id(void) { return etch::focused_id(); }
 void etch_request_focus(uint32_t element_id) { etch::request_focus(element_id); }
 void etch_set_cursor(EtchCursor cursor) { etch::set_cursor(static_cast<etch::Cursor>(cursor)); }
+bool etch_element_geometry(uint32_t element_id, EtchElementGeometry* out_geometry) {
+    if (!out_geometry) return false;
+    etch::ElementGeometry g;
+    if (!etch::element_geometry(element_id,&g)) return false;
+    *out_geometry = {from_cpp(g.bounds),from_cpp(g.visible_bounds),from_cpp(g.local_scale),g.opacity};
+    return true;
+}
+bool etch_screen_to_element_local(uint32_t element_id, EtchVec2 screen_pos, EtchVec2* out_local) {
+    if (!out_local) return false;
+    etch::Vec2 p;
+    if (!etch::screen_to_element_local(element_id,to_cpp(screen_pos),&p)) return false;
+    *out_local = from_cpp(p);
+    return true;
+}
 EtchRect etch_element_bounds(uint32_t element_id) { return from_cpp(etch::element_bounds(element_id)); }
 
 uint16_t etch_key_mods(void) { return etch::key_mods(); }

@@ -581,6 +581,7 @@ VirtualListSlice begin_virtual_list_with_c_measure(const VirtualListDesc& desc, 
         extra->layer = ctx->active_ui->current_layer;
         extra->kind = CustomCmdKind::Box;
         extra->is_virtual_list = true;
+        extra->world_scale = 1;
         extra->scrollbar_track = thm.scrollbar_track;
         extra->scrollbar_thumb = thm.scrollbar_thumb;
         extra->scrollbar_thumb_hover = thm.scrollbar_thumb_hover;
@@ -605,7 +606,6 @@ VirtualListSlice begin_virtual_list_with_c_measure(const VirtualListDesc& desc, 
     Clay__OpenElementWithId(make_clay_id(desc.id));
 
     const bool has_border = (desc.border_width > 0.0f && eff_border.a > 0u);
-    const bool has_visual = (eff_bg.a > 0u) || has_border;
 
     Clay_ElementDeclaration decl = {};
     decl.layout.sizing.width = to_clay_sizing(desc.width);
@@ -620,7 +620,7 @@ VirtualListSlice begin_virtual_list_with_c_measure(const VirtualListDesc& desc, 
     decl.layout.layoutDirection = CLAY_TOP_TO_BOTTOM;
     decl.cornerRadius = to_clay_corners(eff_radius);
     decl.userData = extra;
-    if (has_visual && extra) {
+    if (extra) {
         decl.custom.customData = extra;
     }
     decl.clip.horizontal = true;
@@ -800,6 +800,7 @@ CanvasState begin_canvas(const CanvasDesc& desc_in) noexcept {
         extra->layer = ctx->active_ui->current_layer;
         extra->kind = CustomCmdKind::Box;
         extra->is_canvas = true;
+        extra->world_scale = 1;
         extra->desc = BoxDesc{
             .id = desc.id,
             .axis = Axis::Col,
@@ -1001,6 +1002,7 @@ CanvasNodeResult begin_canvas_node(const CanvasNodeDesc& desc) noexcept {
         .pointer_passthrough = false,
         .clip_to_parent = true,
     });
+    if (auto* extra = static_cast<BoxExtra*>(Clay__GetOpenLayoutElement()->config.userData)) extra->world_scale = z;
     ce.in_node = true;
 
     return CanvasNodeResult{

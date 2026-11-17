@@ -1805,6 +1805,7 @@ void begin_box(const BoxDesc& desc_in) noexcept {
         extra = ctx->frame_arena.alloc<BoxExtra>();
         if (extra) {
             extra->desc = eff_desc;
+            extra->world_scale = wscale;
             if(eff_desc.opacity<1 || eff_desc.animate_layout || eff_desc.hero_id || eff_desc.hover_scale!=1 || eff_desc.press_scale!=1) {
                 push_layer({.opacity=eff_desc.opacity});
                 if(build && ctx->active_ui->current_layer!=build->previous_layer) const_cast<VisualLayerNode*>(ctx->active_ui->current_layer)->source_box=extra;
@@ -3676,6 +3677,27 @@ void set_cursor(Cursor cursor) noexcept {
     if (Context* ctx = current_context()) {
         ctx->active_ui->desired_cursor = cursor;
     }
+}
+
+bool element_geometry(uint32_t element_id, ElementGeometry* out_geometry) noexcept {
+    const Context* ctx = current_context();
+    if (!ctx || !element_id || !out_geometry) return false;
+    const auto& ui = *ctx->active_ui;
+    for (uint32_t i = ui.drop_hit_count; i > 0; --i) {
+        const auto& hit = ui.drop_hits[i-1];
+        if (hit.id == element_id) {
+            *out_geometry = {hit.visual_bounds,hit.visible_bounds,hit.local_scale,hit.visual_opacity};
+            return true;
+        }
+    }
+    return false;
+}
+bool screen_to_element_local(uint32_t element_id, Vec2 screen_pos, Vec2* out_local) noexcept {
+    if (!out_local || !std::isfinite(screen_pos.x) || !std::isfinite(screen_pos.y)) return false;
+    ElementGeometry g;
+    if (!element_geometry(element_id,&g) || g.local_scale.x <= 0 || g.local_scale.y <= 0) return false;
+    *out_local = {(screen_pos.x-g.bounds.x)/g.local_scale.x,(screen_pos.y-g.bounds.y)/g.local_scale.y};
+    return true;
 }
 
 Rect element_bounds(uint32_t element_id) noexcept {

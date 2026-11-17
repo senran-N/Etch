@@ -74,6 +74,8 @@ int main(void) {
     etch_end_frame(ctx);
     etch_destroy_shader_surface(ctx,0);
 
+    EtchElementGeometry geometry;
+    if (!etch_element_geometry(etch_id("smoke_c"), &geometry) || etch_element_geometry(0, NULL)) return 1;
     EtchA11yNode node;
     node.id = 0u;
     const bool found = etch_find_a11y_node(etch_id("smoke_c"), &node, ctx, NULL) &&

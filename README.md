@@ -331,3 +331,12 @@ right edges, normalized snap fractions and velocity-aware release projection.
 `WindowBackdrop` selects Mica/Acrylic on supported Windows versions; create an
 SDL transparent window for alpha composition. Other platforms retain their
 normal SDL window behavior.
+
+Portal hosts can query `element_geometry(id, &geometry)` and
+`screen_to_element_local(id, screen_position, &local_position)` (C99 equivalents
+`etch_element_geometry` / `etch_screen_to_element_local`). Named boxes expose the
+most recent frame composition; queries during layout construction read the prior
+frame. Coordinates are logical screen pixels and local units before Canvas zoom
+and visual layers. Captured drags may map points outside the box. Visible bounds
+intersect ancestor clip bounding rectangles; rounded masks and sibling overlap
+still require the host's hit-testing policy. Outputs remain unchanged on failure.

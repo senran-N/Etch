@@ -12,8 +12,8 @@
 #include <type_traits>
 
 #define ETCH_VERSION_MAJOR 0
-#define ETCH_VERSION_MINOR 16
-#define ETCH_VERSION_PATCH 1
+#define ETCH_VERSION_MINOR 17
+#define ETCH_VERSION_PATCH 0
 #define ETCH_VERSION_STR_DETAIL(x) #x
 #define ETCH_VERSION_STR(x) ETCH_VERSION_STR_DETAIL(x)
 #define ETCH_VERSION_STRING ETCH_VERSION_STR(ETCH_VERSION_MAJOR) "." ETCH_VERSION_STR(ETCH_VERSION_MINOR) "." ETCH_VERSION_STR(ETCH_VERSION_PATCH)
@@ -2317,6 +2317,18 @@ uint32_t focused_id() noexcept;
 void request_focus(uint32_t element_id) noexcept;
 void set_cursor(Cursor cursor) noexcept;
 Rect element_bounds(uint32_t element_id) noexcept;
+// Snapshot from the last completed frame, in logical screen pixels. Only named boxes
+// are supported. visible_bounds intersects ancestor clip bounding rectangles; rounded
+// masks and overlapping siblings can further occlude it. No frame-arena pointers escape.
+struct ElementGeometry {
+    Rect bounds = {}, visible_bounds = {};
+    Vec2 local_scale = {1,1}; // Screen pixels per box-local unit, including Canvas zoom.
+    float opacity = 0;
+};
+bool element_geometry(uint32_t element_id, ElementGeometry* out_geometry) noexcept;
+// Allows positions outside the box for captured drags; false leaves output unchanged.
+bool screen_to_element_local(uint32_t element_id, Vec2 screen_pos, Vec2* out_local) noexcept;
+
 
 // Pro desktop input, shortcuts, popover dismissal & file drops
 uint16_t key_mods() noexcept;

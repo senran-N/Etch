@@ -429,6 +429,8 @@ struct CanvasWireExtra {
 
 struct CodeEditorExtra;
 struct BoxExtra {
+    float world_scale = 1;
+    bool geometry_recorded = false;
     const VisualLayerNode* layer = nullptr;
     Rect layout_rect_logical = {};
     CodeEditorExtra* code_editor = nullptr;
@@ -523,6 +525,9 @@ struct RichTextExtra {
 };
 
 struct SpanHitRegion {
+    Rect visual_bounds = {}, visible_bounds = {};
+    Vec2 local_scale = {1,1};
+    float visual_opacity = 1;
     uint32_t id = 0; // 0 marks a floating overlay blocker rect
     uint32_t clay_elem_id = 0;
     Rect     rect = {};

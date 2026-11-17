@@ -96,10 +96,18 @@ void end_frame(Context* ctx_arg) noexcept {
         const Rect box_px = ctx->active_ui->pixel_snap && !ctx->active_render_layer && cmd->commandType != CLAY_RENDER_COMMAND_TYPE_TEXT ? snap_pixel_rect(raw_box_px) : raw_box_px;
         switch (cmd->commandType) {
             case CLAY_RENDER_COMMAND_TYPE_CUSTOM: {
-                const BoxExtra* extra = static_cast<const BoxExtra*>(cmd->renderData.custom.customData);
+                BoxExtra* extra = static_cast<BoxExtra*>(cmd->renderData.custom.customData);
                 if (extra) {
                     if (extra->desc.id && reserve_span_hits(&ctx->active_ui->drop_hits, &ctx->active_ui->drop_hit_cap, ctx->active_ui->drop_hit_count, 512u)) {
+                        extra->geometry_recorded = true;
+                        const Rect visual = layer_rect(ctx,raw_box_px);
+                        const Rect visible = rect_intersect(visual,cur_clip.rect);
+                        const auto* layer = ctx->active_render_layer;
                         ctx->active_ui->drop_hits[ctx->active_ui->drop_hit_count++] = SpanHitRegion{
+                            .visual_bounds = {visual.x/dpi,visual.y/dpi,visual.w/dpi,visual.h/dpi},
+                            .visible_bounds = {visible.x/dpi,visible.y/dpi,visible.w/dpi,visible.h/dpi},
+                            .local_scale = {extra->world_scale*(layer ? layer->resolved_scale.x : 1),extra->world_scale*(layer ? layer->resolved_scale.y : 1)},
+                            .visual_opacity = layer ? layer->resolved_opacity : 1,
                             .id = extra->desc.id, .clay_elem_id = extra->desc.id,
                             .rect = {cmd->boundingBox.x, cmd->boundingBox.y, cmd->boundingBox.width, cmd->boundingBox.height},
                             .paint_order = static_cast<uint32_t>(i),
@@ -357,6 +365,28 @@ void end_frame(Context* ctx_arg) noexcept {
         }
     }
 
+    // Clay may omit CUSTOM commands for viewport-culled boxes. Retain their
+    // coordinate mapping without emitting primitives or disabling render culling.
+    const auto& elements = Clay_GetCurrentContext()->layoutElements;
+    for (int32_t i=0; i<elements.length; ++i) {
+        const auto& element = elements.internalArray[i];
+        if (element.isTextElement || !element.config.custom.customData) continue;
+        auto* extra = static_cast<BoxExtra*>(element.config.custom.customData);
+        if (!extra->desc.id || extra->geometry_recorded) continue;
+        const auto data = Clay_GetElementData(make_clay_id(extra->desc.id));
+        if (!data.found) continue;
+        const auto& r = data.boundingBox;
+        ctx->active_render_layer = extra->layer;
+        const Rect visual = layer_rect(ctx,{r.x*dpi,r.y*dpi,r.width*dpi,r.height*dpi});
+        const auto* layer = extra->layer;
+        if (reserve_span_hits(&ctx->active_ui->drop_hits,&ctx->active_ui->drop_hit_cap,ctx->active_ui->drop_hit_count,512u)) {
+            ctx->active_ui->drop_hits[ctx->active_ui->drop_hit_count++] = SpanHitRegion{
+                .visual_bounds={visual.x/dpi,visual.y/dpi,visual.w/dpi,visual.h/dpi},
+                .local_scale={extra->world_scale*(layer ? layer->resolved_scale.x : 1),extra->world_scale*(layer ? layer->resolved_scale.y : 1)},
+                .visual_opacity=layer ? layer->resolved_opacity : 1,
+                .id=extra->desc.id};
+        }
+    }
     ctx->active_render_layer=nullptr;
     ctx->active_ui->frame_text_op_count = 0u;
     ctx->active_ui->frame_key_count = 0u;

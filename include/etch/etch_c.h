@@ -8,8 +8,8 @@
 
 #ifndef ETCH_VERSION_MAJOR
 #define ETCH_VERSION_MAJOR 0
-#define ETCH_VERSION_MINOR 16
-#define ETCH_VERSION_PATCH 1
+#define ETCH_VERSION_MINOR 17
+#define ETCH_VERSION_PATCH 0
 #define ETCH_VERSION_STR_DETAIL(x) #x
 #define ETCH_VERSION_STR(x) ETCH_VERSION_STR_DETAIL(x)
 #define ETCH_VERSION_STRING ETCH_VERSION_STR(ETCH_VERSION_MAJOR) "." ETCH_VERSION_STR(ETCH_VERSION_MINOR) "." ETCH_VERSION_STR(ETCH_VERSION_PATCH)
@@ -2055,6 +2055,16 @@ uint32_t etch_focused_id(void);
 void etch_request_focus(uint32_t element_id);
 void etch_set_cursor(EtchCursor cursor);
 EtchRect etch_element_bounds(uint32_t element_id);
+/* Last completed frame; named boxes only. Visible bounds are ancestor clip AABBs,
+   not a guarantee against sibling occlusion or rounded clip masks. */
+typedef struct EtchElementGeometry {
+    EtchRect bounds, visible_bounds;
+    EtchVec2 local_scale;
+    float opacity;
+} EtchElementGeometry;
+bool etch_element_geometry(uint32_t element_id, EtchElementGeometry* out_geometry);
+bool etch_screen_to_element_local(uint32_t element_id, EtchVec2 screen_pos, EtchVec2* out_local);
+
 
 uint16_t etch_key_mods(void);
 bool etch_key_pressed(uint32_t keycode, bool include_repeat);

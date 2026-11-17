@@ -39,6 +39,8 @@ int main() {
     if(etch::eval_shader_surface(ctx,0,{})!=nullptr)return 1;
     etch::end_frame(ctx);
     etch::destroy_shader_surface(ctx,0);
+    etch::ElementGeometry geometry;
+    if (!etch::element_geometry(etch::id("smoke"), &geometry) || etch::element_geometry(0, nullptr)) return 1;
     const bool found = etch::find_a11y_node(etch::id("smoke"), ctx) != nullptr;
     etch::destroy_context(ctx);
     etch::set_current_context(nullptr);
