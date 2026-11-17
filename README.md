@@ -340,3 +340,9 @@ frame. Coordinates are logical screen pixels and local units before Canvas zoom
 and visual layers. Captured drags may map points outside the box. Visible bounds
 intersect ancestor clip bounding rectangles; rounded masks and sibling overlap
 still require the host's hit-testing policy. Outputs remain unchanged on failure.
+
+Release candidate scope: Etch 0.18 pairs with Inlay 0.5 using public C++20/C99
+APIs. Windows Vulkan and D3D12 are the local verification targets. Metal and
+Linux Vulkan Wayland/X11 still require real-hardware CI sign-off; this is a
+pre-1.0 release. Idle UI batching/sleep and bounded frame-arena use are covered
+by the CPU/GPU regression suites. Inlay remains a separate optional consumer.

@@ -4,6 +4,14 @@ All notable changes to Etch are documented here. This file follows
 [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.0] - 2026-11-18
+
+- Publish the pre-1.0 release candidate for public C++20/C99 consumers and Inlay.
+- Audit portal geometry lifetimes, batched idle rendering, package exports and
+  repository guardrail fixtures on Windows Vulkan and D3D12.
+- Retain pre-1.0 status pending external adoption and real-hardware Metal and
+  Linux Vulkan sign-off.
+
 ## [0.17.0] - 2026-11-17
 
 - Add C++ and C99 element geometry snapshots and screen-to-local mapping for

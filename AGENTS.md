@@ -24,7 +24,7 @@ You are valued for C++ systems precision, NOT defensive boilerplate. Apply rigor
 
 ## 3. Verification Discipline
 - All fixes must compile with `/W4 /permissive- /GR- /EHs-c- /utf-8` (0 warnings) and pass `sandbox.exe --headless` visual & assertion checks on both D3D12 and Vulkan.
-- Run `ctest --test-dir build --output-on-failure`, including `c99_abi_smoke`, `repo_guardrails` and, when installation is enabled, `downstream_consumers` (11 suites total). The five core CPU suites (`arena_and_elasticity`, `unicode_bidi_grapheme`, `layout_clay_flex_grid`, `fenwick_virtual_list_1m`, `c99_abi_smoke`) have a 5s timeout; repository checks have 10s and downstream consumer checks (covering both C++20 `main.cpp` and C99 `main_c.c`) have 120s.
+- Run `ctest --test-dir build --output-on-failure`, including `c99_abi_smoke`, `repo_guardrails` and, when installation is enabled, `downstream_consumers` (12 suites total). The five core CPU suites (`arena_and_elasticity`, `unicode_bidi_grapheme`, `layout_clay_flex_grid`, `fenwick_virtual_list_1m`, `c99_abi_smoke`) have a 5s timeout; repository checks have 10s and downstream consumer checks (covering both C++20 `main.cpp` and C99 `main_c.c`) have 120s.
 - Before committing, run `codex review --uncommitted` and FlowGuard `flow_verify`. After committing verified work, `git status --porcelain` must be empty; remove transient screenshots from the repository root even if ignored.
 
 ## 4. Architecture, Packaging & Anti-Toy Guardrails
