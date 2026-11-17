@@ -2480,6 +2480,15 @@ void draw_icon(const IconDrawDesc& desc) noexcept {
     }
 }
 
+FontMetrics font_metrics(uint16_t font_id, float size) noexcept {
+    Context* ctx = current_context();
+    if (!ctx || !ctx->atlas.font_valid || !std::isfinite(size) || size <= 0) return {};
+    const uint16_t slot = resolve_font_slot_idx(&ctx->atlas,font_id);
+    if (slot == kInvalidFont) return {};
+    const auto& font = ctx->atlas.slots[slot];
+    return {font.ascent_em*size,std::abs(font.descent_em)*size,font.line_height_em*size};
+}
+
 Vec2 measure_text(Str text, uint16_t font_id, float size, float letter_spacing) noexcept {
     Context* ctx = current_context();
     if (!ctx || size <= 0.0f) {

@@ -101,7 +101,11 @@ static bool table_viewport_regression() noexcept {
 static float stream_height(uint32_t, void* value) noexcept { return value ? *static_cast<float*>(value) : 300; }
 static bool list_append_regression() noexcept {
     Context* c=create_context({.headless=true});if(!c)return false;
-    const uint32_t list=id("append_heights");bool ok=true;double before=0;
+    const auto metrics=font_metrics(kFontSans,24);
+    const auto c_metrics=etch_font_metrics(ETCH_FONT_SANS,24);
+    const auto scaled=font_metrics(kFontSans,48);
+    const uint32_t list=id("append_heights");bool ok=metrics.ascent>0 && metrics.descent>=0 && metrics.line_height>0 && metrics.ascent==c_metrics.ascent && scaled.ascent==metrics.ascent*2;double before=0;
+
     for(uint32_t f=0;f<8;++f) {
         begin_frame(c,{.viewport_w=400,.viewport_h=200});
         if(f==4)virtual_list_invalidate_heights(list);

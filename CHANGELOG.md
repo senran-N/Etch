@@ -4,6 +4,10 @@ All notable changes to Etch are documented here. This file follows
 [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.1] - 2026-11-17
+
+- Expose public C++/C99 font ascent, descent and line-height metrics for baseline-aligned native consumer layout.
+
 ## [0.16.0] - 2026-11-17
 
 - Preserve variable-list measured heights across append/truncate, defer callback invalidation until the updated descriptor, and retain explicit-height/scroll ordering for streamed document consumers.

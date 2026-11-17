@@ -13,7 +13,7 @@
 
 #define ETCH_VERSION_MAJOR 0
 #define ETCH_VERSION_MINOR 16
-#define ETCH_VERSION_PATCH 0
+#define ETCH_VERSION_PATCH 1
 #define ETCH_VERSION_STR_DETAIL(x) #x
 #define ETCH_VERSION_STR(x) ETCH_VERSION_STR_DETAIL(x)
 #define ETCH_VERSION_STRING ETCH_VERSION_STR(ETCH_VERSION_MAJOR) "." ETCH_VERSION_STR(ETCH_VERSION_MINOR) "." ETCH_VERSION_STR(ETCH_VERSION_PATCH)
@@ -2255,6 +2255,8 @@ void draw_polyline(const PolylineDesc& desc) noexcept;
 void draw_bezier(const BezierDesc& desc) noexcept;
 void draw_ring(const RingDesc& desc) noexcept;
 void draw_icon(const IconDrawDesc& desc) noexcept;
+struct FontMetrics {float ascent = 0, descent = 0, line_height = 0;};
+FontMetrics font_metrics(uint16_t font_id = kFontSans, float size = 14.0f) noexcept;
 Vec2 measure_text(Str text, uint16_t font_id = kFontSans, float size = 14.0f, float letter_spacing = 0.0f) noexcept;
 void draw_text(const TextDrawDesc& desc) noexcept;
 // Invoked at end_frame after layout, with local logical bounds from this frame.

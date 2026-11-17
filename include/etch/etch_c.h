@@ -9,7 +9,7 @@
 #ifndef ETCH_VERSION_MAJOR
 #define ETCH_VERSION_MAJOR 0
 #define ETCH_VERSION_MINOR 16
-#define ETCH_VERSION_PATCH 0
+#define ETCH_VERSION_PATCH 1
 #define ETCH_VERSION_STR_DETAIL(x) #x
 #define ETCH_VERSION_STR(x) ETCH_VERSION_STR_DETAIL(x)
 #define ETCH_VERSION_STRING ETCH_VERSION_STR(ETCH_VERSION_MAJOR) "." ETCH_VERSION_STR(ETCH_VERSION_MINOR) "." ETCH_VERSION_STR(ETCH_VERSION_PATCH)
@@ -1942,6 +1942,8 @@ void etch_draw_polyline(const EtchPolylineDesc* desc);
 void etch_draw_bezier(const EtchBezierDesc* desc);
 void etch_draw_ring(const EtchRingDesc* desc);
 void etch_draw_icon(const EtchIconDrawDesc* desc);
+typedef struct EtchFontMetrics {float ascent,descent,line_height;} EtchFontMetrics;
+EtchFontMetrics etch_font_metrics(uint16_t font_id,float size);
 EtchVec2 etch_measure_text(EtchStr text, uint16_t font_id, float size, float letter_spacing);
 void etch_draw_text(const EtchTextDrawDesc* desc);
 typedef void (*EtchLayoutDrawFn)(EtchRect local_bounds, void* user_data);

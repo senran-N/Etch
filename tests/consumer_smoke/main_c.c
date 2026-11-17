@@ -10,6 +10,8 @@
 typedef char c_chk_prim[(sizeof(EtchPrim) == 64u) ? 1 : -1];
 
 int main(void) {
+    if (etch_font_metrics(ETCH_FONT_SANS,14).ascent != 0) return 1;
+
     const EtchColor seed=etch_color_oklch(.6f,.15f,240.f,1.f);
     const EtchTheme seeded=etch_theme_from_seed(seed,true,1.f);
     if (seeded.on_primary.a!=255 || etch_color_lerp_oklab(seed,seed,.5f).r!=seed.r || etch_spring_spec_fluid().response<=0) return 1;

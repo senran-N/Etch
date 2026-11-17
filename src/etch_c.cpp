@@ -957,6 +957,10 @@ void etch_draw_icon(const EtchIconDrawDesc* desc) {
     if (!desc) return;
     etch::draw_icon({desc->icon_id, to_cpp(desc->rect), to_cpp(desc->color), desc->foreground, desc->angle_rad});
 }
+EtchFontMetrics etch_font_metrics(uint16_t font_id,float size) {
+    const auto metrics=etch::font_metrics(font_id,size);
+    return {metrics.ascent,metrics.descent,metrics.line_height};
+}
 EtchVec2 etch_measure_text(EtchStr text, uint16_t font_id, float size, float letter_spacing) {
     return from_cpp(etch::measure_text(to_cpp(text), font_id, size, letter_spacing));
 }

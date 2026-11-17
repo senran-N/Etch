@@ -6,6 +6,8 @@
 #endif
 
 int main() {
+    if (etch::font_metrics().ascent != 0) return 1;
+
     if (ETCH_VERSION_STRING[0] == '\0') return 1;
     const auto seed=etch::Color::oklch(.6f,.15f,240.f);
     const auto seeded=etch::Theme::from_seed(seed);
