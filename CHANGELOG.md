@@ -4,6 +4,11 @@ All notable changes to Etch are documented here. This file follows
 [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.1] - 2026-11-18
+
+- Align the README package example with Etch 0.18 and correct its scroll fade
+  documentation.
+
 ## [0.18.0] - 2026-11-18
 
 - Publish the pre-1.0 release candidate for public C++20/C99 consumers and Inlay.

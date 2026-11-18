@@ -1,4 +1,4 @@
-# Etch v0.16.0
+# Etch
 
 Etch is a Pure-GPU UI Engine for desktop applications on Windows, Linux, and
 macOS. It combines immediate UI construction, Clay layout, Unicode text
@@ -157,7 +157,7 @@ configuring the consumer. If installation was disabled, reconfigure Etch with
 ```cmake
 cmake_minimum_required(VERSION 3.24)
 project(my_app LANGUAGES C CXX)
-find_package(Etch 0.9 CONFIG REQUIRED)
+find_package(Etch 0.18 CONFIG REQUIRED)
 add_executable(my_app main.cpp)
 target_link_libraries(my_app PRIVATE Etch::etch)
 ```
@@ -237,8 +237,8 @@ provide the feature; it is not synthesized. Load a separate custom slot if prose
 and numeric columns need different numeral settings for the same face.
 
 Tables accept `show_column_lines = false` and `header_font_size_px = 14` for a
-line-free header with existing configurable zebra rows. Scroll edge fade masks
-are not implemented. C99 exposes the corresponding descriptors and font API.
+line-free header with existing configurable zebra rows. C99 exposes the
+corresponding descriptors and font API.
 
 ### Desktop navigation and texture uploads
 
@@ -341,7 +341,7 @@ and visual layers. Captured drags may map points outside the box. Visible bounds
 intersect ancestor clip bounding rectangles; rounded masks and sibling overlap
 still require the host's hit-testing policy. Outputs remain unchanged on failure.
 
-Release candidate scope: Etch 0.18 pairs with Inlay 0.5 using public C++20/C99
+Release candidate scope: Etch 0.18 pairs with Inlay 0.6 using public C++20/C99
 APIs. Windows Vulkan and D3D12 are the local verification targets. Metal and
 Linux Vulkan Wayland/X11 still require real-hardware CI sign-off; this is a
 pre-1.0 release. Idle UI batching/sleep and bounded frame-arena use are covered
