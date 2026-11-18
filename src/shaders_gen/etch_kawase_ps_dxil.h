@@ -4,8 +4,8 @@
 ;
 ; Name                 Index   Mask Register SysValue  Format   Used
 ; -------------------- ----- ------ -------- -------- ------- ------
-; SV_Position              0   xyzw        0      POS   float
-; TEXCOORD                 0   xy          1     NONE   float   xy
+; SV_Position              0   xyzw        0      POS   float       
+; TEXCOORD                 0   xy          1     NONE   float   xy  
 ;
 ;
 ; Output signature:
@@ -16,7 +16,7 @@
 ;
 ; shader hash: d51d9f7031c9017a8852a45e52ecab04
 ;
-; Pipeline Runtime Information:
+; Pipeline Runtime Information: 
 ;
 ;PSVRuntimeInfo:
 ; Pixel Shader
@@ -40,14 +40,14 @@
 ;
 ; Name                 Index             InterpMode DynIdx
 ; -------------------- ----- ---------------------- ------
-; SV_Position              0          noperspective
-; TEXCOORD                 0                 linear
+; SV_Position              0          noperspective       
+; TEXCOORD                 0                 linear       
 ;
 ; Output signature:
 ;
 ; Name                 Index             InterpMode DynIdx
 ; -------------------- ----- ---------------------- ------
-; SV_Target                0
+; SV_Target                0                              
 ;
 ; Buffer Definitions:
 ;
@@ -61,7 +61,7 @@
 ;       float g_offset;                               ; Offset:    8
 ;       uint g_mode;                                  ; Offset:   12
 ;       float4 g_bloom;                               ; Offset:   16
-;
+;   
 ;   } KawaseFS;                                       ; Offset:    0 Size:    32
 ;
 ; }

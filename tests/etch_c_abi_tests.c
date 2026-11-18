@@ -595,8 +595,18 @@ int main(void) {
     const EtchShaderSurfaceEvalDesc eval=etch_shader_surface_eval_desc_default();
     const EtchTerminalCell cell=etch_terminal_cell_default();
     const EtchSheetDesc sheet=etch_sheet_desc_default();
+    const EtchLayerDesc v21_layer=etch_layer_desc_default();
+    const EtchTextSpan v21_span=etch_text_span_default();
+    const EtchTextDrawDesc v21_text_draw=etch_text_draw_desc_default();
+    const EtchImageDesc v21_img=etch_image_desc_default();
+    const EtchImageDrawDesc v21_img_draw=etch_image_draw_desc_default();
     const bool ok_material_defaults=surface.max_fps==60 && surface.spirv.entrypoint!=NULL &&
-        eval.width==1 && eval.enabled && cell.width==1 && sheet.snap_count==3 &&
+        surface.num_samplers==0u && !surface.sampler_mirror_repeat &&
+        eval.width==1 && eval.enabled && eval.textures[0]==NULL && cell.width==1 && sheet.snap_count==3 &&
+        v21_layer.blur_px==0.0f && !v21_layer.blend_plus_lighter &&
+        !v21_span.has_wipe && v21_span.wipe_x==0.0f && v21_span.wipe_feather_px==0.0f &&
+        !v21_text_draw.has_wipe && v21_text_draw.wipe_x==0.0f && v21_text_draw.wipe_feather_px==0.0f &&
+        !v21_img.continuous_corners && !v21_img_draw.continuous_corners &&
         etch_window_chrome_desc_default().backdrop==ETCH_BACKDROP_OPAQUE;
     const bool ok_release = test_release_api(ctx);
     if (!ok_release) fprintf(stderr, "c99_abi_smoke: Etch %s public API failed\n", ETCH_VERSION_STRING);

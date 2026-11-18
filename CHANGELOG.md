@@ -4,6 +4,21 @@ All notable changes to Etch are documented here. This file follows
 [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.0] - 2026-11-19
+
+- Add `LayerDesc::blur_px` (`EtchLayerDesc::blur_px`) optical layer defocus blur via
+  non-overlapping offscreen `R16G16B16A16_FLOAT` slices and a continuous Dual-Kawase
+  mip pyramid (`FrameStats::blur_pass_count` incremented for filter passes).
+- Add `LayerDesc::blend_plus_lighter` (`EtchLayerDesc::blend_plus_lighter`) additive
+  RGB (`SRC=ONE, DST=ONE`) + valid alpha (`SRC=ONE, DST=ONE_MINUS_SRC_ALPHA`) blending.
+- Add sub-pixel horizontal feathered text wipe (`has_wipe`, `color_end`, `wipe_x`,
+  `wipe_feather_px`) on `TextDrawDesc`, `TextSpan`, `EtchTextDrawDesc`, and
+  `EtchTextSpan` for both `SlugGlyph` and raster `Glyph` primitives.
+- Extend `ShaderSurfaceCreateDesc` / `ShaderSurfaceEvalDesc` (and C99 equivalents) with
+  `num_samplers` (`0..4`), `sampler_mirror_repeat`, and `textures[4]`.
+- Add `continuous_corners` superellipse squircle corners on `ImageDesc`, `ImageDrawDesc`,
+  `EtchImageDesc`, and `EtchImageDrawDesc`.
+
 ## [0.20.0] - 2026-11-19
 
 - Add `TextInputDesc::suppress_popup_keys` (`EtchTextInputDesc::suppress_popup_keys`)

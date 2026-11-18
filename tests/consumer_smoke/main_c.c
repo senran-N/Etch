@@ -43,7 +43,9 @@ int main(void) {
     etch_begin_frame(ctx, &fd);
     etch_set_time_scale(ctx,.2f);
     if(!etch_presence(etch_id("presence"),true,etch_spring_spec_fluid()).visible) return 1;
-    const EtchLayerDesc layer=etch_layer_desc_default();
+    EtchLayerDesc layer=etch_layer_desc_default();
+    layer.blur_px = 2.0f;
+    layer.blend_plus_lighter = true;
     etch_push_layer(&layer);etch_pop_layer();
 
 
@@ -78,13 +80,23 @@ int main(void) {
     if (etch_scroll_delta().y != 0.0f || etch_scroll_max(box.id).y != 0.0f) return 1;
     EtchSheetDesc sheet=etch_sheet_desc_default();sheet.id=etch_id("sheet_c");sheet.open=false;
     if(etch_begin_sheet(&sheet))etch_end_sheet();
+    EtchShaderSurfaceCreateDesc surf_create = etch_shader_surface_create_desc_default();
+    if (surf_create.num_samplers != 0u || surf_create.sampler_mirror_repeat) return 1;
     EtchShaderSurfaceEvalDesc eval=etch_shader_surface_eval_desc_default();
-    if(etch_eval_shader_surface(ctx,0,&eval)!=NULL)return 1;
+    if(eval.textures[0] != NULL || etch_eval_shader_surface(ctx,0,&eval)!=NULL)return 1;
+    EtchImageDesc img_desc = etch_image_desc_default();
+    EtchImageDrawDesc img_draw = etch_image_draw_desc_default();
+    EtchTextDrawDesc txt_draw = etch_text_draw_desc_default();
+    if (img_desc.continuous_corners || img_draw.continuous_corners || txt_draw.has_wipe) return 1;
     EtchTextSpan span = etch_text_span_default();
     span.text = ETCH_STR_LIT("file");
     span.font_id = ETCH_FONT_ITALIC;
     span.icon_id = icon;
     span.padding_y = 2;
+    span.has_wipe = true;
+    span.color_end = seed;
+    span.wipe_x = 12.0f;
+    span.wipe_feather_px = 4.0f;
     etch_text_spans(&span, 1, NULL);
     char input[] = "@file";
     EtchTextInputHighlight range = etch_text_input_highlight_default();

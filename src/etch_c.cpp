@@ -48,7 +48,8 @@ inline etch::TextSpan to_cpp(const EtchTextSpan& s) noexcept {
     return {to_cpp(s.text), to_cpp(s.color), to_cpp(s.background), to_cpp(s.border_color),
             s.font_size_px, s.font_id, s.underline, s.strikethrough, s.letter_spacing,
             s.padding_x, s.bg_radius, s.id, s.icon_id, to_cpp(s.icon_color), s.icon_size_px,
-            s.icon_gap_px, s.padding_y, to_cpp(s.hover_background)};
+            s.icon_gap_px, s.padding_y, to_cpp(s.hover_background),
+            s.has_wipe, to_cpp(s.color_end), s.wipe_x, s.wipe_feather_px};
 }
 
 inline etch::PathCmd to_cpp(const EtchPathCmd& c) noexcept {
@@ -280,7 +281,8 @@ EtchTextSpan etch_text_span_default(void) {
     return {from_cpp(d.text), from_cpp(d.color), from_cpp(d.background), from_cpp(d.border_color),
             d.font_size_px, d.font_id, d.underline, d.strikethrough, d.letter_spacing,
             d.padding_x, d.bg_radius, d.id, d.icon_id, from_cpp(d.icon_color), d.icon_size_px,
-            d.icon_gap_px, d.padding_y, from_cpp(d.hover_background)};
+            d.icon_gap_px, d.padding_y, from_cpp(d.hover_background),
+            d.has_wipe, from_cpp(d.color_end), d.wipe_x, d.wipe_feather_px};
 }
 
 EtchRichTextDesc etch_rich_text_desc_default(void) {
@@ -303,7 +305,7 @@ EtchImageDesc etch_image_desc_default(void) {
     const etch::ImageDesc d{};
     return {d.id, d.texture, d.sprite_id, from_cpp(d.width), from_cpp(d.height),
             from_cpp(d.uv_min), from_cpp(d.uv_max), from_cpp(d.radius), from_cpp(d.tint),
-            from_cpp(d.border_color), d.border_width, d.aspect_ratio, d.grid_col_span};
+            from_cpp(d.border_color), d.border_width, d.aspect_ratio, d.grid_col_span, d.continuous_corners};
 }
 
 EtchIconDesc etch_icon_desc_default(void) {
@@ -372,13 +374,14 @@ EtchTextDrawDesc etch_text_draw_desc_default(void) {
     const etch::TextDrawDesc d{};
     return {from_cpp(d.text), from_cpp(d.pos), d.font_id, d.size, from_cpp(d.color),
             d.letter_spacing, static_cast<EtchAlignX>(d.align_x),
-            static_cast<EtchAlignY>(d.align_y), d.foreground, d.max_width_px, d.ellipsis};
+            static_cast<EtchAlignY>(d.align_y), d.foreground, d.max_width_px, d.ellipsis,
+            d.has_wipe, from_cpp(d.color_end), d.wipe_x, d.wipe_feather_px};
 }
 
 EtchImageDrawDesc etch_image_draw_desc_default(void) {
     const etch::ImageDrawDesc d{};
     return {d.texture, d.sprite_id, from_cpp(d.rect), from_cpp(d.uv_rect),
-            from_cpp(d.tint), d.radius, d.foreground};
+            from_cpp(d.tint), d.radius, d.foreground, d.continuous_corners};
 }
 
 EtchTextureDesc etch_texture_desc_default(void) {
@@ -900,7 +903,8 @@ void etch_image(const EtchImageDesc* desc) {
     if (!desc) return;
     etch::image({desc->id, desc->texture, desc->sprite_id, to_cpp(desc->width), to_cpp(desc->height),
                  to_cpp(desc->uv_min), to_cpp(desc->uv_max), to_cpp(desc->radius), to_cpp(desc->tint),
-                 to_cpp(desc->border_color), desc->border_width, desc->aspect_ratio, desc->grid_col_span});
+                 to_cpp(desc->border_color), desc->border_width, desc->aspect_ratio, desc->grid_col_span,
+                 desc->continuous_corners});
 }
 void etch_icon(const EtchIconDesc* desc) {
     if (!desc) return;
@@ -1007,12 +1011,13 @@ void etch_draw_text(const EtchTextDrawDesc* desc) {
     etch::draw_text({to_cpp(desc->text), to_cpp(desc->pos), desc->font_id, desc->size,
                      to_cpp(desc->color), desc->letter_spacing,
                      static_cast<etch::AlignX>(desc->align_x),
-                     static_cast<etch::AlignY>(desc->align_y), desc->foreground, desc->max_width_px, desc->ellipsis});
+                     static_cast<etch::AlignY>(desc->align_y), desc->foreground, desc->max_width_px, desc->ellipsis,
+                     desc->has_wipe, to_cpp(desc->color_end), desc->wipe_x, desc->wipe_feather_px});
 }
 void etch_draw_image(const EtchImageDrawDesc* desc) {
     if (!desc) return;
     etch::draw_image({desc->texture, desc->sprite_id, to_cpp(desc->rect), to_cpp(desc->uv_rect),
-                      to_cpp(desc->tint), desc->radius, desc->foreground});
+                      to_cpp(desc->tint), desc->radius, desc->foreground, desc->continuous_corners});
 }
 
 /* ============================================================================
@@ -1575,9 +1580,12 @@ extern "C" EtchPresenceResult etch_presence(uint32_t id, bool mounted, EtchSprin
 extern "C" void etch_set_time_scale(EtchContext* ctx, float scale) { etch::set_time_scale(to_ctx(ctx),scale); }
 
 extern "C" EtchLayerDesc etch_layer_desc_default(void) {
-    const etch::LayerDesc d;return {d.opacity,from_cpp(d.translate),from_cpp(d.scale),from_cpp(d.pivot_norm),from_cpp(d.pivot_px),d.animating};
+    const etch::LayerDesc d;
+    return {d.opacity,from_cpp(d.translate),from_cpp(d.scale),from_cpp(d.pivot_norm),from_cpp(d.pivot_px),d.animating,d.blur_px,d.blend_plus_lighter};
 }
-extern "C" void etch_push_layer(const EtchLayerDesc* d) {etch::push_layer(d ? etch::LayerDesc{d->opacity,to_cpp(d->translate),to_cpp(d->scale),to_cpp(d->pivot_norm),to_cpp(d->pivot_px),d->animating} : etch::LayerDesc{});}
+extern "C" void etch_push_layer(const EtchLayerDesc* d) {
+    etch::push_layer(d ? etch::LayerDesc{d->opacity,to_cpp(d->translate),to_cpp(d->scale),to_cpp(d->pivot_norm),to_cpp(d->pivot_px),d->animating,d->blur_px,d->blend_plus_lighter} : etch::LayerDesc{});
+}
 extern "C" void etch_pop_layer(void) {etch::pop_layer();}
 
 EtchShaderSurfaceCreateDesc etch_shader_surface_create_desc_default(void) {
@@ -1592,13 +1600,14 @@ EtchShaderSurfaceEvalDesc etch_shader_surface_eval_desc_default(void) {
 EtchShaderSurfaceId etch_create_shader_surface(EtchContext* ctx, const EtchShaderSurfaceCreateDesc* d) {
     if (!d) return 0;
     return etch::create_shader_surface(to_ctx(ctx), {{d->spirv.data,d->spirv.size,d->spirv.entrypoint},
-        {d->dxil.data,d->dxil.size,d->dxil.entrypoint}, {d->msl.data,d->msl.size,d->msl.entrypoint}, d->continuous_time,d->max_fps});
+        {d->dxil.data,d->dxil.size,d->dxil.entrypoint}, {d->msl.data,d->msl.size,d->msl.entrypoint},
+        d->continuous_time, d->max_fps, d->num_samplers, d->sampler_mirror_repeat});
 }
 void etch_destroy_shader_surface(EtchContext* ctx, EtchShaderSurfaceId id) { etch::destroy_shader_surface(to_ctx(ctx),id); }
 SDL_GPUTexture* etch_eval_shader_surface(EtchContext* ctx, EtchShaderSurfaceId id, const EtchShaderSurfaceEvalDesc* d) {
     if (!d) return nullptr;
     etch::ShaderSurfaceEvalDesc eval = {}; eval.width=d->width; eval.height=d->height; eval.revision=d->revision; eval.enabled=d->enabled;
-    for (uint32_t i=0;i<4;++i) eval.params[i]=to_cpp(d->params[i]);
+    for (uint32_t i=0;i<4;++i) { eval.params[i]=to_cpp(d->params[i]); eval.textures[i]=d->textures[i]; }
     return etch::eval_shader_surface(to_ctx(ctx),id,eval);
 }
 

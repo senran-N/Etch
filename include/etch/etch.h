@@ -12,7 +12,7 @@
 #include <type_traits>
 
 #define ETCH_VERSION_MAJOR 0
-#define ETCH_VERSION_MINOR 20
+#define ETCH_VERSION_MINOR 21
 #define ETCH_VERSION_PATCH 0
 #define ETCH_VERSION_STR_DETAIL(x) #x
 #define ETCH_VERSION_STR(x) ETCH_VERSION_STR_DETAIL(x)
@@ -472,6 +472,7 @@ enum class PrimKind : uint8_t {
     MeshGrad = 11,
     BorderBeam = 12,
     PunchHole = 13,
+    LayerBlur = 14,
 };
 
 enum PrimFlags : uint8_t {
@@ -775,6 +776,27 @@ struct alignas(16) Prim {
                 tint.pack_rgba8(),
                 border_color.pack_rgba8(),
                 pack_f16x2(border_width, 1.0f),
+            },
+        };
+    }
+
+    static constexpr Prim make_layer_blur(
+        Rect rect,
+        Rect clip_rect,
+        float blend_t,
+        uint32_t slot_hi = 0u,
+        float clip_radius = 0.0f) noexcept
+    {
+        const uint8_t all_flags = static_cast<uint8_t>((clip_radius != 0.0f) ? PrimFlag_RoundedClip : PrimFlag_None);
+        return Prim{
+            .bounds = {rect.x, rect.y, rect.w, rect.h},
+            .clip = {clip_rect.x, clip_rect.y, clip_rect.x + clip_rect.w, clip_rect.y + clip_rect.h},
+            .payload = {std::bit_cast<uint32_t>(blend_t), slot_hi, 0u, 0u},
+            .style = {
+                pack_header(PrimKind::LayerBlur, all_flags, 0u, clip_radius),
+                Color::white().pack_rgba8(),
+                0u,
+                0u,
             },
         };
     }
@@ -1217,6 +1239,8 @@ struct LayerDesc {
     Vec2 pivot_norm = {.5f,.5f};
     Vec2 pivot_px = {NAN,NAN};
     bool animating = false;
+    float blur_px = 0.0f;
+    bool blend_plus_lighter = false;
 };
 void push_layer(const LayerDesc& desc) noexcept;
 void pop_layer() noexcept;
@@ -1350,6 +1374,10 @@ struct TextSpan {
     float icon_gap_px = 4.0f;
     float padding_y = 0.0f;
     Color hover_background = {};
+    bool has_wipe = false;
+    Color color_end = {};
+    float wipe_x = 0.0f;
+    float wipe_feather_px = 0.0f;
 };
 
 struct RichTextDesc {
@@ -1414,6 +1442,7 @@ struct ImageDesc {
     float border_width = 0.0f;
     float aspect_ratio = 0.0f;
     uint16_t grid_col_span = 1;
+    bool continuous_corners = false;
 };
 
 struct IconDesc {
@@ -1575,6 +1604,10 @@ struct TextDrawDesc {
     bool     foreground = false;
     float    max_width_px = 0.0f; // Logical px, like size; 0 = unlimited.
     bool     ellipsis = false;
+    bool     has_wipe = false;
+    Color    color_end = {};
+    float    wipe_x = 0.0f;
+    float    wipe_feather_px = 0.0f;
 };
 
 struct ImageDrawDesc {
@@ -1585,6 +1618,7 @@ struct ImageDrawDesc {
     Color           tint = Color::white();
     float           radius = 0.0f;
     bool            foreground = false;
+    bool            continuous_corners = false;
 };
 
 struct TextureDesc {
@@ -2214,13 +2248,15 @@ struct ShaderSurfaceCreateDesc {
     ShaderSurfaceCode spirv = {}, dxil = {}, msl = {};
     bool continuous_time = false;
     float max_fps = 60;
+    uint32_t num_samplers = 0; // 0..4 fragment samplers at t0..t3 / s0..s3, space2.
+    bool sampler_mirror_repeat = false;
 };
 struct ShaderSurfaceEvalDesc {
     uint32_t width = 1, height = 1;
     uint64_t revision = 0;
     Vec4 params[4] = {};
+    SDL_GPUTexture* textures[4] = {};
     bool enabled = true;
-    uint8_t reserved[15] = {};
 };
 // Fragment shaders receive TEXCOORD0 UV and one 80-byte uniform at b0,space3:
 // float4 viewport_time (width,height,time,frame), followed by float4 params[4].

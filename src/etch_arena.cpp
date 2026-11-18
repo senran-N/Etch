@@ -315,6 +315,7 @@ struct DrawBatch {
     SDL_GPUTexture* ext_textures[8] = {}; // Slots 1..8; slot 0 is always FontAtlas::gpu_tex
     uint32_t        ext_count = 0;
     bool is_punch_hole = false;
+    bool is_additive = false;
 };
 
 enum class TextEditOpKind : uint8_t {
@@ -372,6 +373,9 @@ struct VisualLayerNode {
     mutable float resolved_opacity = 1;
     mutable Vec2 resolved_scale = {1,1}, resolved_offset_px = {};
     mutable Vec2 inherited_scale = {1,1}, inherited_offset_px = {};
+    mutable float resolved_blur_px = 0.0f;
+    mutable const VisualLayerNode* resolved_blur_root = nullptr;
+    mutable bool resolved_plus_lighter = false;
     mutable bool resolved_animating = false;
     mutable uint32_t resolved_frame = 0;
 };
@@ -510,6 +514,10 @@ struct RichSpanInternal {
     float icon_size = 0.0f;
     float icon_advance = 0.0f;
     float padding_y = 0.0f;
+    bool has_wipe = false;
+    Color color_end = {};
+    float wipe_x = 0.0f;
+    float wipe_feather_px = 0.0f;
     uint32_t layout_text_start() const noexcept { return byte_start + (icon_id != kInvalidIcon ? 1u : 0u); }
 };
 
@@ -600,6 +608,34 @@ struct BlurSplit {
     float    blur_radius_px = 0.0f;
     Rect     union_bounds = {};
 };
+
+inline constexpr uint32_t kMaxFilterSlices = 4u;
+inline constexpr uint32_t kMaxFilterLevels = 5u; // 0: 1x, 1: 1/2, 2: 1/4, 3: 1/8, 4: 1/16
+
+struct FilterSliceTargets {
+    SDL_GPUTexture* levels[kMaxFilterLevels] = {};
+};
+
+struct FilterBlurGroup {
+    const VisualLayerNode* blur_root = nullptr;
+    uint32_t first_batch = 0;
+    uint32_t end_batch = 0;
+    uint32_t slice = 0;
+    uint32_t max_level = 3;
+    float    blur_px = 0.0f;
+    bool     plus_lighter = false;
+    Rect     raw_bounds = {};
+    bool     has_bounds = false;
+    Rect     padded_bounds = {};
+    ClipEntry ancestor_clip = {};
+    uint32_t ancestor_clip_index = 0;
+    uint32_t ancestor_clip_depth = 1;
+};
+
+inline SDL_GPUTexture* filter_tex_sentinel(uint32_t slice, uint32_t level) noexcept {
+    static uint8_t s_filter_tex_tags[kMaxFilterSlices][kMaxFilterLevels] = {};
+    return reinterpret_cast<SDL_GPUTexture*>(&s_filter_tex_tags[slice][level]);
+}
 
 struct KeyEventEntry {
     uint32_t key = 0;
@@ -733,6 +769,9 @@ struct WindowUiState {
     SDL_GPUTexture* blur_pong_tex = nullptr;
     uint32_t blur_rt_w = 0;
     uint32_t blur_rt_h = 0;
+    FilterSliceTargets filter_slices[kMaxFilterSlices] = {};
+    uint32_t filter_rt_w = 0;
+    uint32_t filter_rt_h = 0;
     bool keyboard_focus_active = false;
     uint32_t focus_scope = 0;
     uint32_t focus_scopes[32] = {};
@@ -926,12 +965,17 @@ struct ShaderSurfaceSlot {
     SDL_GPUShader* shader = nullptr;
     SDL_GPUGraphicsPipeline* pipeline = nullptr;
     SDL_GPUTexture* texture = nullptr;
+    SDL_GPUTexture* retired_tex = nullptr;
     SDL_Window* window = nullptr;
     ShaderSurfaceEvalDesc eval = {};
     uint64_t last_render_tick = 0;
-    uint32_t generation = 1, seen_frame = 0;
+    uint64_t output_epoch = 0;
+    uint64_t pending_output_epoch = 0;
+    uint64_t sampled_epochs[4] = {};
+    uint64_t pending_sampled_epochs[4] = {};
+    uint32_t generation = 1, seen_frame = 0, num_samplers = 0;
     float max_fps = 60;
-    bool continuous_time = false, owner_bound = false, initialized = false, dirty = true, recorded = false;
+    bool continuous_time = false, sampler_mirror_repeat = false, owner_bound = false, initialized = false, dirty = true, recorded = false;
 };
 
 struct Context {
@@ -973,6 +1017,16 @@ struct Context {
     BlurSplit* blur_splits = nullptr;
     uint32_t blur_split_cap = 0;
     uint32_t      blur_split_count = 0;
+    Prim*         filter_prims = nullptr;
+    uint32_t      filter_prim_cap = 0;
+    uint32_t      filter_prim_count = 0;
+    DrawBatch*    filter_batches = nullptr;
+    uint32_t      filter_batch_cap = 0;
+    uint32_t      filter_batch_count = 0;
+    FilterBlurGroup* filter_groups = nullptr;
+    uint32_t      filter_group_cap = 0;
+    uint32_t      filter_group_count = 0;
+    FilterBlurGroup* active_filter_group = nullptr;
     bool          layer_has_bg_prims = false;
 
     // GPU objects
@@ -992,11 +1046,17 @@ struct Context {
     SDL_GPUShader*           kawase_vs_shader = nullptr;
     SDL_GPUShader*           kawase_ps_shader = nullptr;
     SDL_GPUSampler*          linear_sampler = nullptr;
+    SDL_GPUSampler*          mirror_linear_sampler = nullptr;
+    SDL_GPUTexture*          surface_fallback_tex = nullptr;
+    uint64_t                 shader_surface_epoch = 0;
     CachedPipeline           pipelines[kMaxCachedPipelines] = {};
     uint32_t                 pipeline_count = 0;
     CachedPipeline punch_pipelines[kMaxCachedPipelines] = {};
     uint32_t punch_pipeline_count = 0;
+    CachedPipeline additive_pipelines[kMaxCachedPipelines] = {};
+    uint32_t additive_pipeline_count = 0;
     SDL_GPUGraphicsPipeline* kawase_pipe = nullptr;
+    SDL_GPUGraphicsPipeline* filter_kawase_pipe = nullptr;
     SDL_GPUGraphicsPipeline* bloom_pipe = nullptr;
     CachedPipeline           present_pipelines[kMaxCachedPipelines] = {};
     uint32_t                 present_pipeline_count = 0;
@@ -1071,13 +1131,16 @@ WindowUiState* window_ui(Context* ctx, SDL_Window* window) noexcept {
 const WindowUiState* window_ui(const Context* ctx, SDL_Window* window) noexcept {
     return window_ui(const_cast<Context*>(ctx), window);
 }
-bool ensure_batch_cap(Context* ctx) noexcept {
-    if (ctx->batch_count < ctx->batch_cap) return true;
-    if (ctx->batch_cap == 65536u) return false;
-    const uint32_t cap = ctx->batch_cap ? ctx->batch_cap * 2u : 256u;
-    void* p = std::realloc(ctx->batches, size_t(cap) * sizeof(DrawBatch));
+bool ensure_batch_cap_array(DrawBatch** batches, uint32_t* cap, uint32_t count) noexcept {
+    if (count < *cap) return true;
+    if (*cap == 65536u) return false;
+    const uint32_t next = *cap ? *cap * 2u : 256u;
+    void* p = std::realloc(*batches, size_t(next) * sizeof(DrawBatch));
     if (!p) return false;
-    ctx->batches = static_cast<DrawBatch*>(p); ctx->batch_cap = cap; return true;
+    *batches = static_cast<DrawBatch*>(p); *cap = next; return true;
+}
+bool ensure_batch_cap(Context* ctx) noexcept {
+    return ensure_batch_cap_array(&ctx->batches, &ctx->batch_cap, ctx->batch_count);
 }
 bool reserve_span_hits(SpanHitRegion** hits, uint32_t* cap, uint32_t count, uint32_t initial) noexcept {
     if (count < *cap) return true;

@@ -195,7 +195,8 @@ void emit_draw_text_cmd(
     float scale,
     const ClipEntry& clip, const uint32_t* terminal_columns = nullptr, float terminal_cell_width = 0) noexcept
 {
-    if (!ctx || !ctx->atlas.font_valid || !tc.text.chars || tc.text.length == 0u || tc.size <= 0.0f || tc.color.a == 0u) {
+    if (!ctx || !ctx->atlas.font_valid || !tc.text.chars || tc.text.length == 0u || tc.size <= 0.0f ||
+        (tc.color.a == 0u && (!tc.has_wipe || tc.color_end.a == 0u))) {
         return;
     }
     const uint16_t primary_slot = resolve_font_slot_idx(&ctx->atlas, tc.font_id);
@@ -271,15 +272,28 @@ void emit_draw_text_cmd(
 
         float pen_x = origin.x + start_x_logical * scale;
         const float base_y = origin.y + (start_y_logical + static_cast<float>(line_idx) * line_h_logical) * scale + asc_px;
+        TextWipeParams wipe = {};
+        if (tc.has_wipe && std::isfinite(tc.wipe_x)) {
+            const float feather = (std::isfinite(tc.wipe_feather_px) && tc.wipe_feather_px > 0.0f) ? tc.wipe_feather_px * scale : 0.0f;
+            const float center_px = pen_x + tc.wipe_x * scale;
+            wipe = {true, tc.color_end, center_px - 0.5f * feather, center_px + 0.5f * feather};
+        }
 
-        const ClipEntry text_clip = clip;
-        const uint32_t first_text_prim = ctx->prim_count;
+        ClipEntry text_clip = clip;
         float clip_left = origin.x + tc.pos.x * scale;
         if (tc.align_x == AlignX::Right) clip_left -= tc.max_width_px * scale;
         else if (tc.align_x == AlignX::Center) clip_left -= tc.max_width_px * scale * 0.5f;
+        if (wipe.enabled && tc.max_width_px > 0) {
+            const auto* layer = ctx->active_render_layer;
+            if (layer) resolve_layer_chain(ctx, layer, ctx->active_ui->dpi_scale);
+            const float sx = layer ? layer->resolved_scale.x : 1.f;
+            const float ox = layer ? layer->resolved_offset_px.x : 0.f;
+            text_clip.rect = rect_intersect(clip.rect, {clip_left * sx + ox, clip.rect.y, tc.max_width_px * scale * sx, clip.rect.h});
+        }
+        const uint32_t first_text_prim = ctx->active_filter_group ? ctx->filter_prim_count : ctx->prim_count;
         if (elided && tc.ellipsis) {
             emit_elided_line(ctx, tc.text.chars + pos, seg_len, tc.font_id, tc.size, tc.letter_spacing,
-                pen_x / scale, base_y / scale, tc.max_width_px, text_clip, tc.color, scale);
+                pen_x / scale, base_y / scale, tc.max_width_px, text_clip, tc.color, scale, wipe.enabled ? &wipe : nullptr);
         }
         uint32_t run_pos = elided && tc.ellipsis ? trim_end : pos;
         while (run_pos < trim_end) {
@@ -309,15 +323,18 @@ void emit_draw_text_cmd(
                     g.x_offset_em,
                     g.y_offset_em,
                     text_clip,
-                    tc.color);
+                    tc.color,
+                    wipe.enabled ? &wipe : nullptr);
                 pen_x += g.x_advance_1px * phys_px + ls_px;
             }
             run_pos = run_end;
         }
 
-        if (tc.max_width_px > 0) {
-            for (uint32_t i = first_text_prim; i < ctx->prim_count; ++i) {
-                Prim& p = ctx->prims[i];
+        if (!wipe.enabled && tc.max_width_px > 0) {
+            Prim* target_prims = ctx->active_filter_group ? ctx->filter_prims : ctx->prims;
+            const uint32_t target_count = ctx->active_filter_group ? ctx->filter_prim_count : ctx->prim_count;
+            for (uint32_t i = first_text_prim; i < target_count; ++i) {
+                Prim& p = target_prims[i];
                 p.style.x |= uint32_t(PrimFlag_TextClip) << 4;
                 const auto* layer=ctx->active_render_layer;
                 const float sx=layer ? layer->resolved_scale.x : 1.f;
@@ -618,6 +635,9 @@ void emit_draw_list_command(
                 Vec2 uv_min = { im.uv_rect.x, im.uv_rect.y };
                 Vec2 uv_max = { im.uv_rect.x + im.uv_rect.w, im.uv_rect.y + im.uv_rect.h };
                 if (im.sprite_id != kInvalidSprite && !resolve_sprite_uv_rect(ctx, im.sprite_id, uv_min, uv_max, &uv_min, &uv_max)) break;
+                const uint8_t img_flags = static_cast<uint8_t>(
+                    ((im.sprite_id != kInvalidSprite || surface_texture_premultiplied(ctx, im.texture)) ? PrimFlag_Premultiplied : PrimFlag_None) |
+                    (im.continuous_corners ? PrimFlag_LinearGrad : PrimFlag_None));
                 push_prim(
                     ctx,
                     Prim::make_texture(
@@ -630,7 +650,7 @@ void emit_draw_list_command(
                         im.tint,
                         Color{},
                         0.0f,
-                        (im.sprite_id != kInvalidSprite || surface_texture_premultiplied(ctx, im.texture)) ? PrimFlag_Premultiplied : PrimFlag_None,
+                        img_flags,
                         clip.radius),
                     im.sprite_id != kInvalidSprite ? nullptr : im.texture);
                 break;
@@ -1171,6 +1191,10 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
     ctx->prim_count = 0u;
     ctx->batch_count = 0u;
     ctx->blur_split_count = 0u;
+    ctx->filter_prim_count = 0u;
+    ctx->filter_batch_count = 0u;
+    ctx->filter_group_count = 0u;
+    ctx->active_filter_group = nullptr;
     ctx->layer_has_bg_prims = true;
     ctx->active_ui->split_depth = 0u;
     ctx->active_ui->canvas_depth = 0u;
@@ -2160,6 +2184,11 @@ void text_spans(std::span<const TextSpan> spans, const RichTextDesc& desc) noexc
         cfg_hash = fnv1a_32_step(cfg_hash, &advance, sizeof(advance));
         cfg_hash = fnv1a_32_step(cfg_hash, &has_text, sizeof(has_text));
 
+        const bool sp_has_wipe = sp.has_wipe && std::isfinite(sp.wipe_x);
+        const Color sp_color_end = sp_has_wipe ? resolve_theme_color(sp.color_end, tint) : Color{};
+        const float sp_wipe_x = sp_has_wipe ? sp.wipe_x * wscale : 0.0f;
+        const float sp_wipe_feather = (sp_has_wipe && std::isfinite(sp.wipe_feather_px) && sp.wipe_feather_px > 0.0f) ? sp.wipe_feather_px * wscale : 0.0f;
+
         int_spans[out_idx++] = RichSpanInternal{
             .text_byte_start = text_start,
             .byte_start = b0,
@@ -2181,6 +2210,10 @@ void text_spans(std::span<const TextSpan> spans, const RichTextDesc& desc) noexc
             .icon_size = icon_size,
             .icon_advance = advance,
             .padding_y = pad_y,
+            .has_wipe = sp_has_wipe,
+            .color_end = sp_color_end,
+            .wipe_x = sp_wipe_x,
+            .wipe_feather_px = sp_wipe_feather,
         };
     }
     full_utf8[total_bytes] = '\0';
@@ -2567,7 +2600,10 @@ void draw_text(const TextDrawDesc& desc) noexcept {
     }
     TextDrawDesc copied = desc;
     copied.color = resolve_theme_color(desc.color, active_theme(ctx).text_primary);
-    if (copied.color.a == 0u) {
+    if (copied.has_wipe) {
+        copied.color_end = resolve_theme_color(desc.color_end, active_theme(ctx).text_primary);
+    }
+    if (copied.color.a == 0u && (!copied.has_wipe || copied.color_end.a == 0u)) {
         return;
     }
     if (DrawCmdNode* node = append_open_box_draw_cmd(ctx, copied.foreground)) {

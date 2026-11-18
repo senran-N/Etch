@@ -40,16 +40,99 @@ bool surface_texture_premultiplied(const Context* ctx, SDL_GPUTexture* texture) 
     return false;
 }
 
+SDL_GPUTexture* ensure_surface_fallback_tex(Context* ctx) noexcept {
+    if (ctx->surface_fallback_tex) return ctx->surface_fallback_tex;
+    static constexpr uint8_t kWhitePx[4] = {255u, 255u, 255u, 255u};
+    const LoadedTexture fallback = create_texture_rgba(ctx, {.rgba_pixels = kWhitePx, .width = 1u, .height = 1u, .srgb = false});
+    if (!fallback.texture || !flush_texture_uploads(ctx)) {
+        if (fallback.texture) SDL_ReleaseGPUTexture(ctx->device, fallback.texture);
+        return nullptr;
+    }
+    ctx->surface_fallback_tex = fallback.texture;
+    return ctx->surface_fallback_tex;
+}
+
 bool record_shader_surfaces(Context* ctx, SDL_GPUCommandBuffer* cmd) noexcept {
     const uint64_t now = SDL_GetPerformanceCounter();
     const double freq = double(SDL_GetPerformanceFrequency());
-    for (ShaderSurfaceSlot& s : ctx->shader_surfaces) {
+    bool active[64] = {};
+    bool visited[64] = {};
+    uint32_t remaining = 0u;
+    for (uint32_t i = 0u; i < 64u; ++i) {
+        ShaderSurfaceSlot& s = ctx->shader_surfaces[i];
         if (!s.shader || !s.owner_bound || s.window != ctx->active_window) continue;
         s.recorded = false;
-        if (!s.texture || !s.eval.enabled || s.seen_frame != ctx->active_ui->frame_index || surface_window_suspended(s.window)) continue;
-        const bool due = s.continuous_time && ctx->time_scale > 0 && !ctx->reduced_motion &&
-            double(now - s.last_render_tick) >= freq / s.max_fps;
+        if (!s.texture || !s.eval.enabled || s.seen_frame != ctx->active_ui->frame_index ||
+            surface_window_suspended(s.window)) continue;
+        active[i] = true;
+        ++remaining;
+    }
+    while (remaining > 0u) {
+        uint32_t next = 64u;
+        for (uint32_t i = 0u; i < 64u && next == 64u; ++i) {
+            if (!active[i] || visited[i]) continue;
+            const ShaderSurfaceSlot& s = ctx->shader_surfaces[i];
+            bool blocked = false;
+            for (uint32_t k = 0u; k < s.num_samplers && !blocked; ++k) {
+                SDL_GPUTexture* tex = s.eval.textures[k];
+                if (!tex || tex == s.texture) continue;
+                for (uint32_t u = 0u; u < 64u; ++u) {
+                    if (u != i && active[u] && !visited[u] && ctx->shader_surfaces[u].texture == tex) {
+                        blocked = true;
+                        break;
+                    }
+                }
+            }
+            if (!blocked) next = i;
+        }
+        if (next == 64u) {
+            for (uint32_t i = 0u; i < 64u; ++i) {
+                if (active[i] && !visited[i]) { next = i; break; }
+            }
+        }
+        visited[next] = true;
+        --remaining;
+        ShaderSurfaceSlot& s = ctx->shader_surfaces[next];
+        bool upstream_updated = false;
+        uint64_t up_epochs[4] = {};
+        for (uint32_t k = 0u; k < s.num_samplers; ++k) {
+            SDL_GPUTexture* tex = s.eval.textures[k];
+            if (!tex || tex == s.texture) continue;
+            for (uint32_t u = 0u; u < 64u; ++u) {
+                if (u == next) continue;
+                const ShaderSurfaceSlot& up = ctx->shader_surfaces[u];
+                if (!up.shader || up.texture != tex) continue;
+                if (active[u] && !visited[u]) continue; // Break cycle back-edge deterministically.
+                const uint64_t up_epoch = up.recorded ? up.pending_output_epoch : up.output_epoch;
+                up_epochs[k] = up_epoch;
+                if (up.recorded || !up.initialized || s.sampled_epochs[k] != up_epoch) {
+                    upstream_updated = true;
+                }
+                break;
+            }
+        }
+        const bool due = upstream_updated || (s.continuous_time && ctx->time_scale > 0 && !ctx->reduced_motion &&
+            double(now - s.last_render_tick) >= freq / s.max_fps);
         if (s.initialized && !s.dirty && !due) continue;
+        SDL_GPUTexture* resolved_texs[4] = {};
+        bool need_fallback = false;
+        for (uint32_t k = 0u; k < s.num_samplers; ++k) {
+            SDL_GPUTexture* tex = s.eval.textures[k];
+            if (!tex || tex == s.texture) {
+                tex = nullptr;
+                need_fallback = true;
+            } else {
+                for (uint32_t u = 0u; u < 64u; ++u) {
+                    if (active[u] && !visited[u] && ctx->shader_surfaces[u].texture == tex) {
+                        tex = nullptr;
+                        need_fallback = true;
+                        break;
+                    }
+                }
+            }
+            resolved_texs[k] = tex;
+        }
+        if (need_fallback && !ensure_surface_fallback_tex(ctx)) return false;
         SDL_GPUColorTargetInfo target = {};
         target.texture = s.texture;
         target.load_op = SDL_GPU_LOADOP_DONT_CARE;
@@ -66,19 +149,36 @@ bool record_shader_surfaces(Context* ctx, SDL_GPUCommandBuffer* cmd) noexcept {
             s.continuous_time && !ctx->reduced_motion ? ctx->active_ui->elapsed_seconds : 0, float(s.seen_frame)};
         std::memcpy(uniform.params, s.eval.params, sizeof(uniform.params));
         SDL_PushGPUFragmentUniformData(cmd, 0, &uniform, sizeof(uniform));
+        if (s.num_samplers > 0u) {
+            SDL_GPUSampler* smp = s.sampler_mirror_repeat ? ctx->mirror_linear_sampler : ctx->linear_sampler;
+            SDL_GPUTextureSamplerBinding bindings[4] = {};
+            for (uint32_t k = 0u; k < s.num_samplers; ++k) {
+                bindings[k] = {resolved_texs[k] ? resolved_texs[k] : ctx->surface_fallback_tex, smp};
+            }
+            SDL_BindGPUFragmentSamplers(pass, 0u, bindings, s.num_samplers);
+        }
         SDL_DrawGPUPrimitives(pass, 3, 1, 0, 0);
         SDL_EndGPURenderPass(pass);
         s.recorded = true;
+        s.pending_output_epoch = ++ctx->shader_surface_epoch;
+        for (uint32_t k = 0u; k < s.num_samplers; ++k) s.pending_sampled_epochs[k] = up_epochs[k];
     }
     return true;
 }
 
 void complete_shader_surfaces(Context* ctx, SDL_Window* window, bool submitted) noexcept {
     for (ShaderSurfaceSlot& s : ctx->shader_surfaces) {
-        if (s.window != window || !s.recorded) continue;
+        if (s.window != window) continue;
+        if (s.retired_tex) {
+            SDL_ReleaseGPUTexture(ctx->device, s.retired_tex);
+            s.retired_tex = nullptr;
+        }
+        if (!s.recorded) continue;
         if (submitted) {
             s.initialized = true;
             s.dirty = false;
+            s.output_epoch = s.pending_output_epoch;
+            for (uint32_t k = 0u; k < s.num_samplers; ++k) s.sampled_epochs[k] = s.pending_sampled_epochs[k];
             s.last_render_tick = SDL_GetPerformanceCounter();
         }
         s.recorded = false;
@@ -96,6 +196,7 @@ void detach_shader_surface_window(Context* ctx, SDL_Window* window) noexcept {
 }
 
 void release_surface_slot(Context* ctx, ShaderSurfaceSlot& s) noexcept {
+    if (s.retired_tex) SDL_ReleaseGPUTexture(ctx->device, s.retired_tex);
     if (s.texture) SDL_ReleaseGPUTexture(ctx->device, s.texture);
     SDL_ReleaseGPUGraphicsPipeline(ctx->device, s.pipeline);
     SDL_ReleaseGPUShader(ctx->device, s.shader);
@@ -110,7 +211,8 @@ void release_shader_surfaces(Context* ctx) noexcept {
 } // namespace
 
 ShaderSurfaceId create_shader_surface(Context* ctx, const ShaderSurfaceCreateDesc& desc) noexcept {
-    if (!ctx || ctx->in_frame || !std::isfinite(desc.max_fps) || desc.max_fps < 1 || desc.max_fps > 240 || !ensure_gpu_device(ctx)) return 0;
+    if (!ctx || ctx->in_frame || !std::isfinite(desc.max_fps) || desc.max_fps < 1 || desc.max_fps > 240 ||
+        desc.num_samplers > 4u || !ensure_gpu_device(ctx)) return 0;
     uint32_t index = 0;
     while (index < 64 && ctx->shader_surfaces[index].shader) ++index;
     if (index == 64) return 0;
@@ -122,7 +224,7 @@ ShaderSurfaceId create_shader_surface(Context* ctx, const ShaderSurfaceCreateDes
     else if ((formats & SDL_GPU_SHADERFORMAT_MSL) && desc.msl.data) { code = &desc.msl; format = SDL_GPU_SHADERFORMAT_MSL; }
     if (!code || !code->size || !code->entrypoint || !code->entrypoint[0]) return 0;
     const SDL_GPUShaderCreateInfo info = {code->size, static_cast<const Uint8*>(code->data), code->entrypoint,
-        format, SDL_GPU_SHADERSTAGE_FRAGMENT, 0, 0, 0, 1, 0};
+        format, SDL_GPU_SHADERSTAGE_FRAGMENT, desc.num_samplers, 0, 0, 1, 0};
     SDL_GPUShader* shader = SDL_CreateGPUShader(ctx->device, &info);
     if (!shader) return 0;
     SDL_GPUGraphicsPipeline* pipe = create_graphics_pipeline(ctx->device, ctx->kawase_vs_shader, shader,
@@ -131,6 +233,8 @@ ShaderSurfaceId create_shader_surface(Context* ctx, const ShaderSurfaceCreateDes
     ShaderSurfaceSlot& s = ctx->shader_surfaces[index];
     s.shader = shader;
     s.pipeline = pipe;
+    s.num_samplers = desc.num_samplers;
+    s.sampler_mirror_repeat = desc.sampler_mirror_repeat;
     s.max_fps = desc.max_fps;
     s.continuous_time = desc.continuous_time;
     s.dirty = true;
@@ -149,17 +253,48 @@ SDL_GPUTexture* eval_shader_surface(Context* ctx, ShaderSurfaceId id, const Shad
     // One evaluation per owner frame keeps earlier draw commands' borrowed texture alive.
     if (s->owner_bound && s->seen_frame == ctx->active_ui->frame_index) return s->eval.enabled ? s->texture : nullptr;
     const bool resize = !s->texture || s->eval.width != desc.width || s->eval.height != desc.height;
+    SDL_GPUTexture* old_tex = nullptr;
     if (resize) {
         const SDL_GPUTextureCreateInfo info = {SDL_GPU_TEXTURETYPE_2D, SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT,
             SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER, desc.width, desc.height, 1, 1, SDL_GPU_SAMPLECOUNT_1, 0};
         SDL_GPUTexture* texture = SDL_CreateGPUTexture(ctx->device, &info);
         if (!texture) return nullptr;
-        if (s->texture) SDL_ReleaseGPUTexture(ctx->device, s->texture);
+        old_tex = s->texture;
+        if (old_tex) {
+            if (s->retired_tex) SDL_ReleaseGPUTexture(ctx->device, s->retired_tex);
+            s->retired_tex = old_tex;
+            for (ShaderSurfaceSlot& other : ctx->shader_surfaces) {
+                if (&other == s || !other.shader) continue;
+                for (uint32_t k = 0u; k < other.num_samplers; ++k) {
+                    if (other.eval.textures[k] == old_tex) {
+                        other.eval.textures[k] = texture;
+                        other.dirty = true;
+                        other.sampled_epochs[k] = 0u;
+                    }
+                }
+            }
+        }
         s->texture = texture;
         s->initialized = false;
     }
-    s->dirty |= resize || s->eval.revision != desc.revision || std::memcmp(s->eval.params, desc.params, sizeof(desc.params)) != 0;
+    bool textures_changed = false;
+    for (uint32_t i = 0u; i < s->num_samplers; ++i) {
+        if (s->eval.textures[i] != desc.textures[i]) {
+            textures_changed = true;
+            s->sampled_epochs[i] = 0u;
+        }
+    }
+    s->dirty |= resize || textures_changed || s->eval.revision != desc.revision ||
+        std::memcmp(s->eval.params, desc.params, sizeof(desc.params)) != 0;
     s->eval = desc;
+    if (old_tex) {
+        for (uint32_t i = 0u; i < s->num_samplers; ++i) {
+            if (s->eval.textures[i] == old_tex) {
+                s->eval.textures[i] = s->texture;
+                s->sampled_epochs[i] = 0u;
+            }
+        }
+    }
     s->seen_frame = ctx->active_ui->frame_index;
     s->window = ctx->active_window;
     s->owner_bound = true;

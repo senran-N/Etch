@@ -79,6 +79,7 @@ void push_layer(const LayerDesc& desc) noexcept {
        !std::isfinite(local.scale.x) || !std::isfinite(local.scale.y) || local.scale.x<=0 || local.scale.y<=0 ||
        !std::isfinite(local.pivot_norm.x) || !std::isfinite(local.pivot_norm.y)) local={};
     local.opacity=std::fmin(1.f,std::fmax(0.f,local.opacity));
+    local.blur_px=std::isfinite(local.blur_px) ? std::fmin(64.f,std::fmax(0.f,local.blur_px)) : 0.f;
     auto* node=ctx->frame_arena.alloc<VisualLayerNode>();
     if(!node) return;
     *node={}; node->parent=ctx->active_ui->current_layer; node->local=local;
@@ -95,11 +96,14 @@ namespace {
 void resolve_layer_chain(Context* ctx, const VisualLayerNode* node, float dpi) noexcept {
     if(node->resolved_frame==ctx->active_ui->frame_index) return;
     Vec2 parent_scale={1,1},parent_offset={}, inherited_scale={1,1},inherited_offset={};
-    float parent_opacity=1; bool parent_animating=false;
+    float parent_opacity=1, parent_blur=0; bool parent_animating=false, parent_plus_lighter=false;
+    const VisualLayerNode* parent_blur_root = nullptr;
     if(node->parent) {
         resolve_layer_chain(ctx,node->parent,dpi);
         parent_scale=node->parent->resolved_scale;parent_offset=node->parent->resolved_offset_px;
         parent_opacity=node->parent->resolved_opacity;parent_animating=node->parent->resolved_animating;
+        parent_blur=node->parent->resolved_blur_px;parent_plus_lighter=node->parent->resolved_plus_lighter;
+        parent_blur_root=node->parent->resolved_blur_root;
         inherited_scale=node->parent->inherited_scale;inherited_offset=node->parent->inherited_offset_px;
     }
     LayerDesc d=node->local;
@@ -185,6 +189,13 @@ void resolve_layer_chain(Context* ctx, const VisualLayerNode* node, float dpi) n
     node->resolved_offset_px={parent_offset.x+parent_scale.x*offset.x,parent_offset.y+parent_scale.y*offset.y};
     node->resolved_opacity=parent_opacity*d.opacity;
     node->resolved_animating=parent_animating || d.animating;
+    const float local_blur = d.blur_px > 0.05f ? d.blur_px * dpi : 0.0f;
+    const float combined_blur = (parent_blur > 0.0f && local_blur > 0.0f)
+        ? std::sqrt(parent_blur * parent_blur + local_blur * local_blur)
+        : (parent_blur + local_blur);
+    node->resolved_blur_px = std::fmin(64.0f, combined_blur);
+    node->resolved_blur_root = parent_blur_root ? parent_blur_root : (d.blur_px > 0.05f ? node : nullptr);
+    node->resolved_plus_lighter = parent_plus_lighter || d.blend_plus_lighter;
     node->resolved_frame=ctx->active_ui->frame_index;
 }
 Rect layer_rect(Context* ctx, Rect r) noexcept {

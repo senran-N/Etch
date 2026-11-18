@@ -14,6 +14,11 @@ constexpr bool is_srgb_gpu_format(SDL_GPUTextureFormat fmt) noexcept {
            fmt == SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM_SRGB;
 }
 
+constexpr bool is_linear_float_format(SDL_GPUTextureFormat fmt) noexcept {
+    return fmt == SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT ||
+           fmt == SDL_GPU_TEXTUREFORMAT_R32G32B32A32_FLOAT;
+}
+
 inline float srgb_u8_to_linear(uint8_t u) noexcept {
     const float c = static_cast<float>(u) * (1.0f / 255.0f);
     return (c <= 0.04045f)
@@ -39,6 +44,7 @@ inline SDL_FColor make_clear_fcolor(Color c, SDL_GPUTextureFormat target_fmt) no
 }
 
 inline constexpr SDL_GPUTextureFormat kBlurTexFormat = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB;
+inline constexpr SDL_GPUTextureFormat kFilterTexFormat = SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT;
 
 struct alignas(16) KawaseUniform {
     float    texel_size[2];
@@ -67,7 +73,7 @@ SDL_GPUGraphicsPipeline* create_graphics_pipeline(
         blend.dst_color_blendfactor = additive ? SDL_GPU_BLENDFACTOR_ONE : SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
         blend.color_blend_op = SDL_GPU_BLENDOP_ADD;
         blend.src_alpha_blendfactor = punch ? SDL_GPU_BLENDFACTOR_ZERO : SDL_GPU_BLENDFACTOR_ONE;
-        blend.dst_alpha_blendfactor = additive ? SDL_GPU_BLENDFACTOR_ONE : SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+        blend.dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
         blend.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
     }
     blend.color_write_mask =
@@ -107,7 +113,7 @@ SDL_GPUGraphicsPipeline* get_or_create_cached_pipeline(
     SDL_GPUTextureFormat target_fmt,
     bool enable_blend,
     CachedPipeline* cache,
-    uint32_t* count, bool punch = false) noexcept
+    uint32_t* count, bool punch = false, bool additive = false) noexcept
 {
     if (!device || !vs || !ps || target_fmt == SDL_GPU_TEXTUREFORMAT_INVALID) {
         return nullptr;
@@ -120,7 +126,7 @@ SDL_GPUGraphicsPipeline* get_or_create_cached_pipeline(
     if (*count >= kMaxCachedPipelines) {
         return nullptr;
     }
-    SDL_GPUGraphicsPipeline* pipe = create_graphics_pipeline(device, vs, ps, target_fmt, enable_blend,punch);
+    SDL_GPUGraphicsPipeline* pipe = create_graphics_pipeline(device, vs, ps, target_fmt, enable_blend, punch, additive);
     if (!pipe) {
         return nullptr;
     }
@@ -147,7 +153,12 @@ SDL_GPUGraphicsPipeline* get_or_create_pipeline(Context* ctx, SDL_GPUTextureForm
 
 SDL_GPUGraphicsPipeline* get_or_create_punch_pipeline(Context* ctx, SDL_GPUTextureFormat format) noexcept {
     return get_or_create_cached_pipeline(ctx->device,ctx->vs_shader,ctx->ps_shader,format,true,
-        ctx->punch_pipelines,&ctx->punch_pipeline_count,true);
+        ctx->punch_pipelines,&ctx->punch_pipeline_count,true,false);
+}
+
+SDL_GPUGraphicsPipeline* get_or_create_additive_pipeline(Context* ctx, SDL_GPUTextureFormat format) noexcept {
+    return get_or_create_cached_pipeline(ctx->device,ctx->vs_shader,ctx->ps_shader,format,true,
+        ctx->additive_pipelines,&ctx->additive_pipeline_count,false,true);
 }
 
 SDL_GPUGraphicsPipeline* get_or_create_present_pipeline(Context* ctx, SDL_GPUTextureFormat target_fmt) noexcept {
@@ -176,7 +187,61 @@ SDL_GPUGraphicsPipeline* get_or_create_kawase_pipeline(Context* ctx) noexcept {
     return ctx->kawase_pipe;
 }
 
+SDL_GPUGraphicsPipeline* get_or_create_filter_kawase_pipeline(Context* ctx) noexcept {
+    if (!ctx->filter_kawase_pipe) {
+        ctx->filter_kawase_pipe = create_graphics_pipeline(
+            ctx->device,
+            ctx->kawase_vs_shader,
+            ctx->kawase_ps_shader,
+            kFilterTexFormat,
+            false);
+    }
+    return ctx->filter_kawase_pipe;
+}
+
+void release_filter_targets(Context* ctx) noexcept {
+    for (uint32_t s = 0u; s < kMaxFilterSlices; ++s) {
+        for (uint32_t l = 0u; l < kMaxFilterLevels; ++l) {
+            if (ctx->active_ui->filter_slices[s].levels[l]) {
+                SDL_ReleaseGPUTexture(ctx->device, ctx->active_ui->filter_slices[s].levels[l]);
+                ctx->active_ui->filter_slices[s].levels[l] = nullptr;
+            }
+        }
+    }
+    ctx->active_ui->filter_rt_w = 0u;
+    ctx->active_ui->filter_rt_h = 0u;
+}
+
+bool ensure_filter_slice_targets(Context* ctx, uint32_t width, uint32_t height, uint32_t slice, uint32_t max_level) noexcept {
+    if (ctx->active_ui->filter_rt_w != width || ctx->active_ui->filter_rt_h != height) {
+        release_filter_targets(ctx);
+        ctx->active_ui->filter_rt_w = width;
+        ctx->active_ui->filter_rt_h = height;
+    }
+    FilterSliceTargets& st = ctx->active_ui->filter_slices[slice];
+    for (uint32_t lvl = 0u; lvl <= max_level && lvl < kMaxFilterLevels; ++lvl) {
+        if (st.levels[lvl]) continue;
+        const uint32_t lw = (width >> lvl) > 0u ? (width >> lvl) : 1u;
+        const uint32_t lh = (height >> lvl) > 0u ? (height >> lvl) : 1u;
+        const SDL_GPUTextureCreateInfo info = {
+            .type = SDL_GPU_TEXTURETYPE_2D,
+            .format = kFilterTexFormat,
+            .usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER,
+            .width = lw,
+            .height = lh,
+            .layer_count_or_depth = 1u,
+            .num_levels = 1u,
+            .sample_count = SDL_GPU_SAMPLECOUNT_1,
+            .props = 0u,
+        };
+        st.levels[lvl] = SDL_CreateGPUTexture(ctx->device, &info);
+        if (!st.levels[lvl]) return false;
+    }
+    return true;
+}
+
 void release_blur_targets(Context* ctx) noexcept {
+    release_filter_targets(ctx);
     if (ctx->active_ui->scene_tex) {
         SDL_ReleaseGPUTexture(ctx->device, ctx->active_ui->scene_tex);
         ctx->active_ui->scene_tex = nullptr;
@@ -364,15 +429,17 @@ void emit_uber_batches(
     SDL_GPUTextureFormat target_fmt,
     uint32_t target_w,
     uint32_t target_h,
+    const DrawBatch* batches,
     uint32_t begin_batch,
-    uint32_t end_batch) noexcept
+    uint32_t end_batch,
+    uint32_t prim_base_offset = 0u) noexcept
 {
-    if (ctx->prim_count == 0u || begin_batch >= end_batch) {
+    if (begin_batch >= end_batch) {
         return;
     }
 
     SDL_BindGPUGraphicsPipeline(render_pass, pipeline);
-    bool punch_bound=false;
+    uint8_t bound_mode = 0u; // 0 = normal, 1 = punch, 2 = additive
 
     const SDL_GPUViewport viewport = {
         .x = 0.0f,
@@ -398,24 +465,36 @@ void emit_uber_batches(
     SDL_GPUBuffer* slug_bufs[5] = { ctx->slug_curve_gpu_buf, ctx->slug_band_gpu_buf, ctx->dyn_slug_curve_gpu_buf, ctx->dyn_slug_band_gpu_buf,ctx->clip_shape_gpu };
     SDL_BindGPUFragmentStorageBuffers(render_pass, 0u, slug_bufs, 5u);
 
-    const uint32_t manual_srgb_bit = is_srgb_gpu_format(target_fmt) ? 0u : (1u << 31);
+    const uint32_t manual_srgb_bit = (is_srgb_gpu_format(target_fmt) || is_linear_float_format(target_fmt)) ? 0u : (1u << 31);
     const float inv_w = 1.0f / static_cast<float>(target_w);
     const float inv_h = 1.0f / static_cast<float>(target_h);
     SDL_GPUTexture* sentinel = blur_tex_sentinel();
+    const uintptr_t filter_base = reinterpret_cast<uintptr_t>(filter_tex_sentinel(0u, 0u));
+    const uintptr_t filter_end = filter_base + kMaxFilterSlices * kMaxFilterLevels;
 
     for (uint32_t b = begin_batch; b < end_batch; ++b) {
-        const DrawBatch& batch = ctx->batches[b];
+        const DrawBatch& batch = batches[b];
         if (batch.prim_count == 0u) {
             continue;
         }
 
-        if(batch.is_punch_hole!=punch_bound) {
-            SDL_BindGPUGraphicsPipeline(render_pass,batch.is_punch_hole ? get_or_create_punch_pipeline(ctx,target_fmt) : pipeline);
-            punch_bound=batch.is_punch_hole;
+        const uint8_t need_mode = batch.is_punch_hole ? 1u : (batch.is_additive ? 2u : 0u);
+        if (need_mode != bound_mode) {
+            SDL_GPUGraphicsPipeline* p = need_mode == 1u
+                ? get_or_create_punch_pipeline(ctx, target_fmt)
+                : (need_mode == 2u ? get_or_create_additive_pipeline(ctx, target_fmt) : pipeline);
+            SDL_BindGPUGraphicsPipeline(render_pass, p);
+            bound_mode = need_mode;
         }
         auto resolve_tex = [&](SDL_GPUTexture* t) noexcept -> SDL_GPUTexture* {
             if (t == sentinel) {
                 return ctx->active_ui->blur_ping_tex ? ctx->active_ui->blur_ping_tex : ctx->atlas.gpu_tex;
+            }
+            const uintptr_t addr = reinterpret_cast<uintptr_t>(t);
+            if (addr >= filter_base && addr < filter_end) {
+                const size_t idx = static_cast<size_t>(addr - filter_base);
+                SDL_GPUTexture* ftex = ctx->active_ui->filter_slices[idx / kMaxFilterLevels].levels[idx % kMaxFilterLevels];
+                return ftex ? ftex : ctx->atlas.gpu_tex;
             }
             return t ? t : ctx->atlas.gpu_tex;
         };
@@ -431,7 +510,7 @@ void emit_uber_batches(
             .dpi_scale = ctx->active_ui->dpi_scale,
             .time_seconds = ctx->active_ui->elapsed_seconds,
             .frame_index = ctx->active_ui->frame_index,
-            .flags = (batch.first_prim & 0x00FFFFFFu) | manual_srgb_bit,
+            .flags = ((prim_base_offset + batch.first_prim) & 0x00FFFFFFu) | manual_srgb_bit,
         };
         SDL_PushGPUVertexUniformData(cmd, 0u, &globals, static_cast<Uint32>(sizeof(globals)));
 
@@ -463,7 +542,7 @@ bool run_uber_render_pass(
     if (!render_pass) {
         return false;
     }
-    emit_uber_batches(ctx, cmd, render_pass, pipeline, dst_fmt, dst_w, dst_h, begin_batch, end_batch);
+    emit_uber_batches(ctx, cmd, render_pass, pipeline, dst_fmt, dst_w, dst_h, ctx->batches, begin_batch, end_batch, 0u);
     SDL_EndGPURenderPass(render_pass);
     return true;
 }
@@ -643,6 +722,13 @@ bool record_frame_commands(
 
     for(uint32_t i=0;i<ctx->batch_count;++i) {
         if(ctx->batches[i].is_punch_hole && !get_or_create_punch_pipeline(ctx,target_fmt)) return false;
+        if(ctx->batches[i].is_additive && !get_or_create_additive_pipeline(ctx,target_fmt)) return false;
+    }
+    if (ctx->blur_split_count > 0u || ctx->active_ui->bloom_intensity > 0) {
+        for (uint32_t i = 0; i < ctx->batch_count; ++i) {
+            if (ctx->batches[i].is_punch_hole && !get_or_create_punch_pipeline(ctx, kBlurTexFormat)) return false;
+            if (ctx->batches[i].is_additive && !get_or_create_additive_pipeline(ctx, kBlurTexFormat)) return false;
+        }
     }
     const bool slug_curves_pending = ctx->atlas.uploaded_slug_curves < ctx->atlas.slug_curve_count;
     const bool slug_bands_pending = ctx->atlas.uploaded_slug_bands < ctx->atlas.slug_band_count;
@@ -687,8 +773,9 @@ bool record_frame_commands(
         ctx->dyn_slug_band_count, static_cast<uint32_t>(sizeof(SlugBandEntryGpu)), &ctx->dyn_slug_band_gpu_buf,
         &ctx->dyn_slug_band_gpu_cap, &ctx->dyn_slug_band_tbuf, &ctx->dyn_slug_band_tbuf_cap,
         &dyn_bands_uploaded)) return false;
-    if (ctx->prim_count > ctx->prim_gpu_cap || ctx->prim_count > ctx->prim_tbuf_cap) {
-        if (!ensure_prim_buffers(ctx, ctx->prim_count)) return false;
+    const uint32_t total_prims = ctx->prim_count + ctx->filter_prim_count;
+    if (total_prims > ctx->prim_gpu_cap || total_prims > ctx->prim_tbuf_cap) {
+        if (!ensure_prim_buffers(ctx, total_prims)) return false;
     }
     auto& atlas = ctx->atlas;
     if (!atlas.gpu_tex || atlas.gpu_w != atlas.width || atlas.gpu_h != atlas.height) {
@@ -715,7 +802,7 @@ bool record_frame_commands(
             if (!ctx->atlas_transfer_buf) return false;
         }
     }
-    if (ctx->clip_shape_count || ctx->atlas.dirty || ctx->prim_count > 0u || slug_curves_pending || slug_bands_pending ||
+    if (ctx->clip_shape_count || ctx->atlas.dirty || total_prims > 0u || slug_curves_pending || slug_bands_pending ||
         ctx->dyn_slug_curve_count > 0u || ctx->dyn_slug_band_count > 0u) {
         SDL_GPUCopyPass* copy_pass = SDL_BeginGPUCopyPass(cmd);
         if (!copy_pass) {
@@ -767,11 +854,14 @@ bool record_frame_commands(
             &dyn_bands_uploaded, ctx->dyn_slug_band_gpu_buf, ctx->dyn_slug_band_tbuf, true)) {
             SDL_EndGPUCopyPass(copy_pass); return false;
         }
-        if (ctx->prim_count > 0u && ctx->prim_gpu_buf && ctx->prim_transfer_buf) {
-            const uint32_t byte_size = ctx->prim_count * static_cast<uint32_t>(sizeof(Prim));
+        if (total_prims > 0u && ctx->prim_gpu_buf && ctx->prim_transfer_buf) {
+            const uint32_t main_bytes = ctx->prim_count * static_cast<uint32_t>(sizeof(Prim));
+            const uint32_t filter_bytes = ctx->filter_prim_count * static_cast<uint32_t>(sizeof(Prim));
+            const uint32_t byte_size = main_bytes + filter_bytes;
             void* mapped = SDL_MapGPUTransferBuffer(ctx->device, ctx->prim_transfer_buf, true);
             if (mapped) {
-                std::memcpy(mapped, ctx->prims, byte_size);
+                if (main_bytes > 0u) std::memcpy(mapped, ctx->prims, main_bytes);
+                if (filter_bytes > 0u) std::memcpy(static_cast<uint8_t*>(mapped) + main_bytes, ctx->filter_prims, filter_bytes);
                 SDL_UnmapGPUTransferBuffer(ctx->device, ctx->prim_transfer_buf);
 
                 const SDL_GPUTransferBufferLocation src = {
@@ -788,6 +878,54 @@ bool record_frame_commands(
         }
 
         SDL_EndGPUCopyPass(copy_pass);
+    }
+
+    if (ctx->filter_group_count > 0u) {
+        bool slice_used[kMaxFilterSlices] = {};
+        uint32_t slice_max_level[kMaxFilterSlices] = {};
+        for (uint32_t gi = 0u; gi < ctx->filter_group_count; ++gi) {
+            const FilterBlurGroup& fg = ctx->filter_groups[gi];
+            slice_used[fg.slice] = true;
+            if (fg.max_level > slice_max_level[fg.slice]) slice_max_level[fg.slice] = fg.max_level;
+        }
+        SDL_GPUGraphicsPipeline* filter_uber_pipe = get_or_create_pipeline(ctx, kFilterTexFormat);
+        SDL_GPUGraphicsPipeline* filter_kawase_pipe = get_or_create_filter_kawase_pipeline(ctx);
+        if (!filter_uber_pipe || !filter_kawase_pipe) return false;
+        for (uint32_t bi = 0u; bi < ctx->filter_batch_count; ++bi) {
+            if (ctx->filter_batches[bi].is_punch_hole && !get_or_create_punch_pipeline(ctx, kFilterTexFormat)) return false;
+        }
+        for (uint32_t s = 0u; s < kMaxFilterSlices; ++s) {
+            if (!slice_used[s]) continue;
+            if (!ensure_filter_slice_targets(ctx, target_w, target_h, s, slice_max_level[s])) return false;
+            FilterSliceTargets& st = ctx->active_ui->filter_slices[s];
+            SDL_GPUColorTargetInfo ct = {};
+            ct.texture = st.levels[0];
+            ct.clear_color = {0.0f, 0.0f, 0.0f, 0.0f};
+            ct.load_op = SDL_GPU_LOADOP_CLEAR;
+            ct.store_op = SDL_GPU_STOREOP_STORE;
+            SDL_GPURenderPass* fpass = SDL_BeginGPURenderPass(cmd, &ct, 1u, nullptr);
+            if (!fpass) return false;
+            for (uint32_t gi = 0u; gi < ctx->filter_group_count; ++gi) {
+                const FilterBlurGroup& fg = ctx->filter_groups[gi];
+                if (fg.slice != s) continue;
+                emit_uber_batches(ctx, cmd, fpass, filter_uber_pipe, kFilterTexFormat, target_w, target_h,
+                    ctx->filter_batches, fg.first_batch, fg.end_batch, ctx->prim_count);
+            }
+            SDL_EndGPURenderPass(fpass);
+
+            for (uint32_t lvl = 0u; lvl < slice_max_level[s]; ++lvl) {
+                const uint32_t src_w = (target_w >> lvl) > 0u ? (target_w >> lvl) : 1u;
+                const uint32_t src_h = (target_h >> lvl) > 0u ? (target_h >> lvl) : 1u;
+                const uint32_t dst_w = (target_w >> (lvl + 1u)) > 0u ? (target_w >> (lvl + 1u)) : 1u;
+                const uint32_t dst_h = (target_h >> (lvl + 1u)) > 0u ? (target_h >> (lvl + 1u)) : 1u;
+                if (!run_kawase_step(ctx, cmd, filter_kawase_pipe, st.levels[lvl], st.levels[lvl + 1u],
+                    dst_w, dst_h, 1.0f / float(src_w), 1.0f / float(src_h), 1.0f, 0u))
+                {
+                    return false;
+                }
+                ++ctx->stats.blur_pass_count;
+            }
+        }
     }
 
     const bool bloom = ctx->active_ui->bloom_intensity > 0;
@@ -1028,6 +1166,11 @@ bool ensure_gpu_device(Context* ctx) noexcept {
     if (driver && !driver[0]) driver = nullptr;
 
     const auto fail = [&]() noexcept -> bool {
+        for(uint32_t i=0;i<ctx->additive_pipeline_count;++i) {
+            SDL_ReleaseGPUGraphicsPipeline(ctx->device,ctx->additive_pipelines[i].pipeline);
+            ctx->additive_pipelines[i]={};
+        }
+        ctx->additive_pipeline_count=0;
         for(uint32_t i=0;i<ctx->punch_pipeline_count;++i) {
             SDL_ReleaseGPUGraphicsPipeline(ctx->device,ctx->punch_pipelines[i].pipeline);
             ctx->punch_pipelines[i]={};
@@ -1048,6 +1191,10 @@ bool ensure_gpu_device(Context* ctx) noexcept {
         ctx->kawase_ps_shader = nullptr;
         if (ctx->linear_sampler) SDL_ReleaseGPUSampler(ctx->device, ctx->linear_sampler);
         ctx->linear_sampler = nullptr;
+        if (ctx->mirror_linear_sampler) SDL_ReleaseGPUSampler(ctx->device, ctx->mirror_linear_sampler);
+        ctx->mirror_linear_sampler = nullptr;
+        if (ctx->surface_fallback_tex) SDL_ReleaseGPUTexture(ctx->device, ctx->surface_fallback_tex);
+        ctx->surface_fallback_tex = nullptr;
         if (ctx->prim_gpu_buf) SDL_ReleaseGPUBuffer(ctx->device, ctx->prim_gpu_buf);
         ctx->prim_gpu_buf = nullptr;
         if (ctx->prim_transfer_buf) SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->prim_transfer_buf);
@@ -1224,6 +1371,14 @@ bool ensure_gpu_device(Context* ctx) noexcept {
     };
     ctx->linear_sampler = SDL_CreateGPUSampler(ctx->device, &sampler_info);
     if (!ctx->linear_sampler) {
+        return fail();
+    }
+    SDL_GPUSamplerCreateInfo mirror_info = sampler_info;
+    mirror_info.address_mode_u = SDL_GPU_SAMPLERADDRESSMODE_MIRRORED_REPEAT;
+    mirror_info.address_mode_v = SDL_GPU_SAMPLERADDRESSMODE_MIRRORED_REPEAT;
+    mirror_info.address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_MIRRORED_REPEAT;
+    ctx->mirror_linear_sampler = SDL_CreateGPUSampler(ctx->device, &mirror_info);
+    if (!ctx->mirror_linear_sampler) {
         return fail();
     }
 
@@ -1433,6 +1588,11 @@ void destroy_context(Context* ctx) noexcept {
     ctx->active_ui = &ctx->headless_ui;
     if (ctx->device) {
         release_shader_surfaces(ctx);
+        for(uint32_t i=0;i<ctx->additive_pipeline_count;++i) {
+            SDL_ReleaseGPUGraphicsPipeline(ctx->device,ctx->additive_pipelines[i].pipeline);
+            ctx->additive_pipelines[i]={};
+        }
+        ctx->additive_pipeline_count=0;
         for(uint32_t i=0;i<ctx->punch_pipeline_count;++i) {
             SDL_ReleaseGPUGraphicsPipeline(ctx->device,ctx->punch_pipelines[i].pipeline);
             ctx->punch_pipelines[i]={};
@@ -1449,12 +1609,15 @@ void destroy_context(Context* ctx) noexcept {
             }
         }
         if (ctx->kawase_pipe) SDL_ReleaseGPUGraphicsPipeline(ctx->device, ctx->kawase_pipe);
+        if (ctx->filter_kawase_pipe) SDL_ReleaseGPUGraphicsPipeline(ctx->device, ctx->filter_kawase_pipe);
         if (ctx->bloom_pipe) SDL_ReleaseGPUGraphicsPipeline(ctx->device, ctx->bloom_pipe);
         if (ctx->vs_shader) SDL_ReleaseGPUShader(ctx->device, ctx->vs_shader);
         if (ctx->ps_shader) SDL_ReleaseGPUShader(ctx->device, ctx->ps_shader);
         if (ctx->kawase_vs_shader) SDL_ReleaseGPUShader(ctx->device, ctx->kawase_vs_shader);
         if (ctx->kawase_ps_shader) SDL_ReleaseGPUShader(ctx->device, ctx->kawase_ps_shader);
         if (ctx->linear_sampler) SDL_ReleaseGPUSampler(ctx->device, ctx->linear_sampler);
+        if (ctx->mirror_linear_sampler) SDL_ReleaseGPUSampler(ctx->device, ctx->mirror_linear_sampler);
+        if (ctx->surface_fallback_tex) SDL_ReleaseGPUTexture(ctx->device, ctx->surface_fallback_tex);
         if (ctx->prim_gpu_buf) SDL_ReleaseGPUBuffer(ctx->device, ctx->prim_gpu_buf);
         if (ctx->prim_transfer_buf) SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->prim_transfer_buf);
         if (ctx->dyn_slug_curve_gpu_buf) SDL_ReleaseGPUBuffer(ctx->device, ctx->dyn_slug_curve_gpu_buf);
@@ -1500,6 +1663,7 @@ void destroy_context(Context* ctx) noexcept {
     std::free(ctx->prims);
     destroy_window_ui_state(ctx, &ctx->headless_ui);
     std::free(ctx->claimed_windows); std::free(ctx->batches); std::free(ctx->blur_splits);
+    std::free(ctx->filter_prims); std::free(ctx->filter_batches); std::free(ctx->filter_groups);
     arena_destroy(&ctx->frame_arena);
 
     if (ctx->owns_video_init) {
@@ -1605,12 +1769,14 @@ bool render_headless_png(
             clear_color))
     {
         SDL_CancelGPUCommandBuffer(cmd);
+        complete_shader_surfaces(ctx, ctx->active_window, false);
         return false;
     }
 
     SDL_GPUCopyPass* dl_pass = SDL_BeginGPUCopyPass(cmd);
     if (!dl_pass) {
         SDL_CancelGPUCommandBuffer(cmd);
+        complete_shader_surfaces(ctx, ctx->active_window, false);
         return false;
     }
 
@@ -1669,6 +1835,15 @@ bool render_headless_png(
 }
 
 namespace {
+
+void invalidate_surfaces_sampling_texture(Context* ctx, SDL_GPUTexture* texture) noexcept {
+    for (ShaderSurfaceSlot& s : ctx->shader_surfaces) {
+        if (!s.shader) continue;
+        for (uint32_t i = 0u; i < s.num_samplers; ++i) {
+            if (s.eval.textures[i] == texture) { s.dirty = true; break; }
+        }
+    }
+}
 
 bool upload_rgba_rows(
     Context* ctx,
@@ -1844,7 +2019,9 @@ bool update_texture_rgba(
     if (row_pitch_bytes != 0u && row_pitch_bytes < tight_pitch) {
         return false;
     }
-    return upload_rgba_rows(ctx, texture, width, height, rgba_pixels, row_pitch_bytes, true);
+    if (!upload_rgba_rows(ctx, texture, width, height, rgba_pixels, row_pitch_bytes, true)) return false;
+    invalidate_surfaces_sampling_texture(ctx, texture);
+    return true;
 }
 
 bool update_texture_region_rgba(Context* ctx, SDL_GPUTexture* texture,
@@ -1854,7 +2031,9 @@ bool update_texture_region_rgba(Context* ctx, SDL_GPUTexture* texture,
        x>=16384 || y>=16384 || width>16384-x || height>16384-y ||
        (row_pitch_bytes && row_pitch_bytes<width*4)) return false;
     // Cycling the destination would discard pixels outside this rectangle.
-    return upload_rgba_rows(ctx,texture,width,height,rgba_pixels,row_pitch_bytes,false,x,y);
+    if (!upload_rgba_rows(ctx,texture,width,height,rgba_pixels,row_pitch_bytes,false,x,y)) return false;
+    invalidate_surfaces_sampling_texture(ctx, texture);
+    return true;
 }
 
 LoadedTexture load_texture_file(Context* ctx, const char* path, bool srgb) noexcept {

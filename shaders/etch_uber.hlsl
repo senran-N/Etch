@@ -15,6 +15,7 @@
 #define ETCH_PRIM_MESH_GRAD   11u
 #define ETCH_PRIM_BORDER_BEAM 12u
 #define ETCH_PRIM_PUNCH_HOLE  13u
+#define ETCH_PRIM_LAYER_BLUR  14u
 
 #define ETCH_FLAG_LINEAR_GRAD   (1u << 0)
 #define ETCH_FLAG_RADIAL_GRAD   (1u << 1)
@@ -208,9 +209,9 @@ VSOut vs_main(uint vertex_id : SV_VertexID, uint instance_id : SV_InstanceID)
     float2 r_br_bl   = unpack_f16x2_custom(p.payload.w);
 
     float pad = 1.0f;
-    if (kind == ETCH_PRIM_GLYPH || kind == ETCH_PRIM_CANVAS_GRID || kind == ETCH_PRIM_BEZIER_WIRE || kind == ETCH_PRIM_RING_ARC)
+    if (kind == ETCH_PRIM_GLYPH || kind == ETCH_PRIM_CANVAS_GRID || kind == ETCH_PRIM_BEZIER_WIRE || kind == ETCH_PRIM_RING_ARC || kind == ETCH_PRIM_LAYER_BLUR)
     {
-        // Keep glyph quad inside texel bounds; CanvasGrid, BezierWire & RingArc already include AA/glow bounds.
+        // Keep glyph quad inside texel bounds; CanvasGrid, BezierWire, RingArc & LayerBlur already include AA/blur bounds.
         pad = 0.0f;
     }
     else if (kind == ETCH_PRIM_SHADOW)
@@ -270,6 +271,10 @@ VSOut vs_main(uint vertex_id : SV_VertexID, uint instance_id : SV_InstanceID)
     {
         uv_rect = float4(g_inv_viewport_size, 1.0f - asfloat(p.payload.x), 0.0f);
     }
+    else if (kind == ETCH_PRIM_LAYER_BLUR)
+    {
+        uv_rect = float4(g_inv_viewport_size, asfloat(p.payload.x), float(p.payload.y));
+    }
     else if (kind == ETCH_PRIM_CANVAS_GRID)
     {
         uv_rect = float4(asfloat(p.payload.x), asfloat(p.payload.y), r_tl_tr.x, r_tl_tr.y);
@@ -296,7 +301,7 @@ VSOut vs_main(uint vertex_id : SV_VertexID, uint instance_id : SV_InstanceID)
     {
         uv_rect = float4(unpack_f16x2_custom(p.payload.x), unpack_f16x2_custom(p.payload.y));
     }
-    else if ((flags & (ETCH_FLAG_LINEAR_GRAD | ETCH_FLAG_RADIAL_GRAD)) != 0u)
+    else if (kind != ETCH_PRIM_SLUG_GLYPH && (flags & (ETCH_FLAG_LINEAR_GRAD | ETCH_FLAG_RADIAL_GRAD)) != 0u)
     {
         col1 = unpack_rgba8_srgb_to_linear(kind == ETCH_PRIM_SLUG_FILL ? p.payload.z : p.payload.x);
         grad_dir = unpack_f16x2_custom(kind == ETCH_PRIM_SLUG_FILL ? p.payload.w : p.payload.y);
@@ -740,12 +745,20 @@ float4 ps_main(VSOut input) : SV_Target0
         float2 norm_uv = saturate((input.pixel_pos - input.bounds.xy) / size);
         float2 uv      = lerp(input.uv_rect.xy, input.uv_rect.zw, norm_uv);
         float  cov     = sample_slot(tex_slot, uv).a;
+        float4 glyph_col = input.color0;
+        if ((flags & ETCH_FLAG_LINEAR_GRAD) != 0u)
+        {
+            float rel_x = input.pixel_pos.x - input.bounds.x;
+            float x0_rel = input.radii.z;
+            float x1_rel = max(input.radii.w, x0_rel + 0.5f);
+            glyph_col = lerp(input.color0, input.border_color, smoothstep(x0_rel, x1_rel, rel_x));
+        }
         if ((flags & ETCH_FLAG_STEM_DARKEN) != 0u)
         {
-            float luma = saturate(dot(input.color0, float4(0.2126f, 0.7152f, 0.0722f, 0.0f)));
+            float luma = saturate(dot(glyph_col.rgb, float3(0.2126f, 0.7152f, 0.0722f)));
             cov = lerp(cov, cov * (2.0f - cov), 0.35f * luma);
         }
-        out_pm = float4(input.color0.rgb, 1.0f) * (input.color0.a * cov);
+        out_pm = float4(glyph_col.rgb, 1.0f) * (glyph_col.a * cov);
     }
     else if (kind == ETCH_PRIM_SLUG_GLYPH)
     {
@@ -755,13 +768,21 @@ float4 ps_main(VSOut input) : SV_Target0
         float cov = slug_render(render_coord, size, input.slug_meta.x, input.slug_meta.y);
         if (any(input.rotation != float2(1.0f, 0.0f)))
             cov *= saturate(0.5f - max(abs(p_local.x)-half_size.x, abs(p_local.y)-half_size.y));
+        float4 glyph_col = input.color0;
+        if ((flags & (ETCH_FLAG_LINEAR_GRAD | ETCH_FLAG_ROUND_CAP)) == ETCH_FLAG_LINEAR_GRAD)
+        {
+            float rel_x = input.pixel_pos.x - input.bounds.x;
+            float x0_rel = input.radii.z;
+            float x1_rel = max(input.radii.w, x0_rel + 0.5f);
+            glyph_col = lerp(input.color0, input.border_color, smoothstep(x0_rel, x1_rel, rel_x));
+        }
         if ((flags & ETCH_FLAG_STEM_DARKEN) != 0u)
         {
             float darken_t = saturate((28.0f - size.y) / 16.0f);
-            float luma = saturate(dot(input.color0, float4(0.2126f, 0.7152f, 0.0722f, 0.0f)));
+            float luma = saturate(dot(glyph_col.rgb, float3(0.2126f, 0.7152f, 0.0722f)));
             cov = lerp(cov, cov * (2.0f - cov), (0.18f + 0.12f * luma) * darken_t);
         }
-        out_pm = float4(input.color0.rgb, 1.0f) * (input.color0.a * cov);
+        out_pm = float4(glyph_col.rgb, 1.0f) * (glyph_col.a * cov);
     }
     else if (kind == ETCH_PRIM_SLUG_FILL) {
         float2 uv = (p_rel + half_size) / size;
@@ -775,7 +796,7 @@ float4 ps_main(VSOut input) : SV_Target0
         float2 uv      = lerp(input.uv_rect.xy, input.uv_rect.zw, norm_uv);
         float4 texel   = sample_slot(tex_slot, uv);
 
-        float d         = sd_rounded_box(p_rel, half_size, input.radii);
+        float d         = sd_rounded_box(p_rel, half_size, input.radii, (flags & ETCH_FLAG_LINEAR_GRAD) != 0u);
         float border_w  = input.grad_params.z;
         float softness  = input.grad_params.w;
         float inv_aa    = 1.0f / max(softness, 0.5f);
@@ -819,6 +840,13 @@ float4 ps_main(VSOut input) : SV_Target0
         float4 b_pm = float4(input.border_color.rgb, 1.0f) * (input.border_color.a * border_t);
         float4 g_pm = float4(glass_lin.rgb, 1.0f) * input.uv_rect.z;
         out_pm      = b_pm + g_pm * inner_cov;
+    }
+    else if (kind == ETCH_PRIM_LAYER_BLUR)
+    {
+        float2 layer_uv = saturate(input.pixel_pos * input.uv_rect.xy);
+        float4 c_lo = sample_slot(tex_slot, layer_uv);
+        float4 c_hi = sample_slot(uint(input.uv_rect.w + 0.5f), layer_uv);
+        out_pm = lerp(c_lo, c_hi, saturate(input.uv_rect.z));
     }
     else if (kind == ETCH_PRIM_CANVAS_GRID)
     {

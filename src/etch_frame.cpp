@@ -93,6 +93,19 @@ void end_frame(Context* ctx_arg) noexcept {
             default: break;
         }
         if(ctx->active_render_layer) resolve_layer_chain(ctx,ctx->active_render_layer,dpi);
+        if (cmd->commandType == CLAY_RENDER_COMMAND_TYPE_SCISSOR_END) {
+            if (ctx->active_filter_group && clip_stack.depth <= ctx->active_filter_group->ancestor_clip_depth) {
+                finalize_filter_group(ctx);
+            }
+        } else if (cmd->commandType != CLAY_RENDER_COMMAND_TYPE_SCISSOR_START) {
+            const VisualLayerNode* cmd_blur_root = ctx->active_render_layer ? ctx->active_render_layer->resolved_blur_root : nullptr;
+            if (ctx->active_filter_group && ctx->active_filter_group->blur_root != cmd_blur_root) {
+                finalize_filter_group(ctx);
+            }
+            if (cmd_blur_root && !ctx->active_filter_group) {
+                begin_filter_group(ctx, cmd_blur_root, cur_clip, clip_stack.depth);
+            }
+        }
         const Rect box_px = ctx->active_ui->pixel_snap && !ctx->active_render_layer && cmd->commandType != CLAY_RENDER_COMMAND_TYPE_TEXT ? snap_pixel_rect(raw_box_px) : raw_box_px;
         switch (cmd->commandType) {
             case CLAY_RENDER_COMMAND_TYPE_CUSTOM: {
@@ -330,6 +343,9 @@ void end_frame(Context* ctx_arg) noexcept {
                     const ImageDesc& idesc = extra->desc;
                     Vec2 uv0=idesc.uv_min, uv1=idesc.uv_max;
                     if (idesc.sprite_id != kInvalidSprite && !resolve_sprite_uv_rect(ctx,idesc.sprite_id,uv0,uv1,&uv0,&uv1)) break;
+                    const uint8_t img_flags = static_cast<uint8_t>(
+                        ((idesc.sprite_id != kInvalidSprite || surface_texture_premultiplied(ctx, idesc.texture)) ? PrimFlag_Premultiplied : PrimFlag_None) |
+                        (idesc.continuous_corners ? PrimFlag_LinearGrad : PrimFlag_None));
                     push_prim(
                         ctx,
                         Prim::make_texture(
@@ -342,7 +358,7 @@ void end_frame(Context* ctx_arg) noexcept {
                             idesc.tint,
                             idesc.border_color,
                             idesc.border_width * dpi,
-                            (idesc.sprite_id != kInvalidSprite || surface_texture_premultiplied(ctx, idesc.texture)) ? PrimFlag_Premultiplied : PrimFlag_None,
+                            img_flags,
                             cur_clip.radius),
                         idesc.sprite_id != kInvalidSprite ? nullptr : idesc.texture);
                 }
@@ -369,6 +385,7 @@ void end_frame(Context* ctx_arg) noexcept {
                 break;
         }
     }
+    finalize_filter_group(ctx);
 
     // Clay may omit CUSTOM commands for viewport-culled boxes. Retain their
     // coordinate mapping without emitting primitives or disabling render culling.

@@ -8,7 +8,7 @@
 
 #ifndef ETCH_VERSION_MAJOR
 #define ETCH_VERSION_MAJOR 0
-#define ETCH_VERSION_MINOR 20
+#define ETCH_VERSION_MINOR 21
 #define ETCH_VERSION_PATCH 0
 #define ETCH_VERSION_STR_DETAIL(x) #x
 #define ETCH_VERSION_STR(x) ETCH_VERSION_STR_DETAIL(x)
@@ -91,7 +91,8 @@ typedef enum EtchPrimKind {
     ETCH_PRIM_ROTATED_RECT = 10,
     ETCH_PRIM_MESH_GRAD = 11,
     ETCH_PRIM_BORDER_BEAM = 12,
-    ETCH_PRIM_PUNCH_HOLE = 13
+    ETCH_PRIM_PUNCH_HOLE = 13,
+    ETCH_PRIM_LAYER_BLUR = 14
 } EtchPrimKind;
 
 typedef enum EtchPrimFlags {
@@ -317,13 +318,15 @@ typedef struct EtchShaderSurfaceCreateDesc {
     EtchShaderSurfaceCode spirv, dxil, msl;
     bool continuous_time;
     float max_fps;
+    uint32_t num_samplers;
+    bool sampler_mirror_repeat;
 } EtchShaderSurfaceCreateDesc;
 typedef struct EtchShaderSurfaceEvalDesc {
     uint32_t width, height;
     uint64_t revision;
     EtchVec4 params[4];
+    struct SDL_GPUTexture* textures[4];
     bool enabled;
-    uint8_t reserved[15];
 } EtchShaderSurfaceEvalDesc;
 EtchShaderSurfaceCreateDesc etch_shader_surface_create_desc_default(void);
 EtchShaderSurfaceEvalDesc etch_shader_surface_eval_desc_default(void);
@@ -902,6 +905,10 @@ typedef struct EtchTextSpan {
     float icon_gap_px;
     float padding_y;
     EtchColor hover_background;
+    bool has_wipe;
+    EtchColor color_end;
+    float wipe_x;
+    float wipe_feather_px;
 } EtchTextSpan;
 
 typedef struct EtchRichTextDesc {
@@ -963,6 +970,7 @@ typedef struct EtchImageDesc {
     float border_width;
     float aspect_ratio;
     uint16_t grid_col_span;
+    bool continuous_corners;
 } EtchImageDesc;
 
 typedef struct EtchIconDesc {
@@ -1135,6 +1143,10 @@ typedef struct EtchTextDrawDesc {
     bool foreground;
     float max_width_px;
     bool ellipsis;
+    bool has_wipe;
+    EtchColor color_end;
+    float wipe_x;
+    float wipe_feather_px;
 } EtchTextDrawDesc;
 
 typedef struct EtchImageDrawDesc {
@@ -1145,6 +1157,7 @@ typedef struct EtchImageDrawDesc {
     EtchColor tint;
     float radius;
     bool foreground;
+    bool continuous_corners;
 } EtchImageDrawDesc;
 
 typedef struct EtchTextureDesc {
@@ -1814,6 +1827,8 @@ typedef struct EtchLayerDesc {
     float opacity;
     EtchVec2 translate, scale, pivot_norm, pivot_px;
     bool animating;
+    float blur_px;
+    bool blend_plus_lighter;
 } EtchLayerDesc;
 EtchLayerDesc etch_layer_desc_default(void);
 void etch_push_layer(const EtchLayerDesc* desc);

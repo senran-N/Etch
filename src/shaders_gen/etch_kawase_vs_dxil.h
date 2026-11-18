@@ -4,7 +4,7 @@
 ;
 ; Name                 Index   Mask Register SysValue  Format   Used
 ; -------------------- ----- ------ -------- -------- ------- ------
-; SV_VertexID              0   x           0   VERTID    uint   x
+; SV_VertexID              0   x           0   VERTID    uint   x   
 ;
 ;
 ; Output signature:
@@ -12,11 +12,11 @@
 ; Name                 Index   Mask Register SysValue  Format   Used
 ; -------------------- ----- ------ -------- -------- ------- ------
 ; SV_Position              0   xyzw        0      POS   float   xyzw
-; TEXCOORD                 0   xy          1     NONE   float   xy
+; TEXCOORD                 0   xy          1     NONE   float   xy  
 ;
 ; shader hash: 0bf4bd763efba4bf22b1f665d1aa58af
 ;
-; Pipeline Runtime Information:
+; Pipeline Runtime Information: 
 ;
 ;PSVRuntimeInfo:
 ; Vertex Shader
@@ -39,14 +39,14 @@
 ;
 ; Name                 Index             InterpMode DynIdx
 ; -------------------- ----- ---------------------- ------
-; SV_VertexID              0
+; SV_VertexID              0                              
 ;
 ; Output signature:
 ;
 ; Name                 Index             InterpMode DynIdx
 ; -------------------- ----- ---------------------- ------
-; SV_Position              0          noperspective
-; TEXCOORD                 0                 linear
+; SV_Position              0          noperspective       
+; TEXCOORD                 0                 linear       
 ;
 ; Buffer Definitions:
 ;

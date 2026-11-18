@@ -677,22 +677,122 @@ Vec4 box_scroll_fade(Context* ctx,const BoxExtra* extra,float dpi) noexcept {
         extra->desc.scroll_x ? std::fmin(extra->desc.scroll_fade_px,std::fmax(0.f,max_x-ws->scroll_pos.x))*dpi : 0};
 }
 
+bool append_prim_to_batch(
+    Prim** prims,
+    uint32_t* prim_count,
+    uint32_t* prim_cap,
+    uint32_t hard_cap,
+    DrawBatch** batches,
+    uint32_t* batch_count,
+    uint32_t* batch_cap,
+    Prim prim,
+    SDL_GPUTexture* ext_tex,
+    SDL_GPUTexture* ext_tex2,
+    bool hole,
+    bool additive,
+    bool force_new_batch) noexcept
+{
+    if (*prim_count >= *prim_cap) {
+        if (*prim_cap >= hard_cap) return false;
+        uint32_t cap = *prim_cap >= kMinPrimCap ? *prim_cap : kMinPrimCap;
+        cap = cap > hard_cap / 2u ? hard_cap : cap * 2u;
+        Prim* grown = static_cast<Prim*>(std::realloc(*prims, static_cast<size_t>(cap) * sizeof(Prim)));
+        if (!grown) return false;
+        *prims = grown;
+        *prim_cap = cap;
+    }
+
+    if (*batch_count == 0u || force_new_batch) {
+        if (!ensure_batch_cap_array(batches, batch_cap, *batch_count)) return false;
+        (*batches)[(*batch_count)++] = DrawBatch{
+            .first_prim = *prim_count,
+            .prim_count = 0u,
+            .ext_textures = {},
+            .ext_count = 0u,
+            .is_punch_hole = hole,
+            .is_additive = additive,
+        };
+    }
+
+    DrawBatch* cur = &(*batches)[*batch_count - 1u];
+    if ((cur->is_punch_hole != hole || cur->is_additive != additive) && cur->prim_count > 0u) {
+        if (!ensure_batch_cap_array(batches, batch_cap, *batch_count)) return false;
+        cur = &(*batches)[(*batch_count)++];
+        *cur = DrawBatch{
+            .first_prim = *prim_count,
+            .prim_count = 0u,
+            .ext_textures = {},
+            .ext_count = 0u,
+            .is_punch_hole = hole,
+            .is_additive = additive,
+        };
+    }
+    cur->is_punch_hole = hole;
+    cur->is_additive = additive;
+
+    const auto find_ext_slot = [](const DrawBatch* b, SDL_GPUTexture* tex) noexcept -> uint16_t {
+        if (!tex) return 0u;
+        for (uint32_t i = 0u; i < b->ext_count; ++i) {
+            if (b->ext_textures[i] == tex) return static_cast<uint16_t>(i + 1u);
+        }
+        return 0u;
+    };
+
+    uint16_t tex_slot = find_ext_slot(cur, ext_tex);
+    uint16_t slot2 = find_ext_slot(cur, ext_tex2);
+    uint32_t needed = 0u;
+    if (ext_tex && tex_slot == 0u) ++needed;
+    if (ext_tex2 && ext_tex2 != ext_tex && slot2 == 0u) ++needed;
+
+    if (cur->ext_count + needed > 8u) {
+        if (!ensure_batch_cap_array(batches, batch_cap, *batch_count)) return false;
+        cur = &(*batches)[(*batch_count)++];
+        *cur = DrawBatch{
+            .first_prim = *prim_count,
+            .prim_count = 0u,
+            .ext_textures = {},
+            .ext_count = 0u,
+            .is_punch_hole = hole,
+            .is_additive = additive,
+        };
+        tex_slot = 0u;
+        slot2 = 0u;
+    }
+
+    if (ext_tex) {
+        if (tex_slot == 0u) {
+            cur->ext_textures[cur->ext_count] = ext_tex;
+            tex_slot = static_cast<uint16_t>(cur->ext_count + 1u);
+            ++cur->ext_count;
+        }
+    }
+    if (ext_tex2) {
+        slot2 = find_ext_slot(cur, ext_tex2);
+        if (slot2 == 0u) {
+            cur->ext_textures[cur->ext_count] = ext_tex2;
+            slot2 = static_cast<uint16_t>(cur->ext_count + 1u);
+            ++cur->ext_count;
+        }
+    }
+
+    prim.style.x = (prim.style.x & ~(0xFu << 10)) | ((static_cast<uint32_t>(tex_slot) & 0xFu) << 10);
+    if (ext_tex2) {
+        prim.payload.y = static_cast<uint32_t>(slot2);
+    }
+    (*prims)[(*prim_count)++] = prim;
+    ++cur->prim_count;
+    return true;
+}
+
 void push_prim(
     Context* ctx,
     Prim prim,
     SDL_GPUTexture* ext_tex = nullptr,
-    float cull_pad_px = 2.0f) noexcept
+    float cull_pad_px = 2.0f,
+    SDL_GPUTexture* ext_tex2 = nullptr,
+    bool force_additive = false) noexcept
 {
     if (!ctx || !ctx->prims) return;
-    if (ctx->prim_count >= ctx->max_prims) {
-        if (ctx->max_prims >= kMaxPrimHardCap) return;
-        uint32_t cap = ctx->max_prims >= kMinPrimCap ? ctx->max_prims : kMinPrimCap;
-        cap = cap > kMaxPrimHardCap / 2u ? kMaxPrimHardCap : cap * 2u;
-        Prim* grown = static_cast<Prim*>(std::realloc(ctx->prims, static_cast<size_t>(cap) * sizeof(Prim)));
-        if (!grown) return;
-        ctx->prims = grown;
-        ctx->max_prims = cap;
-    }
     const auto* layer=ctx->active_render_layer;
     if(layer) {
         resolve_layer_chain(ctx,layer,ctx->active_ui->dpi_scale);
@@ -707,6 +807,12 @@ void push_prim(
         }
         else prim.style.y=fade(prim.style.y);
         if(kind==PrimKind::Rect || kind==PrimKind::RotatedRect || kind==PrimKind::BezierWire || kind==PrimKind::RingArc || kind==PrimKind::Texture || kind==PrimKind::BlurGlass || kind==PrimKind::CanvasGrid || kind==PrimKind::MeshGrad) prim.style.z=fade(prim.style.z);
+        if((kind==PrimKind::SlugGlyph || kind==PrimKind::Glyph) && (prim.style.x & (uint32_t(PrimFlag_LinearGrad)<<4))) {
+            prim.style.z=fade(prim.style.z);
+            const float x0=unpack_f16_cpu(uint16_t(prim.payload.w))*scale.x;
+            const float x1=unpack_f16_cpu(uint16_t(prim.payload.w>>16))*scale.x;
+            prim.payload.w=pack_f16x2(clamp_range(x0,-32768.0f,32768.0f),clamp_range(x1,-32768.0f,32768.0f));
+        }
         if(kind==PrimKind::BezierWire || kind==PrimKind::RingArc) prim.payload.w=fade(prim.payload.w);
         if(kind==PrimKind::MeshGrad) {prim.payload.x=fade(prim.payload.x);prim.payload.y=fade(prim.payload.y);}
         if(kind==PrimKind::SlugFill) prim.payload.z=fade(prim.payload.z);
@@ -736,7 +842,12 @@ void push_prim(
         const float width = unpack_f16_cpu(static_cast<uint16_t>(prim.style.w));
         if (snap_rect && width > 0) prim.style.w = (prim.style.w & 0xFFFF0000u) | pack_f16(std::fmax(1.0f, std::round(width)));
     }
-    if(ctx->render_clip_index) {
+    FilterBlurGroup* fg = ctx->active_filter_group;
+    if (fg && ctx->render_clip_index == fg->ancestor_clip_index) {
+        prim.style.x &= 0x3FFFu;
+        prim.style.x &= ~(uint32_t(PrimFlag_RoundedClip) << 4);
+        prim.clip = {0.0f, 0.0f, static_cast<float>(ctx->active_ui->viewport_w), static_cast<float>(ctx->active_ui->viewport_h)};
+    } else if (ctx->render_clip_index) {
         const uint32_t index=ctx->render_clip_index;
         prim.style.x=(prim.style.x & 0x3FFFu) | (1u<<18) | ((index&0xFFFu)<<20) | ((index>>12)<<14);
     }
@@ -770,57 +881,45 @@ void push_prim(
     {
         return;
     }
-    if (ctx->batch_count == 0u) {
-        ctx->batches[0] = DrawBatch{ .first_prim = 0u, .prim_count = 0u, .ext_textures = {}, .ext_count = 0u };
-        ctx->batch_count = 1u;
-    }
 
-    DrawBatch* cur = &ctx->batches[ctx->batch_count - 1u];
-    const bool hole=(prim.style.x&15u)==uint32_t(PrimKind::PunchHole);
-    if(cur->is_punch_hole!=hole && cur->prim_count) {
-        if(!ensure_batch_cap(ctx)) return;
-        cur=&ctx->batches[ctx->batch_count++];
-        *cur={.first_prim=ctx->prim_count};
-    }
-    cur->is_punch_hole=hole;
-    uint16_t tex_slot = 0u;
-
-    if (ext_tex != nullptr) {
-        bool found = false;
-        for (uint32_t i = 0u; i < cur->ext_count; ++i) {
-            if (cur->ext_textures[i] == ext_tex) {
-                tex_slot = static_cast<uint16_t>(i + 1u);
-                found = true;
-                break;
-            }
+    const bool hole = (prim.style.x & 15u) == uint32_t(PrimKind::PunchHole);
+    if (fg) {
+        const float bx0 = min_x - cull_pad_px;
+        const float by0 = min_y - cull_pad_px;
+        const float bx1 = max_x + cull_pad_px;
+        const float by1 = max_y + cull_pad_px;
+        if (!fg->has_bounds) {
+            fg->raw_bounds = {bx0, by0, bx1 - bx0, by1 - by0};
+            fg->has_bounds = true;
+        } else {
+            const float gx0 = std::fmin(fg->raw_bounds.x, bx0);
+            const float gy0 = std::fmin(fg->raw_bounds.y, by0);
+            const float gx1 = std::fmax(fg->raw_bounds.x + fg->raw_bounds.w, bx1);
+            const float gy1 = std::fmax(fg->raw_bounds.y + fg->raw_bounds.h, by1);
+            fg->raw_bounds = {gx0, gy0, gx1 - gx0, gy1 - gy0};
         }
-        if (!found) {
-            if (cur->ext_count < 8u) {
-                cur->ext_textures[cur->ext_count] = ext_tex;
-                tex_slot = static_cast<uint16_t>(cur->ext_count + 1u);
-                ++cur->ext_count;
-            } else {
-                if (!ensure_batch_cap(ctx)) {
-                    return;
-                }
-                cur = &ctx->batches[ctx->batch_count++];
-                *cur = DrawBatch{
-                    .first_prim = ctx->prim_count,
-                    .prim_count = 0u,
-                    .ext_textures = {ext_tex, nullptr, nullptr},
-                    .ext_count = 1u,
-                };
-                tex_slot = 1u;
-            }
+        if (layer) {
+            fg->blur_px = std::fmax(fg->blur_px, layer->resolved_blur_px);
+            fg->plus_lighter |= layer->resolved_plus_lighter;
         }
+        const bool need_new = (ctx->filter_batch_count == fg->first_batch);
+        (void)append_prim_to_batch(
+            &ctx->filter_prims, &ctx->filter_prim_count, &ctx->filter_prim_cap, kMaxPrimHardCap,
+            &ctx->filter_batches, &ctx->filter_batch_count, &ctx->filter_batch_cap,
+            prim, ext_tex, ext_tex2, hole, false, need_new);
+        return;
     }
 
-    Prim final_p = prim;
-    final_p.style.x = (final_p.style.x & ~(0xFu << 10)) | ((static_cast<uint32_t>(tex_slot) & 0xFu) << 10);
-    ctx->prims[ctx->prim_count++] = final_p;
-    ++cur->prim_count;
+    const bool additive = !hole && (force_additive || (layer && layer->resolved_plus_lighter));
+    if (!append_prim_to_batch(
+            &ctx->prims, &ctx->prim_count, &ctx->max_prims, kMaxPrimHardCap,
+            &ctx->batches, &ctx->batch_count, &ctx->batch_cap,
+            prim, ext_tex, ext_tex2, hole, additive, false))
+    {
+        return;
+    }
 
-    const uint32_t pkind = final_p.style.x & 0xFu;
+    const uint32_t pkind = prim.style.x & 0xFu;
     if (pkind != static_cast<uint32_t>(PrimKind::Shadow) &&
         pkind != static_cast<uint32_t>(PrimKind::BlurGlass))
     {
@@ -828,11 +927,117 @@ void push_prim(
     }
 }
 
+void begin_filter_group(Context* ctx, const VisualLayerNode* blur_root, const ClipEntry& ancestor_clip, uint32_t clip_depth) noexcept {
+    if (!ctx || !blur_root || ctx->active_filter_group) return;
+    if (ctx->filter_group_count == ctx->filter_group_cap) {
+        const uint32_t cap = ctx->filter_group_cap ? ctx->filter_group_cap * 2u : 16u;
+        void* p = std::realloc(ctx->filter_groups, size_t(cap) * sizeof(FilterBlurGroup));
+        if (!p) return;
+        ctx->filter_groups = static_cast<FilterBlurGroup*>(p);
+        ctx->filter_group_cap = cap;
+    }
+    FilterBlurGroup& g = ctx->filter_groups[ctx->filter_group_count++];
+    g = FilterBlurGroup{
+        .blur_root = blur_root,
+        .first_batch = ctx->filter_batch_count,
+        .end_batch = ctx->filter_batch_count,
+        .slice = 0u,
+        .max_level = 3u,
+        .blur_px = blur_root->resolved_blur_px,
+        .plus_lighter = blur_root->resolved_plus_lighter,
+        .raw_bounds = {},
+        .has_bounds = false,
+        .padded_bounds = {},
+        .ancestor_clip = ancestor_clip,
+        .ancestor_clip_index = ancestor_clip.indexed ? ancestor_clip.shape : 0u,
+        .ancestor_clip_depth = clip_depth,
+    };
+    ctx->active_filter_group = &g;
+}
+
+void finalize_filter_group(Context* ctx) noexcept {
+    if (!ctx || !ctx->active_filter_group) return;
+    FilterBlurGroup& g = *ctx->active_filter_group;
+    ctx->active_filter_group = nullptr;
+    g.end_batch = ctx->filter_batch_count;
+    if (!g.has_bounds || g.end_batch <= g.first_batch || g.raw_bounds.w <= 0.0f || g.raw_bounds.h <= 0.0f) {
+        --ctx->filter_group_count;
+        return;
+    }
+    const float pad = std::ceil(g.blur_px * 2.5f + 4.0f);
+    const float vp_w = static_cast<float>(ctx->active_ui->viewport_w);
+    const float vp_h = static_cast<float>(ctx->active_ui->viewport_h);
+    const float px0 = std::fmax(0.0f, std::floor(g.raw_bounds.x - pad));
+    const float py0 = std::fmax(0.0f, std::floor(g.raw_bounds.y - pad));
+    const float px1 = std::fmin(vp_w, std::ceil(g.raw_bounds.x + g.raw_bounds.w + pad));
+    const float py1 = std::fmin(vp_h, std::ceil(g.raw_bounds.y + g.raw_bounds.h + pad));
+    g.padded_bounds = {px0, py0, px1 - px0, py1 - py0};
+    const Rect clipped = rect_intersect(g.padded_bounds, g.ancestor_clip.rect);
+    if (clipped.w <= 0.0f || clipped.h <= 0.0f) {
+        ctx->filter_batch_count = g.first_batch;
+        --ctx->filter_group_count;
+        return;
+    }
+
+    uint32_t chosen_slice = 0u;
+    bool found_clean = false;
+    float best_overlap = 1.0e30f;
+    for (uint32_t s = 0u; s < kMaxFilterSlices; ++s) {
+        float overlap_area = 0.0f;
+        for (uint32_t i = 0u; i + 1u < ctx->filter_group_count; ++i) {
+            const FilterBlurGroup& prev = ctx->filter_groups[i];
+            if (prev.slice != s) continue;
+            const Rect inter = rect_intersect(g.padded_bounds, prev.padded_bounds);
+            overlap_area += inter.w * inter.h;
+        }
+        if (overlap_area <= 0.0f) {
+            chosen_slice = s;
+            found_clean = true;
+            break;
+        }
+        if (overlap_area < best_overlap) {
+            best_overlap = overlap_area;
+            chosen_slice = s;
+        }
+    }
+    (void)found_clean;
+    g.slice = chosen_slice;
+
+    const float b = clamp_range(g.blur_px, 0.0f, 64.0f);
+    uint32_t lo = 0u, hi = 1u;
+    float blend_t = 0.0f;
+    if (b <= 2.0f) {
+        lo = 0u; hi = 1u; blend_t = b * 0.5f;
+    } else if (b <= 5.0f) {
+        lo = 1u; hi = 2u; blend_t = (b - 2.0f) / 3.0f;
+    } else if (b <= 11.0f) {
+        lo = 2u; hi = 3u; blend_t = (b - 5.0f) / 6.0f;
+    } else {
+        lo = 3u; hi = 4u; blend_t = clamp_range((b - 11.0f) / 13.0f, 0.0f, 1.0f);
+    }
+    g.max_level = hi;
+
+    const VisualLayerNode* saved_layer = ctx->active_render_layer;
+    const uint32_t saved_clip = ctx->render_clip_index;
+    ctx->active_render_layer = nullptr;
+    ctx->render_clip_index = g.ancestor_clip_index;
+    push_prim(
+        ctx,
+        Prim::make_layer_blur(g.padded_bounds, g.ancestor_clip.rect, blend_t, 0u, g.ancestor_clip.radius),
+        filter_tex_sentinel(g.slice, lo),
+        0.0f,
+        filter_tex_sentinel(g.slice, hi),
+        g.plus_lighter);
+    ctx->active_render_layer = saved_layer;
+    ctx->render_clip_index = saved_clip;
+}
+
 inline Corners scale_corners(Corners c, float dpi) noexcept {
     return Corners{ c.tl * dpi, c.tr * dpi, c.br * dpi, c.bl * dpi };
 }
 
 bool begin_blur_layer(Context* ctx, Rect box_px, float radius_px) noexcept {
+    if (ctx->active_filter_group) return false;
     if (!ctx->layer_has_bg_prims && ctx->blur_split_count > 0u) {
         BlurSplit& cur = ctx->blur_splits[ctx->blur_split_count - 1u];
         const bool overlaps =
@@ -1167,6 +1372,13 @@ void emit_box_background_and_shadow(
     }
 }
 
+struct TextWipeParams {
+    bool enabled = false;
+    Color color_end = {};
+    float x0_px = 0.0f;
+    float x1_px = 0.0f;
+};
+
 void emit_slug_outline_quad(
     Context* ctx,
     uint16_t slot_idx,
@@ -1177,7 +1389,7 @@ void emit_slug_outline_quad(
     float x_offset_em,
     float y_offset_em,
     const ClipEntry& clip_px,
-    Color tint, bool color_layer = false) noexcept
+    Color tint, bool color_layer = false, const TextWipeParams* wipe = nullptr) noexcept
 {
     const SlugGlyphEntry ge = slug_get_glyph(&ctx->atlas, slot_idx, glyph_id);
     if (!ge.has_outline) {
@@ -1191,21 +1403,33 @@ void emit_slug_outline_quad(
     if (box_w <= 0.0f || box_h <= 0.0f) {
         return;
     }
-    push_prim(
-        ctx,
-        Prim::make_slug_glyph(
-            Rect{ box_x, box_y, box_w, box_h },
-            clip_px.rect,
-            tint,
-            ge.band_offset,
-            ge.num_hbands,
-            ge.num_vbands,
-            clip_px.radius,
-            color_layer ? PrimFlag_None : PrimFlag_StemDarken));
+    Prim p = Prim::make_slug_glyph(
+        Rect{ box_x, box_y, box_w, box_h },
+        clip_px.rect,
+        tint,
+        ge.band_offset,
+        ge.num_hbands,
+        ge.num_vbands,
+        clip_px.radius,
+        color_layer ? PrimFlag_None : PrimFlag_StemDarken);
+    if (wipe && wipe->enabled && !color_layer) {
+        const float x0_rel = wipe->x0_px - box_x;
+        const float x1_rel = wipe->x1_px - box_x;
+        if (x1_rel <= -1.0f) {
+            p.style.y = wipe->color_end.pack_rgba8();
+        } else if (x0_rel < box_w + 1.0f) {
+            p.style.x |= static_cast<uint32_t>(PrimFlag_LinearGrad) << 4;
+            p.style.z = wipe->color_end.pack_rgba8();
+            p.payload.w = pack_f16x2(clamp_range(x0_rel, -32768.0f, 32768.0f),
+                                     clamp_range(x1_rel, -32768.0f, 32768.0f));
+        }
+    }
+    push_prim(ctx, p);
 }
 
 void emit_slug_glyph_quad(Context* ctx, uint16_t slot_idx, uint32_t glyph_id, float phys_px, float pen_x_px,
-    float baseline_y_px, float x_offset_em, float y_offset_em, const ClipEntry& clip_px, Color tint) noexcept {
+    float baseline_y_px, float x_offset_em, float y_offset_em, const ClipEntry& clip_px, Color tint,
+    const TextWipeParams* wipe = nullptr) noexcept {
     const auto& slot=ctx->atlas.slots[slot_idx]; const auto layers=slug_get_colr_layers(slot,glyph_id);
     if (!layers.count) {
         if(slot.has_sbix || slot.has_cbdt) {
@@ -1222,7 +1446,7 @@ void emit_slug_glyph_quad(Context* ctx, uint16_t slot_idx, uint32_t glyph_id, fl
                 return;
             }
         }
-        emit_slug_outline_quad(ctx,slot_idx,glyph_id,phys_px,pen_x_px,baseline_y_px,x_offset_em,y_offset_em,clip_px,tint);return;
+        emit_slug_outline_quad(ctx,slot_idx,glyph_id,phys_px,pen_x_px,baseline_y_px,x_offset_em,y_offset_em,clip_px,tint,false,wipe);return;
     }
     for(uint32_t i=0;i<layers.count;++i) {
         const auto* p=slot.colr_data+slot.colr_layer_off+(layers.first+i)*4u;
@@ -1232,7 +1456,7 @@ void emit_slug_glyph_quad(Context* ctx, uint16_t slot_idx, uint32_t glyph_id, fl
             const auto* c=slot.cpal_data+slot.cpal_color_records_off+uint32_t(palette)*4u;
             color=Color::rgba8(c[2],c[1],c[0],static_cast<uint8_t>((uint32_t(c[3])*tint.a+127u)/255u));
         }
-        emit_slug_outline_quad(ctx,slot_idx,glyph,phys_px,pen_x_px,baseline_y_px,x_offset_em,y_offset_em,clip_px,color,true);
+        emit_slug_outline_quad(ctx,slot_idx,glyph,phys_px,pen_x_px,baseline_y_px,x_offset_em,y_offset_em,clip_px,color,true,nullptr);
     }
 }
 
@@ -1247,7 +1471,8 @@ Str ellipsis_text(Context* ctx, uint16_t font) noexcept {
 }
 // Emit whole visual clusters, reserving room for the trailing marker.
 float emit_elided_line(Context* ctx, const char* chars, uint32_t len, uint16_t font, float size, float spacing,
-    float start, float baseline, float max_width, const ClipEntry& clip, Color color, float dpi) noexcept {
+    float start, float baseline, float max_width, const ClipEntry& clip, Color color, float dpi,
+    const TextWipeParams* wipe = nullptr) noexcept {
     const Str marker=ellipsis_text(ctx,font);
     const auto dots=shape_utf8_run(ctx,font,marker.chars,marker.length);
     float dots_w=0;for(const auto& g:dots)dots_w+=g.x_advance_1px*size;
@@ -1258,10 +1483,10 @@ float emit_elided_line(Context* ctx, const char* chars, uint32_t len, uint16_t f
         uint32_t j=i+1;while(j<glyphs.size()&&glyphs[j].cluster==glyphs[i].cluster)++j;
         float advance=0;for(uint32_t k=i;k<j;++k)advance+=glyphs[k].x_advance_1px*size+spacing;
         if(pen-start+advance>available+0.01f)break;
-        for(uint32_t k=i;k<j;++k){const auto& g=glyphs[k];emit_slug_glyph_quad(ctx,g.font_slot,g.glyph_id,size*dpi,pen*dpi,baseline*dpi,g.x_offset_em,g.y_offset_em,clip,color);pen+=g.x_advance_1px*size+spacing;}
+        for(uint32_t k=i;k<j;++k){const auto& g=glyphs[k];emit_slug_glyph_quad(ctx,g.font_slot,g.glyph_id,size*dpi,pen*dpi,baseline*dpi,g.x_offset_em,g.y_offset_em,clip,color,wipe);pen+=g.x_advance_1px*size+spacing;}
         i=j;
     }
-    for(const auto& g:dots){emit_slug_glyph_quad(ctx,g.font_slot,g.glyph_id,size*dpi,pen*dpi,baseline*dpi,g.x_offset_em,g.y_offset_em,clip,color);pen+=g.x_advance_1px*size;}
+    for(const auto& g:dots){emit_slug_glyph_quad(ctx,g.font_slot,g.glyph_id,size*dpi,pen*dpi,baseline*dpi,g.x_offset_em,g.y_offset_em,clip,color,wipe);pen+=g.x_advance_1px*size;}
     return pen;
 }
 
@@ -1485,6 +1710,7 @@ void emit_rich_text_command(
         bool trim_last_spacing = false;
         bool first_glyph_has_ls = false;
         float start_x_px = 0.0f;
+        float span_text_x0_px = 0.0f;
     };
 
     const size_t arena_mark = ctx->frame_arena.mark();
@@ -1544,7 +1770,7 @@ void emit_rich_text_command(
             pen_logical += sp.padding_x;
         }
         if (has_left && sp.icon_size > 0.0f) {
-            push_chunk(RichLineChunk{.sp = &sp, .start_x_px = pen_logical * dpi});
+            push_chunk(RichLineChunk{.sp = &sp, .start_x_px = pen_logical * dpi, .span_text_x0_px = pen_logical * dpi});
             pen_logical += sp.icon_advance;
         }
         const float text_x0 = pen_logical;
@@ -1601,6 +1827,7 @@ void emit_rich_text_command(
                         .trim_last_spacing = is_last_on_line,
                         .first_glyph_has_ls = first_has_ls,
                         .start_x_px = chunk_start_x * dpi,
+                        .span_text_x0_px = text_x0 * dpi,
                     });
                 }
                 pos = run_end;
@@ -1733,6 +1960,12 @@ void emit_rich_text_command(
         const float phys_px = sp->font_size_px * dpi;
         const float ls_px = sp->letter_spacing * dpi;
         float gx = ch.start_x_px;
+        TextWipeParams wipe = {};
+        if (sp->has_wipe) {
+            const float center_px = ch.span_text_x0_px + sp->wipe_x * dpi;
+            const float half_f = 0.5f * sp->wipe_feather_px * dpi;
+            wipe = {true, sp->color_end, center_px - half_f, center_px + half_f};
+        }
         if (ch.glyphs.empty()) {
             const float size = sp->icon_size * dpi;
             if (td.truncated && (elided || gx + size > text_limit_px + 0.01f)) break;
@@ -1764,7 +1997,8 @@ void emit_rich_text_command(
                 g.x_offset_em,
                 g.y_offset_em,
                 effective_clip,
-                sp->color);
+                sp->color,
+                wipe.enabled ? &wipe : nullptr);
             gx += g.x_advance_1px * phys_px + (ch.trim_last_spacing ? 0.0f : ls_px);
             visible_end_px=gx;
         }
@@ -1773,8 +2007,18 @@ void emit_rich_text_command(
     if(td.truncated) {
         const Str dots=ellipsis_text(ctx,ellipsis_span->font_id);
         float pen=visible_end_px;
+        TextWipeParams wipe = {};
+        if (ellipsis_span->has_wipe) {
+            float dots_span_x0 = cmd->boundingBox.x * dpi;
+            for (uint32_t i = 0u; i < seg_count; ++i) {
+                if (segs[i].sp == ellipsis_span) { dots_span_x0 = segs[i].text_x0_px; break; }
+            }
+            const float center_px = dots_span_x0 + ellipsis_span->wipe_x * dpi;
+            const float half_f = 0.5f * ellipsis_span->wipe_feather_px * dpi;
+            wipe = {true, ellipsis_span->color_end, center_px - half_f, center_px + half_f};
+        }
         for(const auto& g:shape_utf8_run(ctx,ellipsis_span->font_id,dots.chars,dots.length)) {
-            emit_slug_glyph_quad(ctx,g.font_slot,g.glyph_id,ellipsis_span->font_size_px*dpi,pen,baseline_y_px,g.x_offset_em,g.y_offset_em,effective_clip,ellipsis_span->color);
+            emit_slug_glyph_quad(ctx,g.font_slot,g.glyph_id,ellipsis_span->font_size_px*dpi,pen,baseline_y_px,g.x_offset_em,g.y_offset_em,effective_clip,ellipsis_span->color,wipe.enabled ? &wipe : nullptr);
             pen+=g.x_advance_1px*ellipsis_span->font_size_px*dpi;
         }
     }
