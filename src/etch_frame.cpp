@@ -293,7 +293,12 @@ void end_frame(Context* ctx_arg) noexcept {
                     ctx->render_clip_index=parent.indexed ? parent.shape : 0;
                     emit_border_beam(ctx,box_px,parent,scale_corners(d.radius,dpi),d.border_beam,d.top_rim_alpha,d.continuous_corners,dpi);
                 }
-                if (any_clip && d.border_width > 0.0f && d.border_color.a > 0u) {
+                if (has_segmented_border(d) && d.border_color.a > 0u &&
+                    (d.border_width > 0.0f || has_border_sides(d))) {
+                    const ClipEntry& parent = any_clip && clip_stack.depth > 1u
+                        ? clip_stack.entries[clip_stack.depth - 2u] : cur_clip;
+                    emit_segmented_border(ctx, d, box_px, parent, dpi);
+                } else if (any_clip && d.border_width > 0.0f && d.border_color.a > 0u) {
                     // Clip against parent container (below our own SCISSOR_START) so border AA edge isn't halved.
                     const ClipEntry& parent_clip = (clip_stack.depth > 1u)
                         ? clip_stack.entries[clip_stack.depth - 2u]

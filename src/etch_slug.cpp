@@ -72,7 +72,7 @@ uint16_t resolve_font_slot_idx(FontAtlas* atlas, uint16_t font_id) noexcept {
         ensure_bold_loaded(atlas);
     if (font_id == kFontMono && !atlas->slots[kFontMono].loaded && !atlas->mono_probed)
         ensure_mono_loaded(atlas);
-    if (font_id == kFontMedium || font_id == kFontSemiBold) ensure_weighted_loaded(atlas, font_id);
+    if (font_id == kFontMedium || font_id == kFontSemiBold || font_id == kFontItalic) ensure_weighted_loaded(atlas, font_id);
     if (font_id < kMaxFontSlots && atlas->slots[font_id].loaded) {
         return font_id;
     }
@@ -94,7 +94,7 @@ uint16_t resolve_target_font_slot(const FontAtlas* atlas, uint16_t slot_hint) no
     // Keep the built-in Sans/Bold/Mono slots available for lazy loading.
     if (slot_hint == kInvalidFont) {
         for (uint16_t i = 3u; i < kMaxFontSlots; ++i) {
-            if (i != kFontMedium && i != kFontSemiBold && !atlas->slots[i].loaded) {
+            if (i != kFontMedium && i != kFontSemiBold && i != kFontItalic && !atlas->slots[i].loaded) {
                 return i;
             }
         }
@@ -273,7 +273,7 @@ bool try_load_font_file_into_slot(
     FontAtlas* atlas,
     uint16_t slot_idx,
     const char* path,
-    int32_t face_index = 0) noexcept
+    int32_t face_index = 0, bool prefer_italic = false) noexcept
 {
     size_t sz = 0;
     void* raw = SDL_LoadFile(path, &sz);
@@ -283,6 +283,39 @@ bool try_load_font_file_into_slot(
         }
         return false;
     }
+#if defined(__APPLE__)
+    if (prefer_italic && std::memcmp(raw, "ttcf", 4) == 0) {
+        hb_blob_t* blob = hb_blob_create(static_cast<const char*>(raw), static_cast<unsigned int>(sz),
+                                          HB_MEMORY_MODE_READONLY, nullptr, nullptr);
+        const unsigned int faces = hb_face_count(blob);
+        face_index = -1;
+        for (unsigned int i = 0; i < faces; ++i) {
+            hb_face_t* face = hb_face_create(blob, i);
+            hb_blob_t* head = hb_face_reference_table(face, HB_TAG('h','e','a','d'));
+            hb_blob_t* os2 = hb_face_reference_table(face, HB_TAG('O','S','/','2'));
+            unsigned int head_len = 0, os2_len = 0;
+            const auto* head_data = reinterpret_cast<const uint8_t*>(hb_blob_get_data(head, &head_len));
+            const auto* os2_data = reinterpret_cast<const uint8_t*>(hb_blob_get_data(os2, &os2_len));
+            // head.macStyle bit 1 and OS/2.fsSelection bits 0 and 9 identify italic/oblique.
+            const bool italic = (head_len >= 46u && (ot_u16(head_data + 44u) & 2u)) ||
+                                (os2_len >= 64u && (ot_u16(os2_data + 62u) & 0x201u));
+            const bool regular_weight = os2_len >= 6u && ot_u16(os2_data + 4u) == 400u;
+            hb_blob_destroy(os2);
+            hb_blob_destroy(head);
+            hb_face_destroy(face);
+            if (!italic) continue;
+            if (face_index < 0 || regular_weight) face_index = static_cast<int32_t>(i);
+            if (regular_weight) break;
+        }
+        hb_blob_destroy(blob);
+        if (face_index < 0) {
+            SDL_free(raw);
+            return false;
+        }
+    }
+#else
+    (void)prefer_italic;
+#endif
     return init_font_slot_from_owned_bytes(
         atlas,
         slot_idx,
@@ -309,7 +342,7 @@ bool try_load_system_font(FontAtlas* atlas, uint16_t slot_idx, const char* filen
         const int n = std::snprintf(buf, sizeof(buf), "%s/%s%s", root, directory, filename);
         if (n < 0 || static_cast<size_t>(n) >= sizeof(buf)) return false;
         if (slot_idx >= 3u && slot_idx < kFontMedium && font_has_source_hash(atlas, hash_font_path(buf, 0))) return true;
-        return try_load_font_file_into_slot(atlas, slot_idx, buf);
+        return try_load_font_file_into_slot(atlas, slot_idx, buf, 0, slot_idx == kFontItalic);
     };
 #if defined(_WIN32)
     if (probe(SDL_getenv("SystemRoot"), "Fonts/")) return true;
@@ -368,7 +401,19 @@ void ensure_weighted_loaded(FontAtlas* atlas, uint16_t slot) noexcept {
     atlas->weighted_probed |= bit;
     const char* medium[] = {"Inter-Medium.ttf", "Roboto-Medium.ttf", "NotoSans-Medium.ttf"};
     const char* semibold[] = {"seguisb.ttf", "Inter-SemiBold.ttf", "NotoSans-SemiBold.ttf"};
-    for (const char* path : std::span<const char* const>(slot == kFontMedium ? medium : semibold, 3))
+    const char* italic[] = {
+#if defined(_WIN32)
+        "segoeuii.ttf", "Inter-Italic.ttf", "ariali.ttf",
+#elif defined(__APPLE__)
+        "Arial Italic.ttf", "HelveticaNeue.ttc",
+#else
+        "DejaVuSans-Oblique.ttf", "NotoSans-Italic.ttf", "Ubuntu-Italic.ttf",
+#endif
+    };
+    const std::span<const char* const> candidates = slot == kFontItalic
+        ? std::span<const char* const>(italic)
+        : std::span<const char* const>(slot == kFontMedium ? medium : semibold, 3);
+    for (const char* path : candidates)
         if (try_load_system_font(atlas, slot, path)) break;
     rebuild_fallback_order(atlas);
 }
@@ -1330,13 +1375,15 @@ bool is_font_loaded(const Context* ctx, uint16_t font_id) noexcept {
         ensure_bold_loaded(&atlas);
     if (font_id == kFontMono && !atlas.slots[kFontMono].loaded && !atlas.mono_probed)
         ensure_mono_loaded(&atlas);
-    if (font_id == kFontMedium || font_id == kFontSemiBold) ensure_weighted_loaded(&atlas, font_id);
+    if (font_id == kFontMedium || font_id == kFontSemiBold || font_id == kFontItalic) ensure_weighted_loaded(&atlas, font_id);
     return atlas.slots[font_id].loaded;
 }
 
 // Shared SVG and native path decoder. Caller owns the frame-arena mark.
 static SlugRawCurve* decode_vector_path(Context* ctx, Str svg_path_d,
-    std::span<const PathCmd> commands, Vec4 view_box, uint32_t* count) noexcept {
+    std::span<const PathCmd> commands, Vec4 view_box, uint32_t* count,
+    void (*stroke_subpath)(void*, std::span<const SlugRawCurve>, Vec2, bool) noexcept = nullptr,
+    void* stroke_data = nullptr) noexcept {
     SlugRawCurve* raw = ctx->frame_arena.alloc_uninit<SlugRawCurve>(kStackRawCap);
     if (!raw) { *count = 0; return nullptr; }
     uint32_t raw_cap = kStackRawCap;
@@ -1365,10 +1412,18 @@ static SlugRawCurve* decode_vector_path(Context* ctx, Str svg_path_d,
     auto map_svg = [&](Vec2 p) noexcept -> Vec2 {
         return Vec2{ p.x - vx, (vy + vh) - p.y };
     };
+    const auto valid_stroke_point = [&](Vec2 p) noexcept {
+        return std::fabs(p.x) < std::fmin(view_box.z * 32768.0f, 1e16f) &&
+               std::fabs(p.y) < std::fmin(view_box.w * 32768.0f, 1e16f);
+    };
     auto emit_quad = [&](Vec2 p1, Vec2 p2, Vec2 p3, bool is_implicit = false) noexcept {
         const Vec2 a = map_svg(p1);
         const Vec2 b = map_svg(p2);
         const Vec2 c = map_svg(p3);
+        if (stroke_subpath && !(valid_stroke_point(a) && valid_stroke_point(b) && valid_stroke_point(c))) {
+            complete = false;
+            return;
+        }
         push_raw(SlugRawCurve{ a.x, a.y, b.x, b.y, c.x, c.y, is_implicit });
     };
     auto emit_line = [&](Vec2 p1, Vec2 p2, bool is_implicit = false) noexcept {
@@ -1449,6 +1504,7 @@ static SlugRawCurve* decode_vector_path(Context* ctx, Str svg_path_d,
             dtheta += 2.0f * kPi;
         }
 
+        if (!std::isfinite(dtheta)) { complete = false; return; }
         const int segs = static_cast<int>(std::ceil(std::fabs(dtheta) / (0.5f * kPi)));
         const int n_segs = (segs > 1) ? segs : 1;
         const float seg_dt = dtheta / static_cast<float>(n_segs);
@@ -1490,7 +1546,14 @@ static SlugRawCurve* decode_vector_path(Context* ctx, Str svg_path_d,
 
     auto close_subpath = [&](bool is_explicit) noexcept {
         if (subpath_has_segments) {
-            emit_line(cur, subpath_start, !is_explicit);
+            if (stroke_subpath) {
+                const Vec2 start = map_svg(subpath_start);
+                complete = complete && valid_stroke_point(start) && valid_stroke_point(map_svg(cur));
+                if (complete) stroke_subpath(stroke_data, {raw, raw_count}, start, is_explicit);
+                raw_count = 0;
+            } else {
+                emit_line(cur, subpath_start, !is_explicit);
+            }
             subpath_has_segments = false;
         }
         cur = subpath_start;
@@ -1505,7 +1568,8 @@ static SlugRawCurve* decode_vector_path(Context* ctx, Str svg_path_d,
             case PathVerb::Close: close_subpath(true); break;
         }
     }
-    while (p && p < end) {
+    bool svg_started = false;
+    while (complete && p && p < end) {
         p = svg_skip_ws_comma(p, end);
         if (p >= end) {
             break;
@@ -1513,8 +1577,14 @@ static SlugRawCurve* decode_vector_path(Context* ctx, Str svg_path_d,
         if (svg_is_command_char(*p)) {
             cmd = *p++;
         } else if (cmd == '\0') {
+            if (stroke_subpath) complete = false;
             break;
         }
+        if (stroke_subpath && !svg_started && cmd != 'M' && cmd != 'm') {
+            complete = false;
+            break;
+        }
+        svg_started = true;
 
         if (cmd == 'Z' || cmd == 'z') {
             close_subpath(true);
@@ -1530,6 +1600,7 @@ static SlugRawCurve* decode_vector_path(Context* ctx, Str svg_path_d,
             case 'm': {
                 float x = 0.0f, y = 0.0f;
                 if (!svg_parse_number(p, end, &x) || !svg_parse_number(p, end, &y)) {
+                    if (stroke_subpath) complete = false;
                     p = end;
                     break;
                 }
@@ -1545,6 +1616,7 @@ static SlugRawCurve* decode_vector_path(Context* ctx, Str svg_path_d,
             case 'l': {
                 float x = 0.0f, y = 0.0f;
                 if (!svg_parse_number(p, end, &x) || !svg_parse_number(p, end, &y)) {
+                    if (stroke_subpath) complete = false;
                     p = end;
                     break;
                 }
@@ -1560,6 +1632,7 @@ static SlugRawCurve* decode_vector_path(Context* ctx, Str svg_path_d,
             case 'h': {
                 float x = 0.0f;
                 if (!svg_parse_number(p, end, &x)) {
+                    if (stroke_subpath) complete = false;
                     p = end;
                     break;
                 }
@@ -1575,6 +1648,7 @@ static SlugRawCurve* decode_vector_path(Context* ctx, Str svg_path_d,
             case 'v': {
                 float y = 0.0f;
                 if (!svg_parse_number(p, end, &y)) {
+                    if (stroke_subpath) complete = false;
                     p = end;
                     break;
                 }
@@ -1592,6 +1666,7 @@ static SlugRawCurve* decode_vector_path(Context* ctx, Str svg_path_d,
                 if (!svg_parse_number(p, end, &cx) || !svg_parse_number(p, end, &cy) ||
                     !svg_parse_number(p, end, &x) || !svg_parse_number(p, end, &y))
                 {
+                    if (stroke_subpath) complete = false;
                     p = end;
                     break;
                 }
@@ -1609,6 +1684,7 @@ static SlugRawCurve* decode_vector_path(Context* ctx, Str svg_path_d,
             case 't': {
                 float x = 0.0f, y = 0.0f;
                 if (!svg_parse_number(p, end, &x) || !svg_parse_number(p, end, &y)) {
+                    if (stroke_subpath) complete = false;
                     p = end;
                     break;
                 }
@@ -1629,6 +1705,7 @@ static SlugRawCurve* decode_vector_path(Context* ctx, Str svg_path_d,
                     !svg_parse_number(p, end, &c2x) || !svg_parse_number(p, end, &c2y) ||
                     !svg_parse_number(p, end, &x) || !svg_parse_number(p, end, &y))
                 {
+                    if (stroke_subpath) complete = false;
                     p = end;
                     break;
                 }
@@ -1649,6 +1726,7 @@ static SlugRawCurve* decode_vector_path(Context* ctx, Str svg_path_d,
                 if (!svg_parse_number(p, end, &c2x) || !svg_parse_number(p, end, &c2y) ||
                     !svg_parse_number(p, end, &x) || !svg_parse_number(p, end, &y))
                 {
+                    if (stroke_subpath) complete = false;
                     p = end;
                     break;
                 }
@@ -1672,6 +1750,7 @@ static SlugRawCurve* decode_vector_path(Context* ctx, Str svg_path_d,
                     !svg_parse_flag(p, end, &sweep) || !svg_parse_number(p, end, &x) ||
                     !svg_parse_number(p, end, &y))
                 {
+                    if (stroke_subpath) complete = false;
                     p = end;
                     break;
                 }
@@ -1684,6 +1763,7 @@ static SlugRawCurve* decode_vector_path(Context* ctx, Str svg_path_d,
                 break;
             }
             default:
+                if (stroke_subpath) complete = false;
                 p = end;
                 break;
         }
@@ -1691,17 +1771,242 @@ static SlugRawCurve* decode_vector_path(Context* ctx, Str svg_path_d,
     close_subpath(false);
 
     *count = complete ? raw_count : 0;
+    if (stroke_subpath && !complete) return nullptr;
     return raw;
 }
 
-uint16_t register_svg_icon(
-    Context* ctx,
-    Str svg_path_d,
-    Vec4 view_box,
-    uint16_t slot_hint) noexcept
+namespace {
+
+struct StrokeOutline {
+    Arena* arena;
+    const SvgStrokeDesc* desc;
+    float tolerance = 0.0f;
+    float dot_tolerance = 0.0f;
+    SlugRawCurve* curves = nullptr;
+    uint32_t curve_count = 0;
+    uint32_t curve_cap = 0;
+    Vec2* points = nullptr;
+    uint32_t point_count = 0;
+    uint32_t point_cap = 0;
+    bool complete = true;
+};
+
+template<class T>
+bool grow_stroke_buffer(Arena* arena, T*& data, uint32_t& capacity) noexcept {
+    const uint32_t grown = capacity ? capacity * 2u : 64u;
+    T* next = arena->alloc_uninit<T>(grown);
+    if (!next) return false;
+    if (capacity) std::memcpy(next, data, size_t(capacity) * sizeof(T));
+    data = next;
+    capacity = grown;
+    return true;
+}
+
+float stroke_cross(Vec2 a, Vec2 b) noexcept { return a.x * b.y - a.y * b.x; }
+float stroke_dot(Vec2 a, Vec2 b) noexcept { return a.x * b.x + a.y * b.y; }
+
+void push_stroke_point(StrokeOutline& out, Vec2 p) noexcept {
+    if (!out.complete) return;
+    if (out.point_count && stroke_dot(p - out.points[out.point_count - 1], p - out.points[out.point_count - 1]) <= 1e-12f)
+        return;
+    if (out.point_count == out.point_cap && !grow_stroke_buffer(out.arena, out.points, out.point_cap)) {
+        out.complete = false;
+        return;
+    }
+    out.points[out.point_count++] = p;
+}
+
+void flatten_stroke_quad(StrokeOutline& out, Vec2 a, Vec2 b, Vec2 c, uint32_t depth) noexcept {
+    const Vec2 l = (a + b) * 0.5f, r = (b + c) * 0.5f;
+    const Vec2 mid = (l + r) * 0.5f;
+    const Vec2 error = mid - (a + c) * 0.5f;
+    if (depth == 10u || stroke_dot(error, error) <= out.tolerance * out.tolerance) {
+        push_stroke_point(out, c);
+        return;
+    }
+    flatten_stroke_quad(out, a, l, mid, depth + 1u);
+    flatten_stroke_quad(out, mid, r, c, depth + 1u);
+}
+
+void stroke_subpath(void* data, std::span<const SlugRawCurve> source, Vec2 start, bool closed) noexcept {
+    auto& out = *static_cast<StrokeOutline*>(data);
+    if (!out.complete) return;
+    out.point_count = 0;
+    push_stroke_point(out, start);
+    for (const SlugRawCurve& c : source)
+        flatten_stroke_quad(out, {c.p1x, c.p1y}, {c.p2x, c.p2y}, {c.p3x, c.p3y}, 0);
+    if (!out.complete) return;
+
+    const auto& desc = *out.desc;
+    const float half = desc.stroke_width * 0.5f;
+    constexpr float pi = 3.14159265358979323846f;
+    const auto right = [](Vec2 d) noexcept -> Vec2 { return {d.y, -d.x}; };
+    const auto unit = [](Vec2 d) noexcept { return d / std::hypot(d.x, d.y); };
+    Vec2 pen{}, contour_start{};
+    bool has_pen = false;
+    const auto quad = [&](Vec2 control, Vec2 end) noexcept {
+        if (!out.complete) return;
+        if (out.curve_count == out.curve_cap && !grow_stroke_buffer(out.arena, out.curves, out.curve_cap)) {
+            out.complete = false;
+            return;
+        }
+        out.curves[out.curve_count++] = {pen.x, pen.y, control.x, control.y, end.x, end.y};
+        pen = end;
+    };
+    const auto line = [&](Vec2 end) noexcept {
+        if (!has_pen) {
+            contour_start = pen = end;
+            has_pen = true;
+        } else if (pen.x != end.x || pen.y != end.y) {
+            quad((pen + end) * 0.5f, end);
+        }
+    };
+    const auto arc = [&](Vec2 center, Vec2 from, Vec2 to, float sweep) noexcept {
+        const int steps = static_cast<int>(std::ceil(sweep / (pi * 0.25f)));
+        const float step = sweep / static_cast<float>(steps);
+        Vec2 u = from;
+        for (int i = 0; i < steps; ++i) {
+            const Vec2 v = i + 1 == steps ? to : u * std::cos(step) - right(u) * std::sin(step);
+            quad(center + (u + v) * (half / (1.0f + stroke_dot(u, v))), center + v * half);
+            u = v;
+        }
+    };
+
+    float path_length = 0.0f;
+    for (uint32_t i = 1; i < out.point_count; ++i) {
+        const Vec2 d = out.points[i] - out.points[i - 1];
+        path_length += std::hypot(d.x, d.y);
+    }
+    if (path_length <= out.dot_tolerance) {
+        if (desc.cap == StrokeCap::Round) {
+            line(start + Vec2{half, 0});
+            arc(start, {1, 0}, {1, 0}, 2.0f * pi);
+        } else if (desc.cap == StrokeCap::Square) {
+            line(start + Vec2{-half, -half});
+            line(start + Vec2{half, -half});
+            line(start + Vec2{half, half});
+            line(start + Vec2{-half, half});
+            line(start + Vec2{-half, -half});
+        }
+        return;
+    }
+
+    const Vec2* p = out.points;
+    uint32_t n = out.point_count;
+    if (closed && stroke_dot(p[n - 1] - p[0], p[n - 1] - p[0]) <= 1e-12f) --n;
+    const auto join = [&](Vec2 a, Vec2 b, Vec2 c) noexcept {
+        const Vec2 incoming = unit(b - a), outgoing = unit(c - b);
+        const Vec2 u = right(incoming), v = right(outgoing);
+        const float turn = stroke_cross(incoming, outgoing);
+        const float cosine = stroke_dot(incoming, outgoing);
+        const float denom = 1.0f + cosine;
+        if (denom > 1e-5f) {
+            const Vec2 bisector = (u + v) / denom;
+            const float ratio_sq = stroke_dot(bisector, bisector);
+            if ((turn <= 0.0f && ratio_sq <= 16.0f) ||
+                (turn > 0.0f && desc.join == StrokeJoin::Miter && ratio_sq <= desc.miter_limit * desc.miter_limit)) {
+                line(b + bisector * half);
+                return;
+            }
+        }
+        line(b + u * half);
+        if (desc.join == StrokeJoin::Round && (turn > 1e-6f || (denom <= 1e-5f && turn == 0.0f)))
+            arc(b, u, v, turn == 0.0f ? pi : std::atan2(turn, cosine));
+        else
+            line(b + v * half);
+    };
+
+    const auto trim = [&](Vec2 a, Vec2 b) noexcept {
+        const float turn = stroke_cross(a, b);
+        const float denom = 1.0f + stroke_dot(a, b);
+        if (denom <= 1e-5f) return INFINITY;
+        return turn * half / denom;
+    };
+    const uint32_t edges = closed ? n : n - 1u;
+    bool folded = false;
+    for (uint32_t i = 0; i < edges; ++i) {
+        const uint32_t j = (i + 1u) % n;
+        const Vec2 delta = p[j] - p[i];
+        const float length = std::hypot(delta.x, delta.y);
+        const Vec2 direction = delta / length;
+        const float from = i > 0 || closed ? trim(unit(p[i] - p[(i + n - 1u) % n]), direction) : 0.0f;
+        const float to = j < n - 1u || closed ? trim(direction, unit(p[(j + 1u) % n] - p[j])) : 0.0f;
+        if (std::fmax(from, 0.0f) + std::fmax(to, 0.0f) >= length ||
+            std::fmin(from, 0.0f) + std::fmin(to, 0.0f) <= -length) {
+            folded = true;
+            break;
+        }
+    }
+    if (folded) {
+        // A tight inside offset can cross its neighbors. Build the union from
+        // positive-winding strips and outside joins to keep the interior filled.
+        for (uint32_t i = 0; i < edges; ++i) {
+            const uint32_t j = (i + 1u) % n;
+            const Vec2 dir = unit(p[j] - p[i]), normal = right(dir);
+            const bool first = !closed && i == 0, last = !closed && j == n - 1u;
+            const Vec2 a = first && desc.cap == StrokeCap::Square ? p[i] - dir * half : p[i];
+            const Vec2 b = last && desc.cap == StrokeCap::Square ? p[j] + dir * half : p[j];
+            has_pen = false;
+            line(a + normal * half);
+            line(b + normal * half);
+            if (last && desc.cap == StrokeCap::Round) arc(b, normal, -normal, pi);
+            else line(b - normal * half);
+            line(a - normal * half);
+            if (first && desc.cap == StrokeCap::Round) arc(a, -normal, normal, pi);
+            else line(contour_start);
+
+            if (last) continue;
+            Vec2 before = p[i], after = p[(j + 1u) % n];
+            const float turn = stroke_cross(dir, unit(after - p[j]));
+            if (turn < 0.0f) std::swap(before, after);
+            const Vec2 u = right(unit(p[j] - before)), v = right(unit(after - p[j]));
+            has_pen = false;
+            line(p[j]);
+            line(p[j] + u * half);
+            join(before, p[j], after);
+            line(p[j] + v * half);
+            line(contour_start);
+        }
+        return;
+    }
+
+    // Traversing the right rail in each direction produces opposite winding for
+    // closed paths. The shader takes absolute winding, so the outer contour of
+    // each subpath contributes the same sign regardless of path direction.
+    for (uint32_t rail = 0; rail < 2; ++rail) {
+        const auto at = [&](uint32_t i) noexcept { return p[rail ? n - 1u - i : i]; };
+        const Vec2 first_dir = unit(at(1) - at(0));
+        const Vec2 last_dir = unit(at(n - 1) - at(n - 2));
+        const float extension = desc.cap == StrokeCap::Square ? half : 0.0f;
+        if (closed) has_pen = false;
+        else if (rail == 0) line(at(0) + right(first_dir) * half - first_dir * extension);
+        const uint32_t first = closed ? 0u : 1u;
+        const uint32_t end = closed ? n : n - 1u;
+        for (uint32_t i = first; i < end; ++i)
+            join(at((i + n - 1) % n), at(i), at((i + 1) % n));
+        if (closed) {
+            line(contour_start);
+        } else {
+            const Vec2 normal = right(last_dir);
+            const Vec2 cap = at(n - 1) + last_dir * extension;
+            line(cap + normal * half);
+            if (desc.cap == StrokeCap::Round) arc(cap, normal, -normal, pi);
+            else line(cap - normal * half);
+        }
+    }
+}
+
+} // namespace
+
+static uint16_t register_vector_icon(Context* ctx, Str svg_path_d, Vec4 view_box,
+    uint16_t slot_hint, const SvgStrokeDesc* stroke) noexcept
 {
     if (!ctx || !svg_path_d.chars || svg_path_d.length == 0u ||
-        view_box.z <= 1e-3f || view_box.w <= 1e-3f)
+        !std::isfinite(view_box.x) || !std::isfinite(view_box.y) ||
+        !std::isfinite(view_box.z) || !std::isfinite(view_box.w) ||
+        view_box.z <= 1e-3f || view_box.w <= 1e-3f ||
+        (stroke && (stroke->stroke_width >= std::fmin(std::fmin(view_box.z, view_box.w) * 32768.0f, 1e16f) ||
+                    (slot_hint != kInvalidIcon && slot_hint >= kMaxVectorIcons))))
     {
         return kInvalidIcon;
     }
@@ -1723,7 +2028,18 @@ uint16_t register_svg_icon(
 
     const size_t mark = ctx->frame_arena.mark();
     uint32_t raw_count = 0;
-    const SlugRawCurve* raw = decode_vector_path(ctx, svg_path_d, {}, view_box, &raw_count);
+    const SlugRawCurve* raw = nullptr;
+    StrokeOutline outline{.arena = &ctx->frame_arena, .desc = stroke};
+    if (stroke) {
+        outline.dot_tolerance = std::fmin(view_box.z, view_box.w) * 0.001f;
+        outline.tolerance = std::fmax(1e-5f, std::fmin(outline.dot_tolerance, stroke->stroke_width / 32.0f));
+        if (decode_vector_path(ctx, svg_path_d, {}, view_box, &raw_count, stroke_subpath, &outline) && outline.complete) {
+            raw = outline.curves;
+            raw_count = outline.curve_count;
+        }
+    } else {
+        raw = decode_vector_path(ctx, svg_path_d, {}, view_box, &raw_count);
+    }
 
     const CompiledSlugShape compiled = compile_slug_contours(
         &ctx->atlas,
@@ -1751,6 +2067,17 @@ uint16_t register_svg_icon(
         for (uint32_t i = 0; i < ctx->claimed_window_cap; ++i)
             if (ctx->claimed_windows[i]) ctx->claimed_windows[i]->ui.redraw_budget = 2u;
     return slot;
+}
+
+uint16_t register_svg_icon(Context* ctx, Str path, Vec4 view_box, uint16_t slot_hint) noexcept {
+    return register_vector_icon(ctx, path, view_box, slot_hint, nullptr);
+}
+
+uint16_t register_svg_stroke_icon(Context* ctx, Str path, const SvgStrokeDesc& desc) noexcept {
+    if (!std::isfinite(desc.stroke_width) || desc.stroke_width <= 0.0f ||
+        !std::isfinite(desc.miter_limit) || desc.miter_limit < 1.0f ||
+        desc.cap > StrokeCap::Square || desc.join > StrokeJoin::Bevel) return kInvalidIcon;
+    return register_vector_icon(ctx, path, desc.view_box, desc.slot_hint, &desc);
 }
 
 bool is_icon_loaded(const Context* ctx, uint16_t icon_id) noexcept {

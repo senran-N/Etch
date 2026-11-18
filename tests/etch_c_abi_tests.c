@@ -459,6 +459,59 @@ static bool test_containers_and_canvas(EtchContext* ctx) {
            etch_virtual_list_scroll_offset(vlist_id) > 0.0;
 }
 
+static bool test_release_api(EtchContext* ctx) {
+    EtchSvgStrokeDesc stroke = etch_svg_stroke_desc_default();
+    const EtchStr path = ETCH_STR_LIT("M19 19l-4-4M17 10a7 7 0 1 1-14 0a7 7 0 1 1 14 0z");
+    const uint16_t id = etch_register_svg_stroke_icon(ctx, path, NULL);
+    if (stroke.stroke_width != 2 || stroke.join != ETCH_STROKE_JOIN_ROUND ||
+        !etch_is_icon_loaded(ctx, id) || etch_register_svg_stroke_icon(NULL, path, &stroke) != ETCH_INVALID_ICON)
+        return false;
+    stroke.stroke_width = -1;
+    if (etch_register_svg_stroke_icon(ctx, path, &stroke) != ETCH_INVALID_ICON) return false;
+    EtchBoxDesc box = etch_box_desc_default();
+    EtchTextSpan span = etch_text_span_default();
+    EtchTextInputHighlight ranges[3];
+    for (unsigned i = 0; i < 3; ++i) ranges[i] = etch_text_input_highlight_default();
+    EtchTextInputDesc input = etch_text_input_desc_default();
+    if (box.border_sides.left != 0 || box.border_dash_px != 0 || box.border_gap_px != 0 ||
+        span.icon_id != ETCH_INVALID_ICON || span.icon_gap_px != 4 || span.padding_y != 0 ||
+        input.highlights != NULL || input.highlight_count != 0 || ranges[0].radius_px != 4) return false;
+
+    EtchFrameDesc frame = etch_frame_desc_default();
+    frame.viewport_w = 192;
+    frame.viewport_h = 120;
+    etch_begin_frame(ctx, &frame);
+    box.clip_children = true;
+    box.border_sides.bottom = 2;
+    box.border_color = (EtchColor){255, 0, 0, 255};
+    box.border_dash_px = 4;
+    etch_begin_box(&box);
+    span.icon_id = id;
+    span.text = ETCH_STR_LIT("file");
+    span.font_id = ETCH_FONT_ITALIC;
+    span.padding_y = 2;
+    etch_text_spans(&span, 1, NULL);
+    char text[] = "@f \xC3\xA9";
+    ranges[0].byte_length = 2;
+    ranges[0].background = box.border_color;
+    ranges[1].byte_offset = 4;
+    ranges[1].byte_length = UINT32_MAX;
+    ranges[1].text_color = box.border_color;
+    ranges[2].byte_offset = UINT32_MAX;
+    ranges[2].byte_length = 1;
+    ranges[2].border_color = box.border_color;
+    input.buffer = text;
+    input.capacity = sizeof(text);
+    input.highlights = ranges;
+    input.highlight_count = 3;
+    const EtchTextInputResult result = etch_text_input(&input);
+    input.highlights = NULL; /* A null list remains valid with a nonzero count. */
+    (void)etch_text_input(&input);
+    etch_end_box();
+    etch_end_frame(ctx);
+    return result.byte_length == sizeof(text) - 1 && etch_font_metrics(ETCH_FONT_ITALIC, 16).line_height > 0;
+}
+
 int main(void) {
     if (!test_abi_and_arena()) {
         fprintf(stderr, "c99_abi_smoke: test_abi_and_arena failed\n");
@@ -491,7 +544,9 @@ int main(void) {
     const bool ok_material_defaults=surface.max_fps==60 && surface.spirv.entrypoint!=NULL &&
         eval.width==1 && eval.enabled && cell.width==1 && sheet.snap_count==3 &&
         etch_window_chrome_desc_default().backdrop==ETCH_BACKDROP_OPAQUE;
-    const bool ok_layout = ok_material_defaults && ok_closure && ok_numerals && test_layout_widgets_and_a11y(ctx);
+    const bool ok_release = test_release_api(ctx);
+    if (!ok_release) fprintf(stderr, "c99_abi_smoke: Etch %s public API failed\n", ETCH_VERSION_STRING);
+    const bool ok_layout = ok_release && ok_material_defaults && ok_closure && ok_numerals && test_layout_widgets_and_a11y(ctx);
     const bool ok_editor = test_text_buffer_and_code_editor(ctx);
     const bool ok_containers = test_containers_and_canvas(ctx);
 

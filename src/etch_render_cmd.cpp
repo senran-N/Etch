@@ -365,7 +365,9 @@ void measure_line_segment_x(
     float* out_xa,
     float* out_xb,
     float* out_total_w,
-    uint32_t tab_width = 4u) noexcept
+    uint32_t tab_width,
+    LineClusterVisitor visit,
+    void* visit_data) noexcept
 {
     uint32_t glyph_idx = 0u;
     const auto next_spacing = [&]() noexcept -> float {
@@ -387,6 +389,10 @@ void measure_line_segment_x(
             const uint32_t cp_off = static_cast<uint32_t>(p - seg);
             const uint32_t cp = next_utf8_codepoint(p, end);
             const float adv = ((cp == '\t' && !mask_bullets) ? static_cast<float>(tab_width) * cp_w : cp_w) + next_spacing();
+            if (visit) {
+                if (cp == '\n') continue;
+                visit(visit_data, cp_off, static_cast<uint32_t>(p - seg), total_w, adv, false);
+            }
             if (cp_off < stop_a) xa += adv;
             if (cp_off < stop_b) xb += adv;
             total_w += adv;
@@ -404,8 +410,12 @@ void measure_line_segment_x(
         const char* end = seg + seg_len;
         while (p < end) {
             const uint32_t cp_off = static_cast<uint32_t>(p - seg);
-            (void)next_utf8_codepoint(p, end);
+            const uint32_t cp = next_utf8_codepoint(p, end);
             const float adv = bullet_adv + next_spacing();
+            if (visit) {
+                if (cp == '\n') continue;
+                visit(visit_data, cp_off, static_cast<uint32_t>(p - seg), total_w, adv, false);
+            }
             if (cp_off < stop_a) xa += adv;
             if (cp_off < stop_b) xb += adv;
             total_w += adv;
@@ -420,6 +430,7 @@ void measure_line_segment_x(
     while (pos < seg_len) {
         if (seg[pos] == '\t') {
             const float adv = static_cast<float>(tab_width) * primary.space_advance_em * base_px + next_spacing();
+            if (visit) visit(visit_data, pos, pos + 1u, total_w, adv, false);
             if (pos < stop_a) xa = total_w + adv;
             if (pos < stop_b) xb = total_w + adv;
             total_w += adv;
@@ -427,7 +438,8 @@ void measure_line_segment_x(
             continue;
         }
         uint32_t run_end = pos;
-        while (run_end < seg_len && seg[run_end] != '\t') {
+        if (visit && seg[pos] == '\n') { ++pos; continue; }
+        while (run_end < seg_len && seg[run_end] != '\t' && (!visit || seg[run_end] != '\n')) {
             ++run_end;
         }
         const uint32_t run_len = run_end - pos;
@@ -457,6 +469,7 @@ void measure_line_segment_x(
                 const float fraction = count ? static_cast<float>(before) / static_cast<float>(count) : 0;
                 *x = total_w + cluster_adv * (is_rtl ? 1.0f-fraction : fraction);
             };
+            if (visit) visit(visit_data, abs_c0, abs_c1, total_w, cluster_adv, is_rtl);
             if (out_xa) stop_x(stop_a, &xa);
             if (out_xb) stop_x(stop_b, &xb);
             total_w += cluster_adv;
@@ -538,9 +551,11 @@ Clay_Dimensions measure_rich_slice(
         const uint32_t ov0 = (s0 > sp.byte_start) ? s0 : sp.byte_start;
         const uint32_t ov1 = (s1 < sp.byte_end) ? s1 : sp.byte_end;
         const bool is_last_seg = (ov1 == s1);
-        total_w += measure_rich_span_segment(ctx, sp, base + ov0, ov1 - ov0, is_last_seg);
+        const uint32_t text_start = std::max(ov0, sp.layout_text_start());
+        if (ov1 > text_start)
+            total_w += measure_rich_span_segment(ctx, sp, base + text_start, ov1 - text_start, is_last_seg);
         if (ov0 == sp.byte_start) {
-            total_w += sp.padding_x;
+            total_w += sp.padding_x + sp.icon_advance;
         }
         if (ov1 == sp.byte_end) {
             total_w += sp.padding_x;
@@ -911,6 +926,136 @@ void emit_border_beam(Context* ctx,Rect bounds,const ClipEntry& clip,Corners rad
         beam.width*scale,angle,beam.sweep_fraction,beam.glow_px*scale,rim,beam.softness,beam.symmetric_dual,continuous,clip.radius));
 }
 
+bool has_border_sides(const BoxDesc& d) noexcept {
+    return d.border_sides.left > 0.0f || d.border_sides.right > 0.0f ||
+           d.border_sides.top > 0.0f || d.border_sides.bottom > 0.0f;
+}
+
+bool has_segmented_border(const BoxDesc& d) noexcept {
+    return has_border_sides(d) || d.border_dash_px > 0.0f;
+}
+
+void emit_segmented_border(Context* ctx, const BoxDesc& d, Rect box, const ClipEntry& parent, float dpi) noexcept {
+    const bool sides = has_border_sides(d);
+    const float spread = d.border_align == BorderAlign::Outside ? 1.0f :
+                         d.border_align == BorderAlign::Center ? 0.5f : 0.0f;
+    const Padding w = sides ? Padding{d.border_sides.left * dpi, d.border_sides.right * dpi,
+                                     d.border_sides.top * dpi, d.border_sides.bottom * dpi}
+                            : Padding::all(d.border_width * dpi);
+    const Rect outer{box.x - w.left * spread, box.y - w.top * spread,
+                     box.w + (w.left + w.right) * spread, box.h + (w.top + w.bottom) * spread};
+    Corners r = scale_corners(d.radius, dpi);
+    if (sides) {
+        if (r.tl > 0.0f) r.tl += std::fmin(w.top, w.left) * spread;
+        if (r.tr > 0.0f) r.tr += std::fmin(w.top, w.right) * spread;
+        if (r.br > 0.0f) r.br += std::fmin(w.bottom, w.right) * spread;
+        if (r.bl > 0.0f) r.bl += std::fmin(w.bottom, w.left) * spread;
+    } else if (spread > 0.0f) {
+        if (r.tl > 0.0f) r.tl += w.top * spread;
+        if (r.tr > 0.0f) r.tr += w.top * spread;
+        if (r.br > 0.0f) r.br += w.top * spread;
+        if (r.bl > 0.0f) r.bl += w.top * spread;
+    }
+
+    const bool rounded = r.tl > 0 || r.tr > 0 || r.br > 0 || r.bl > 0;
+    const bool clip_corner_arcs = !sides && rounded &&
+        (w.top < 1.0f || (r.tl > 0 && r.tl <= w.top * 0.5f + 0.5f) ||
+         (r.tr > 0 && r.tr <= w.top * 0.5f + 0.5f) ||
+         (r.br > 0 && r.br <= w.top * 0.5f + 0.5f) ||
+         (r.bl > 0 && r.bl <= w.top * 0.5f + 0.5f));
+    const ClipEntry clip = (sides && rounded) || clip_corner_arcs
+        ? make_box_clip(ctx, parent, outer, r, d.continuous_corners) : parent;
+    const uint32_t saved_clip = ctx->render_clip_index;
+    ctx->render_clip_index = (clip.indexed || clip.shape != parent.shape) ? clip.shape : 0u;
+    const float dash = d.border_dash_px * dpi;
+    const float gap = d.border_gap_px > 0.0f ? d.border_gap_px * dpi : dash;
+    const float period = std::fmax(0.5f, dash + gap);
+    const float painted = dash > 0.0f && period <= 0.5f ? dash / (dash + gap) * period : dash;
+    Rect visible = clip.rect;
+    if (const auto* layer = ctx->active_render_layer) {
+        const Vec2 scale = layer->resolved_scale, offset = layer->resolved_offset_px;
+        visible = {(visible.x - offset.x) / scale.x, (visible.y - offset.y) / scale.y,
+                   visible.w / scale.x, visible.h / scale.y};
+    }
+    float phase = 0.0f;
+    const auto segments = [&](float length, float first, float last, auto emit) noexcept {
+        if (length <= 0.0f) return;
+        if (dash <= 0.0f) {
+            emit(0.0f, length);
+            return;
+        }
+        if (last > first && std::isfinite(length)) {
+            float start = first - std::fmod(std::fmod(first, period) + phase, period);
+            while (start < last) {
+                const float a = std::fmax(0.0f, start), b = std::fmin(length, start + painted);
+                if (b > a) emit(a, b);
+                const float next = start + period;
+                if (next <= start) break;
+                start = next;
+            }
+        }
+        phase = std::fmod(phase + std::fmod(length, period), period);
+    };
+    const auto strip = [&](Rect bounds, bool horizontal, bool reverse) noexcept {
+        if (bounds.w <= 0.0f || bounds.h <= 0.0f) return;
+        const float length = horizontal ? bounds.w : bounds.h;
+        const Rect overlap = rect_intersect(bounds, visible);
+        const float visible_offset = horizontal ? overlap.x - bounds.x : overlap.y - bounds.y;
+        const float visible_len = overlap.w > 0.0f && overlap.h > 0.0f ? (horizontal ? overlap.w : overlap.h) : 0.0f;
+        const float start = reverse ? length - visible_offset - visible_len : visible_offset;
+        segments(length, start, start + visible_len, [&](float a, float b) noexcept {
+            Rect piece = bounds;
+            const float offset = reverse ? length - b : a;
+            if (horizontal) { piece.x += offset; piece.w = b - a; }
+            else { piece.y += offset; piece.h = b - a; }
+            push_prim(ctx, Prim::make_rect(piece, clip.rect, d.border_color, {}, {}, 0, 1, clip.radius));
+        });
+    };
+    const float x = outer.x, y = outer.y, right = x + outer.w, bottom = y + outer.h;
+    const float top_w = std::fmin(w.top, outer.h);
+    const float bottom_w = std::fmin(w.bottom, outer.h - top_w);
+    if (sides) {
+        strip({x, y, outer.w, top_w}, true, false);
+        strip({right - std::fmin(w.right, outer.w), y + top_w, std::fmin(w.right, outer.w), outer.h - top_w - bottom_w}, false, false);
+        strip({x, bottom - bottom_w, outer.w, bottom_w}, true, true);
+        const float left_w = std::fmin(w.left, std::fmax(0.0f, outer.w - w.right));
+        strip({x, y + top_w, left_w, outer.h - top_w - bottom_w}, false, true);
+    } else {
+        constexpr float quarter = 1.57079632679489661923f;
+        const float half = w.top * 0.5f;
+        const float max_r = std::fmin(outer.w, outer.h) * 0.5f;
+        const auto outer_radius = [&](float radius) noexcept { return std::fmin(radius, max_r); };
+        const float tl = outer_radius(r.tl), tr = outer_radius(r.tr);
+        const float br = outer_radius(r.br), bl = outer_radius(r.bl);
+        const auto arc = [&](Vec2 center, float radius, float angle) noexcept {
+            if (radius == 0.0f) return;
+            // RingArc's SDF resolves radii and half widths down to half a physical pixel.
+            const float corner_half = std::fmax(0.5f, std::fmin(half, radius - 0.5f));
+            const float center_r = std::fmax(0.5f, radius - corner_half);
+            const float length = quarter * center_r;
+            const Rect arc_bounds{center.x - radius, center.y - radius, 2.0f * radius, 2.0f * radius};
+            const Rect overlap = rect_intersect(visible, arc_bounds);
+            const float last = overlap.w > 0.0f && overlap.h > 0.0f ? length : 0.0f;
+            segments(length, 0.0f, last, [&](float a, float b) noexcept {
+                if ((b - a) / center_r < 1e-4f) return;
+                push_prim(ctx, Prim::make_ring_arc(center, center_r, corner_half, angle + a / center_r,
+                    (b - a) / center_r, clip.rect, d.border_color, d.border_color, false, {}, 0, clip.radius));
+            });
+        };
+        strip({x + tl, y, outer.w - tl - tr, top_w}, true, false);
+        arc({right - tr, y + tr}, tr, -quarter);
+        strip({right - w.right, y + (tr > 0 ? tr : top_w), w.right,
+               outer.h - (tr > 0 ? tr : top_w) - (br > 0 ? br : bottom_w)}, false, false);
+        arc({right - br, bottom - br}, br, 0.0f);
+        strip({x + bl, bottom - bottom_w, outer.w - bl - br, bottom_w}, true, true);
+        arc({x + bl, bottom - bl}, bl, quarter);
+        strip({x, y + (tl > 0 ? tl : top_w), w.left,
+               outer.h - (tl > 0 ? tl : top_w) - (bl > 0 ? bl : bottom_w)}, false, true);
+        arc({x + tl, y + tl}, tl, 2.0f * quarter);
+    }
+    ctx->render_clip_index = saved_clip;
+}
+
 void emit_box_background_and_shadow(
     Context* ctx,
     const BoxExtra* extra,
@@ -953,7 +1098,7 @@ void emit_box_background_and_shadow(
 
     const bool has_fill = (d.background.a > 0u) || has_grad;
     const bool any_clip = d.clip_children || d.scroll_x || d.scroll_y || d.shrink_width || d.shrink_height;
-    const bool draw_border_here = !any_clip && d.border_width > 0.0f && d.border_color.a > 0u;
+    const bool draw_border_here = !any_clip && !has_segmented_border(d) && d.border_width > 0.0f && d.border_color.a > 0u;
     if(draw_border_here) align_border_bounds(&box_px,&rad_px,d.border_width*dpi,d.border_align);
     if (has_fill || draw_border_here || use_blur) {
         const Color border_col = draw_border_here ? d.border_color : Color{};
@@ -1146,6 +1291,19 @@ SelectionLine selection_line(const Clay_RenderCommand* cmd) noexcept {
 }
 
 // Visit visual cluster edges once; ligatures and RTL runs retain their shaped boundaries.
+static uint32_t selection_text_offset(const SelectionLine& line, uint32_t layout_offset) noexcept {
+    if (!line.rich || !line.rich->has_icon_markers) return layout_offset;
+    const RichSpanInternal* spans = line.rich->spans;
+    uint32_t lo = 0, hi = line.rich->span_count - 1u;
+    while (lo < hi) {
+        const uint32_t middle = lo + (hi - lo) / 2u;
+        if (layout_offset >= spans[middle].byte_end) lo = middle + 1;
+        else hi = middle;
+    }
+    const RichSpanInternal& span = spans[lo];
+    return span.text_byte_start + std::max(layout_offset, span.layout_text_start()) - span.layout_text_start();
+}
+
 void selection_line_geometry(Context* ctx, const Clay_RenderCommand* cmd, const SelectionLine& line,
     uint32_t a, uint32_t b, float pointer_x, float* xa, float* xb, uint32_t* hit,
     const ClipEntry* selection_clip = nullptr, float dpi = 1.0f) noexcept {
@@ -1153,33 +1311,36 @@ void selection_line_geometry(Context* ctx, const Clay_RenderCommand* cmd, const 
     float best = 1.0e30f;
     bool has_xa = false;
     bool has_xb = false;
-    *xa = pen; *xb = pen; *hit = line.start;
+    *xa = pen; *xb = pen; *hit = selection_text_offset(line, line.start);
     const auto edge = [&](uint32_t byte, float x) noexcept {
         if (byte == a) { *xa = x; has_xa = true; }
         if (byte == b) { *xb = x; has_xb = true; }
         const float dist = std::abs(x - pointer_x);
         if (dist < best) { best = dist; *hit = byte; }
     };
-    const auto segment = [&](uint32_t start, uint32_t end, uint16_t font, float size, float spacing, bool trim) noexcept {
+    const auto segment = [&](uint32_t start, uint32_t end, uint16_t font, float size, float spacing, bool trim,
+                             uint32_t marker_bytes) noexcept {
+        const uint32_t byte_a = a + marker_bytes, byte_b = b + marker_bytes;
+        const auto text_edge = [&](uint32_t byte, float x) noexcept { edge(byte - marker_bytes, x); };
         const uint16_t slot = resolve_font_slot_idx(&ctx->atlas, font);
         uint32_t pos = start;
         uint32_t glyph_index = 0;
         const auto advance_spacing = [&]() noexcept { return (!trim || glyph_index++ > 0u) ? spacing : 0.0f; };
         while (pos < end) {
             if (line.base[pos] == '\t' || slot == kInvalidFont) {
-                edge(pos, pen);
+                text_edge(pos, pen);
                 const float start_pen = pen;
                 const bool tab = line.base[pos] == '\t';
                 const char* cp = line.base + pos;
                 (void)next_utf8_codepoint(cp, line.base + end);
                 pen += (tab ? 4.0f : 1.0f) * (slot == kInvalidFont ? 0.55f : ctx->atlas.slots[slot].space_advance_em) * size + advance_spacing();
                 const uint32_t next_pos = static_cast<uint32_t>(cp - line.base);
-                if (selection_clip && a < next_pos && b > pos) {
+                if (selection_clip && byte_a < next_pos && byte_b > pos) {
                     push_prim(ctx, Prim::make_rect({start_pen * dpi, cmd->boundingBox.y * dpi,
                         (pen - start_pen) * dpi, cmd->boundingBox.height * dpi},
                         selection_clip->rect, line.color, {}, {}, 0, 1, selection_clip->radius));
                 }
-                pos = next_pos; edge(pos, pen); continue;
+                pos = next_pos; text_edge(pos, pen); continue;
             }
             uint32_t run_end = pos;
             while (run_end < end && line.base[run_end] != '\t') ++run_end;
@@ -1192,7 +1353,7 @@ void selection_line_geometry(Context* ctx, const Clay_RenderCommand* cmd, const 
                 rtl = glyphs[i].is_rtl != 0;
                 const uint32_t c1 = glyphs[i].cluster_end;
                 const float cluster_x = pen;
-                edge(pos + (rtl ? c1 : c0), pen);
+                text_edge(pos + (rtl ? c1 : c0), pen);
                 for (uint32_t k = i; k < j; ++k) pen += glyphs[k].x_advance_1px * size + advance_spacing();
                 const auto selection_stop = [&](uint32_t stop, float* x, bool* has_x) noexcept {
                     if (stop > pos+c0 && stop < pos+c1) {
@@ -1203,8 +1364,8 @@ void selection_line_geometry(Context* ctx, const Clay_RenderCommand* cmd, const 
                         *has_x = true;
                     }
                 };
-                if (selection_clip && c1 > c0 && a < pos+c1 && b > pos+c0) {
-                    const uint32_t lo = a > pos+c0 ? a : pos+c0, hi = b < pos+c1 ? b : pos+c1;
+                if (selection_clip && c1 > c0 && byte_a < pos+c1 && byte_b > pos+c0) {
+                    const uint32_t lo = std::max(byte_a, pos+c0), hi = std::min(byte_b, pos+c1);
                     const uint32_t count = count_utf8_cps(line.base+pos+c0,c1-c0);
                     if (count > 0u) {
                         const float f0 = static_cast<float>(count_utf8_cps(line.base+pos+c0,lo-pos-c0))/static_cast<float>(count);
@@ -1214,9 +1375,9 @@ void selection_line_geometry(Context* ctx, const Clay_RenderCommand* cmd, const 
                             selection_clip->rect,line.color,{}, {},0,1,selection_clip->radius));
                     }
                 }
-                selection_stop(a,xa,&has_xa);
-                selection_stop(b,xb,&has_xb);
-                edge(pos + (rtl ? c0 : c1), pen);
+                selection_stop(byte_a,xa,&has_xa);
+                selection_stop(byte_b,xb,&has_xb);
+                text_edge(pos + (rtl ? c0 : c1), pen);
                 i = j;
             }
             pos = run_end;
@@ -1228,17 +1389,24 @@ void selection_line_geometry(Context* ctx, const Clay_RenderCommand* cmd, const 
             const uint32_t lo = sp.byte_start > line.start ? sp.byte_start : line.start;
             const uint32_t hi = sp.byte_end < line.end ? sp.byte_end : line.end;
             if (hi <= lo) continue;
-            if (lo == sp.byte_start) pen += sp.padding_x;
-            segment(lo, hi, sp.font_id, sp.font_size_px, sp.letter_spacing, hi == line.end);
+            if (lo == sp.byte_start) {
+                if (sp.icon_advance > 0.0f) edge(sp.text_byte_start, pen);
+                pen += sp.padding_x + sp.icon_advance;
+            }
+            const uint32_t start = std::max(lo, sp.layout_text_start());
+            if (start < hi)
+                segment(start, hi, sp.font_id, sp.font_size_px, sp.letter_spacing, hi == line.end,
+                        sp.layout_text_start() - sp.text_byte_start);
             if (hi == sp.byte_end) pen += sp.padding_x;
         }
     } else {
         const auto& td = cmd->renderData.text;
         segment(line.start, line.end, static_cast<uint16_t>(td.fontId & 0x7Fu),
-            decode_clay_font_px(td.fontSize, td.fontId), static_cast<float>(td.letterSpacing), false);
+            decode_clay_font_px(td.fontSize, td.fontId), static_cast<float>(td.letterSpacing), false, 0u);
     }
-    if (!has_xa && a >= line.end) *xa = pen;
-    if (!has_xb && b >= line.end) *xb = pen;
+    const uint32_t text_end = selection_text_offset(line, line.end);
+    if (!has_xa && a >= text_end) *xa = pen;
+    if (!has_xb && b >= text_end) *xb = pen;
 }
 
 void emit_selection_line(Context* ctx, const Clay_RenderCommand* cmd, const ClipEntry& clip, float dpi) noexcept {
@@ -1254,13 +1422,17 @@ void emit_selection_line(Context* ctx, const Clay_RenderCommand* cmd, const Clip
     if (!ws) return;
     const uint32_t a = ws->edit_cursor < ws->edit_sel_anchor ? ws->edit_cursor : ws->edit_sel_anchor;
     const uint32_t b = ws->edit_cursor > ws->edit_sel_anchor ? ws->edit_cursor : ws->edit_sel_anchor;
-    if (a == b || a >= line.end || b <= line.start) return;
+    if (a == b || a >= selection_text_offset(line, line.end) ||
+        b <= selection_text_offset(line, line.start)) return;
     float xa, xb; uint32_t hit;
     const size_t mark = ctx->frame_arena.mark();
-    selection_line_geometry(ctx, cmd, line, a < line.start ? line.start : a, b > line.end ? line.end : b, 0, &xa, &xb, &hit, &clip, dpi);
+    selection_line_geometry(ctx, cmd, line, a, b, 0, &xa, &xb, &hit, &clip, dpi);
     ctx->frame_arena.rewind(mark);
 
 }
+
+void emit_vector_icon_quad(Context* ctx, uint16_t icon_id, Rect target_px, Color color,
+                           const ClipEntry& clip, float angle_rad = 0.0f) noexcept;
 
 void emit_rich_text_command(
     Context* ctx,
@@ -1277,7 +1449,7 @@ void emit_rich_text_command(
         const float ox=layer ? layer->resolved_offset_px.x : 0.f;
         effective_clip.rect=rect_intersect(clip.rect,Rect{cmd->boundingBox.x*dpi*sx+ox,clip.rect.y,width*dpi*sx,clip.rect.h});
     }
-    emit_selection_line(ctx, cmd, effective_clip, dpi);
+    if (!rich->has_icon_markers) emit_selection_line(ctx, cmd, effective_clip, dpi);
     const Clay_TextRenderData& td = cmd->renderData.text;
     const char* chars = td.stringContents.chars;
     const int32_t len = td.stringContents.length;
@@ -1371,6 +1543,10 @@ void emit_rich_text_command(
         if (has_left) {
             pen_logical += sp.padding_x;
         }
+        if (has_left && sp.icon_size > 0.0f) {
+            push_chunk(RichLineChunk{.sp = &sp, .start_x_px = pen_logical * dpi});
+            pen_logical += sp.icon_advance;
+        }
         const float text_x0 = pen_logical;
 
         const uint16_t slot_idx = can_shape ? resolve_font_slot_idx(&ctx->atlas, sp.font_id) : kInvalidFont;
@@ -1382,9 +1558,10 @@ void emit_rich_text_command(
             return s;
         };
 
+        const uint32_t text_start = std::max(ov0, sp.layout_text_start());
         if (!has_slot) {
             const float cp_w = sp.font_size_px * 0.55f;
-            const char* p = base + ov0;
+            const char* p = base + text_start;
             const char* end = base + ov1;
             while (p < end) {
                 const uint32_t cp = next_utf8_codepoint(p, end);
@@ -1392,7 +1569,7 @@ void emit_rich_text_command(
             }
         } else {
             const FontSlot& primary = ctx->atlas.slots[slot_idx];
-            uint32_t pos = ov0;
+            uint32_t pos = text_start;
             while (pos < ov1) {
                 if (base[pos] == '\t') {
                     uint32_t t_end = pos + 1u;
@@ -1446,16 +1623,6 @@ void emit_rich_text_command(
             .has_right_edge = has_right,
         };
 
-        if (sp.id != 0u && seg_x1 > seg_x0 && reserve_span_hits(&ctx->active_ui->span_hits, &ctx->active_ui->span_hit_cap, ctx->active_ui->span_hit_count, 256u)) {
-            ctx->active_ui->span_hits[ctx->active_ui->span_hit_count++] = SpanHitRegion{
-                .id = sp.id,
-                .clay_elem_id = rich->clay_elem_id,
-                .rect = Rect{ seg_x0, cmd->boundingBox.y, seg_x1 - seg_x0, cmd->boundingBox.height },
-                .z_index = cmd->zIndex,
-                .clip_rect = clip_logical,
-                .has_clip = true,
-            };
-        }
     }
 
     float visible_end_px=cmd->boundingBox.x*dpi;
@@ -1469,6 +1636,13 @@ void emit_rich_text_command(
             const Str dots=ellipsis_text(ctx,sp.font_id);float reserved=0;
             for(const auto& g:shape_utf8_run(ctx,sp.font_id,dots.chars,dots.length)) reserved+=g.x_advance_1px*sp.font_size_px*dpi;
             float pen=ch.start_x_px;
+            if (ch.glyphs.empty()) {
+                const float end = pen + sp.icon_size * dpi;
+                if (end + reserved > full_limit_px + 0.01f) break;
+                visible_end_px = end;
+                ellipsis_span = &sp;
+                continue;
+            }
             for(uint32_t gi=0;gi<ch.glyphs.size();) {
                 const uint32_t first=gi;float next=pen;
                 do {
@@ -1485,7 +1659,9 @@ void emit_rich_text_command(
     for (uint32_t i = 0u; i < seg_count; ++i) {
         const RichLineSeg& sg = segs[i];
         const RichSpanInternal* sp = sg.sp;
-        if (sp->background.a == 0u && sp->border_color.a == 0u) {
+        const Color background = sp->id && sp->hover_background.a && hovered(sp->id)
+            ? sp->hover_background : sp->background;
+        if (background.a == 0u && sp->border_color.a == 0u) {
             continue;
         }
         const float w_px = (td.truncated ? std::fmin(sg.x1_px,visible_end_px) : sg.x1_px) - sg.x0_px;
@@ -1504,6 +1680,13 @@ void emit_rich_text_command(
         float bot_px = baseline_y_px + sp_desc_px + pad_y_px;
         if (top_px < line_top_px) top_px = line_top_px;
         if (bot_px > line_bot_px) bot_px = line_bot_px;
+        if (sg.has_left_edge && sp->icon_size > 0.0f) {
+            const float center_y = (line_top_px + line_bot_px) * 0.5f;
+            top_px = std::fmin(top_px, center_y - sp->icon_size * dpi * 0.5f);
+            bot_px = std::fmax(bot_px, center_y + sp->icon_size * dpi * 0.5f);
+        }
+        top_px -= sp->padding_y * dpi;
+        bot_px += sp->padding_y * dpi;
         const float h_px = (bot_px > top_px) ? (bot_px - top_px) : (line_bot_px - line_top_px);
         const float r_full = sp->bg_radius * dpi;
         const float r_join = (r_full < 2.0f * dpi) ? r_full : (2.0f * dpi);
@@ -1515,12 +1698,30 @@ void emit_rich_text_command(
             Prim::make_rect(
                 Rect{ sg.x0_px, top_px, w_px, h_px },
                 effective_clip.rect,
-                sp->background,
+                background,
                 Corners{ rl, rr, rr, rl },
                 sp->border_color,
                 bw,
                 1.0f,
                 effective_clip.radius));
+    }
+
+    if (rich->has_icon_markers) emit_selection_line(ctx, cmd, effective_clip, dpi);
+    for (uint32_t i = 0u; i < seg_count; ++i) {
+        const RichLineSeg& sg = segs[i];
+        const RichSpanInternal& sp = *sg.sp;
+        if (sp.id != 0u && sg.x1_px > sg.x0_px &&
+            reserve_span_hits(&ctx->active_ui->span_hits, &ctx->active_ui->span_hit_cap, ctx->active_ui->span_hit_count, 256u)) {
+            ctx->active_ui->span_hits[ctx->active_ui->span_hit_count++] = SpanHitRegion{
+                .id = sp.id,
+                .clay_elem_id = rich->clay_elem_id,
+                .rect = {sg.x0_px / dpi, cmd->boundingBox.y - sp.padding_y, (sg.x1_px - sg.x0_px) / dpi,
+                         cmd->boundingBox.height + sp.padding_y * 2.0f},
+                .z_index = cmd->zIndex,
+                .clip_rect = clip_logical,
+                .has_clip = true,
+            };
+        }
     }
 
     if(td.truncated) visible_end_px=cmd->boundingBox.x*dpi;
@@ -1532,6 +1733,15 @@ void emit_rich_text_command(
         const float phys_px = sp->font_size_px * dpi;
         const float ls_px = sp->letter_spacing * dpi;
         float gx = ch.start_x_px;
+        if (ch.glyphs.empty()) {
+            const float size = sp->icon_size * dpi;
+            if (td.truncated && (elided || gx + size > text_limit_px + 0.01f)) break;
+            emit_vector_icon_quad(ctx, sp->icon_id, {gx, (line_top_px + line_bot_px - size) * 0.5f, size, size},
+                                  sp->icon_color, effective_clip);
+            visible_end_px = gx + size;
+            ellipsis_span = sp;
+            continue;
+        }
         for (uint32_t gi = 0u; gi < static_cast<uint32_t>(ch.glyphs.size()); ++gi) {
             const ShapedGlyph& g = ch.glyphs[gi];
             if(td.truncated && (gi==0 || ch.glyphs[gi-1].cluster!=g.cluster)) {

@@ -1383,7 +1383,9 @@ void emit_utf8_glyph_run(
     bool mask_bullets,
     float* io_pen_x,
     float* io_pen_y,
-    uint32_t tab_width = 4u) noexcept
+    uint32_t tab_width,
+    std::span<const TextInputHighlight> highlights,
+    uint32_t byte_base) noexcept
 {
     if (!ctx || !ctx->atlas.font_valid || !s || len == 0u || !io_pen_x || !io_pen_y) {
         return;
@@ -1396,11 +1398,19 @@ void emit_utf8_glyph_run(
     const float base_px = (font_size_px > 0.0f) ? font_size_px : 14.0f;
     const float phys_px = base_px * dpi;
 
+    const auto cluster_color = [&](uint32_t lo, uint32_t hi) noexcept {
+        Color color = tint;
+        for (const TextInputHighlight& h : highlights)
+            if (h.text_color.a && lo < h.byte_offset + h.byte_length && hi > h.byte_offset)
+                color = h.text_color;
+        return color;
+    };
     if (mask_bullets) {
         const float bullet_adv_logical = primary.bullet_advance_em * base_px + letter_spacing;
         const char* p = s;
         const char* end = s + len;
         while (p < end) {
+            const char* start = p;
             const uint32_t cp = next_utf8_codepoint(p, end);
             if (cp == '\n') {
                 if (multiline) {
@@ -1412,7 +1422,8 @@ void emit_utf8_glyph_run(
             const float pen_x_px = (origin_x + *io_pen_x - scroll_x) * dpi;
             const float base_y_px = (origin_y + *io_pen_y - scroll_y) * dpi + ascender_px;
             emit_slug_glyph_quad(
-                ctx, primary_slot, primary.bullet_glyph_id, phys_px, pen_x_px, base_y_px, 0.0f, 0.0f, clip_px, tint);
+                ctx, primary_slot, primary.bullet_glyph_id, phys_px, pen_x_px, base_y_px, 0.0f, 0.0f, clip_px,
+                cluster_color(byte_base + static_cast<uint32_t>(start - s), byte_base + static_cast<uint32_t>(p - s)));
             *io_pen_x += bullet_adv_logical;
         }
         return;
@@ -1452,7 +1463,7 @@ void emit_utf8_glyph_run(
                 g.x_offset_em,
                 g.y_offset_em,
                 clip_px,
-                tint);
+                cluster_color(byte_base + pos + g.cluster, byte_base + pos + g.cluster_end));
             *io_pen_x += g.x_advance_1px * base_px + letter_spacing;
         }
         pos = run_end;
@@ -1541,8 +1552,52 @@ void emit_text_input_command(
     const uint32_t sel_max = (c_byte < a_byte) ? a_byte : c_byte;
     const bool wrap_aff = (ws && wrap_w > 0.0f) ? ws->edit_wrap_affinity : false;
 
-    // 1. Emit per-line selection highlight quads
-    if (sel_max > sel_min && desc.selection_color.a > 0u) {
+    const auto highlights = desc.highlights;
+    const auto emit_highlights = [&](uint32_t start, uint32_t end, float x, float y) noexcept {
+        if (y + geom.line_h < scroll_y || y > scroll_y + geom.clip_logical.h) return;
+        for (const TextInputHighlight& h : highlights) {
+            const uint32_t lo = std::max(start, h.byte_offset);
+            const uint32_t hi = std::min(end, h.byte_offset + h.byte_length);
+            if (lo >= hi || !(h.background.a || h.border_color.a)) continue;
+            const auto pill = [&](float left, float right) noexcept {
+                if (right <= left) return;
+                const Rect bounds{(geom.origin_x + x + left - scroll_x) * dpi,
+                                  (geom.origin_y + y - scroll_y) * dpi, (right - left) * dpi, geom.line_h * dpi};
+                push_prim(ctx, Prim::make_rect(bounds, inner_clip.rect, h.background,
+                    Corners::all(std::fmin(h.radius_px * dpi, std::fmin(bounds.w, bounds.h) * 0.5f)),
+                    h.border_color, h.border_color.a ? dpi : 0.0f));
+            };
+            struct HighlightRun {
+                const decltype(pill)& emit;
+                const char* text;
+                uint32_t first, last;
+                float left = 0.0f, right = 0.0f;
+            };
+            HighlightRun run{pill, s + start, lo - start, hi - start};
+            measure_line_segment_x(ctx, desc.font_id, run.text, end - start, 0u, 0u,
+                base_px, desc.letter_spacing, desc.password, false, nullptr, nullptr, nullptr, 4u,
+                [](void* data, uint32_t a, uint32_t b, float pen, float advance, bool rtl) noexcept {
+                    auto& visual = *static_cast<HighlightRun*>(data);
+                    if (visual.first >= b || visual.last <= a || advance <= 0.0f) return;
+                    float left = pen, right = pen + advance;
+                    if (visual.first > a || visual.last < b) {
+                        const float count = static_cast<float>(count_utf8_cps(visual.text + a, b - a));
+                        const float f0 = static_cast<float>(count_utf8_cps(visual.text + a, std::max(visual.first, a) - a)) / count;
+                        const float f1 = static_cast<float>(count_utf8_cps(visual.text + a, std::min(visual.last, b) - a)) / count;
+                        left = pen + advance * (rtl ? 1.0f - f1 : f0);
+                        right = pen + advance * (rtl ? 1.0f - f0 : f1);
+                    }
+                    if (left > visual.right + 0.001f || visual.left == visual.right) {
+                        visual.emit(visual.left, visual.right);
+                        visual.left = left;
+                    }
+                    visual.right = right;
+                }, &run);
+            pill(run.left, run.right);
+        }
+    };
+    const bool draw_selection = sel_max > sel_min && desc.selection_color.a > 0u;
+    if (draw_selection || (!composing && !highlights.empty())) {
         const Color sel_col = is_focused
             ? desc.selection_color
             : Color::rgba8(desc.selection_color.r, desc.selection_color.g, desc.selection_color.b, static_cast<uint8_t>(desc.selection_color.a * 45u / 100u));
@@ -1562,7 +1617,8 @@ void emit_text_input_command(
                 const uint32_t hs = (sel_min > ls) ? sel_min : ls;
                 const uint32_t he = (sel_max < le) ? sel_max : le;
                 const bool spans_nl = desc.multiline && sel_max > le && sel_min <= le;
-                if (he > hs || spans_nl) {
+                if (!composing && !highlights.empty()) emit_highlights(ls, le, 0.0f, line_y);
+                if (draw_selection && (he > hs || spans_nl)) {
                     float x0 = 0.0f;
                     float x1 = 0.0f;
                     measure_line_segment_x(
@@ -1591,7 +1647,8 @@ void emit_text_input_command(
                         const uint32_t he = (sel_max < sub_abs_e) ? sel_max : sub_abs_e;
                         const bool is_last = (sub.end >= line_len);
                         const bool spans_nl = is_last && desc.multiline && sel_max > le && sel_min <= le;
-                        if (he > hs || spans_nl) {
+                        if (!composing && !highlights.empty()) emit_highlights(sub_abs_s, sub_abs_e, 0.0f, line_y);
+                        if (draw_selection && (he > hs || spans_nl)) {
                             float x0 = 0.0f;
                             float x1 = 0.0f;
                             measure_line_segment_x(
@@ -1700,11 +1757,12 @@ void emit_text_input_command(
                             float sub_py = py;
                             if (sub.start < rel_c && sub.start < sub.end) {
                                 const uint32_t p_end = (sub.end < rel_c) ? sub.end : rel_c;
+                                if (!highlights.empty()) emit_highlights(ls + sub.start, ls + p_end, px, py);
                                 emit_utf8_glyph_run(
                                     ctx, desc.font_id, spliced + sub.start, p_end - sub.start,
                                     base_px, desc.letter_spacing, ascender_px, geom.line_adv,
                                     desc.text_color, geom.origin_x, geom.origin_y, scroll_x, scroll_y,
-                                    inner_clip, dpi, false, false, &px, &sub_py);
+                                    inner_clip, dpi, false, false, &px, &sub_py, 4u, highlights, ls + sub.start);
                             }
                             const uint32_t cs = (sub.start > rel_c) ? sub.start : rel_c;
                             const uint32_t ce = (sub.end < comp_end_off) ? sub.end : comp_end_off;
@@ -1760,11 +1818,12 @@ void emit_text_input_command(
                                 const uint32_t ss = (sub.start > comp_end_off) ? sub.start : comp_end_off;
                                 if (sub.end > ss) {
                                     sub_py = py;
+                                    if (!highlights.empty()) emit_highlights(ls + ss - comp_len, ls + sub.end - comp_len, px, py);
                                     emit_utf8_glyph_run(
                                         ctx, desc.font_id, spliced + ss, sub.end - ss,
                                         base_px, desc.letter_spacing, ascender_px, geom.line_adv,
                                         desc.text_color, geom.origin_x, geom.origin_y, scroll_x, scroll_y,
-                                        inner_clip, dpi, false, false, &px, &sub_py);
+                                        inner_clip, dpi, false, false, &px, &sub_py, 4u, highlights, ls + ss - comp_len);
                                 }
                             }
                             py += geom.line_adv;
@@ -1777,11 +1836,12 @@ void emit_text_input_command(
                     [&](const WrappedSubline& sub) noexcept {
                         float px = 0.0f;
                         float sub_py = py;
+                        if (!highlights.empty()) emit_highlights(ls + sub.start, ls + sub.end, px, py);
                         emit_utf8_glyph_run(
                             ctx, desc.font_id, s + ls + sub.start, sub.end - sub.start,
                             base_px, desc.letter_spacing, ascender_px, geom.line_adv,
                             desc.text_color, geom.origin_x, geom.origin_y, scroll_x, scroll_y,
-                            inner_clip, dpi, false, desc.password, &px, &sub_py);
+                            inner_clip, dpi, false, desc.password, &px, &sub_py, 4u, highlights, ls + sub.start);
                         py += geom.line_adv;
                         return true;
                     });
@@ -1792,12 +1852,28 @@ void emit_text_input_command(
             pos = le + 1u;
         }
     } else if (composing) {
+        const auto emit_committed_highlights = [&](uint32_t start, uint32_t end, float x, float y) noexcept {
+            if (highlights.empty()) return;
+            while (start < end) {
+                uint32_t stop = end;
+                if (desc.multiline) {
+                    const void* nl = std::memchr(s + start, '\n', end - start);
+                    if (nl) stop = static_cast<uint32_t>(static_cast<const char*>(nl) - s);
+                }
+                emit_highlights(start, stop, x, y);
+                if (stop == end) break;
+                start = stop + 1u;
+                x = 0.0f;
+                y += geom.line_adv;
+            }
+        };
+        emit_committed_highlights(0, c_byte, 0, 0);
         float pen_x = 0.0f;
         float pen_y = 0.0f;
         emit_utf8_glyph_run(
             ctx, desc.font_id, s, c_byte, base_px, desc.letter_spacing, ascender_px, geom.line_adv,
             desc.text_color, geom.origin_x, geom.origin_y, scroll_x, scroll_y,
-            inner_clip, dpi, desc.multiline, desc.password, &pen_x, &pen_y);
+            inner_clip, dpi, desc.multiline, desc.password, &pen_x, &pen_y, 4u, highlights);
 
         const float comp_start_x = pen_x;
         const float comp_start_y = pen_y;
@@ -1848,10 +1924,11 @@ void emit_text_input_command(
         }
 
         if (c_byte < len) {
+            emit_committed_highlights(c_byte, len, pen_x, pen_y);
             emit_utf8_glyph_run(
                 ctx, desc.font_id, s + c_byte, len - c_byte, base_px, desc.letter_spacing, ascender_px, geom.line_adv,
                 desc.text_color, geom.origin_x, geom.origin_y, scroll_x, scroll_y,
-                inner_clip, dpi, desc.multiline, desc.password, &pen_x, &pen_y);
+                inner_clip, dpi, desc.multiline, desc.password, &pen_x, &pen_y, 4u, highlights, c_byte);
         }
     } else if (wrap_w <= 0.0f) {
         float pen_x = 0.0f;
@@ -1859,7 +1936,7 @@ void emit_text_input_command(
         emit_utf8_glyph_run(
             ctx, desc.font_id, s, len, base_px, desc.letter_spacing, ascender_px, geom.line_adv,
             desc.text_color, geom.origin_x, geom.origin_y, scroll_x, scroll_y,
-            inner_clip, dpi, desc.multiline, desc.password, &pen_x, &pen_y);
+            inner_clip, dpi, desc.multiline, desc.password, &pen_x, &pen_y, 4u, highlights);
         const TextVisualPos cpos = text_byte_to_visual(ctx, desc, ti->committed_text, c_byte);
         caret_vx = cpos.x;
         caret_vy = cpos.y;
@@ -1878,7 +1955,7 @@ void emit_text_input_command(
                         ctx, desc.font_id, s + ls + sub.start, sub.end - sub.start,
                         base_px, desc.letter_spacing, ascender_px, geom.line_adv,
                         desc.text_color, geom.origin_x, geom.origin_y, scroll_x, scroll_y,
-                        inner_clip, dpi, false, desc.password, &px, &sub_py);
+                        inner_clip, dpi, false, desc.password, &px, &sub_py, 4u, highlights, ls + sub.start);
                     py += geom.line_adv;
                     return true;
                 });

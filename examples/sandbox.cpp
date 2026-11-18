@@ -1488,6 +1488,7 @@ int run_interactive() noexcept {
 int main(int argc, char** argv) {
     bool headless = false;
     const char* out_png = "frame_check.png";
+    const char* renderer = nullptr;
 
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--headless") == 0) {
@@ -1496,11 +1497,14 @@ int main(int argc, char** argv) {
                 out_png = argv[i + 1];
                 ++i;
             }
+        } else if (std::strcmp(argv[i], "--renderer") == 0 && i + 1 < argc) {
+            renderer = argv[++i];
+            if (std::strcmp(renderer, "d3d12") == 0) renderer = "direct3d12";
         }
     }
 
     if (headless) {
-        return run_headless(out_png);
+        return run_headless(out_png, renderer);
     }
     return run_interactive();
 }

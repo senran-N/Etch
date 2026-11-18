@@ -1,6 +1,7 @@
-int run_headless(const char* out_png_path) noexcept {
+int run_headless(const char* out_png_path, const char* renderer) noexcept {
     etch::Context* ctx = etch::create_context(etch::ContextDesc{
         .headless = true,
+        .gpu_driver = renderer,
     });
     if (!ctx) {
         std::fprintf(stderr, "Etch headless error: create_context failed (%s)\n", SDL_GetError());

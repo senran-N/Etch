@@ -8,8 +8,8 @@
 
 #ifndef ETCH_VERSION_MAJOR
 #define ETCH_VERSION_MAJOR 0
-#define ETCH_VERSION_MINOR 18
-#define ETCH_VERSION_PATCH 1
+#define ETCH_VERSION_MINOR 19
+#define ETCH_VERSION_PATCH 0
 #define ETCH_VERSION_STR_DETAIL(x) #x
 #define ETCH_VERSION_STR(x) ETCH_VERSION_STR_DETAIL(x)
 #define ETCH_VERSION_STRING ETCH_VERSION_STR(ETCH_VERSION_MAJOR) "." ETCH_VERSION_STR(ETCH_VERSION_MINOR) "." ETCH_VERSION_STR(ETCH_VERSION_PATCH)
@@ -55,7 +55,7 @@ enum {
     ETCH_FONT_SANS = 0u,
     ETCH_FONT_BOLD = 1u,
     ETCH_FONT_MONO = 2u,
-    ETCH_FONT_MEDIUM = 14u, ETCH_FONT_SEMIBOLD = 15u,
+    ETCH_FONT_MEDIUM = 14u, ETCH_FONT_SEMIBOLD = 15u, ETCH_FONT_ITALIC = 16u,
     ETCH_MAX_FONT_SLOTS = 64u,
     ETCH_INVALID_FONT = 0xFFFFu,
     ETCH_MAX_VECTOR_ICONS = 1024u,
@@ -863,6 +863,9 @@ typedef struct EtchBoxDesc {
     EtchBorderBeamStyle border_beam;
     float top_rim_alpha;
     float scroll_fade_px;
+    EtchPadding border_sides;
+    float border_dash_px;
+    float border_gap_px;
 } EtchBoxDesc;
 
 typedef struct EtchTextDesc {
@@ -893,6 +896,12 @@ typedef struct EtchTextSpan {
     float padding_x;
     float bg_radius;
     uint32_t id;
+    uint16_t icon_id;
+    EtchColor icon_color;
+    float icon_size_px;
+    float icon_gap_px;
+    float padding_y;
+    EtchColor hover_background;
 } EtchTextSpan;
 
 typedef struct EtchRichTextDesc {
@@ -1243,6 +1252,15 @@ typedef struct EtchCodeEditorResult {
     EtchRect ime_cursor_rect;
 } EtchCodeEditorResult;
 
+typedef struct EtchTextInputHighlight {
+    uint32_t byte_offset;
+    uint32_t byte_length;
+    EtchColor text_color;
+    EtchColor background;
+    EtchColor border_color;
+    float radius_px;
+} EtchTextInputHighlight;
+
 typedef struct EtchTextInputDesc {
     uint32_t id;
     char* buffer;
@@ -1270,6 +1288,8 @@ typedef struct EtchTextInputDesc {
     bool read_only;
     bool password;
     bool context_menu, clear_button, escape_blurs;
+    const EtchTextInputHighlight* highlights;
+    uint32_t highlight_count;
 } EtchTextInputDesc;
 
 typedef struct EtchTextInputResult {
@@ -1735,6 +1755,7 @@ EtchImageDrawDesc etch_image_draw_desc_default(void);
 EtchTextureDesc etch_texture_desc_default(void);
 EtchWindowChromeDesc etch_window_chrome_desc_default(void);
 EtchCodeEditorDesc etch_code_editor_desc_default(void);
+EtchTextInputHighlight etch_text_input_highlight_default(void);
 EtchTextInputDesc etch_text_input_desc_default(void);
 EtchButtonDesc etch_button_desc_default(void);
 EtchCheckboxDesc etch_checkbox_desc_default(void);
@@ -1862,6 +1883,25 @@ uint16_t etch_load_font_memory(EtchContext* ctx, const void* data, size_t size_b
 bool etch_is_font_loaded(const EtchContext* ctx, uint16_t font_id);
 bool etch_set_font_tabular_numbers(EtchContext* ctx, uint16_t font_id, bool enabled);
 
+typedef enum EtchStrokeCap {
+    ETCH_STROKE_CAP_BUTT = 0, ETCH_STROKE_CAP_ROUND = 1, ETCH_STROKE_CAP_SQUARE = 2
+} EtchStrokeCap;
+
+typedef enum EtchStrokeJoin {
+    ETCH_STROKE_JOIN_MITER = 0, ETCH_STROKE_JOIN_ROUND = 1, ETCH_STROKE_JOIN_BEVEL = 2
+} EtchStrokeJoin;
+
+typedef struct EtchSvgStrokeDesc {
+    EtchVec4 view_box;
+    float stroke_width;
+    EtchStrokeCap cap;
+    EtchStrokeJoin join;
+    float miter_limit;
+    uint16_t slot_hint;
+} EtchSvgStrokeDesc;
+
+EtchSvgStrokeDesc etch_svg_stroke_desc_default(void);
+uint16_t etch_register_svg_stroke_icon(EtchContext* ctx, EtchStr svg_path_d, const EtchSvgStrokeDesc* desc);
 uint16_t etch_register_svg_icon(EtchContext* ctx, EtchStr svg_path_d, EtchVec4 view_box, uint16_t slot_hint);
 bool etch_is_icon_loaded(const EtchContext* ctx, uint16_t icon_id);
 

@@ -484,6 +484,7 @@ struct ImageExtra {
 };
 
 struct RichSpanInternal {
+    uint32_t text_byte_start = 0;
     uint32_t byte_start = 0;
     uint32_t byte_end = 0;
     Color    color = Color::white();
@@ -497,6 +498,13 @@ struct RichSpanInternal {
     float    padding_x = 0.0f;
     float    bg_radius = 4.0f;
     uint32_t id = 0;
+    uint16_t icon_id = kInvalidIcon;
+    Color icon_color = {};
+    Color hover_background = {};
+    float icon_size = 0.0f;
+    float icon_advance = 0.0f;
+    float padding_y = 0.0f;
+    uint32_t layout_text_start() const noexcept { return byte_start + (icon_id != kInvalidIcon ? 1u : 0u); }
 };
 
 struct SelectableTextExtra {
@@ -516,6 +524,7 @@ struct RichTextExtra {
     uint32_t          span_count = 0;
     const char*       full_utf8 = nullptr;
     uint32_t          total_bytes = 0;
+    bool              has_icon_markers = false;
     float             line_height_px = 0.0f;
     float             max_ascent_px = 0.0f;
     float             max_descent_px = 0.0f;
@@ -558,10 +567,13 @@ uint32_t utf8_next_grapheme(const char*, uint32_t, uint32_t) noexcept;
 uint32_t utf8_word_left(const char*, uint32_t, uint32_t) noexcept;
 uint32_t utf8_word_right(const char*, uint32_t, uint32_t) noexcept;
 void utf8_word_bounds_at(const char*, uint32_t, uint32_t, uint32_t*, uint32_t*) noexcept;
+using LineClusterVisitor = void (*)(void*, uint32_t, uint32_t, float, float, bool) noexcept;
 void measure_line_segment_x(Context*, uint16_t, const char*, uint32_t, uint32_t, uint32_t,
-    float, float, bool, bool, float*, float*, float*, uint32_t) noexcept;
+    float, float, bool, bool, float*, float*, float*, uint32_t = 4u,
+    LineClusterVisitor = nullptr, void* = nullptr) noexcept;
 void emit_utf8_glyph_run(Context*, uint16_t, const char*, uint32_t, float, float, float,
-    float, Color, float, float, float, float, const ClipEntry&, float, bool, bool, float*, float*, uint32_t) noexcept;
+    float, Color, float, float, float, float, const ClipEntry&, float, bool, bool, float*, float*, uint32_t = 4u,
+    std::span<const TextInputHighlight> = {}, uint32_t = 0u) noexcept;
 void clear_ime_composition(Context*) noexcept;
 struct ScrollbarGeom;
 ScrollbarGeom compute_vscrollbar_geom(const WidgetState*) noexcept;

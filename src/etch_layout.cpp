@@ -8,7 +8,7 @@ void emit_vector_icon_quad(
     uint16_t icon_id,
     Rect target_px,
     Color color,
-    const ClipEntry& clip, float angle_rad = 0.0f) noexcept
+    const ClipEntry& clip, float angle_rad) noexcept
 {
     if (icon_id >= kMaxVectorIcons || color.a == 0u || target_px.w <= 0.0f || target_px.h <= 0.0f) {
         return;
@@ -1704,6 +1704,13 @@ void begin_box(const BoxDesc& desc_in) noexcept {
     const float wscale = current_world_scale(ctx);
     BoxDesc desc = desc_in;
     desc.transition=valid_spring_spec(desc.transition);
+    const auto positive_px = [](float px) noexcept {
+        return std::isfinite(px) && px > 0.0f ? std::fmin(px, 65504.0f) : 0.0f;
+    };
+    desc.border_sides = {positive_px(desc.border_sides.left), positive_px(desc.border_sides.right),
+                         positive_px(desc.border_sides.top), positive_px(desc.border_sides.bottom)};
+    desc.border_dash_px = positive_px(desc.border_dash_px);
+    desc.border_gap_px = positive_px(desc.border_gap_px);
     desc.border_beam=valid_border_beam(desc.border_beam);
     desc.scroll_fade_px=std::isfinite(desc.scroll_fade_px) && desc.scroll_fade_px>0 ? desc.scroll_fade_px : 0;
     desc.top_rim_alpha=std::isfinite(desc.top_rim_alpha) ? clamp_range(desc.top_rim_alpha,0,1) : 0;
@@ -1719,6 +1726,12 @@ void begin_box(const BoxDesc& desc_in) noexcept {
         desc.gap *= wscale;
         if (desc.row_gap >= 0) desc.row_gap *= wscale;
         desc.border_width *= wscale;
+        desc.border_sides.left *= wscale;
+        desc.border_sides.right *= wscale;
+        desc.border_sides.top *= wscale;
+        desc.border_sides.bottom *= wscale;
+        desc.border_dash_px *= wscale;
+        desc.border_gap_px *= wscale;
         desc.border_beam.width *= wscale;
         desc.border_beam.glow_px *= wscale;
         desc.scroll_fade_px *= wscale;
@@ -1790,7 +1803,8 @@ void begin_box(const BoxDesc& desc_in) noexcept {
     const bool any_clip = eff_desc.clip_children || is_scroll || eff_desc.shrink_width || eff_desc.shrink_height;
     const bool is_floating_blocker = (eff_desc.attach_to != AttachTo::None && !eff_desc.pointer_passthrough);
     const bool has_beam=eff_desc.border_beam.color.a>0 || eff_desc.border_beam.base_color.a>0 || eff_desc.top_rim_alpha>0;
-    const bool has_border = (eff_desc.border_width > 0.0f && eff_desc.border_color.a > 0u) || has_beam;
+    const bool has_border = (eff_desc.border_color.a > 0u &&
+        (eff_desc.border_width > 0.0f || has_border_sides(eff_desc))) || has_beam;
     const bool has_scrollbar = is_scroll && eff_desc.show_scrollbar;
     const bool has_visual =
         eff_desc.background.a > 0u ||
@@ -1890,7 +1904,7 @@ void begin_box(const BoxDesc& desc_in) noexcept {
             decl.clip.childOffset = Clay_Vector2{ -box_ws->scroll_pos.x, -box_ws->scroll_pos.y };
         }
     }
-    if ((any_clip && (has_border || has_scrollbar)) || has_beam) {
+    if ((has_border && (any_clip || has_segmented_border(eff_desc))) || (any_clip && has_scrollbar) || has_beam) {
         // Ask Clay to emit a border command after children for scrollbars and material rims.
         decl.border.color = Clay_Color{255.0f, 255.0f, 255.0f, 1.0f};
         decl.border.width = Clay_BorderWidth{1u, 1u, 1u, 1u, 0u};
@@ -2026,14 +2040,18 @@ void text_spans(std::span<const TextSpan> spans, const RichTextDesc& desc) noexc
 
     uint32_t valid_count = 0u;
     uint32_t total_bytes = 0u;
+    uint32_t icon_count = 0u;
     for (const TextSpan& sp : spans) {
-        if (!sp.text.chars || sp.text.length == 0u) {
-            continue;
-        }
-        if (sp.text.length > (0x3FFFFFFFu - total_bytes)) {
+        const bool has_text = sp.text.chars && sp.text.length > 0u;
+        const bool has_icon = is_icon_loaded(ctx, sp.icon_id);
+        if (!has_text && !has_icon) continue;
+        const uint32_t marker = has_icon ? 1u : 0u;
+        const uint32_t text_len = has_text ? sp.text.length : 0u;
+        if (text_len > 0x3FFFFFFFu || text_len + marker > 0x3FFFFFFFu - total_bytes) {
             return;
         }
-        total_bytes += sp.text.length;
+        total_bytes += text_len + marker;
+        if (has_icon) ++icon_count;
         ++valid_count;
     }
     if (valid_count == 0u || total_bytes == 0u) {
@@ -2043,7 +2061,9 @@ void text_spans(std::span<const TextSpan> spans, const RichTextDesc& desc) noexc
     char* full_utf8 = ctx->frame_arena.alloc_uninit<char>(total_bytes + 1u);
     RichSpanInternal* int_spans = ctx->frame_arena.alloc_uninit<RichSpanInternal>(valid_count);
     RichTextExtra* rich = ctx->frame_arena.alloc<RichTextExtra>();
-    if (!full_utf8 || !int_spans || !rich) {
+    const uint32_t text_bytes = total_bytes - icon_count;
+    char* plain_utf8 = icon_count ? ctx->frame_arena.alloc_uninit<char>(text_bytes + 1u) : full_utf8;
+    if (!full_utf8 || !int_spans || !rich || !plain_utf8) {
         return;
     }
 
@@ -2059,6 +2079,7 @@ void text_spans(std::span<const TextSpan> spans, const RichTextDesc& desc) noexc
         4096.0f);
 
     uint32_t cursor = 0u;
+    uint32_t text_cursor = 0u;
     uint32_t out_idx = 0u;
     float max_asc = 0.0f;
     float max_desc = 0.0f;
@@ -2067,12 +2088,19 @@ void text_spans(std::span<const TextSpan> spans, const RichTextDesc& desc) noexc
     cfg_hash = fnv1a_32_step(cfg_hash, &ctx->atlas.font_revision, sizeof(ctx->atlas.font_revision));
 
     for (const TextSpan& sp : spans) {
-        if (!sp.text.chars || sp.text.length == 0u) {
-            continue;
-        }
+        const bool has_text = sp.text.chars && sp.text.length > 0u;
+        const bool has_icon = is_icon_loaded(ctx, sp.icon_id);
+        if (!has_text && !has_icon) continue;
         const uint32_t b0 = cursor;
-        std::memcpy(full_utf8 + cursor, sp.text.chars, sp.text.length);
-        cursor += sp.text.length;
+        const uint32_t text_start = text_cursor;
+        // Clay wraps the marker with the start of the span. Copy and selection only see the text.
+        if (has_icon) full_utf8[cursor++] = '\x01';
+        if (has_text) {
+            std::memcpy(full_utf8 + cursor, sp.text.chars, sp.text.length);
+            if (icon_count) std::memcpy(plain_utf8 + text_cursor, sp.text.chars, sp.text.length);
+            cursor += sp.text.length;
+            text_cursor += sp.text.length;
+        }
         const uint32_t b1 = cursor;
 
         const float raw_sz = (sp.font_size_px > 0.0f) ? (sp.font_size_px * wscale) : base_px;
@@ -2085,6 +2113,13 @@ void text_spans(std::span<const TextSpan> spans, const RichTextDesc& desc) noexc
         const float eff_ls = (desc.letter_spacing + sp.letter_spacing) * wscale;
         const float eff_pad = (sp.padding_x > 0.0f) ? (sp.padding_x * wscale) : 0.0f;
         const float eff_rad = (sp.bg_radius > 0.0f) ? (sp.bg_radius * wscale) : 0.0f;
+        const float icon_size = has_icon ? (std::isfinite(sp.icon_size_px) && sp.icon_size_px > 0.0f
+            ? std::fmin(sp.icon_size_px * wscale, 4096.0f) : 0.9f * sp_px) : 0.0f;
+        const float icon_gap = has_icon && has_text && std::isfinite(sp.icon_gap_px) && sp.icon_gap_px > 0.0f
+            ? sp.icon_gap_px * wscale : 0.0f;
+        const float advance = icon_size + icon_gap;
+        const float pad_y = std::isfinite(sp.padding_y) && sp.padding_y > 0.0f ? sp.padding_y * wscale : 0.0f;
+        const Color tint = resolve_theme_color(sp.color, base_color);
 
         if (sp.id != 0u) {
             if (WidgetState* ws = state_map_get_or_insert(&ctx->active_ui->states, sp.id, ctx->active_ui->frame_index)) {
@@ -2109,7 +2144,7 @@ void text_spans(std::span<const TextSpan> spans, const RichTextDesc& desc) noexc
         }
         if (sp_asc > max_asc) max_asc = sp_asc;
         if (sp_desc > max_desc) max_desc = sp_desc;
-        if (sp_lh > max_lh) max_lh = sp_lh;
+        max_lh = std::fmax(max_lh, std::fmax(sp_lh, icon_size) + pad_y * 2.0f);
 
         cfg_hash = fnv1a_32_step(cfg_hash, &b0, sizeof(b0));
         cfg_hash = fnv1a_32_step(cfg_hash, &b1, sizeof(b1));
@@ -2118,10 +2153,14 @@ void text_spans(std::span<const TextSpan> spans, const RichTextDesc& desc) noexc
         cfg_hash = fnv1a_32_step(cfg_hash, &eff_ls, sizeof(eff_ls));
         cfg_hash = fnv1a_32_step(cfg_hash, &eff_pad, sizeof(eff_pad));
 
+        cfg_hash = fnv1a_32_step(cfg_hash, &advance, sizeof(advance));
+        cfg_hash = fnv1a_32_step(cfg_hash, &has_text, sizeof(has_text));
+
         int_spans[out_idx++] = RichSpanInternal{
+            .text_byte_start = text_start,
             .byte_start = b0,
             .byte_end = b1,
-            .color = resolve_theme_color(sp.color, base_color),
+            .color = tint,
             .background = sp.background,
             .border_color = sp.border_color,
             .font_size_px = sp_px,
@@ -2132,9 +2171,16 @@ void text_spans(std::span<const TextSpan> spans, const RichTextDesc& desc) noexc
             .padding_x = eff_pad,
             .bg_radius = eff_rad,
             .id = sp.id,
+            .icon_id = has_icon ? sp.icon_id : kInvalidIcon,
+            .icon_color = sp.icon_color.a ? resolve_theme_color(sp.icon_color, tint) : tint,
+            .hover_background = sp.hover_background,
+            .icon_size = icon_size,
+            .icon_advance = advance,
+            .padding_y = pad_y,
         };
     }
     full_utf8[total_bytes] = '\0';
+    plain_utf8[text_bytes] = '\0';
 
     const float final_lh = (desc.line_height_px > 0.0f) ? (desc.line_height_px * wscale) : max_lh;
     cfg_hash = fnv1a_32_step(cfg_hash, &final_lh, sizeof(final_lh));
@@ -2143,6 +2189,7 @@ void text_spans(std::span<const TextSpan> spans, const RichTextDesc& desc) noexc
     rich->span_count = out_idx;
     rich->full_utf8 = full_utf8;
     rich->total_bytes = total_bytes;
+    rich->has_icon_markers = icon_count != 0u;
     rich->line_height_px = final_lh;
     rich->max_ascent_px = max_asc;
     rich->max_descent_px = max_desc;
@@ -2150,7 +2197,7 @@ void text_spans(std::span<const TextSpan> spans, const RichTextDesc& desc) noexc
     rich->config_hash = cfg_hash;
     if (desc.selectable && desc.id) {
         rich->selectable_id = desc.id; rich->selection_color = eff_sel_color;
-        register_selectable_text(ctx,desc.id,full_utf8,total_bytes,false);
+        register_selectable_text(ctx,desc.id,plain_utf8,text_bytes,false);
     }
 
     Clay_TextElementConfig cfg = {};
@@ -2177,7 +2224,7 @@ void text_spans(std::span<const TextSpan> spans, const RichTextDesc& desc) noexc
     Clay__OpenTextElement(clay_str, cfg);
     if (cctx && cctx->layoutElements.length > prev_elem_len) {
         rich->clay_elem_id = cctx->layoutElements.internalArray[cctx->layoutElements.length - 1].id;
-        auto* n=a11y_emit(ctx,desc.id ? desc.id : rich->clay_elem_id,A11yRole::StaticText,{full_utf8,total_bytes}); if(n)n->clay_id=rich->clay_elem_id;
+        auto* n=a11y_emit(ctx,desc.id ? desc.id : rich->clay_elem_id,A11yRole::StaticText,{plain_utf8,text_bytes}); if(n)n->clay_id=rich->clay_elem_id;
     }
 }
 
@@ -2996,7 +3043,10 @@ uint32_t text_input_menu(const TextInputDesc& d, uint32_t length, bool selection
     return key;
 }
 
-TextInputResult text_input(const TextInputDesc& desc_in) noexcept {
+using ReadInputHighlight = TextInputHighlight (*)(const void*, size_t) noexcept;
+
+static TextInputResult text_input_impl(const TextInputDesc& desc_in, const void* highlights,
+    size_t highlight_count, ReadInputHighlight read_highlight) noexcept {
     Context* ctx = current_context();
     if (!ctx || !ctx->in_frame) {
         return TextInputResult{};
@@ -3534,6 +3584,32 @@ TextInputResult text_input(const TextInputDesc& desc_in) noexcept {
         extra->layer = ctx->active_ui->current_layer;
         extra->kind = CustomCmdKind::TextInput;
         ti_extra->desc = desc;
+        ti_extra->desc.highlights = {};
+        if (highlight_count && committed_slice.length > 0u) {
+            Arena& arena = ctx->frame_arena;
+            const size_t capacity = arena.remaining() / sizeof(TextInputHighlight);
+            TextInputHighlight* copy = highlight_count < capacity
+                ? arena.alloc_uninit<TextInputHighlight>(highlight_count) : nullptr;
+            if (copy) {
+                uint32_t count = 0;
+                const char* text = committed_slice.chars;
+                const uint32_t bytes = committed_slice.length;
+                for (size_t i = 0; i < highlight_count; ++i) {
+                    TextInputHighlight range = read_highlight(highlights, i);
+                    if (range.byte_offset >= bytes || range.byte_length == 0u ||
+                        !(range.background.a || range.border_color.a || range.text_color.a)) continue;
+                    uint32_t end = range.byte_offset + std::min(range.byte_length, bytes - range.byte_offset);
+                    const uint32_t begin = utf8_clamp_boundary(text, bytes, range.byte_offset);
+                    const uint32_t end_boundary = utf8_clamp_boundary(text, bytes, end);
+                    if (end_boundary < end) end = utf8_next_boundary(text, bytes, end_boundary);
+                    range.byte_offset = begin;
+                    range.byte_length = end - begin;
+                    range.radius_px = std::isfinite(range.radius_px) ? std::fmax(0.0f, range.radius_px) : 0.0f;
+                    copy[count++] = range;
+                }
+                ti_extra->desc.highlights = {copy, count};
+            }
+        }
         if (desc.placeholder.chars && desc.placeholder.length > 0u && !desc.placeholder.is_static) {
             ti_extra->desc.placeholder = ctx->frame_arena.push_str(desc.placeholder.chars, desc.placeholder.length);
         }
@@ -3596,6 +3672,11 @@ TextInputResult text_input(const TextInputDesc& desc_in) noexcept {
         .selection_anchor_byte = anchor,
         .ime_cursor_rect = (is_focused && !desc.read_only && !desc.password) ? ctx->active_ui->ime_cursor_logical : Rect{},
     };
+}
+
+TextInputResult text_input(const TextInputDesc& desc) noexcept {
+    return text_input_impl(desc, desc.highlights.data(), desc.highlights.size(),
+        [](const void* ranges, size_t i) noexcept { return static_cast<const TextInputHighlight*>(ranges)[i]; });
 }
 
 bool hovered(uint32_t element_id) noexcept {

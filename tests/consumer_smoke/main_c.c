@@ -34,6 +34,9 @@ int main(void) {
         return 1;
     }
 
+    const EtchSvgStrokeDesc stroke = etch_svg_stroke_desc_default();
+    const uint16_t icon = etch_register_svg_stroke_icon(ctx, ETCH_STR_LIT("M4 12h16"), &stroke);
+    if (!etch_is_icon_loaded(ctx, icon)) return 1;
     EtchFrameDesc fd = etch_frame_desc_default();
     fd.viewport_w = 128u;
     fd.viewport_h = 96u;
@@ -48,6 +51,9 @@ int main(void) {
     box.id = etch_id("smoke_c");
     box.width = etch_sizing_fixed(64.0f);
     box.height = etch_sizing_fixed(48.0f);
+    box.border_color = seed;
+    box.border_sides.bottom = 2;
+    box.border_dash_px = 3;
     etch_begin_box(&box);
 
     EtchButtonDesc btn = etch_button_desc_default();
@@ -71,6 +77,22 @@ int main(void) {
     if(etch_begin_sheet(&sheet))etch_end_sheet();
     EtchShaderSurfaceEvalDesc eval=etch_shader_surface_eval_desc_default();
     if(etch_eval_shader_surface(ctx,0,&eval)!=NULL)return 1;
+    EtchTextSpan span = etch_text_span_default();
+    span.text = ETCH_STR_LIT("file");
+    span.font_id = ETCH_FONT_ITALIC;
+    span.icon_id = icon;
+    span.padding_y = 2;
+    etch_text_spans(&span, 1, NULL);
+    char input[] = "@file";
+    EtchTextInputHighlight range = etch_text_input_highlight_default();
+    range.byte_length = 5;
+    range.background = seed;
+    EtchTextInputDesc field = etch_text_input_desc_default();
+    field.buffer = input;
+    field.capacity = sizeof(input);
+    field.highlights = &range;
+    field.highlight_count = 1;
+    if (etch_text_input(&field).byte_length != 5) return 1;
     etch_end_frame(ctx);
     etch_destroy_shader_surface(ctx,0);
 

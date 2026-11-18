@@ -12,8 +12,8 @@
 #include <type_traits>
 
 #define ETCH_VERSION_MAJOR 0
-#define ETCH_VERSION_MINOR 18
-#define ETCH_VERSION_PATCH 1
+#define ETCH_VERSION_MINOR 19
+#define ETCH_VERSION_PATCH 0
 #define ETCH_VERSION_STR_DETAIL(x) #x
 #define ETCH_VERSION_STR(x) ETCH_VERSION_STR_DETAIL(x)
 #define ETCH_VERSION_STRING ETCH_VERSION_STR(ETCH_VERSION_MAJOR) "." ETCH_VERSION_STR(ETCH_VERSION_MINOR) "." ETCH_VERSION_STR(ETCH_VERSION_PATCH)
@@ -1300,12 +1300,16 @@ struct BoxDesc {
     BorderBeamStyle border_beam = {};
     float top_rim_alpha = 0;
     float scroll_fade_px = 0; // Content edge masks; no leading fade at scroll zero.
+    Padding border_sides = {}; // Positive sides replace the uniform width.
+    float border_dash_px = 0.0f;
+    float border_gap_px = 0.0f; // Zero uses the dash length.
 };
 
 inline constexpr uint16_t kFontSans       = 0u;
 inline constexpr uint16_t kFontBold       = 1u;
 inline constexpr uint16_t kFontMono       = 2u;
 inline constexpr uint16_t kFontMedium = 14u, kFontSemiBold = 15u; // Lazy static faces; missing faces fall back to Sans.
+inline constexpr uint16_t kFontItalic = 16u;
 inline constexpr uint16_t kMaxFontSlots   = 64u;
 inline constexpr uint16_t kInvalidFont    = 0xFFFFu;
 inline constexpr uint16_t kMaxVectorIcons = 1024u;
@@ -1340,6 +1344,12 @@ struct TextSpan {
     float    padding_x = 0.0f;       // Horizontal pill padding at span start/end in logical px
     float    bg_radius = 4.0f;       // Pill corner radius in logical px
     uint32_t id = 0;                 // Optional semantic ID for hovered(id) / pressed(id) / clicked(id)
+    uint16_t icon_id = kInvalidIcon;
+    Color icon_color = Color::theme_auto();
+    float icon_size_px = 0.0f; // Zero uses 90% of the effective font size.
+    float icon_gap_px = 4.0f;
+    float padding_y = 0.0f;
+    Color hover_background = {};
 };
 
 struct RichTextDesc {
@@ -1691,6 +1701,15 @@ CodeEditorResult code_editor(const CodeEditorDesc&) noexcept;
 void code_editor_set_cursor(uint32_t, uint32_t anchor_byte, uint32_t cursor_byte, bool scroll_into_view = true) noexcept;
 void code_editor_scroll_to_line(uint32_t, uint32_t, AlignY align = AlignY::Center) noexcept;
 
+struct TextInputHighlight {
+    uint32_t byte_offset = 0;
+    uint32_t byte_length = 0;
+    Color text_color = {};
+    Color background = {};
+    Color border_color = {};
+    float radius_px = 4.0f;
+};
+
 struct TextInputDesc {
     uint32_t id = 0;
     char* buffer = nullptr;            // Writable NUL-terminated UTF-8; read_only permits bounded, unterminated memory.
@@ -1720,6 +1739,7 @@ struct TextInputDesc {
     bool context_menu = true;
     bool clear_button = false;
     bool escape_blurs = true;
+    std::span<const TextInputHighlight> highlights = {};
 };
 
 struct TextInputResult {
@@ -2095,6 +2115,19 @@ bool is_font_loaded(const Context* ctx, uint16_t font_id) noexcept;
 bool set_font_tabular_numbers(Context* ctx, uint16_t font_id, bool enabled) noexcept;
 
 // Zero-atlas SVG path -> Slug vector icon compiler
+enum class StrokeCap : uint8_t { Butt = 0, Round = 1, Square = 2 };
+enum class StrokeJoin : uint8_t { Miter = 0, Round = 1, Bevel = 2 };
+
+struct SvgStrokeDesc {
+    Vec4 view_box = {0.0f, 0.0f, 24.0f, 24.0f};
+    float stroke_width = 2.0f;
+    StrokeCap cap = StrokeCap::Round;
+    StrokeJoin join = StrokeJoin::Round;
+    float miter_limit = 4.0f;
+    uint16_t slot_hint = kInvalidIcon;
+};
+
+uint16_t register_svg_stroke_icon(Context* ctx, Str svg_path_d, const SvgStrokeDesc& desc = {}) noexcept;
 uint16_t register_svg_icon(
     Context* ctx,
     Str svg_path_d,

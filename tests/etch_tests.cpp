@@ -140,8 +140,196 @@ static bool source_ok(const unsigned char* p,size_t size,const char* entry) noex
     const char* source=reinterpret_cast<const char*>(p);
     return std::strstr(source,entry) && !std::strstr(source,"SampleLevel") && !std::strstr(source,"StructuredBuffer<") && !std::strstr(source,"register(");
 }
+static bool v019_regression() noexcept {
+    Context* ctx = create_context({.headless = true});
+    if (!ctx) return false;
+    bool ok = true;
+    const auto check = [&](bool condition, int line) noexcept {
+        if (!condition) std::fprintf(stderr, "Etch %s regression at line %d\n", ETCH_VERSION_STRING, line);
+        ok &= condition;
+    };
+    const Color red = Color::rgb_hex(0xE92134), green = Color::rgb_hex(0x16C25E);
+    const Color blue = Color::rgb_hex(0x231DE6), hover = Color::rgb_hex(0x15DFE0);
+    const Str poly = str_lit("M4 18 L4 5 H19");
+    const uint16_t open = register_svg_stroke_icon(ctx, poly, {.cap = StrokeCap::Butt, .join = StrokeJoin::Miter});
+    const uint16_t ring = register_svg_stroke_icon(ctx, str_lit("M5 5 H19 V19 H5 z"));
+    const uint16_t lucide = register_svg_stroke_icon(ctx,
+        str_lit("M20 20l-5-5 M17 10a7 7 0 1 1-14 0A7 7 0 1 1 17 10Z M6 11c1-4 2-3 4-2s3 0 4-1"));
+    const uint16_t tight = register_svg_stroke_icon(ctx, str_lit("M11 11h2v2h-2Z"),
+        {.stroke_width = 4, .join = StrokeJoin::Bevel});
+    check(register_svg_stroke_icon(ctx, str_lit("m3 12 q3-8 6 0 t6 0 Q18 4 21 12"),
+          {.cap = StrokeCap::Square, .join = StrokeJoin::Miter, .miter_limit = 1}) != kInvalidIcon, __LINE__);
+    const uint16_t dot = register_svg_stroke_icon(ctx, str_lit("M12 16h.01"));
+    const uint16_t square = register_svg_stroke_icon(ctx, str_lit("M12 16L12 16"), {.cap = StrokeCap::Square});
+    check(open != kInvalidIcon && ring != kInvalidIcon && lucide != kInvalidIcon &&
+          dot != kInvalidIcon && square != kInvalidIcon && tight != kInvalidIcon, __LINE__);
+    check(register_svg_stroke_icon(nullptr, poly) == kInvalidIcon &&
+          register_svg_stroke_icon(ctx, {}) == kInvalidIcon &&
+          register_svg_stroke_icon(ctx, poly, {.stroke_width = 0}) == kInvalidIcon &&
+          register_svg_stroke_icon(ctx, poly, {.stroke_width = NAN}) == kInvalidIcon &&
+          register_svg_stroke_icon(ctx, str_lit("M12 16L12 16"), {.cap = StrokeCap::Butt}) == kInvalidIcon &&
+          register_svg_stroke_icon(ctx, str_lit("M2 2 L6 6 L")) == kInvalidIcon, __LINE__);
+
+    set_current_context(ctx);
+    const bool italic = is_font_loaded(ctx, kFontItalic);
+    check(italic == etch_is_font_loaded(reinterpret_cast<EtchContext*>(ctx), ETCH_FONT_ITALIC) &&
+          font_metrics(kFontItalic, 16).line_height > 0, __LINE__);
+    constexpr uint32_t span_id = id("inline chip"), rich_id = id("rich select");
+    char input[] = "@file $skill /cmd \xE7\x95\x8C";
+    const auto scene = [&](Vec2 pointer, bool highlights_enabled = true, bool down = false) noexcept {
+        begin_frame(ctx, {.viewport_w = 360, .viewport_h = 230, .pointer_pos = pointer, .pointer_down = down});
+        begin_box({.axis = Axis::Col, .width = Sizing::grow(), .height = Sizing::grow(), .gap = 4,
+                   .background = Color::white()});
+        begin_box({.axis = Axis::Row, .height = Sizing::fixed(48), .gap = 4});
+        for (uint16_t value : {open, ring, lucide, dot, square, tight})
+            icon({.icon_id = value, .size_px = 48, .color = red});
+        end_box();
+        begin_box({.axis = Axis::Row, .height = Sizing::fixed(36), .gap = 4});
+        const Padding widths[] = {{3,0,0,0}, {0,3,0,0}, {0,0,3,0}, {0,0,0,3}};
+        for (Padding side : widths) {
+            begin_box({.width = Sizing::fixed(48), .height = Sizing::fixed(36),
+                       .border_color = blue, .radius = Corners::all(5), .clip_children = true,
+                       .border_sides = side});
+            box({.width = Sizing::grow(), .height = Sizing::grow(), .background = Color::white()});
+            end_box();
+        }
+        box({.width = Sizing::fixed(64), .height = Sizing::fixed(36), .border_color = blue,
+             .border_width = 3, .border_dash_px = 5, .border_gap_px = 4});
+        box({.width = Sizing::fixed(64), .height = Sizing::fixed(36), .border_color = green,
+             .border_width = 3, .radius = Corners::all(9), .border_dash_px = 8, .border_gap_px = 5});
+        end_box();
+
+        begin_box({.width = Sizing::fixed(94), .height = Sizing::fixed(56)});
+        text_spans({{.background = blue, .padding_x = 2, .id = span_id, .icon_id = dot,
+                     .icon_color = green, .icon_size_px = 20, .padding_y = 3, .hover_background = hover},
+                    {.text = str_lit("queue.ts "), .font_id = kFontItalic, .icon_id = open, .icon_size_px = 16},
+                    {.text = str_lit("next \xC3\xA9 token")}},
+                   {.id = rich_id, .selectable = true});
+        end_box();
+
+        TextInputHighlight ranges[] = {
+            {.byte_offset = 0, .byte_length = 5, .text_color = red, .background = green},
+            {.byte_offset = 6, .byte_length = 6, .background = blue},
+            {.byte_offset = 13, .byte_length = 4, .border_color = red},
+            {.byte_offset = 19, .byte_length = UINT32_MAX, .background = green},
+            {.byte_offset = 500, .byte_length = UINT32_MAX, .background = hover},
+        };
+        begin_box({.axis = Axis::Row, .height = Sizing::fixed(64), .gap = 4});
+        const TextInputDesc field = {.buffer = input, .capacity = sizeof(input), .width = Sizing::fixed(238),
+            .height = Sizing::fixed(32), .padding = Padding::xy(4, 4), .font_size_px = 15, .font_id = kFontMono,
+            .text_color = Color::rgb_hex(0x111111), .background = Color::white(), .border_color = {},
+            .border_width = 0, .radius = {}, .read_only = true,
+            .highlights = highlights_enabled ? std::span<const TextInputHighlight>(ranges) : std::span<const TextInputHighlight>{}};
+        auto single = text_input(field);
+        TextInputDesc multi = field;
+        multi.width = Sizing::fixed(66);
+        multi.height = Sizing::fixed(64);
+        multi.multiline = multi.word_wrap = true;
+        auto wrapped = text_input(multi);
+        for (auto& range : ranges) range = {}; // Rendering must use the frame-owned copy.
+        end_box();
+        end_box();
+        end_frame(ctx);
+        check(single.byte_length == sizeof(input) - 1 && wrapped.cursor_byte == single.cursor_byte, __LINE__);
+    };
+    scene({-1,-1}, false);
+    Vec4 glyph_bounds[256]{};
+    uint32_t glyph_count = 0;
+    for (const Prim& p : frame_prims(ctx)) {
+        if ((p.style.x & 15) == uint32_t(PrimKind::SlugGlyph) && glyph_count < 256)
+            glyph_bounds[glyph_count++] = p.bounds;
+    }
+    scene({8,101});
+    scene({8,101});
+    check(hovered(span_id), __LINE__);
+    set_text_selection(rich_id, 0, 22);
+    const Str copy = selected_text(rich_id);
+    check(copy.length == 22 && std::memcmp(copy.chars, "queue.ts next \xC3\xA9 token", 22) == 0, __LINE__);
+    uint32_t glyph_index = 0, highlighted = 0, wrapped_pills = 0;
+    bool hover_pill = false, corner_arc = false;
+    float first_rich_y = -1.0f;
+    bool wrapped_rich = false;
+    for (const Prim& p : frame_prims(ctx)) {
+        const auto kind = static_cast<PrimKind>(p.style.x & 15);
+        if (kind == PrimKind::SlugGlyph) {
+            check(glyph_index < glyph_count && std::memcmp(&p.bounds, &glyph_bounds[glyph_index], sizeof(Vec4)) == 0, __LINE__);
+            ++glyph_index;
+            if (p.bounds.y >= 92 && p.bounds.y < 148) {
+                if (first_rich_y < 0) first_rich_y = p.bounds.y;
+                wrapped_rich |= p.bounds.y > first_rich_y + 21.0f;
+            }
+            if (p.bounds.y > 150 && p.style.y == red.pack_rgba8()) ++highlighted;
+        }
+        if (kind == PrimKind::Rect && p.bounds.x >= 242 && p.bounds.y > 150 &&
+            (p.style.y == green.pack_rgba8() || p.style.y == blue.pack_rgba8())) ++wrapped_pills;
+        if (kind == PrimKind::Rect && p.style.y == hover.pack_rgba8()) {
+            check(p.bounds.y < 140 && p.bounds.z >= 24 && p.bounds.z < 25 && p.bounds.w > 22, __LINE__);
+            hover_pill = true;
+        }
+        corner_arc |= kind == PrimKind::RingArc;
+    }
+    check(glyph_index == glyph_count && highlighted >= 8 && wrapped_pills >= 3 && hover_pill &&
+          corner_arc && wrapped_rich, __LINE__);
+
+    {
+        const char* file = "etch-v019-pixels.png";
+        const bool rendered = render_headless_png(ctx, 360, 230, file, Color::white());
+        SDL_Surface* pixels = rendered ? SDL_LoadPNG(file) : nullptr;
+        check(pixels && frame_stats(ctx).draw_call_count == 1u, __LINE__);
+        if (pixels) {
+            const auto pixel = [&](int x, int y, Color expected) noexcept {
+                Uint8 r = 0, g = 0, b = 0, a = 0;
+                const bool match = SDL_ReadSurfacePixel(pixels, x, y, &r, &g, &b, &a) &&
+                    std::abs(int(r) - expected.r) < 12 && std::abs(int(g) - expected.g) < 12 &&
+                    std::abs(int(b) - expected.b) < 12;
+                if (!match) std::fprintf(stderr, "Etch %s pixel (%d,%d) = %u,%u,%u\n", ETCH_VERSION_STRING, x, y, r, g, b);
+                return match;
+            };
+            check(pixel(8, 20, red) && pixel(8, 3, Color::white()), __LINE__);
+            check(pixel(62, 24, red) && pixel(76, 24, Color::white()), __LINE__);
+            check(pixel(134, 30, red) && pixel(180, 32, red) && pixel(232, 32, red) &&
+                  pixel(284, 24, red), __LINE__);
+            check(pixel(1, 70, blue) && pixel(98, 70, blue) && pixel(128, 53, blue) &&
+                  pixel(180, 86, blue) && pixel(0, 52, Color::white()), __LINE__);
+            check(pixel(210, 53, blue) && pixel(214, 53, Color::white()) && pixel(218, 53, blue), __LINE__);
+            check(pixel(6, 103, hover) && pixel(22, 174, green), __LINE__);
+            SDL_DestroySurface(pixels);
+        }
+        std::remove(file);
+    }
+    clear_text_selection(rich_id);
+    scene({29, 106});
+    scene({29, 106}, true, true);
+    scene({90, 139}, true, true);
+    scene({90, 139});
+    const Str dragged = selected_text(rich_id);
+    check(dragged.length == 22 && std::memcmp(dragged.chars, "queue.ts next \xC3\xA9 token", 22) == 0, __LINE__);
+    const uint32_t field_id = id("scrolled highlight");
+    char long_input[] = "before before before @file";
+    const TextInputHighlight trailing = {.byte_offset = 21, .byte_length = 5, .background = green};
+    const auto scrolled_field = [&]() noexcept {
+        begin_frame(ctx, {.viewport_w = 150, .viewport_h = 60});
+        const auto result = text_input({.id = field_id, .buffer = long_input, .capacity = sizeof(long_input),
+            .width = Sizing::fixed(80), .height = Sizing::fixed(30), .font_size_px = 15,
+            .font_id = kFontMono, .highlights = {&trailing, 1u}});
+        end_frame(ctx);
+        return result;
+    };
+    (void)scrolled_field();
+    request_focus(field_id);
+    const auto scrolled = scrolled_field();
+    bool trailing_visible = false;
+    for (const Prim& p : frame_prims(ctx))
+        trailing_visible |= p.style.y == green.pack_rgba8() && p.bounds.x < 80 && p.bounds.x + p.bounds.z > 30;
+    check(scrolled.focused && scrolled.cursor_byte == sizeof(long_input) - 1u && trailing_visible, __LINE__);
+
+    destroy_context(ctx);
+    set_current_context(nullptr);
+    return ok;
+}
+
 static bool gpu_suite() noexcept {
-    const bool media_ok=verify_workbench_materials_gpu() && verify_shader_surface_gpu() && verify_texture_regions_gpu() && verify_mesh_gpu() && verify_punch_gpu() && verify_beam_fade_gpu() && verify_media_emoji_checks() && verify_sprite_recycling_gpu() && verify_border_coverage() && verify_visual_quality_gpu() && verify_closure_gpu();
+    const bool media_ok=v019_regression() && verify_workbench_materials_gpu() && verify_shader_surface_gpu() && verify_texture_regions_gpu() && verify_mesh_gpu() && verify_punch_gpu() && verify_beam_fade_gpu() && verify_media_emoji_checks() && verify_sprite_recycling_gpu() && verify_border_coverage() && verify_visual_quality_gpu() && verify_closure_gpu();
     const bool v070_ok=verify_theme_wrap_checks();
     static_assert(sizeof(Prim)==64);
     bool ok=source_ok(g_etch_uber_vs_msl,sizeof(g_etch_uber_vs_msl),"vertex vs_main_out vs_main(") && source_ok(g_etch_uber_ps_msl,sizeof(g_etch_uber_ps_msl),"fragment ps_main_out ps_main(") && source_ok(g_etch_kawase_vs_msl,sizeof(g_etch_kawase_vs_msl),"vertex vs_main_out vs_main(") && source_ok(g_etch_kawase_ps_msl,sizeof(g_etch_kawase_ps_msl),"fragment ps_main_out ps_main(");
@@ -165,6 +353,7 @@ static bool gpu_suite() noexcept {
     std::remove("etch_ctest_gpu.png");destroy_context(c);set_current_context(nullptr);return ok;
 }
 int main(int argc,char** argv) {
+    if(argc==2 && std::strcmp(argv[1],"--suite=v019")==0) return v019_regression() ? 0 : 1;
     if(argc==2 && std::strcmp(argv[1],"--suite=mesh_grad")==0) return verify_mesh_gpu() ? 0 : 1;
     if(argc==2 && std::strcmp(argv[1],"--suite=punch_hole")==0) return verify_punch_gpu() ? 0 : 1;
     if(argc==2 && std::strcmp(argv[1],"--suite=workbench_materials")==0) return verify_workbench_materials_gpu() ? 0 : 1;

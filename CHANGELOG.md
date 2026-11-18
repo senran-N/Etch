@@ -4,6 +4,13 @@ All notable changes to Etch are documented here. This file follows
 [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html).
 
+## [0.19.0] - 2026-11-18
+
+- Compile SVG strokes into Slug vector icons with configurable caps and joins.
+- Add per-side and dashed box borders, including borders on clipped containers.
+- Add a lazy system italic font slot, inline rich-text icons and hoverable pills,
+  and UTF-8 byte-range highlights for text inputs.
+
 ## [0.18.1] - 2026-11-18
 
 - Align the README package example with Etch 0.18 and correct its scroll fade

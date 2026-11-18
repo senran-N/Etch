@@ -19,6 +19,8 @@ int main() {
 
     etch::Context* ctx = etch::create_context({.headless = true});
     if (!ctx) return 1;
+    const auto icon = etch::register_svg_stroke_icon(ctx, etch::str_lit("M4 12h16"));
+    if (!etch::is_icon_loaded(ctx, icon)) return 1;
     etch::begin_frame(ctx, {.viewport_w = 64, .viewport_h = 64});
     etch::set_time_scale(ctx,.2f);
     const auto pr=etch::presence(etch::id("presence"),true);
@@ -37,6 +39,11 @@ int main() {
     etch::terminal_grid({.id=etch::id("terminal"),.cells=cells,.columns=2,.rows=1});
     if(etch::begin_sheet({.id=etch::id("sheet"),.open=false}))etch::end_sheet();
     if(etch::eval_shader_surface(ctx,0,{})!=nullptr)return 1;
+    etch::box({.border_color = seed, .border_sides = {.bottom = 1}, .border_dash_px = 3});
+    etch::text_spans({{.text = etch::str_lit("file"), .font_id = etch::kFontItalic, .icon_id = icon, .padding_y = 2}});
+    char input[] = "@file";
+    const etch::TextInputHighlight highlights[] = {{.byte_length = 5, .background = seed}};
+    if (etch::text_input({.buffer = input, .capacity = sizeof(input), .highlights = highlights}).byte_length != 5) return 1;
     etch::end_frame(ctx);
     etch::destroy_shader_surface(ctx,0);
     etch::ElementGeometry geometry;

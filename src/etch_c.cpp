@@ -47,7 +47,8 @@ inline etch::GridTrack to_cpp(const EtchGridTrack& t) noexcept {
 inline etch::TextSpan to_cpp(const EtchTextSpan& s) noexcept {
     return {to_cpp(s.text), to_cpp(s.color), to_cpp(s.background), to_cpp(s.border_color),
             s.font_size_px, s.font_id, s.underline, s.strikethrough, s.letter_spacing,
-            s.padding_x, s.bg_radius, s.id};
+            s.padding_x, s.bg_radius, s.id, s.icon_id, to_cpp(s.icon_color), s.icon_size_px,
+            s.icon_gap_px, s.padding_y, to_cpp(s.hover_background)};
 }
 
 inline etch::PathCmd to_cpp(const EtchPathCmd& c) noexcept {
@@ -165,6 +166,9 @@ inline etch::BoxDesc to_cpp(const EtchBoxDesc& d) noexcept {
     out.grid_columns = d.grid_columns;
     out.grid_tracks = convert_frame_span<etch::GridTrack, EtchGridTrack>(d.grid_tracks, d.grid_track_count, to_cpp);
     out.grid_col_span = d.grid_col_span;
+    out.border_sides = to_cpp(d.border_sides);
+    out.border_dash_px = d.border_dash_px;
+    out.border_gap_px = d.border_gap_px;
     return out;
 }
 
@@ -260,7 +264,8 @@ EtchBoxDesc etch_box_desc_default(void) {
             static_cast<EtchAnchor>(d.anchor_element), static_cast<EtchAnchor>(d.anchor_parent),
             from_cpp(d.floating_offset), d.z_index, d.pointer_passthrough, d.clip_to_parent,
             d.backdrop_blur, d.clamp_to_viewport, d.wrap, d.row_gap, d.aspect_ratio,
-            d.grid_columns, nullptr, 0u, d.grid_col_span, d.shrink_width, d.shrink_height, d.continuous_corners, d.shadow_spread, d.window_drag_passthrough,static_cast<EtchBorderAlign>(d.border_align),d.opacity,from_cpp(d.hover_background),from_cpp(d.hover_border_color),d.hover_scale,d.press_scale,d.animate_layout,d.hero_id,from_cpp(d.transition),from_cpp(d.border_beam),d.top_rim_alpha,d.scroll_fade_px};
+            d.grid_columns, nullptr, 0u, d.grid_col_span, d.shrink_width, d.shrink_height, d.continuous_corners, d.shadow_spread, d.window_drag_passthrough,static_cast<EtchBorderAlign>(d.border_align),d.opacity,from_cpp(d.hover_background),from_cpp(d.hover_border_color),d.hover_scale,d.press_scale,d.animate_layout,d.hero_id,from_cpp(d.transition),from_cpp(d.border_beam),d.top_rim_alpha,d.scroll_fade_px,
+            from_cpp(d.border_sides), d.border_dash_px, d.border_gap_px};
 }
 
 EtchTextDesc etch_text_desc_default(void) {
@@ -274,7 +279,8 @@ EtchTextSpan etch_text_span_default(void) {
     const etch::TextSpan d{};
     return {from_cpp(d.text), from_cpp(d.color), from_cpp(d.background), from_cpp(d.border_color),
             d.font_size_px, d.font_id, d.underline, d.strikethrough, d.letter_spacing,
-            d.padding_x, d.bg_radius, d.id};
+            d.padding_x, d.bg_radius, d.id, d.icon_id, from_cpp(d.icon_color), d.icon_size_px,
+            d.icon_gap_px, d.padding_y, from_cpp(d.hover_background)};
 }
 
 EtchRichTextDesc etch_rich_text_desc_default(void) {
@@ -400,6 +406,12 @@ EtchCodeEditorDesc etch_code_editor_desc_default(void) {
             from_cpp(d.radius),d.scroll_fade_px};
 }
 
+EtchTextInputHighlight etch_text_input_highlight_default(void) {
+    const etch::TextInputHighlight h{};
+    return {h.byte_offset, h.byte_length, from_cpp(h.text_color), from_cpp(h.background),
+            from_cpp(h.border_color), h.radius_px};
+}
+
 EtchTextInputDesc etch_text_input_desc_default(void) {
     const etch::TextInputDesc d{};
     return {d.id, d.buffer, d.capacity, from_cpp(d.placeholder), from_cpp(d.width),
@@ -408,7 +420,7 @@ EtchTextInputDesc etch_text_input_desc_default(void) {
             from_cpp(d.selection_color), from_cpp(d.caret_color), from_cpp(d.composition_color),
             from_cpp(d.background), from_cpp(d.border_color), from_cpp(d.focus_border_color),
             d.border_width, d.focus_border_width, from_cpp(d.radius), d.multiline, d.word_wrap,
-            d.read_only, d.password, d.context_menu, d.clear_button, d.escape_blurs};
+            d.read_only, d.password, d.context_menu, d.clear_button, d.escape_blurs, nullptr, 0u};
 }
 
 EtchButtonDesc etch_button_desc_default(void) {
@@ -699,6 +711,21 @@ bool etch_set_font_tabular_numbers(EtchContext* ctx, uint16_t font_id, bool enab
 }
 bool etch_is_font_loaded(const EtchContext* ctx, uint16_t font_id) {
     return etch::is_font_loaded(to_ctx(ctx), font_id);
+}
+
+EtchSvgStrokeDesc etch_svg_stroke_desc_default(void) {
+    const etch::SvgStrokeDesc d{};
+    return {{d.view_box.x, d.view_box.y, d.view_box.z, d.view_box.w}, d.stroke_width, static_cast<EtchStrokeCap>(d.cap),
+            static_cast<EtchStrokeJoin>(d.join), d.miter_limit, d.slot_hint};
+}
+
+uint16_t etch_register_svg_stroke_icon(EtchContext* ctx, EtchStr path, const EtchSvgStrokeDesc* d) {
+    if (!d) return etch::register_svg_stroke_icon(to_ctx(ctx), to_cpp(path));
+    if (d->cap < ETCH_STROKE_CAP_BUTT || d->cap > ETCH_STROKE_CAP_SQUARE ||
+        d->join < ETCH_STROKE_JOIN_MITER || d->join > ETCH_STROKE_JOIN_BEVEL) return ETCH_INVALID_ICON;
+    return etch::register_svg_stroke_icon(to_ctx(ctx), to_cpp(path),
+        {to_cpp(d->view_box), d->stroke_width, static_cast<etch::StrokeCap>(d->cap),
+         static_cast<etch::StrokeJoin>(d->join), d->miter_limit, d->slot_hint});
 }
 
 uint16_t etch_register_svg_icon(EtchContext* ctx, EtchStr svg_path_d, EtchVec4 view_box, uint16_t slot_hint) {
@@ -1043,14 +1070,20 @@ void etch_destroy_gpu_texture(EtchContext* ctx, struct SDL_GPUTexture* tex) { et
 
 EtchTextInputResult etch_text_input(const EtchTextInputDesc* desc) {
     if (!desc) return {};
-    const etch::TextInputResult r = etch::text_input({
+    const etch::TextInputResult r = etch::text_input_impl({
         desc->id, desc->buffer, desc->capacity, to_cpp(desc->placeholder), to_cpp(desc->width),
         to_cpp(desc->height), to_cpp(desc->padding), desc->font_size_px, desc->font_id,
         desc->letter_spacing, to_cpp(desc->text_color), to_cpp(desc->placeholder_color),
         to_cpp(desc->selection_color), to_cpp(desc->caret_color), to_cpp(desc->composition_color),
         to_cpp(desc->background), to_cpp(desc->border_color), to_cpp(desc->focus_border_color),
         desc->border_width, desc->focus_border_width, to_cpp(desc->radius), desc->multiline,
-        desc->word_wrap, desc->read_only, desc->password, desc->context_menu, desc->clear_button, desc->escape_blurs});
+        desc->word_wrap, desc->read_only, desc->password, desc->context_menu, desc->clear_button, desc->escape_blurs,
+    }, desc->highlights, desc->highlights ? desc->highlight_count : 0u,
+        [](const void* ranges, size_t i) noexcept {
+            const auto& h = static_cast<const EtchTextInputHighlight*>(ranges)[i];
+            return etch::TextInputHighlight{h.byte_offset, h.byte_length, to_cpp(h.text_color),
+                                            to_cpp(h.background), to_cpp(h.border_color), h.radius_px};
+        });
     return {r.changed, r.submitted, r.focused, r.composing, r.byte_length,
             r.cursor_byte, r.selection_anchor_byte, from_cpp(r.ime_cursor_rect)};
 }

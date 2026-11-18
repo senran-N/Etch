@@ -157,7 +157,7 @@ configuring the consumer. If installation was disabled, reconfigure Etch with
 ```cmake
 cmake_minimum_required(VERSION 3.24)
 project(my_app LANGUAGES C CXX)
-find_package(Etch 0.18 CONFIG REQUIRED)
+find_package(Etch 0.19 CONFIG REQUIRED)
 add_executable(my_app main.cpp)
 target_link_libraries(my_app PRIVATE Etch::etch)
 ```
@@ -225,12 +225,12 @@ For a downward card shadow use `shadow_offset = {0, 12}`, `shadow_blur = 20`,
 `shadow_spread = -6`; box values are logical pixels. Low-level `Prim::make_shadow`
 accepts offset/spread in physical pixels. A spread that collapses the shadow omits it.
 
-`kFontMedium` (14) and `kFontSemiBold` (15) lazily probe static faces; Windows
+`kFontMedium` (14), `kFontSemiBold` (15), and `kFontItalic` (16) lazily probe system faces. Windows
 SemiBold probes `seguisb.ttf`. Missing faces render with Sans, and
 `is_font_loaded(ctx, slot)` reports whether the requested face actually loaded.
-Applications can load their own 500/600 faces into these slots. Automatic custom
-font allocation uses slots 3–63, skipping reserved slots 14 and 15; up to 64 fonts
-and 1024 vector icons are supported. Variable-font axis selection is not implemented.
+Applications can load their own faces into those slots. Automatic allocation
+uses free custom slots from 3 through 63, skipping slots 14, 15, and 16. Etch
+supports up to 64 font slots and 1024 vector icons. Variable-font axis selection is not implemented.
 Before starting a frame, call `set_font_tabular_numbers(ctx, font_id, true)` to
 request OpenType `tnum` consistently in measured and rendered text. The font must
 provide the feature; it is not synthesized. Load a separate custom slot if prose
