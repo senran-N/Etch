@@ -8,7 +8,7 @@
 
 #ifndef ETCH_VERSION_MAJOR
 #define ETCH_VERSION_MAJOR 0
-#define ETCH_VERSION_MINOR 19
+#define ETCH_VERSION_MINOR 20
 #define ETCH_VERSION_PATCH 0
 #define ETCH_VERSION_STR_DETAIL(x) #x
 #define ETCH_VERSION_STR(x) ETCH_VERSION_STR_DETAIL(x)
@@ -1287,7 +1287,7 @@ typedef struct EtchTextInputDesc {
     bool word_wrap;
     bool read_only;
     bool password;
-    bool context_menu, clear_button, escape_blurs;
+    bool context_menu, clear_button, escape_blurs, suppress_popup_keys;
     const EtchTextInputHighlight* highlights;
     uint32_t highlight_count;
 } EtchTextInputDesc;
@@ -2022,6 +2022,8 @@ bool etch_has_text_selection(uint32_t element_id);
 EtchStr etch_selected_text(uint32_t element_id, EtchArena* arena);
 void etch_clear_text_selection(uint32_t element_id);
 EtchRect etch_ime_cursor_rect(const EtchContext* ctx);
+void etch_request_text_input(uint32_t element_id, EtchRect ime_cursor_rect);
+EtchStr etch_typed_text(uint32_t element_id);
 bool etch_set_clipboard_text(const char* utf8_text);
 EtchStr etch_get_clipboard_text(EtchArena* arena);
 
@@ -2145,6 +2147,8 @@ bool etch_set_desktop_window_min_size(struct SDL_Window* window, float logical_w
 float etch_spring_from(uint32_t anim_id, float target, float initial_value, EtchSpringSpec spec);
 float etch_spring(uint32_t anim_id, float target, EtchSpringSpec spec);
 EtchVec2 etch_spring_vec2(uint32_t anim_id, EtchVec2 target, EtchSpringSpec spec);
+EtchVec2 etch_scroll_delta(void);
+EtchVec2 etch_scroll_max(uint32_t element_id);
 EtchVec2 etch_scroll_offset(uint32_t element_id);
 void etch_set_scroll_offset(uint32_t element_id, EtchVec2 offset, bool stop_momentum);
 

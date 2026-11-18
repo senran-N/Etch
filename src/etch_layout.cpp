@@ -873,7 +873,7 @@ static void process_window_event(Context* ctx, const SDL_Event& event) noexcept 
                 }
             } else {
                 const WidgetState* tab_ws=state_map_find(&ctx->active_ui->states,ctx->active_ui->focus_id);
-                if (event.key.key == SDLK_TAB && !(tab_ws && tab_ws->edit_text_buffer)) {
+                if (event.key.key == SDLK_TAB && !(tab_ws && (tab_ws->edit_text_buffer || tab_ws->suppress_popup_keys))) {
                     ctx->active_ui->pending_tab_delta += ((event.key.mod & SDL_KMOD_SHIFT) != 0u) ? -1 : 1;
                 } else {
                     push_pending_text_op(
@@ -1040,6 +1040,7 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
     if (ctx->active_ui->frame_text_op_count > 0u) {
         std::memcpy(ctx->active_ui->frame_text_ops, ctx->active_ui->pending_text_ops, size_t(ctx->active_ui->frame_text_op_count) * sizeof(PendingTextOp));
     }
+    ctx->active_ui->frame_text_utf8_len = ctx->active_ui->pending_text_utf8_len;
     if (ctx->active_ui->pending_text_utf8_len > 0u) {
         std::memcpy(ctx->active_ui->frame_text_utf8, ctx->active_ui->pending_text_utf8, ctx->active_ui->pending_text_utf8_len);
     }
@@ -1071,7 +1072,7 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
         }
         if (ctx->active_ui->ime_comp_len == 0u) {
             const WidgetState* tab_ws=state_map_find(&ctx->active_ui->states,ctx->active_ui->focus_id);
-            if (desc.key_pressed_code == SDLK_TAB && !(tab_ws && tab_ws->edit_text_buffer)) {
+            if (desc.key_pressed_code == SDLK_TAB && !(tab_ws && (tab_ws->edit_text_buffer || tab_ws->suppress_popup_keys))) {
                 ctx->active_ui->pending_tab_delta += ((ctx->active_ui->frame_key_mods & Mod_Shift) != 0u) ? -1 : 1;
             } else if (ctx->active_ui->frame_text_op_count < kMaxTextOpsPerFrame) {
                 ctx->active_ui->frame_text_ops[ctx->active_ui->frame_text_op_count++] = PendingTextOp{
@@ -1251,6 +1252,7 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
     const Vec2 scroll = (desc.scroll_delta.x != 0.0f || desc.scroll_delta.y != 0.0f)
         ? desc.scroll_delta
         : ctx->active_ui->event_scroll_delta;
+    ctx->active_ui->frame_scroll_delta = scroll;
     ctx->active_ui->event_scroll_delta = {};
 
     // Update Clay hit-test results against the previous frame's tree BEFORE Clay_BeginLayout() resets it.
@@ -1583,6 +1585,7 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
         }
         if (target_scroll) {
             if (target_scroll->is_virtual_list) {
+                target_scroll->vlist_pending_scroll = false;
                 if (ctx->active_ui->sim_dt <= 0.0f) {
                     target_scroll->vscroll_pos_y = clamp_double(
                         target_scroll->vscroll_pos_y - static_cast<double>(scroll.y) * 48.0,
@@ -1625,6 +1628,7 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
             request_redraw(ctx);
         } else if (fallback_scroll) {
             if (fallback_scroll->is_virtual_list) {
+                fallback_scroll->vlist_pending_scroll = false;
                 if (ctx->active_ui->sim_dt <= 0.0f) {
                     fallback_scroll->vscroll_pos_y = clamp_double(
                         fallback_scroll->vscroll_pos_y - static_cast<double>(scroll.y) * 48.0,
@@ -3027,6 +3031,31 @@ Rect ime_cursor_rect(const Context* ctx_arg) noexcept {
     return ctx ? ctx->active_ui->ime_cursor_logical : Rect{};
 }
 
+void request_text_input(uint32_t element_id, Rect ime_cursor_rect) noexcept {
+    Context* ctx = current_context();
+    if (!ctx || !ctx->in_frame || element_id == 0u || ctx->active_ui->focus_id != element_id) {
+        return;
+    }
+    ctx->active_ui->ime_focused_id = element_id;
+    ctx->active_ui->ime_focused_password = false;
+    const bool valid_rect = std::isfinite(ime_cursor_rect.x) && std::isfinite(ime_cursor_rect.y) &&
+                            std::isfinite(ime_cursor_rect.w) && std::isfinite(ime_cursor_rect.h) &&
+                            ime_cursor_rect.w > 0.0f && ime_cursor_rect.h > 0.0f;
+    ctx->active_ui->ime_cursor_logical = valid_rect ? ime_cursor_rect : Rect{};
+    ctx->active_ui->ime_cursor_offset_win = 0;
+}
+
+Str typed_text(uint32_t element_id) noexcept {
+    Context* ctx = current_context();
+    if (!ctx || !ctx->in_frame || ctx->active_ui->frame_text_utf8_len == 0u) {
+        return {};
+    }
+    if (element_id != 0u && ctx->active_ui->focus_id != element_id) {
+        return {};
+    }
+    return ctx->frame_arena.push_str(ctx->active_ui->frame_text_utf8, ctx->active_ui->frame_text_utf8_len);
+}
+
 uint32_t text_input_menu(const TextInputDesc& d, uint32_t length, bool selection) noexcept {
     if (!d.context_menu || !d.id) return 0;
     const uint32_t popup=id_index(d.id,0xED1700u);
@@ -3094,6 +3123,7 @@ static TextInputResult text_input_impl(const TextInputDesc& desc_in, const void*
         ws->edit_text_buffer = nullptr;
         ws->is_text_input_writable = writable;
         ws->is_multiline_input = desc.multiline;
+        ws->suppress_popup_keys = desc.suppress_popup_keys;
         if (ws->pressed_this_frame || ctx->active_ui->frame_text_op_count || ctx->active_ui->ime_comp_len) ws->edit_reveal_caret = true;
     }
     if (buf && cap > 0u) {
@@ -3462,7 +3492,7 @@ static TextInputResult text_input_impl(const TextInputDesc& desc_in, const void*
                 }
                 case SDLK_UP:
                 case SDLK_DOWN:
-                    if (desc.multiline && ws) {
+                    if (!desc.suppress_popup_keys && desc.multiline && ws) {
                         ws->edit_cursor = cursor;
                         ws->edit_sel_anchor = anchor;
                         move_caret_vertical(
@@ -3517,6 +3547,9 @@ static TextInputResult text_input_impl(const TextInputDesc& desc_in, const void*
                     break;
                 case SDLK_RETURN:
                 case SDLK_KP_ENTER:
+                    if (desc.suppress_popup_keys) {
+                        break;
+                    }
                     if (desc.multiline && !primary) {
                         if (writable) {
                             const uint32_t prev_len = len;
@@ -4010,6 +4043,26 @@ Vec2 spring_vec2(uint32_t anim_id, Vec2 target, SpringSpec spec) noexcept {
         .x = spring(id_index(anim_id, 0x58u), target.x, spec),
         .y = spring(id_index(anim_id, 0x59u), target.y, spec),
     };
+}
+
+Vec2 scroll_delta() noexcept {
+    const Context* ctx = current_context();
+    return (ctx && ctx->in_frame) ? ctx->active_ui->frame_scroll_delta : Vec2{};
+}
+
+Vec2 scroll_max(uint32_t element_id) noexcept {
+    const Context* ctx = current_context();
+    if (!ctx || element_id == 0u) {
+        return {};
+    }
+    const WidgetState* ws = state_map_find(&ctx->active_ui->states, element_id);
+    if (!ws) {
+        return {};
+    }
+    if (ws->is_virtual_list) {
+        return Vec2{0.0f, static_cast<float>(ws->vscroll_max_y)};
+    }
+    return ws->scroll_max;
 }
 
 Vec2 scroll_offset(uint32_t element_id) noexcept {

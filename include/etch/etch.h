@@ -12,7 +12,7 @@
 #include <type_traits>
 
 #define ETCH_VERSION_MAJOR 0
-#define ETCH_VERSION_MINOR 19
+#define ETCH_VERSION_MINOR 20
 #define ETCH_VERSION_PATCH 0
 #define ETCH_VERSION_STR_DETAIL(x) #x
 #define ETCH_VERSION_STR(x) ETCH_VERSION_STR_DETAIL(x)
@@ -1739,6 +1739,7 @@ struct TextInputDesc {
     bool context_menu = true;
     bool clear_button = false;
     bool escape_blurs = true;
+    bool suppress_popup_keys = false;
     std::span<const TextInputHighlight> highlights = {};
 };
 
@@ -2335,6 +2336,8 @@ bool has_text_selection(uint32_t element_id = 0) noexcept;
 Str selected_text(uint32_t element_id = 0, Arena* arena = nullptr) noexcept;
 void clear_text_selection(uint32_t element_id = 0) noexcept;
 Rect ime_cursor_rect(const Context* ctx = nullptr) noexcept;
+void request_text_input(uint32_t element_id, Rect ime_cursor_rect = {}) noexcept;
+Str typed_text(uint32_t element_id = 0) noexcept;
 bool set_clipboard_text(const char* utf8_text) noexcept;
 Str get_clipboard_text(Arena* arena = nullptr) noexcept;
 
@@ -2403,6 +2406,8 @@ bool accept_drag_payload(uint32_t target_id, uint32_t kind_hash, DragPayloadView
 float spring(uint32_t anim_id, float target, SpringSpec spec = {}) noexcept;
 float spring(uint32_t anim_id, float target, float initial_value, SpringSpec spec = {}) noexcept;
 Vec2 spring_vec2(uint32_t anim_id, Vec2 target, SpringSpec spec = {}) noexcept;
+Vec2 scroll_delta() noexcept;
+Vec2 scroll_max(uint32_t element_id) noexcept;
 Vec2 scroll_offset(uint32_t element_id) noexcept;
 void set_scroll_offset(uint32_t element_id, Vec2 offset, bool stop_momentum = true) noexcept;
 

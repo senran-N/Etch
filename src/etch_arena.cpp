@@ -54,6 +54,7 @@ struct WidgetState {
     bool     double_clicked_this_frame = false;
     bool     is_text_input_writable = false;
     bool     is_multiline_input = false, edit_reveal_caret = true;
+    bool     suppress_popup_keys = false;
     float    edit_max_scroll_y = 0;
     float hover_t=0, hover_vel=0, press_t=0, press_vel=0;
     Vec2 terminal_cursor = {}, terminal_velocity = {};
@@ -126,6 +127,11 @@ struct WidgetState {
 
     // Virtual List state (double-precision scroll prevents float32 ULP degradation past 16.7M px)
     bool     is_virtual_list = false;
+    bool     vlist_pending_scroll = false;
+    uint32_t vlist_built_frame = 0;
+    uint32_t vlist_pending_scroll_row = 0;
+    float    vlist_pending_scroll_item_h = 0.0f;
+    AlignY   vlist_pending_scroll_align = AlignY::Top;
     double   vscroll_pos_y = 0.0;
     double   vscroll_vel_y = 0.0;
     double   vscroll_max_y = 0.0;
@@ -760,6 +766,7 @@ struct WindowUiState {
     bool       event_right_down = false;
     bool       event_middle_down = false;
     Vec2       event_scroll_delta = {};
+    Vec2       frame_scroll_delta = {};
     bool       prev_pointer_down = false;
     bool       prev_right_down = false;
     bool       prev_pan_button_down = false;
@@ -844,6 +851,7 @@ struct WindowUiState {
     PendingTextOp frame_text_ops[kMaxTextOpsPerFrame] = {};
     uint32_t      frame_text_op_count = 0;
     char          frame_text_utf8[kMaxPendingTextBytes] = {};
+    uint32_t      frame_text_utf8_len = 0;
 
     char          ime_comp_utf8[kMaxImeCompBytes] = {};
     uint32_t      ime_comp_len = 0;
@@ -1305,6 +1313,7 @@ void state_map_clear_flags(StateMap* map, bool clear_frame_edges, bool clear_pre
             slot.right_clicked_this_frame = false;
             slot.double_clicked_this_frame = false;
             slot.span_hovered = false;
+            slot.suppress_popup_keys = false;
         }
         if (clear_pressed) {
             slot.pressed_down = false;

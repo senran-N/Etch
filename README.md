@@ -157,7 +157,7 @@ configuring the consumer. If installation was disabled, reconfigure Etch with
 ```cmake
 cmake_minimum_required(VERSION 3.24)
 project(my_app LANGUAGES C CXX)
-find_package(Etch 0.19 CONFIG REQUIRED)
+find_package(Etch 0.20 CONFIG REQUIRED)
 add_executable(my_app main.cpp)
 target_link_libraries(my_app PRIVATE Etch::etch)
 ```

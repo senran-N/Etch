@@ -455,8 +455,37 @@ static bool test_containers_and_canvas(EtchContext* ctx) {
         }
     }
 
-    return mstate.calls > 0u && slice.first_index > 999880u &&
-           etch_virtual_list_scroll_offset(vlist_id) > 0.0;
+    if (!(mstate.calls > 0u && slice.first_index > 999880u &&
+           etch_virtual_list_scroll_offset(vlist_id) > 0.0)) {
+        return false;
+    }
+
+    const uint32_t inv_id = etch_id("c_vlist_inv_400");
+    EtchVirtualListDesc ivd = etch_virtual_list_desc_default();
+    ivd.id = inv_id;
+    ivd.item_count = 600u;
+    ivd.item_height_px = 20.0f;
+    ivd.height = etch_sizing_fixed(160.0f);
+    ivd.variable_height = true;
+    ivd.measure_height_fn = c_custom_row_height;
+    ivd.measure_user_data = &mstate;
+    etch_begin_frame(ctx, &fd);
+    etch_begin_virtual_list(&ivd);
+    etch_end_virtual_list();
+    etch_end_frame(ctx);
+    etch_virtual_list_invalidate_heights(inv_id);
+    etch_virtual_list_scroll_to_row(inv_id, 400u, 20.0f, ETCH_ALIGN_Y_TOP);
+    double expected_c_y = 0.0;
+    for (uint32_t r = 0u; r < 400u; ++r) {
+        expected_c_y += (double)c_custom_row_height(r, NULL);
+    }
+    const double c_off = etch_virtual_list_scroll_offset(inv_id);
+    etch_begin_frame(ctx, &fd);
+    const EtchVirtualListSlice islice = etch_begin_virtual_list(&ivd);
+    etch_end_virtual_list();
+    etch_end_frame(ctx);
+    return (c_off - expected_c_y) > -0.5 && (c_off - expected_c_y) < 0.5 &&
+           islice.first_index <= 400u && islice.end_index > 400u;
 }
 
 static bool test_release_api(EtchContext* ctx) {
@@ -475,17 +504,28 @@ static bool test_release_api(EtchContext* ctx) {
     EtchTextInputDesc input = etch_text_input_desc_default();
     if (box.border_sides.left != 0 || box.border_dash_px != 0 || box.border_gap_px != 0 ||
         span.icon_id != ETCH_INVALID_ICON || span.icon_gap_px != 4 || span.padding_y != 0 ||
-        input.highlights != NULL || input.highlight_count != 0 || ranges[0].radius_px != 4) return false;
+        input.highlights != NULL || input.highlight_count != 0 || input.suppress_popup_keys || ranges[0].radius_px != 4) return false;
 
     EtchFrameDesc frame = etch_frame_desc_default();
     frame.viewport_w = 192;
     frame.viewport_h = 120;
+    frame.scroll_delta = etch_vec2(0.0f, -1.5f);
     etch_begin_frame(ctx, &frame);
+    const EtchVec2 sd = etch_scroll_delta();
+    if (sd.y > -1.4f || sd.y < -1.6f) return false;
+    box.id = etch_id("c_scroll_box");
+    box.width = etch_sizing_fixed(100.0f);
+    box.height = etch_sizing_fixed(50.0f);
+    box.scroll_y = true;
     box.clip_children = true;
     box.border_sides.bottom = 2;
     box.border_color = (EtchColor){255, 0, 0, 255};
     box.border_dash_px = 4;
     etch_begin_box(&box);
+    EtchBoxDesc child = etch_box_desc_default();
+    child.width = etch_sizing_fixed(80.0f);
+    child.height = etch_sizing_fixed(170.0f);
+    etch_box(&child);
     span.icon_id = id;
     span.text = ETCH_STR_LIT("file");
     span.font_id = ETCH_FONT_ITALIC;
@@ -500,15 +540,29 @@ static bool test_release_api(EtchContext* ctx) {
     ranges[2].byte_offset = UINT32_MAX;
     ranges[2].byte_length = 1;
     ranges[2].border_color = box.border_color;
+    input.id = etch_id("c_ti_popup");
     input.buffer = text;
     input.capacity = sizeof(text);
+    input.multiline = true;
+    input.suppress_popup_keys = true;
     input.highlights = ranges;
     input.highlight_count = 3;
     const EtchTextInputResult result = etch_text_input(&input);
     input.highlights = NULL; /* A null list remains valid with a nonzero count. */
     (void)etch_text_input(&input);
+    const uint32_t term_id = etch_id("c_term_ime");
+    EtchBoxDesc term_box = etch_box_desc_default();
+    term_box.id = term_id;
+    term_box.focusable = true;
+    etch_box(&term_box);
+    etch_request_focus(term_id);
+    etch_request_text_input(term_id, (EtchRect){4.0f, 8.0f, 2.0f, 14.0f});
+    const EtchStr typed = etch_typed_text(term_id);
+    if (typed.length != 0u) return false;
     etch_end_box();
     etch_end_frame(ctx);
+    const EtchVec2 smax = etch_scroll_max(etch_id("c_scroll_box"));
+    if (smax.y < 119.0f || smax.y > 121.0f || etch_scroll_delta().y != 0.0f) return false;
     return result.byte_length == sizeof(text) - 1 && etch_font_metrics(ETCH_FONT_ITALIC, 16).line_height > 0;
 }
 

@@ -73,6 +73,9 @@ int main(void) {
     EtchTerminalGridDesc terminal=etch_terminal_grid_desc_default();
     terminal.id=etch_id("terminal_c");terminal.cells=&cell;terminal.cell_count=1;terminal.columns=1;terminal.rows=1;
     etch_terminal_grid(&terminal);
+    etch_request_text_input(terminal.id, (EtchRect){0.0f, 0.0f, 2.0f, 16.0f});
+    if (etch_typed_text(terminal.id).length != 0u) return 1;
+    if (etch_scroll_delta().y != 0.0f || etch_scroll_max(box.id).y != 0.0f) return 1;
     EtchSheetDesc sheet=etch_sheet_desc_default();sheet.id=etch_id("sheet_c");sheet.open=false;
     if(etch_begin_sheet(&sheet))etch_end_sheet();
     EtchShaderSurfaceEvalDesc eval=etch_shader_surface_eval_desc_default();
@@ -90,6 +93,7 @@ int main(void) {
     EtchTextInputDesc field = etch_text_input_desc_default();
     field.buffer = input;
     field.capacity = sizeof(input);
+    field.suppress_popup_keys = true;
     field.highlights = &range;
     field.highlight_count = 1;
     if (etch_text_input(&field).byte_length != 5) return 1;

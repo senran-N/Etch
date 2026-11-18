@@ -1921,6 +1921,7 @@ void apply_scrollbar_drag(WidgetState* ws, float pointer_y, float grab_offset, b
         } else if (ws->is_virtual_list) {
             ws->vscroll_pos_y = static_cast<double>(ratio) * ws->vscroll_max_y;
             ws->vscroll_vel_y = 0.0;
+            ws->vlist_pending_scroll = false;
         } else {
             ws->scroll_pos.y = ratio * ws->scroll_max.y;
             ws->scroll_vel.y = 0.0f;

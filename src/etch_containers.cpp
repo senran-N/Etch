@@ -244,6 +244,31 @@ void reset_vlist_heights(VarVirtualListCache* c) noexcept {
         fenwick_add(c,i,double(count)*(double(c->default_height)+c->gap_px));
     }
 }
+void remeasure_vlist_dirty_chunks(VarVirtualListCache* c) noexcept {
+    if (!c || !c->dirty) {
+        return;
+    }
+    if (c->measure_fn || c->c_measure_fn) {
+        for (uint32_t chunk = 0; chunk < c->chunk_count; ++chunk) {
+            if (!c->chunks[chunk]) continue;
+            const uint32_t end = std::min(c->item_count, (chunk + 1u) * kVarListChunkSize);
+            for (uint32_t row = chunk * kVarListChunkSize; row < end; ++row) {
+                float measured = c->measure_fn
+                    ? c->measure_fn(row, c->measure_user_data)
+                    : c->c_measure_fn(row, c->measure_user_data);
+                measured = std::isfinite(measured)
+                    ? (c->uncapped_heights ? std::fmax(measured, 1.0f) : clamp_range(measured, 1.0f, 16384.0f))
+                    : c->default_height;
+                const float old = c->chunks[chunk][row % kVarListChunkSize];
+                c->chunks[chunk][row % kVarListChunkSize] = measured;
+                fenwick_add(c, chunk, double(measured) - double(old));
+            }
+        }
+    } else {
+        reset_vlist_heights(c);
+    }
+    c->dirty = false;
+}
 VarVirtualListCache* prepare_vlist_raw(
     WindowUiState* ui,
     uint32_t list_id,
@@ -305,22 +330,7 @@ VarVirtualListCache* prepare_vlist_raw(
         if (!c->chunks || !c->fenwick) { std::free(c->chunks); std::free(c->fenwick); *c = {}; return nullptr; }
         reset_vlist_heights(c);
     }
-    if (c->dirty) {
-        if (c->measure_fn || c->c_measure_fn) {
-            for (uint32_t chunk = 0; chunk < c->chunk_count; ++chunk) {
-                if (!c->chunks[chunk]) continue;
-                const uint32_t end = std::min(c->item_count, (chunk + 1) * 256);
-                for (uint32_t row = chunk * 256; row < end; ++row) {
-                    float measured = c->measure_fn ? c->measure_fn(row, c->measure_user_data) : c->c_measure_fn(row, c->measure_user_data);
-                    measured = std::isfinite(measured) ? (c->uncapped_heights ? std::fmax(measured, 1.f) : clamp_range(measured, 1, 16384)) : c->default_height;
-                    const float old = c->chunks[chunk][row % 256];
-                    c->chunks[chunk][row % 256] = measured;
-                    fenwick_add(c, chunk, double(measured) - old);
-                }
-            }
-        } else reset_vlist_heights(c);
-        c->dirty = false;
-    }
+    remeasure_vlist_dirty_chunks(c);
     return c;
 }
 VarVirtualListCache* prepare_vlist(
@@ -393,6 +403,70 @@ void update_vlist_height(Context* ctx, VarVirtualListCache* c, uint32_t row, flo
             ws->vscroll_pos_y = clamp_double(ws->vscroll_pos_y + (vlist_current_row_top(c, c->last_anchor_row) - anchor_before), 0.0, ws->vscroll_max_y);
     }
 }
+void sync_vlist_scroll_bounds(Context* ctx, VarVirtualListCache* c, double previous_total) noexcept {
+    if (auto* ws = state_map_find(&ctx->active_ui->states, c->list_id)) {
+        ws->vscroll_total_h += c->total_stride_sum - previous_total;
+        ws->vscroll_max_y = std::fmax(ws->vscroll_total_h - ws->viewport_dim.y, 0.0);
+        ws->vscroll_pos_y = clamp_double(ws->vscroll_pos_y, 0.0, ws->vscroll_max_y);
+    }
+}
+void apply_vlist_scroll_to_row(
+    Context* ctx,
+    WidgetState* ws,
+    VarVirtualListCache* cache,
+    uint32_t row_index,
+    float item_height_px,
+    AlignY align,
+    double known_view_h) noexcept
+{
+    const double previous_total = cache ? cache->total_stride_sum : 0.0;
+    if (cache && cache->dirty) {
+        remeasure_vlist_dirty_chunks(cache);
+    }
+    if (cache && cache->item_count == 0u) {
+        return;
+    }
+    if (cache && row_index >= cache->item_count) {
+        row_index = cache->item_count - 1u;
+    }
+    if (cache && (cache->measure_fn || cache->c_measure_fn)) {
+        const uint32_t target_chunk = row_index / kVarListChunkSize;
+        if (target_chunk <= 64u) {
+            for (uint32_t ch = 0u; ch <= target_chunk; ++ch) {
+                vlist_ensure_chunk(cache, ch);
+            }
+        }
+    }
+    const float item_h = cache
+        ? vlist_height(cache, row_index)
+        : (std::isfinite(item_height_px) && item_height_px > 1.0f ? item_height_px : 1.0f);
+    const double stride = (ws->vlist_stride >= item_h)
+        ? static_cast<double>(ws->vlist_stride)
+        : static_cast<double>(item_h);
+    const double view_h = (known_view_h > 1.0)
+        ? known_view_h
+        : ((ws->viewport_dim.y > 1.0f)
+            ? static_cast<double>(ws->viewport_dim.y)
+            : (static_cast<double>(ctx->active_ui->viewport_h) / static_cast<double>(ctx->active_ui->dpi_scale)));
+    double target_y = cache ? vlist_row_top(cache, row_index) : static_cast<double>(row_index) * stride;
+    if (cache) {
+        ws->vscroll_total_h += cache->total_stride_sum - previous_total;
+        ws->vscroll_max_y = (ws->vscroll_total_h > view_h) ? (ws->vscroll_total_h - view_h) : 0.0;
+    }
+    if (align == AlignY::Center) {
+        target_y -= 0.5 * (view_h - static_cast<double>(item_h));
+    } else if (align == AlignY::Bottom) {
+        target_y -= (view_h - static_cast<double>(item_h));
+    }
+    if (target_y < 0.0) {
+        target_y = 0.0;
+    }
+    if (ws->vscroll_max_y > 0.0 && target_y > ws->vscroll_max_y) {
+        target_y = ws->vscroll_max_y;
+    }
+    ws->vscroll_pos_y = target_y;
+    ws->vscroll_vel_y = 0.0;
+}
 } // namespace
 
 // Shared sparse Fenwick list helpers used by both virtual lists and wrapped code editors.
@@ -429,11 +503,8 @@ void virtual_list_set_item_height(uint32_t id, uint32_t row, float height) noexc
     auto* c = find_vlist(ctx->active_ui,id); if (!c || row >= c->item_count) return;
     if (c->dirty) {
         const double previous_total = c->total_stride_sum;
-        reset_vlist_heights(c); c->dirty = false;
-        if (auto* ws = state_map_find(&ctx->active_ui->states,id)) {
-            ws->vscroll_total_h += c->total_stride_sum-previous_total;
-            ws->vscroll_max_y = std::fmax(ws->vscroll_total_h-ws->viewport_dim.y,0.0);
-        }
+        remeasure_vlist_dirty_chunks(c);
+        sync_vlist_scroll_bounds(ctx, c, previous_total);
     }
     update_vlist_height(ctx,c,row,clamp_range(height,1,16384)); request_redraw(ctx);
 }
@@ -480,6 +551,7 @@ VirtualListSlice begin_virtual_list_with_c_measure(const VirtualListDesc& desc, 
     ws->is_scroll_x = false;
     ws->is_scroll_y = false;
     ws->is_virtual_list = true;
+    ws->vlist_built_frame = ctx->active_ui->frame_index;
     ws->show_scrollbar = desc.show_scrollbar;
     ws->vlist_stride = static_cast<float>(stride);
     ws->owner_canvas_id = (ctx->active_ui->canvas_depth > 0u)
@@ -504,12 +576,23 @@ VirtualListSlice begin_virtual_list_with_c_measure(const VirtualListDesc& desc, 
     const double max_scroll = (total_h > view_h) ? (total_h - view_h) : 0.0;
     ws->vscroll_total_h = total_h;
     ws->vscroll_max_y = max_scroll;
+    if (ws->vlist_pending_scroll) {
+        ws->vlist_pending_scroll = false;
+        if (desc.item_count > 0u) {
+            const uint32_t pending_row = (ws->vlist_pending_scroll_row >= desc.item_count)
+                ? (desc.item_count - 1u)
+                : ws->vlist_pending_scroll_row;
+            apply_vlist_scroll_to_row(
+                ctx, ws, cache, pending_row,
+                ws->vlist_pending_scroll_item_h, ws->vlist_pending_scroll_align, view_h);
+        }
+    }
     PendingA11yAction lv_cmd = {};
     while(a11y_take_any(desc.id,12u,&lv_cmd)) {
         ws->vscroll_pos_y += (lv_cmd.action==A11yAction::Increment) ? 40.0 : -40.0;
         request_redraw(ctx);
     }
-    ws->vscroll_pos_y = clamp_double(ws->vscroll_pos_y, 0.0, max_scroll);
+    ws->vscroll_pos_y = clamp_double(ws->vscroll_pos_y, 0.0, ws->vscroll_max_y);
     ws->viewport_dim.y = static_cast<float>(view_h);
 
     const double content_scroll_y = (ws->vscroll_pos_y > static_cast<double>(desc.padding.top))
@@ -669,6 +752,7 @@ void set_virtual_list_scroll_offset(uint32_t list_id, double offset_y, bool stop
     if (WidgetState* ws = state_map_get_or_insert(&ctx->active_ui->states, list_id, ctx->active_ui->frame_index)) {
         ws->is_user_element = true;
         ws->is_virtual_list = true;
+        ws->vlist_pending_scroll = false;
         double clamped = (offset_y > 0.0) ? offset_y : 0.0;
         if (ws->vscroll_max_y > 0.0) {
             clamped = clamp_double(clamped, 0.0, ws->vscroll_max_y);
@@ -695,38 +779,19 @@ void virtual_list_scroll_to_row(
     if (!ws) {
         return;
     }
-    auto* cache = find_vlist(ctx->active_ui,list_id);
-    const double previous_total = cache ? cache->total_stride_sum : 0;
-    if (cache && cache->dirty) { reset_vlist_heights(cache); cache->dirty = false; }
-    if (cache && cache->item_count == 0) return;
-    if (cache && row_index >= cache->item_count) row_index = cache->item_count-1;
-    const float item_h = cache ? vlist_height(cache,row_index) : (std::isfinite(item_height_px) && item_height_px > 1 ? item_height_px : 1);
-    const double stride = (ws->vlist_stride >= item_h)
-        ? static_cast<double>(ws->vlist_stride)
-        : static_cast<double>(item_h);
-    const double view_h = (ws->viewport_dim.y > 1.0f)
-        ? static_cast<double>(ws->viewport_dim.y)
-        : (static_cast<double>(ctx->active_ui->viewport_h) / static_cast<double>(ctx->active_ui->dpi_scale));
-    double target_y = cache ? vlist_row_top(cache,row_index) : static_cast<double>(row_index) * stride;
-    if (cache) {
-        ws->vscroll_total_h += cache->total_stride_sum-previous_total;
-        ws->vscroll_max_y = ws->vscroll_total_h > view_h ? ws->vscroll_total_h-view_h : 0;
-    }
-    if (align == AlignY::Center) {
-        target_y -= 0.5 * (view_h - static_cast<double>(item_h));
-    } else if (align == AlignY::Bottom) {
-        target_y -= (view_h - static_cast<double>(item_h));
-    }
-    if (target_y < 0.0) {
-        target_y = 0.0;
-    }
-    if (ws->vscroll_max_y > 0.0 && target_y > ws->vscroll_max_y) {
-        target_y = ws->vscroll_max_y;
-    }
     ws->is_user_element = true;
     ws->is_virtual_list = true;
-    ws->vscroll_pos_y = target_y;
-    ws->vscroll_vel_y = 0.0;
+    if (!ctx->in_frame || ws->vlist_built_frame != ctx->active_ui->frame_index) {
+        ws->vlist_pending_scroll = true;
+        ws->vlist_pending_scroll_row = row_index;
+        ws->vlist_pending_scroll_item_h = item_height_px;
+        ws->vlist_pending_scroll_align = align;
+    }
+    auto* cache = find_vlist(ctx->active_ui, list_id);
+    if (cache && cache->item_count == 0u) {
+        return;
+    }
+    apply_vlist_scroll_to_row(ctx, ws, cache, row_index, item_height_px, align, 0.0);
     request_redraw(ctx);
 }
 

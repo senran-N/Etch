@@ -4,6 +4,17 @@ All notable changes to Etch are documented here. This file follows
 [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.0] - 2026-11-19
+
+- Add `TextInputDesc::suppress_popup_keys` (`EtchTextInputDesc::suppress_popup_keys`)
+  to suppress `Tab` focus advancement, `Up`/`Down` caret movement, and `Return`
+  newline/submit while keeping `key_pressed` readable for autocomplete popovers.
+- Add public `scroll_delta()`, `scroll_max(id)`, `request_text_input(id, rect)`,
+  and `typed_text(id)` C++20/C99 primitives for custom scrollable/terminal widgets.
+- Make `virtual_list_invalidate_heights` order-independent with
+  `virtual_list_scroll_to_row` and `virtual_list_set_item_height` across pre- and
+  post-`begin_virtual_list` call sites.
+
 ## [0.19.0] - 2026-11-18
 
 - Compile SVG strokes into Slug vector icons with configurable caps and joins.

@@ -394,7 +394,9 @@ void end_frame(Context* ctx_arg) noexcept {
     }
     ctx->active_render_layer=nullptr;
     ctx->active_ui->frame_text_op_count = 0u;
+    ctx->active_ui->frame_text_utf8_len = 0u;
     ctx->active_ui->frame_key_count = 0u;
+    ctx->active_ui->frame_scroll_delta = {};
     ctx->active_ui->last_mouse_clicks = 1u;
 
     if (ctx->active_ui->ime_focused_id == 0u && ctx->active_ui->ime_comp_len > 0u) {

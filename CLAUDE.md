@@ -1,4 +1,4 @@
-# CLAUDE.md — Etch Architecture Constitution (v0.19.0)
+# CLAUDE.md — Etch Architecture Constitution (v0.20.0)
 
 ## 1. Project Identity & End-State Goals
 - **Codename**: `Etch` (Namespace `etch::`, C ABI prefix `etch_` / `Etch`, Macro prefix `ETCH_`, Library `etch` / `libetch`)

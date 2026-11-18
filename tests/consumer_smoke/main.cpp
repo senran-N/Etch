@@ -37,13 +37,16 @@ int main() {
     if(etch::update_texture_region_rgba(nullptr,nullptr,0,0,1,1,nullptr)) return 1;
     const etch::TerminalCell cells[2]={};
     etch::terminal_grid({.id=etch::id("terminal"),.cells=cells,.columns=2,.rows=1});
+    etch::request_text_input(etch::id("terminal"), {0, 0, 2, 16});
+    if (etch::typed_text(etch::id("terminal")).length != 0u) return 1;
+    if (etch::scroll_delta().y != 0.0f || etch::scroll_max(etch::id("smoke")).y != 0.0f) return 1;
     if(etch::begin_sheet({.id=etch::id("sheet"),.open=false}))etch::end_sheet();
     if(etch::eval_shader_surface(ctx,0,{})!=nullptr)return 1;
     etch::box({.border_color = seed, .border_sides = {.bottom = 1}, .border_dash_px = 3});
     etch::text_spans({{.text = etch::str_lit("file"), .font_id = etch::kFontItalic, .icon_id = icon, .padding_y = 2}});
     char input[] = "@file";
     const etch::TextInputHighlight highlights[] = {{.byte_length = 5, .background = seed}};
-    if (etch::text_input({.buffer = input, .capacity = sizeof(input), .highlights = highlights}).byte_length != 5) return 1;
+    if (etch::text_input({.buffer = input, .capacity = sizeof(input), .suppress_popup_keys = true, .highlights = highlights}).byte_length != 5) return 1;
     etch::end_frame(ctx);
     etch::destroy_shader_surface(ctx,0);
     etch::ElementGeometry geometry;

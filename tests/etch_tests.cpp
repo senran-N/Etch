@@ -56,8 +56,116 @@ static bool unicode_suite() noexcept {
     TextBuffer b={};ok &= init_text_buffer(&b,str_cstr(data));ok &= text_buffer_line_count(&b)==1;free_text_buffer(&b);
     destroy_context(c);set_current_context(nullptr);return ok;
 }
+static bool v020_regression() noexcept {
+    Context* c = create_context({.headless = true});
+    if (!c) return false;
+    bool ok = true;
+    const auto inject_text_input = [&](const char* utf8) noexcept {
+        SDL_Event ev = {};
+        ev.type = SDL_EVENT_TEXT_INPUT;
+        ev.text.text = utf8;
+        process_event(c, ev);
+    };
+    const uint32_t ti_id = id("v020_ti");
+    const uint32_t next_id = id("v020_next");
+    const uint32_t scroll_id = id("v020_scroll");
+    const uint32_t term_id = id("v020_term");
+    char buf[64] = "line1\nline2";
+    bool suppress = true;
+
+    const auto step_ui = [&](uint32_t key = 0u, TextInputResult* out_res = nullptr, bool* saw_key = nullptr) noexcept {
+        begin_frame(c, {.viewport_w = 400, .viewport_h = 300, .key_pressed_code = key});
+        if (saw_key && key != 0u) *saw_key = key_pressed(key);
+        const TextInputResult r = text_input({
+            .id = ti_id, .buffer = buf, .capacity = sizeof(buf),
+            .width = Sizing::fixed(200), .height = Sizing::fixed(80),
+            .multiline = true, .suppress_popup_keys = suppress
+        });
+        if (out_res) *out_res = r;
+        box({.id = next_id, .width = Sizing::fixed(100), .height = Sizing::fixed(30), .focusable = true});
+        begin_box({.id = scroll_id, .width = Sizing::fixed(200), .height = Sizing::fixed(100), .scroll_y = true});
+        box({.width = Sizing::fixed(180), .height = Sizing::fixed(350)});
+        end_box();
+        box({.id = term_id, .width = Sizing::fixed(200), .height = Sizing::fixed(40), .focusable = true});
+        end_frame(c);
+    };
+
+    ok &= scroll_delta().x == 0.0f && scroll_delta().y == 0.0f && typed_text().length == 0u;
+    step_ui();
+    ok &= std::fabs(scroll_max(scroll_id).y - 250.0f) < 0.5f && scroll_max(id("missing")).y == 0.0f;
+
+    request_focus(ti_id);
+    set_text_selection(ti_id, 3u, 3u);
+    step_ui();
+
+    bool saw = false;
+    TextInputResult res = {};
+    step_ui(SDLK_TAB, &res, &saw);
+    ok &= focused(ti_id) && !focused(next_id) && saw;
+
+    saw = false;
+    step_ui(SDLK_DOWN, &res, &saw);
+    ok &= saw && res.cursor_byte == 3u;
+
+    set_text_selection(ti_id, 9u, 9u);
+    step_ui();
+    saw = false;
+    step_ui(SDLK_UP, &res, &saw);
+    ok &= saw && res.cursor_byte == 9u;
+
+    set_text_selection(ti_id, 3u, 3u);
+    step_ui();
+
+    saw = false;
+    step_ui(SDLK_RETURN, &res, &saw);
+    ok &= saw && !res.changed && !res.submitted && std::strcmp(buf, "line1\nline2") == 0 && res.cursor_byte == 3u;
+
+    inject_text_input("X");
+    step_ui(0u, &res);
+    ok &= res.changed && std::strcmp(buf, "linXe1\nline2") == 0 && res.cursor_byte == 4u;
+
+    step_ui(SDLK_BACKSPACE, &res);
+    ok &= res.changed && std::strcmp(buf, "line1\nline2") == 0 && res.cursor_byte == 3u;
+
+    step_ui(SDLK_LEFT, &res);
+    ok &= res.cursor_byte == 2u;
+
+    suppress = false;
+    step_ui();
+    step_ui(SDLK_TAB);
+    ok &= focused(next_id);
+
+    SDL_Event wheel = {};
+    wheel.type = SDL_EVENT_MOUSE_WHEEL;
+    wheel.wheel.x = 1.0f;
+    wheel.wheel.y = -2.5f;
+    process_event(c, wheel);
+    inject_text_input("ab");
+    begin_frame(c, {.viewport_w = 400, .viewport_h = 300});
+    ok &= std::fabs(scroll_delta().x - 1.0f) < 1e-4f && std::fabs(scroll_delta().y + 2.5f) < 1e-4f;
+    ok &= typed_text(term_id).length == 0u && typed_text().length == 2u && std::memcmp(typed_text().chars, "ab", 2) == 0;
+    request_text_input(term_id, {10.0f, 20.0f, 2.0f, 16.0f});
+    end_frame(c);
+    ok &= scroll_delta().x == 0.0f && scroll_delta().y == 0.0f && typed_text().length == 0u;
+
+    request_focus(term_id);
+    inject_text_input("ls");
+    inject_text_input("!");
+    begin_frame(c, {.viewport_w = 400, .viewport_h = 300});
+    request_text_input(term_id, {12.0f, 24.0f, 2.0f, 16.0f});
+    const Str tt = typed_text(term_id);
+    const Rect cr = ime_cursor_rect(c);
+    ok &= tt.length == 3u && std::memcmp(tt.chars, "ls!", 3) == 0 && tt.chars[3] == '\0';
+    ok &= std::fabs(cr.x - 12.0f) < 1e-4f && std::fabs(cr.y - 24.0f) < 1e-4f && cr.h == 16.0f;
+    end_frame(c);
+
+    destroy_context(c);
+    set_current_context(nullptr);
+    return ok;
+}
+
 static bool layout_suite() noexcept {
-    if(!verify_snap_sheet() || !verify_caret_deadline())return false;
+    if(!verify_snap_sheet() || !verify_caret_deadline() || !v020_regression())return false;
     Context* c=create_context({.headless=true});if(!c)return false;
     begin_frame(c,{.viewport_w=400,.viewport_h=200});begin_box({.id=id("grid"),.width=Sizing::fixed(400),.height=Sizing::fixed(200),.gap=10,.grid_columns=2});
     box({.id=id("left"),.width=Sizing::grow(),.height=Sizing::fixed(40)});box({.id=id("right"),.width=Sizing::grow(),.height=Sizing::fixed(40)});end_box();end_frame(c);
@@ -128,6 +236,46 @@ static bool list_append_regression() noexcept {
     begin_frame(c,{.viewport_w=400,.viewport_h=200});begin_virtual_list({.id=id("explicit_heights"),.item_count=2,.height=Sizing::fixed(200),.measure_height_fn=stream_height,.variable_height=true});end_virtual_list();end_frame(c);
     virtual_list_scroll_to_row(id("explicit_heights"),1,28,AlignY::Top);
     ok &= std::fabs(virtual_list_scroll_offset(id("explicit_heights"))-420)<1;
+
+    uint32_t var_scale = 1u;
+    const auto var_measure = [](uint32_t row, void* ud) noexcept -> float {
+        const uint32_t s = *static_cast<const uint32_t*>(ud);
+        return static_cast<float>((20u + (row % 5u) * 10u) * s);
+    };
+    const uint32_t var_id = id("invalidate_scroll_400");
+    begin_frame(c, {.viewport_w = 400, .viewport_h = 200});
+    begin_virtual_list({.id = var_id, .item_count = 600, .item_height_px = 20, .height = Sizing::fixed(200),
+        .measure_height_fn = var_measure, .measure_user_data = &var_scale, .variable_height = true});
+    end_virtual_list();
+    end_frame(c);
+    var_scale = 2u;
+    double expected_y400 = 0.0;
+    for (uint32_t r = 0; r < 400u; ++r) expected_y400 += static_cast<double>(var_measure(r, &var_scale));
+    virtual_list_invalidate_heights(var_id);
+    virtual_list_scroll_to_row(var_id, 400u, 20.0f, AlignY::Top);
+    ok &= std::fabs(virtual_list_scroll_offset(var_id) - expected_y400) < 0.5;
+    begin_frame(c, {.viewport_w = 400, .viewport_h = 200});
+    const auto slice400 = begin_virtual_list({.id = var_id, .item_count = 600, .item_height_px = 20, .height = Sizing::fixed(200),
+        .measure_height_fn = var_measure, .measure_user_data = &var_scale, .variable_height = true});
+    end_virtual_list();
+    end_frame(c);
+    ok &= std::fabs(slice400.scroll_y - expected_y400) < 0.5 && slice400.first_index <= 400u && slice400.end_index > 400u;
+
+    const uint32_t grow_id = id("invalidate_grow_400");
+    begin_frame(c, {.viewport_w = 400, .viewport_h = 200});
+    begin_virtual_list({.id = grow_id, .item_count = 100, .item_height_px = 20, .height = Sizing::fixed(200),
+        .measure_height_fn = var_measure, .measure_user_data = &var_scale, .variable_height = true});
+    end_virtual_list();
+    end_frame(c);
+    virtual_list_invalidate_heights(grow_id);
+    virtual_list_scroll_to_row(grow_id, 400u, 20.0f, AlignY::Top);
+    begin_frame(c, {.viewport_w = 400, .viewport_h = 200});
+    const auto grow_slice = begin_virtual_list({.id = grow_id, .item_count = 600, .item_height_px = 20, .height = Sizing::fixed(200),
+        .measure_height_fn = var_measure, .measure_user_data = &var_scale, .variable_height = true});
+    end_virtual_list();
+    end_frame(c);
+    ok &= std::fabs(grow_slice.scroll_y - expected_y400) < 0.5 && grow_slice.first_index <= 400u && grow_slice.end_index > 400u;
+
     destroy_context(c);set_current_context(nullptr);return ok;
 }
 static bool list_suite() noexcept {
