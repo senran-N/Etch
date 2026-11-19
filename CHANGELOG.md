@@ -4,6 +4,14 @@ All notable changes to Etch are documented here. This file follows
 [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html).
 
+## [0.22.1] - 2026-11-19
+
+- Fix `src/etch_gpu.cpp` mid-frame `filter_slices` release bug when `LayerDesc::blur_px`
+  and `BoxDesc::backdrop_blur` are used together on the first frame or after a resize:
+  keep `release_blur_targets` scoped to backdrop/scene targets (`scene_tex`,
+  `blur_ping_tex`, `blur_pong_tex`) and call `release_filter_targets` explicitly
+  alongside it in `release_window` and `destroy_context`.
+
 ## [0.22.0] - 2026-11-19
 
 - Bind `push_layer` `pivot_norm` to the first top-level box under explicit layers so

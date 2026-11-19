@@ -242,7 +242,6 @@ bool ensure_filter_slice_targets(Context* ctx, uint32_t width, uint32_t height, 
 }
 
 void release_blur_targets(Context* ctx) noexcept {
-    release_filter_targets(ctx);
     if (ctx->active_ui->scene_tex) {
         SDL_ReleaseGPUTexture(ctx->device, ctx->active_ui->scene_tex);
         ctx->active_ui->scene_tex = nullptr;
@@ -1680,6 +1679,7 @@ void destroy_context(Context* ctx) noexcept {
         if (ctx->texture_upload_buf) SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->texture_upload_buf);
         if (ctx->atlas.gpu_tex) SDL_ReleaseGPUTexture(ctx->device, ctx->atlas.gpu_tex);
         release_blur_targets(ctx);
+        release_filter_targets(ctx);
         if (ctx->headless_tex) SDL_ReleaseGPUTexture(ctx->device, ctx->headless_tex);
         if (ctx->headless_dl_buf) SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->headless_dl_buf);
         SDL_DestroyGPUDevice(ctx->device);
@@ -1985,6 +1985,7 @@ void release_window(Context* ctx, SDL_Window* window) noexcept {
         WindowUiState* saved = ctx->active_ui;
         ctx->active_ui = &slot.ui;
         release_blur_targets(ctx);
+        release_filter_targets(ctx);
         ctx->active_ui = saved == &slot.ui ? &ctx->headless_ui : saved;
         destroy_window_ui_state(ctx, &slot.ui);
         SDL_ReleaseWindowFromGPUDevice(ctx->device, window);

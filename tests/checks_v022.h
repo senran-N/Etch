@@ -318,9 +318,50 @@ inline bool verify_v022_driver(const char* driver) noexcept {
         destroy_texture(c, &seed_tex);
     }
 
-    std::remove(png_path);
     destroy_context(c);
     set_current_context(nullptr);
+
+    // (7) Fresh context first-frame + resize combination of LayerDesc::blur_px and BoxDesc::backdrop_blur.
+    if (Context* fc = create_context({.enable_gpu_debug = true, .headless = true, .gpu_driver = driver, .respect_reduced_motion = false})) {
+        auto run_combo = [&](uint32_t vw, uint32_t vh, const char* tag) noexcept -> bool {
+            begin_frame(fc, {.viewport_w = vw, .viewport_h = vh});
+            begin_box({.width = Sizing::fixed(float(vw)), .height = Sizing::fixed(float(vh))});
+            ETCH_LAYER({.blur_px = 6.0f}) {
+                begin_box({.width = Sizing::fixed(0), .height = Sizing::fixed(0)});
+                draw_rect({.rect = {20.0f, 20.0f, 80.0f, 60.0f}, .fill = Color::rgba8(0, 220, 80, 255)});
+                end_box();
+            }
+            begin_box({.width = Sizing::fixed(float(vw)), .height = Sizing::fixed(float(vh)), .padding = {.left = 140, .top = 20}});
+            box({.width = Sizing::fixed(80), .height = Sizing::fixed(60), .background = Color::rgba8(30, 50, 90, 140), .backdrop_blur = 8.0f});
+            end_box();
+            end_box();
+            end_frame(fc);
+            if (!render_headless_png(fc, vw, vh, png_path, Color::rgba8(16, 16, 20, 255))) return false;
+            if (frame_stats(fc).blur_pass_count < 2u) return false;
+            SDL_Surface* img = SDL_LoadPNG(png_path);
+            if (!img) return false;
+            Uint8 r = 0, g = 0, b = 0, a = 0;
+            const bool layer_ok = SDL_ReadSurfacePixel(img, 60, 50, &r, &g, &b, &a) &&
+                g > 150 && r < 40 && b < 110;
+            Uint8 br = 0, bg = 0, bb = 0, ba = 0;
+            const bool backdrop_ok = SDL_ReadSurfacePixel(img, 180, 50, &br, &bg, &bb, &ba) &&
+                bb > br && bb > 30;
+            if (!layer_ok || !backdrop_ok) {
+                std::fprintf(stderr, "v022 [%s] %s blur+backdrop_blur failed: layer=(%u,%u,%u,%u) backdrop=(%u,%u,%u,%u)\n",
+                    driver, tag, r, g, b, a, br, bg, bb, ba);
+            }
+            SDL_DestroySurface(img);
+            return layer_ok && backdrop_ok;
+        };
+        ok &= run_combo(240u, 160u, "first_frame");
+        ok &= run_combo(280u, 180u, "resize");
+        destroy_context(fc);
+        set_current_context(nullptr);
+    } else {
+        ok = false;
+    }
+
+    std::remove(png_path);
     return ok;
 }
 
