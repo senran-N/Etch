@@ -21,6 +21,7 @@
 #include "checks_theme_wrap.h"
 #include "checks_os_window_a11y.h"
 #include "checks_v021.h"
+#include "checks_v022.h"
 #include "etch_uber_vs_msl.h"
 #include "etch_uber_ps_msl.h"
 #include "etch_kawase_vs_msl.h"
@@ -478,7 +479,7 @@ static bool v019_regression() noexcept {
 }
 
 static bool gpu_suite() noexcept {
-    const bool media_ok=v019_regression() && verify_v021_gpu() && verify_workbench_materials_gpu() && verify_shader_surface_gpu() && verify_texture_regions_gpu() && verify_mesh_gpu() && verify_punch_gpu() && verify_beam_fade_gpu() && verify_media_emoji_checks() && verify_sprite_recycling_gpu() && verify_border_coverage() && verify_visual_quality_gpu() && verify_closure_gpu();
+    const bool media_ok=v019_regression() && verify_v021_gpu() && verify_v022_gpu() && verify_workbench_materials_gpu() && verify_shader_surface_gpu() && verify_texture_regions_gpu() && verify_mesh_gpu() && verify_punch_gpu() && verify_beam_fade_gpu() && verify_media_emoji_checks() && verify_sprite_recycling_gpu() && verify_border_coverage() && verify_visual_quality_gpu() && verify_closure_gpu();
     const bool v070_ok=verify_theme_wrap_checks();
     static_assert(sizeof(Prim)==64);
     bool ok=source_ok(g_etch_uber_vs_msl,sizeof(g_etch_uber_vs_msl),"vertex vs_main_out vs_main(") && source_ok(g_etch_uber_ps_msl,sizeof(g_etch_uber_ps_msl),"fragment ps_main_out ps_main(") && source_ok(g_etch_kawase_vs_msl,sizeof(g_etch_kawase_vs_msl),"vertex vs_main_out vs_main(") && source_ok(g_etch_kawase_ps_msl,sizeof(g_etch_kawase_ps_msl),"fragment ps_main_out ps_main(");
@@ -504,6 +505,7 @@ static bool gpu_suite() noexcept {
 int main(int argc,char** argv) {
     if(argc==2 && std::strcmp(argv[1],"--suite=v019")==0) return v019_regression() ? 0 : 1;
     if(argc==2 && std::strcmp(argv[1],"--suite=v021")==0) return verify_v021_gpu() ? 0 : 1;
+    if(argc==2 && std::strcmp(argv[1],"--suite=v022")==0) return verify_v022_gpu() ? 0 : 1;
     if(argc==2 && std::strcmp(argv[1],"--suite=mesh_grad")==0) return verify_mesh_gpu() ? 0 : 1;
     if(argc==2 && std::strcmp(argv[1],"--suite=punch_hole")==0) return verify_punch_gpu() ? 0 : 1;
     if(argc==2 && std::strcmp(argv[1],"--suite=workbench_materials")==0) return verify_workbench_materials_gpu() ? 0 : 1;

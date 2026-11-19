@@ -72,14 +72,16 @@ bool advance_motion(Context* ctx, float* pos, float* vel, float target, SpringSp
 void push_layer(const LayerDesc& desc) noexcept {
     Context* ctx=current_context();
     if(!ctx || !ctx->in_frame) return;
-    // Clay cannot cull in layout space when a visual layer can move content into view.
-    Clay_SetCullingEnabled(false);
     LayerDesc local=desc;
     if(!std::isfinite(local.opacity) || !std::isfinite(local.translate.x) || !std::isfinite(local.translate.y) ||
        !std::isfinite(local.scale.x) || !std::isfinite(local.scale.y) || local.scale.x<=0 || local.scale.y<=0 ||
        !std::isfinite(local.pivot_norm.x) || !std::isfinite(local.pivot_norm.y)) local={};
     local.opacity=std::fmin(1.f,std::fmax(0.f,local.opacity));
     local.blur_px=std::isfinite(local.blur_px) ? std::fmin(64.f,std::fmax(0.f,local.blur_px)) : 0.f;
+    if(local.translate.x!=0.0f || local.translate.y!=0.0f || local.scale.x!=1.0f || local.scale.y!=1.0f) {
+        // Clay cannot cull in layout space when a visual layer can move or scale content into view.
+        Clay_SetCullingEnabled(false);
+    }
     auto* node=ctx->frame_arena.alloc<VisualLayerNode>();
     if(!node) return;
     *node={}; node->parent=ctx->active_ui->current_layer; node->local=local;
@@ -176,6 +178,9 @@ void resolve_layer_chain(Context* ctx, const VisualLayerNode* node, float dpi) n
     Vec2 pivot={0,0};
     if(node->source_box) {
         const Rect r=node->source_box->layout_rect_logical;
+        pivot={(r.x+r.w*d.pivot_norm.x)*dpi,(r.y+r.h*d.pivot_norm.y)*dpi};
+    } else if(node->pivot_box) {
+        const Rect r=node->pivot_box->layout_rect_logical;
         pivot={(r.x+r.w*d.pivot_norm.x)*dpi,(r.y+r.h*d.pivot_norm.y)*dpi};
     }
     Vec2 inherited_pivot=pivot;

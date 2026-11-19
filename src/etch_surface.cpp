@@ -118,9 +118,16 @@ bool record_shader_surfaces(Context* ctx, SDL_GPUCommandBuffer* cmd) noexcept {
         bool need_fallback = false;
         for (uint32_t k = 0u; k < s.num_samplers; ++k) {
             SDL_GPUTexture* tex = s.eval.textures[k];
-            if (!tex || tex == s.texture) {
+            if (!tex) {
                 tex = nullptr;
                 need_fallback = true;
+            } else if (tex == s.texture) {
+                if (s.enable_feedback && s.initialized && s.prev_texture) {
+                    tex = s.prev_texture;
+                } else {
+                    tex = nullptr;
+                    need_fallback = true;
+                }
             } else {
                 for (uint32_t u = 0u; u < 64u; ++u) {
                     if (active[u] && !visited[u] && ctx->shader_surfaces[u].texture == tex) {
@@ -159,6 +166,18 @@ bool record_shader_surfaces(Context* ctx, SDL_GPUCommandBuffer* cmd) noexcept {
         }
         SDL_DrawGPUPrimitives(pass, 3, 1, 0, 0);
         SDL_EndGPURenderPass(pass);
+        if (s.enable_feedback && s.prev_texture) {
+            SDL_GPUCopyPass* copy_pass = SDL_BeginGPUCopyPass(cmd);
+            if (!copy_pass) return false;
+            const SDL_GPUTextureLocation src_loc = {
+                .texture = s.texture, .mip_level = 0u, .layer = 0u, .x = 0u, .y = 0u, .z = 0u
+            };
+            const SDL_GPUTextureLocation dst_loc = {
+                .texture = s.prev_texture, .mip_level = 0u, .layer = 0u, .x = 0u, .y = 0u, .z = 0u
+            };
+            SDL_CopyGPUTextureToTexture(copy_pass, &src_loc, &dst_loc, s.eval.width, s.eval.height, 1u, false);
+            SDL_EndGPUCopyPass(copy_pass);
+        }
         s.recorded = true;
         s.pending_output_epoch = ++ctx->shader_surface_epoch;
         for (uint32_t k = 0u; k < s.num_samplers; ++k) s.pending_sampled_epochs[k] = up_epochs[k];
@@ -172,6 +191,10 @@ void complete_shader_surfaces(Context* ctx, SDL_Window* window, bool submitted) 
         if (s.retired_tex) {
             SDL_ReleaseGPUTexture(ctx->device, s.retired_tex);
             s.retired_tex = nullptr;
+        }
+        if (s.retired_prev_tex) {
+            SDL_ReleaseGPUTexture(ctx->device, s.retired_prev_tex);
+            s.retired_prev_tex = nullptr;
         }
         if (!s.recorded) continue;
         if (submitted) {
@@ -197,6 +220,8 @@ void detach_shader_surface_window(Context* ctx, SDL_Window* window) noexcept {
 
 void release_surface_slot(Context* ctx, ShaderSurfaceSlot& s) noexcept {
     if (s.retired_tex) SDL_ReleaseGPUTexture(ctx->device, s.retired_tex);
+    if (s.retired_prev_tex) SDL_ReleaseGPUTexture(ctx->device, s.retired_prev_tex);
+    if (s.prev_texture) SDL_ReleaseGPUTexture(ctx->device, s.prev_texture);
     if (s.texture) SDL_ReleaseGPUTexture(ctx->device, s.texture);
     SDL_ReleaseGPUGraphicsPipeline(ctx->device, s.pipeline);
     SDL_ReleaseGPUShader(ctx->device, s.shader);
@@ -235,6 +260,7 @@ ShaderSurfaceId create_shader_surface(Context* ctx, const ShaderSurfaceCreateDes
     s.pipeline = pipe;
     s.num_samplers = desc.num_samplers;
     s.sampler_mirror_repeat = desc.sampler_mirror_repeat;
+    s.enable_feedback = desc.enable_feedback;
     s.max_fps = desc.max_fps;
     s.continuous_time = desc.continuous_time;
     s.dirty = true;
@@ -259,6 +285,14 @@ SDL_GPUTexture* eval_shader_surface(Context* ctx, ShaderSurfaceId id, const Shad
             SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER, desc.width, desc.height, 1, 1, SDL_GPU_SAMPLECOUNT_1, 0};
         SDL_GPUTexture* texture = SDL_CreateGPUTexture(ctx->device, &info);
         if (!texture) return nullptr;
+        SDL_GPUTexture* prev_texture = nullptr;
+        if (s->enable_feedback) {
+            prev_texture = SDL_CreateGPUTexture(ctx->device, &info);
+            if (!prev_texture) {
+                SDL_ReleaseGPUTexture(ctx->device, texture);
+                return nullptr;
+            }
+        }
         old_tex = s->texture;
         if (old_tex) {
             if (s->retired_tex) SDL_ReleaseGPUTexture(ctx->device, s->retired_tex);
@@ -274,7 +308,12 @@ SDL_GPUTexture* eval_shader_surface(Context* ctx, ShaderSurfaceId id, const Shad
                 }
             }
         }
+        if (s->prev_texture) {
+            if (s->retired_prev_tex) SDL_ReleaseGPUTexture(ctx->device, s->retired_prev_tex);
+            s->retired_prev_tex = s->prev_texture;
+        }
         s->texture = texture;
+        s->prev_texture = prev_texture;
         s->initialized = false;
     }
     bool textures_changed = false;

@@ -658,9 +658,15 @@ ClipEntry make_box_clip(Context* ctx,const ClipEntry& parent,Rect bounds,Corners
 }
 
 Vec4 box_scroll_fade(Context* ctx,const BoxExtra* extra,float dpi) noexcept {
-    if(extra->desc.scroll_fade_px<=0 || !extra->desc.id) return {};
+    Vec4 fade = {
+        (std::isfinite(extra->desc.edge_fade.top) && extra->desc.edge_fade.top > 0.0f) ? extra->desc.edge_fade.top * dpi : 0.0f,
+        (std::isfinite(extra->desc.edge_fade.bottom) && extra->desc.edge_fade.bottom > 0.0f) ? extra->desc.edge_fade.bottom * dpi : 0.0f,
+        (std::isfinite(extra->desc.edge_fade.left) && extra->desc.edge_fade.left > 0.0f) ? extra->desc.edge_fade.left * dpi : 0.0f,
+        (std::isfinite(extra->desc.edge_fade.right) && extra->desc.edge_fade.right > 0.0f) ? extra->desc.edge_fade.right * dpi : 0.0f,
+    };
+    if(extra->desc.scroll_fade_px<=0 || !extra->desc.id) return fade;
     const auto* ws=state_map_find(&ctx->active_ui->states,extra->desc.id);
-    if(!ws) return {};
+    if(!ws) return fade;
     const double pos=extra->is_virtual_list ? ws->vscroll_pos_y : ws->scroll_pos.y;
     double max=extra->is_virtual_list ? ws->vscroll_max_y : ws->scroll_max.y;
     float max_x=ws->scroll_max.x;
@@ -671,10 +677,12 @@ Vec4 box_scroll_fade(Context* ctx,const BoxExtra* extra,float dpi) noexcept {
             max_x=std::fmax(0.0f,sc.contentDimensions.width-sc.scrollContainerDimensions.width);
         }
     }
-    return {extra->is_virtual_list || extra->desc.scroll_y ? float(std::fmin(extra->desc.scroll_fade_px,pos))*dpi : 0,
-        extra->is_virtual_list || extra->desc.scroll_y ? float(std::fmin(extra->desc.scroll_fade_px,std::fmax(0.0,max-pos)))*dpi : 0,
-        extra->desc.scroll_x ? std::fmin(extra->desc.scroll_fade_px,ws->scroll_pos.x)*dpi : 0,
-        extra->desc.scroll_x ? std::fmin(extra->desc.scroll_fade_px,std::fmax(0.f,max_x-ws->scroll_pos.x))*dpi : 0};
+    return {
+        std::fmax(fade.x, extra->is_virtual_list || extra->desc.scroll_y ? float(std::fmin(extra->desc.scroll_fade_px,pos))*dpi : 0.0f),
+        std::fmax(fade.y, extra->is_virtual_list || extra->desc.scroll_y ? float(std::fmin(extra->desc.scroll_fade_px,std::fmax(0.0,max-pos)))*dpi : 0.0f),
+        std::fmax(fade.z, extra->desc.scroll_x ? std::fmin(extra->desc.scroll_fade_px,ws->scroll_pos.x)*dpi : 0.0f),
+        std::fmax(fade.w, extra->desc.scroll_x ? std::fmin(extra->desc.scroll_fade_px,std::fmax(0.f,max_x-ws->scroll_pos.x))*dpi : 0.0f),
+    };
 }
 
 bool append_prim_to_batch(
@@ -900,13 +908,13 @@ void push_prim(
         }
         if (layer) {
             fg->blur_px = std::fmax(fg->blur_px, layer->resolved_blur_px);
-            fg->plus_lighter |= layer->resolved_plus_lighter;
         }
+        const bool child_additive = !hole && (force_additive || (layer && layer->resolved_plus_lighter && !fg->blur_root->resolved_plus_lighter));
         const bool need_new = (ctx->filter_batch_count == fg->first_batch);
         (void)append_prim_to_batch(
             &ctx->filter_prims, &ctx->filter_prim_count, &ctx->filter_prim_cap, kMaxPrimHardCap,
             &ctx->filter_batches, &ctx->filter_batch_count, &ctx->filter_batch_cap,
-            prim, ext_tex, ext_tex2, hole, false, need_new);
+            prim, ext_tex, ext_tex2, hole, child_additive, need_new);
         return;
     }
 
@@ -964,7 +972,7 @@ void finalize_filter_group(Context* ctx) noexcept {
         --ctx->filter_group_count;
         return;
     }
-    const float pad = std::ceil(g.blur_px * 2.5f + 4.0f);
+    const float pad = std::ceil(g.blur_px * 2.5f + 8.0f);
     const float vp_w = static_cast<float>(ctx->active_ui->viewport_w);
     const float vp_h = static_cast<float>(ctx->active_ui->viewport_h);
     const float px0 = std::fmax(0.0f, std::floor(g.raw_bounds.x - pad));

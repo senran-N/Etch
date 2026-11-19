@@ -4,6 +4,27 @@ All notable changes to Etch are documented here. This file follows
 [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html).
 
+## [0.22.0] - 2026-11-19
+
+- Bind `push_layer` `pivot_norm` to the first top-level box under explicit layers so
+  `scale` transforms pivot in-place around the target box rather than window `(0, 0)`.
+- Overhaul `LayerDesc::blur_px` filter targets to `R8G8B8A8_UNORM_SRGB` (50% VRAM
+  reduction), 8 lazy slices, local scissored Kawase downsample passes, 120-frame
+  idle target release, and preserved child `blend_plus_lighter` inside filter groups.
+- Scope `Clay_SetCullingEnabled(false)` in `push_layer` to layers with non-identity
+  translation or scale.
+- Polish Windows frameless window chrome (`WM_ERASEBKGND` suppression during native
+  frame resize/show, borderless usable-bounds fix) and add `is_window_minimized`
+  (`etch_is_window_minimized`).
+- Add `BoxDesc::edge_fade` (`EtchBoxDesc::edge_fade`) static per-side edge fade masks
+  for clipped containers.
+- Add native `TextDrawDesc` (`EtchTextDrawDesc`) `shadow_color`, `shadow_offset`, and
+  allocation-free radial multi-tap `shadow_blur` halo rendering.
+- Add `FontWeight` (`EtchFontWeight`) and cross-platform `load_system_font`
+  (`etch_load_system_font`) system font resolver with clean fallbacks.
+- Add `ShaderSurfaceCreateDesc::enable_feedback` (`EtchShaderSurfaceCreateDesc::enable_feedback`)
+  ping-pong self-reference history buffer for procedural shader surfaces.
+
 ## [0.21.0] - 2026-11-19
 
 - Add `LayerDesc::blur_px` (`EtchLayerDesc::blur_px`) optical layer defocus blur via

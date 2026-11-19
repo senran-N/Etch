@@ -188,44 +188,22 @@ Vec2 measure_multiline_text_metrics(
     return Vec2{ max_w, static_cast<float>(line_count) * line_h };
 }
 
-void emit_draw_text_cmd(
+void emit_text_cmd_pass(
     Context* ctx,
     const TextDrawDesc& tc,
     Vec2 origin,
     float scale,
-    const ClipEntry& clip, const uint32_t* terminal_columns = nullptr, float terminal_cell_width = 0) noexcept
+    const ClipEntry& clip,
+    const uint32_t* terminal_columns,
+    float terminal_cell_width,
+    uint16_t primary_slot,
+    const FontSlot& primary,
+    float start_y_logical,
+    float line_h_logical,
+    Vec2 pass_offset_logical,
+    Color pass_color,
+    bool use_wipe) noexcept
 {
-    if (!ctx || !ctx->atlas.font_valid || !tc.text.chars || tc.text.length == 0u || tc.size <= 0.0f ||
-        (tc.color.a == 0u && (!tc.has_wipe || tc.color_end.a == 0u))) {
-        return;
-    }
-    const uint16_t primary_slot = resolve_font_slot_idx(&ctx->atlas, tc.font_id);
-    if (primary_slot == kInvalidFont) {
-        return;
-    }
-    const FontSlot& primary = ctx->atlas.slots[primary_slot];
-
-    uint32_t line_count = 0u;
-    float line_h_logical = 0.0f;
-    const Vec2 total_sz = measure_multiline_text_metrics(
-        ctx,
-        tc.text,
-        tc.font_id,
-        tc.size,
-        tc.letter_spacing,
-        &line_count,
-        &line_h_logical);
-    if (line_count == 0u) {
-        return;
-    }
-
-    float start_y_logical = tc.pos.y;
-    if (tc.align_y == AlignY::Center) {
-        start_y_logical -= total_sz.y * 0.5f;
-    } else if (tc.align_y == AlignY::Bottom) {
-        start_y_logical -= total_sz.y;
-    }
-
     const float phys_px = tc.size * scale;
     const float asc_px = primary.ascent_em * phys_px;
     const float ls_px = tc.letter_spacing * scale;
@@ -270,10 +248,10 @@ void emit_draw_text_cmd(
             start_x_logical -= line_w_logical;
         }
 
-        float pen_x = origin.x + start_x_logical * scale;
-        const float base_y = origin.y + (start_y_logical + static_cast<float>(line_idx) * line_h_logical) * scale + asc_px;
+        float pen_x = origin.x + (start_x_logical + pass_offset_logical.x) * scale;
+        const float base_y = origin.y + (start_y_logical + pass_offset_logical.y + static_cast<float>(line_idx) * line_h_logical) * scale + asc_px;
         TextWipeParams wipe = {};
-        if (tc.has_wipe && std::isfinite(tc.wipe_x)) {
+        if (use_wipe && std::isfinite(tc.wipe_x)) {
             const float feather = (std::isfinite(tc.wipe_feather_px) && tc.wipe_feather_px > 0.0f) ? tc.wipe_feather_px * scale : 0.0f;
             const float center_px = pen_x + tc.wipe_x * scale;
             wipe = {true, tc.color_end, center_px - 0.5f * feather, center_px + 0.5f * feather};
@@ -293,7 +271,7 @@ void emit_draw_text_cmd(
         const uint32_t first_text_prim = ctx->active_filter_group ? ctx->filter_prim_count : ctx->prim_count;
         if (elided && tc.ellipsis) {
             emit_elided_line(ctx, tc.text.chars + pos, seg_len, tc.font_id, tc.size, tc.letter_spacing,
-                pen_x / scale, base_y / scale, tc.max_width_px, text_clip, tc.color, scale, wipe.enabled ? &wipe : nullptr);
+                pen_x / scale, base_y / scale, tc.max_width_px, text_clip, pass_color, scale, wipe.enabled ? &wipe : nullptr);
         }
         uint32_t run_pos = elided && tc.ellipsis ? trim_end : pos;
         while (run_pos < trim_end) {
@@ -310,7 +288,7 @@ void emit_draw_text_cmd(
             uint32_t last_cluster = UINT32_MAX;
             for (const ShapedGlyph& g : glyphs) {
                 if (terminal_columns && g.cluster != last_cluster) {
-                    pen_x = origin.x + (start_x_logical + float(terminal_columns[run_pos + g.cluster]) * terminal_cell_width) * scale;
+                    pen_x = origin.x + (start_x_logical + pass_offset_logical.x + float(terminal_columns[run_pos + g.cluster]) * terminal_cell_width) * scale;
                     last_cluster = g.cluster;
                 }
                 emit_slug_glyph_quad(
@@ -323,7 +301,7 @@ void emit_draw_text_cmd(
                     g.x_offset_em,
                     g.y_offset_em,
                     text_clip,
-                    tc.color,
+                    pass_color,
                     wipe.enabled ? &wipe : nullptr);
                 pen_x += g.x_advance_1px * phys_px + ls_px;
             }
@@ -348,6 +326,93 @@ void emit_draw_text_cmd(
             break;
         }
         pos = end + 1u;
+    }
+}
+
+void emit_draw_text_cmd(
+    Context* ctx,
+    const TextDrawDesc& tc,
+    Vec2 origin,
+    float scale,
+    const ClipEntry& clip, const uint32_t* terminal_columns = nullptr, float terminal_cell_width = 0) noexcept
+{
+    const Color shadow_col = resolve_theme_color(tc.shadow_color, active_theme(ctx).shadow);
+    const bool has_main = tc.color.a > 0u || (tc.has_wipe && tc.color_end.a > 0u);
+    if (!ctx || !ctx->atlas.font_valid || !tc.text.chars || tc.text.length == 0u || tc.size <= 0.0f ||
+        (!has_main && shadow_col.a == 0u)) {
+        return;
+    }
+    const uint16_t primary_slot = resolve_font_slot_idx(&ctx->atlas, tc.font_id);
+    if (primary_slot == kInvalidFont) {
+        return;
+    }
+    const FontSlot& primary = ctx->atlas.slots[primary_slot];
+
+    uint32_t line_count = 0u;
+    float line_h_logical = 0.0f;
+    const Vec2 total_sz = measure_multiline_text_metrics(
+        ctx,
+        tc.text,
+        tc.font_id,
+        tc.size,
+        tc.letter_spacing,
+        &line_count,
+        &line_h_logical);
+    if (line_count == 0u) {
+        return;
+    }
+
+    float start_y_logical = tc.pos.y;
+    if (tc.align_y == AlignY::Center) {
+        start_y_logical -= total_sz.y * 0.5f;
+    } else if (tc.align_y == AlignY::Bottom) {
+        start_y_logical -= total_sz.y;
+    }
+
+    if (shadow_col.a > 0u) {
+        const Vec2 base_off = {
+            std::isfinite(tc.shadow_offset.x) ? tc.shadow_offset.x : 0.0f,
+            std::isfinite(tc.shadow_offset.y) ? tc.shadow_offset.y : 0.0f,
+        };
+        const float blur = (std::isfinite(tc.shadow_blur) && tc.shadow_blur > 0.0f) ? tc.shadow_blur : 0.0f;
+        if (blur <= 0.5f) {
+            emit_text_cmd_pass(ctx, tc, origin, scale, clip, terminal_columns, terminal_cell_width,
+                primary_slot, primary, start_y_logical, line_h_logical, base_off, shadow_col, false);
+        } else {
+            static constexpr float kCos8[8] = {1.0f, 0.70710678f, 0.0f, -0.70710678f, -1.0f, -0.70710678f, 0.0f, 0.70710678f};
+            static constexpr float kSin8[8] = {0.0f, 0.70710678f, 1.0f, 0.70710678f, 0.0f, -0.70710678f, -1.0f, -0.70710678f};
+            static constexpr float kCos4[4] = {0.70710678f, -0.70710678f, -0.70710678f, 0.70710678f};
+            static constexpr float kSin4[4] = {0.70710678f, 0.70710678f, -0.70710678f, -0.70710678f};
+            const float r = clamp_range(blur * 0.45f, 0.5f, 24.0f);
+            const bool two_ring = blur >= 4.0f;
+            const float w_inner = two_ring ? 0.10f : 0.125f;
+            const uint8_t inner_a = static_cast<uint8_t>(clamp_range(std::round(float(shadow_col.a) * w_inner), 0.0f, 255.0f));
+            if (inner_a > 0u) {
+                const Color tap_col = {shadow_col.r, shadow_col.g, shadow_col.b, inner_a};
+                for (uint32_t k = 0u; k < 8u; ++k) {
+                    emit_text_cmd_pass(ctx, tc, origin, scale, clip, terminal_columns, terminal_cell_width,
+                        primary_slot, primary, start_y_logical, line_h_logical,
+                        {base_off.x + kCos8[k] * r, base_off.y + kSin8[k] * r}, tap_col, false);
+                }
+            }
+            if (two_ring) {
+                const float r_out = r * 1.65f;
+                const uint8_t outer_a = static_cast<uint8_t>(clamp_range(std::round(float(shadow_col.a) * 0.08f), 0.0f, 255.0f));
+                if (outer_a > 0u) {
+                    const Color tap_col = {shadow_col.r, shadow_col.g, shadow_col.b, outer_a};
+                    for (uint32_t k = 0u; k < 4u; ++k) {
+                        emit_text_cmd_pass(ctx, tc, origin, scale, clip, terminal_columns, terminal_cell_width,
+                            primary_slot, primary, start_y_logical, line_h_logical,
+                            {base_off.x + kCos4[k] * r_out, base_off.y + kSin4[k] * r_out}, tap_col, false);
+                    }
+                }
+            }
+        }
+    }
+
+    if (has_main) {
+        emit_text_cmd_pass(ctx, tc, origin, scale, clip, terminal_columns, terminal_cell_width,
+            primary_slot, primary, start_y_logical, line_h_logical, {0.0f, 0.0f}, tc.color, tc.has_wipe);
     }
 }
 
@@ -1741,6 +1806,8 @@ void begin_box(const BoxDesc& desc_in) noexcept {
     desc.border_gap_px = positive_px(desc.border_gap_px);
     desc.border_beam=valid_border_beam(desc.border_beam);
     desc.scroll_fade_px=std::isfinite(desc.scroll_fade_px) && desc.scroll_fade_px>0 ? desc.scroll_fade_px : 0;
+    desc.edge_fade = {positive_px(desc.edge_fade.left), positive_px(desc.edge_fade.right),
+                      positive_px(desc.edge_fade.top), positive_px(desc.edge_fade.bottom)};
     desc.top_rim_alpha=std::isfinite(desc.top_rim_alpha) ? clamp_range(desc.top_rim_alpha,0,1) : 0;
     if(desc.border_beam.color.a && desc.border_beam.beam_active && desc.border_beam.speed!=0 && !ctx->reduced_motion && ctx->time_scale>0) ++ctx->active_ui->active_anim_count;
     if(!std::isfinite(desc.opacity)) desc.opacity=1;
@@ -1763,6 +1830,7 @@ void begin_box(const BoxDesc& desc_in) noexcept {
         desc.border_beam.width *= wscale;
         desc.border_beam.glow_px *= wscale;
         desc.scroll_fade_px *= wscale;
+        desc.edge_fade = scale_padding(desc.edge_fade, wscale);
         desc.radius = scale_corners_uniform(desc.radius, wscale);
         desc.shadow_blur *= wscale;
         desc.shadow_spread *= wscale;
@@ -1851,6 +1919,10 @@ void begin_box(const BoxDesc& desc_in) noexcept {
             if(eff_desc.opacity<1 || eff_desc.animate_layout || eff_desc.hero_id || eff_desc.hover_scale!=1 || eff_desc.press_scale!=1) {
                 push_layer({.opacity=eff_desc.opacity});
                 if(build && ctx->active_ui->current_layer!=build->previous_layer) const_cast<VisualLayerNode*>(ctx->active_ui->current_layer)->source_box=extra;
+            }
+            if (const VisualLayerNode* parent_layer = build ? build->previous_layer : ctx->active_ui->current_layer;
+                parent_layer && !parent_layer->source_box && !parent_layer->pivot_box) {
+                const_cast<VisualLayerNode*>(parent_layer)->pivot_box = extra;
             }
             extra->layer=ctx->active_ui->current_layer;
             extra->keyboard_focus_ring = focus_ring;
@@ -2603,7 +2675,11 @@ void draw_text(const TextDrawDesc& desc) noexcept {
     if (copied.has_wipe) {
         copied.color_end = resolve_theme_color(desc.color_end, active_theme(ctx).text_primary);
     }
-    if (copied.color.a == 0u && (!copied.has_wipe || copied.color_end.a == 0u)) {
+    copied.shadow_color = resolve_theme_color(desc.shadow_color, active_theme(ctx).shadow);
+    if (!std::isfinite(copied.shadow_offset.x)) copied.shadow_offset.x = 0.0f;
+    if (!std::isfinite(copied.shadow_offset.y)) copied.shadow_offset.y = 0.0f;
+    if (!std::isfinite(copied.shadow_blur) || copied.shadow_blur < 0.0f) copied.shadow_blur = 0.0f;
+    if (copied.color.a == 0u && (!copied.has_wipe || copied.color_end.a == 0u) && copied.shadow_color.a == 0u) {
         return;
     }
     if (DrawCmdNode* node = append_open_box_draw_cmd(ctx, copied.foreground)) {
@@ -2844,6 +2920,15 @@ bool is_window_maximized(const Context* ctx_arg, SDL_Window* window) noexcept {
         return false;
     }
     return (SDL_GetWindowFlags(target) & SDL_WINDOW_MAXIMIZED) != 0u;
+}
+
+bool is_window_minimized(const Context* ctx_arg, SDL_Window* window) noexcept {
+    const Context* ctx = ctx_arg ? ctx_arg : current_context();
+    SDL_Window* target = window ? window : (ctx ? (ctx->active_window ? ctx->active_window : ctx->window) : nullptr);
+    if (!target || (ctx && ctx->headless)) {
+        return false;
+    }
+    return (SDL_GetWindowFlags(target) & SDL_WINDOW_MINIMIZED) != 0u;
 }
 
 bool begin_drag_payload(

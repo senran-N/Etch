@@ -44,7 +44,7 @@ inline SDL_FColor make_clear_fcolor(Color c, SDL_GPUTextureFormat target_fmt) no
 }
 
 inline constexpr SDL_GPUTextureFormat kBlurTexFormat = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB;
-inline constexpr SDL_GPUTextureFormat kFilterTexFormat = SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT;
+inline constexpr SDL_GPUTextureFormat kFilterTexFormat = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB;
 
 struct alignas(16) KawaseUniform {
     float    texel_size[2];
@@ -210,6 +210,7 @@ void release_filter_targets(Context* ctx) noexcept {
     }
     ctx->active_ui->filter_rt_w = 0u;
     ctx->active_ui->filter_rt_h = 0u;
+    ctx->active_ui->filter_idle_frames = 0u;
 }
 
 bool ensure_filter_slice_targets(Context* ctx, uint32_t width, uint32_t height, uint32_t slice, uint32_t max_level) noexcept {
@@ -432,7 +433,8 @@ void emit_uber_batches(
     const DrawBatch* batches,
     uint32_t begin_batch,
     uint32_t end_batch,
-    uint32_t prim_base_offset = 0u) noexcept
+    uint32_t prim_base_offset = 0u,
+    const SDL_Rect* scissor_override = nullptr) noexcept
 {
     if (begin_batch >= end_batch) {
         return;
@@ -451,13 +453,13 @@ void emit_uber_batches(
     };
     SDL_SetGPUViewport(render_pass, &viewport);
 
-    const SDL_Rect scissor = {
+    const SDL_Rect full_scissor = {
         .x = 0,
         .y = 0,
         .w = static_cast<int>(target_w),
         .h = static_cast<int>(target_h),
     };
-    SDL_SetGPUScissor(render_pass, &scissor);
+    SDL_SetGPUScissor(render_pass, scissor_override ? scissor_override : &full_scissor);
 
     SDL_GPUBuffer* storage_bufs[1] = { ctx->prim_gpu_buf };
     SDL_BindGPUVertexStorageBuffers(render_pass, 0u, storage_bufs, 1u);
@@ -881,11 +883,22 @@ bool record_frame_commands(
     }
 
     if (ctx->filter_group_count > 0u) {
+        ctx->active_ui->filter_idle_frames = 0u;
         bool slice_used[kMaxFilterSlices] = {};
         uint32_t slice_max_level[kMaxFilterSlices] = {};
+        Rect slice_bounds[kMaxFilterSlices] = {};
         for (uint32_t gi = 0u; gi < ctx->filter_group_count; ++gi) {
             const FilterBlurGroup& fg = ctx->filter_groups[gi];
-            slice_used[fg.slice] = true;
+            if (!slice_used[fg.slice]) {
+                slice_used[fg.slice] = true;
+                slice_bounds[fg.slice] = fg.padded_bounds;
+            } else {
+                const float x0 = std::fmin(slice_bounds[fg.slice].x, fg.padded_bounds.x);
+                const float y0 = std::fmin(slice_bounds[fg.slice].y, fg.padded_bounds.y);
+                const float x1 = std::fmax(slice_bounds[fg.slice].x + slice_bounds[fg.slice].w, fg.padded_bounds.x + fg.padded_bounds.w);
+                const float y1 = std::fmax(slice_bounds[fg.slice].y + slice_bounds[fg.slice].h, fg.padded_bounds.y + fg.padded_bounds.h);
+                slice_bounds[fg.slice] = {x0, y0, x1 - x0, y1 - y0};
+            }
             if (fg.max_level > slice_max_level[fg.slice]) slice_max_level[fg.slice] = fg.max_level;
         }
         SDL_GPUGraphicsPipeline* filter_uber_pipe = get_or_create_pipeline(ctx, kFilterTexFormat);
@@ -893,11 +906,22 @@ bool record_frame_commands(
         if (!filter_uber_pipe || !filter_kawase_pipe) return false;
         for (uint32_t bi = 0u; bi < ctx->filter_batch_count; ++bi) {
             if (ctx->filter_batches[bi].is_punch_hole && !get_or_create_punch_pipeline(ctx, kFilterTexFormat)) return false;
+            if (ctx->filter_batches[bi].is_additive && !get_or_create_additive_pipeline(ctx, kFilterTexFormat)) return false;
         }
         for (uint32_t s = 0u; s < kMaxFilterSlices; ++s) {
             if (!slice_used[s]) continue;
             if (!ensure_filter_slice_targets(ctx, target_w, target_h, s, slice_max_level[s])) return false;
             FilterSliceTargets& st = ctx->active_ui->filter_slices[s];
+            const Rect sb = slice_bounds[s];
+            const int sx0 = static_cast<int>(std::floor(clamp_range(sb.x, 0.0f, float(target_w))));
+            const int sy0 = static_cast<int>(std::floor(clamp_range(sb.y, 0.0f, float(target_h))));
+            const int sx1 = static_cast<int>(std::ceil(clamp_range(sb.x + sb.w, 0.0f, float(target_w))));
+            const int sy1 = static_cast<int>(std::ceil(clamp_range(sb.y + sb.h, 0.0f, float(target_h))));
+            const SDL_Rect slice_scissor = {
+                sx0, sy0,
+                (sx1 > sx0) ? (sx1 - sx0) : 0,
+                (sy1 > sy0) ? (sy1 - sy0) : 0,
+            };
             SDL_GPUColorTargetInfo ct = {};
             ct.texture = st.levels[0];
             ct.clear_color = {0.0f, 0.0f, 0.0f, 0.0f};
@@ -909,22 +933,42 @@ bool record_frame_commands(
                 const FilterBlurGroup& fg = ctx->filter_groups[gi];
                 if (fg.slice != s) continue;
                 emit_uber_batches(ctx, cmd, fpass, filter_uber_pipe, kFilterTexFormat, target_w, target_h,
-                    ctx->filter_batches, fg.first_batch, fg.end_batch, ctx->prim_count);
+                    ctx->filter_batches, fg.first_batch, fg.end_batch, ctx->prim_count, &slice_scissor);
             }
             SDL_EndGPURenderPass(fpass);
 
+            float pad_dst[kMaxFilterLevels] = {};
+            if (slice_max_level[s] > 0u) {
+                pad_dst[slice_max_level[s]] = 3.0f;
+                for (int32_t l = static_cast<int32_t>(slice_max_level[s]) - 1; l >= 1; --l) {
+                    pad_dst[l] = pad_dst[l + 1] * 2.0f + 3.0f;
+                }
+            }
             for (uint32_t lvl = 0u; lvl < slice_max_level[s]; ++lvl) {
                 const uint32_t src_w = (target_w >> lvl) > 0u ? (target_w >> lvl) : 1u;
                 const uint32_t src_h = (target_h >> lvl) > 0u ? (target_h >> lvl) : 1u;
                 const uint32_t dst_w = (target_w >> (lvl + 1u)) > 0u ? (target_w >> (lvl + 1u)) : 1u;
                 const uint32_t dst_h = (target_h >> (lvl + 1u)) > 0u ? (target_h >> (lvl + 1u)) : 1u;
+                const float dsx = float(dst_w) / float(target_w);
+                const float dsy = float(dst_h) / float(target_h);
+                const float m = pad_dst[lvl + 1u];
+                const Rect region = {
+                    sb.x * dsx - m,
+                    sb.y * dsy - m,
+                    sb.w * dsx + 2.0f * m,
+                    sb.h * dsy + 2.0f * m,
+                };
                 if (!run_kawase_step(ctx, cmd, filter_kawase_pipe, st.levels[lvl], st.levels[lvl + 1u],
-                    dst_w, dst_h, 1.0f / float(src_w), 1.0f / float(src_h), 1.0f, 0u))
+                    dst_w, dst_h, 1.0f / float(src_w), 1.0f / float(src_h), 1.0f, 0u, region))
                 {
                     return false;
                 }
                 ++ctx->stats.blur_pass_count;
             }
+        }
+    } else if (ctx->active_ui->filter_rt_w != 0u) {
+        if (++ctx->active_ui->filter_idle_frames >= 120u) {
+            release_filter_targets(ctx);
         }
     }
 

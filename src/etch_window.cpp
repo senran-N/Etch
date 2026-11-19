@@ -43,9 +43,11 @@ SDL_Window* create_desktop_window_on_display(const char* title, float logical_w,
     if (!window) return nullptr;
     SDL_SetWindowPosition(window, SDL_WINDOWPOS_CENTERED_DISPLAY(display), SDL_WINDOWPOS_CENTERED_DISPLAY(display));
     const float scale = desktop_coordinate_scale(window);
-    int top=0, left=0, bottom=0, right=0;
-    SDL_GetWindowBordersSize(window,&top,&left,&bottom,&right);
-    usable.w -= left + right; usable.h -= top + bottom;
+    if ((flags & SDL_WINDOW_BORDERLESS) == 0) {
+        int top=0, left=0, bottom=0, right=0;
+        SDL_GetWindowBordersSize(window,&top,&left,&bottom,&right);
+        usable.w -= left + right; usable.h -= top + bottom;
+    }
     const float ratio = std::fmin(1.0f, std::fmin(usable.w / (logical_w * scale), usable.h / (logical_h * scale)));
     const int w = static_cast<int>(std::fmax(1.0f, std::round(logical_w * scale * ratio)));
     const int h = static_cast<int>(std::fmax(1.0f, std::round(logical_h * scale * ratio)));

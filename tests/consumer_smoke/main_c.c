@@ -109,6 +109,22 @@ int main(void) {
     field.highlights = &range;
     field.highlight_count = 1;
     if (etch_text_input(&field).byte_length != 5) return 1;
+    if (etch_is_window_minimized(ctx, NULL)) return 1;
+    if (etch_load_system_font(ctx, ETCH_STR_LIT("Segoe UI"), ETCH_FONT_WEIGHT_REGULAR, ETCH_INVALID_FONT) == ETCH_INVALID_FONT) return 1;
+    EtchBoxDesc fade_box = etch_box_desc_default();
+    fade_box.width = etch_sizing_fixed(32.0f);
+    fade_box.height = etch_sizing_fixed(32.0f);
+    fade_box.clip_children = true;
+    fade_box.edge_fade.top = 4.0f;
+    fade_box.edge_fade.bottom = 4.0f;
+    etch_begin_box(&fade_box);
+    EtchTextDrawDesc shadow_td = etch_text_draw_desc_default();
+    shadow_td.text = ETCH_STR_LIT("S");
+    shadow_td.shadow_color = seed;
+    shadow_td.shadow_offset = (EtchVec2){1.0f, 1.0f};
+    shadow_td.shadow_blur = 2.0f;
+    etch_draw_text(&shadow_td);
+    etch_end_box();
     etch_end_frame(ctx);
     etch_destroy_shader_surface(ctx,0);
 

@@ -1,5 +1,6 @@
 // Native maximize hit testing is independent of the optional accessibility bridge.
 #if defined(_WIN32)
+#include <cwchar>
 #include <windows.h>
 #include <dwmapi.h>
 #endif
@@ -27,6 +28,9 @@ void chrome_mouse_event(ClaimedWindowSlot* slot, UINT msg, POINT point) noexcept
 LRESULT CALLBACK chrome_window_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) noexcept {
     auto* slot=reinterpret_cast<ClaimedWindowSlot*>(GetPropW(hwnd,kChromeSlotProperty));
     const WNDPROC original=reinterpret_cast<WNDPROC>(slot->native_chrome_proc);
+    if(slot->native_frame_applied && msg==WM_ERASEBKGND) {
+        return 1;
+    }
     if(slot->native_frame_applied && msg==WM_NCCALCSIZE && wparam) {
         if(IsZoomed(hwnd)) {
             auto* params=reinterpret_cast<NCCALCSIZE_PARAMS*>(lparam);
@@ -139,6 +143,135 @@ void detach_win32_chrome(ClaimedWindowSlot* slot) noexcept {
     slot->native_chrome_proc=nullptr;
 #else
     (void)slot;
+#endif
+}
+
+#if defined(_WIN32)
+bool wstr_icontains(const wchar_t* hay, const wchar_t* needle) noexcept {
+    if (!hay || !needle || !needle[0]) return false;
+    return std::wcsstr(hay, needle) != nullptr;
+}
+void wstr_tolower(const wchar_t* src, wchar_t* dst, size_t cap) noexcept {
+    size_t i = 0;
+    for (; i + 1u < cap && src[i]; ++i) {
+        const wchar_t c = src[i];
+        dst[i] = (c >= L'A' && c <= L'Z') ? static_cast<wchar_t>(c + (L'a' - L'A')) : c;
+    }
+    dst[i] = L'\0';
+}
+bool wstr_ends_with_font_ext(const wchar_t* lower_s) noexcept {
+    const size_t len = std::wcslen(lower_s);
+    if (len < 4u) return false;
+    const wchar_t* tail = lower_s + (len - 4u);
+    return std::wcscmp(tail, L".ttf") == 0 || std::wcscmp(tail, L".ttc") == 0 || std::wcscmp(tail, L".otf") == 0;
+}
+#endif
+
+bool win32_find_system_font_path(Str family_name, FontWeight weight, char* out_path, size_t out_cap) noexcept {
+#if defined(_WIN32)
+    if (!family_name.chars || family_name.length == 0u || !out_path || out_cap == 0u) return false;
+    wchar_t fam_raw[128] = {};
+    const int wlen = MultiByteToWideChar(CP_UTF8, 0, family_name.chars, static_cast<int>(family_name.length), fam_raw, 127);
+    if (wlen <= 0) return false;
+    fam_raw[wlen] = L'\0';
+    wchar_t fam_lower[128] = {};
+    wstr_tolower(fam_raw, fam_lower, 128u);
+    const size_t fam_len = std::wcslen(fam_lower);
+    if (fam_len == 0u) return false;
+
+    const HKEY roots[2] = {HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER};
+    int best_score = -100000;
+    wchar_t best_data[512] = {};
+    bool found = false;
+
+    for (HKEY root : roots) {
+        HKEY key = nullptr;
+        if (RegOpenKeyExW(root, L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Fonts", 0, KEY_READ, &key) != ERROR_SUCCESS) {
+            continue;
+        }
+        for (DWORD idx = 0u; ; ++idx) {
+            wchar_t val_name[256] = {};
+            DWORD val_len = 256u;
+            wchar_t data[512] = {};
+            DWORD data_bytes = sizeof(data) - sizeof(wchar_t);
+            DWORD type = 0u;
+            const LONG rc = RegEnumValueW(key, idx, val_name, &val_len, nullptr, &type, reinterpret_cast<LPBYTE>(data), &data_bytes);
+            if (rc == ERROR_NO_MORE_ITEMS) break;
+            if (rc != ERROR_SUCCESS || (type != REG_SZ && type != REG_EXPAND_SZ) || data_bytes < 4u) continue;
+            data[data_bytes / sizeof(wchar_t)] = L'\0';
+
+            wchar_t val_lower[256] = {};
+            wchar_t data_lower[512] = {};
+            wstr_tolower(val_name, val_lower, 256u);
+            wstr_tolower(data, data_lower, 512u);
+            if (!wstr_ends_with_font_ext(data_lower)) continue;
+
+            const wchar_t* hit = std::wcsstr(val_lower, fam_lower);
+            if (!hit) continue;
+
+            int score = 20;
+            if (hit == val_lower) {
+                score += 40;
+                const wchar_t after = val_lower[fam_len];
+                if (after == L'\0' || after == L' ' || after == L'(' || after == L'&') score += 30;
+            }
+            const bool has_bold = wstr_icontains(val_lower, L"bold");
+            const bool has_semibold = wstr_icontains(val_lower, L"semibold") || wstr_icontains(val_lower, L"semi bold") || wstr_icontains(val_lower, L"demi");
+            const bool has_medium = wstr_icontains(val_lower, L"medium");
+            const bool has_italic = wstr_icontains(val_lower, L"italic") || wstr_icontains(val_lower, L"oblique");
+            const bool has_light = wstr_icontains(val_lower, L"light") || wstr_icontains(val_lower, L"thin");
+            const bool has_black = wstr_icontains(val_lower, L"black") || wstr_icontains(val_lower, L"heavy");
+            const bool has_mono = wstr_icontains(val_lower, L"mono") || wstr_icontains(val_lower, L"code");
+
+            switch (weight) {
+                case FontWeight::Bold:
+                    if (has_bold && !has_semibold) score += 45;
+                    else if (has_semibold) score += 10;
+                    if (has_italic) score -= 25;
+                    if (has_light) score -= 20;
+                    break;
+                case FontWeight::SemiBold:
+                    if (has_semibold) score += 45;
+                    else if (has_bold) score += 15;
+                    if (has_italic) score -= 25;
+                    break;
+                case FontWeight::Medium:
+                    if (has_medium) score += 45;
+                    else if (has_semibold) score += 15;
+                    if (has_italic) score -= 25;
+                    break;
+                case FontWeight::Italic:
+                    if (has_italic) score += 45;
+                    if (has_bold) score -= 15;
+                    break;
+                case FontWeight::Mono:
+                    if (has_mono) score += 30;
+                    if (has_bold || has_italic) score -= 20;
+                    break;
+                case FontWeight::Regular:
+                default:
+                    if (!has_bold && !has_semibold && !has_medium && !has_italic && !has_light && !has_black) score += 35;
+                    else score -= 25;
+                    break;
+            }
+            if (!found || score > best_score) {
+                best_score = score;
+                std::wcsncpy(best_data, data, 511u);
+                best_data[511] = L'\0';
+                found = true;
+            }
+        }
+        RegCloseKey(key);
+    }
+    if (!found) return false;
+    wchar_t expanded[512] = {};
+    const DWORD exp_n = ExpandEnvironmentStringsW(best_data, expanded, 512u);
+    const wchar_t* final_w = (exp_n > 0u && exp_n <= 512u) ? expanded : best_data;
+    const int n = WideCharToMultiByte(CP_UTF8, 0, final_w, -1, out_path, static_cast<int>(out_cap), nullptr, nullptr);
+    return n > 0;
+#else
+    (void)family_name; (void)weight; (void)out_path; (void)out_cap;
+    return false;
 #endif
 }
 } // namespace

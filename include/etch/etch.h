@@ -12,7 +12,7 @@
 #include <type_traits>
 
 #define ETCH_VERSION_MAJOR 0
-#define ETCH_VERSION_MINOR 21
+#define ETCH_VERSION_MINOR 22
 #define ETCH_VERSION_PATCH 0
 #define ETCH_VERSION_STR_DETAIL(x) #x
 #define ETCH_VERSION_STR(x) ETCH_VERSION_STR_DETAIL(x)
@@ -1327,6 +1327,7 @@ struct BoxDesc {
     Padding border_sides = {}; // Positive sides replace the uniform width.
     float border_dash_px = 0.0f;
     float border_gap_px = 0.0f; // Zero uses the dash length.
+    Padding edge_fade = {}; // Logical px fade on {left, right, top, bottom} for clipped containers.
 };
 
 inline constexpr uint16_t kFontSans       = 0u;
@@ -1608,6 +1609,9 @@ struct TextDrawDesc {
     Color    color_end = {};
     float    wipe_x = 0.0f;
     float    wipe_feather_px = 0.0f;
+    Color    shadow_color = {};
+    Vec2     shadow_offset = {};
+    float    shadow_blur = 0.0f;
 };
 
 struct ImageDrawDesc {
@@ -2134,6 +2138,19 @@ Arena* frame_arena(Context* ctx) noexcept;
 SDL_GPUDevice* gpu_device(Context* ctx) noexcept;
 
 // Multi-font registry & automatic cluster-safe fallback chain
+enum class FontWeight : uint8_t {
+    Regular = 0,
+    Medium = 1,
+    SemiBold = 2,
+    Bold = 3,
+    Italic = 4,
+    Mono = 5,
+};
+uint16_t load_system_font(
+    Context* ctx,
+    Str family_name,
+    FontWeight weight = FontWeight::Regular,
+    uint16_t slot_hint = kInvalidFont) noexcept;
 uint16_t load_font_file(
     Context* ctx,
     const char* path,
@@ -2226,6 +2243,7 @@ void minimize_window(SDL_Window* window = nullptr) noexcept;
 void maximize_window(SDL_Window* window = nullptr) noexcept;
 void restore_window(SDL_Window* window = nullptr) noexcept;
 bool is_window_maximized(const Context* ctx = nullptr, SDL_Window* window = nullptr) noexcept;
+bool is_window_minimized(const Context* ctx = nullptr, SDL_Window* window = nullptr) noexcept;
 bool set_window_fullscreen(bool fullscreen, SDL_Window* window = nullptr) noexcept;
 bool is_window_fullscreen(const Context* ctx = nullptr, SDL_Window* window = nullptr) noexcept;
 Padding window_safe_insets(const Context* ctx = nullptr, SDL_Window* window = nullptr) noexcept;
@@ -2250,6 +2268,7 @@ struct ShaderSurfaceCreateDesc {
     float max_fps = 60;
     uint32_t num_samplers = 0; // 0..4 fragment samplers at t0..t3 / s0..s3, space2.
     bool sampler_mirror_repeat = false;
+    bool enable_feedback = false;
 };
 struct ShaderSurfaceEvalDesc {
     uint32_t width = 1, height = 1;

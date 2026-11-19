@@ -1736,7 +1736,40 @@ int run_headless(const char* out_png_path, const char* renderer) noexcept {
     const bool v30_ok = verify_a11y_checks(ctx);
     const bool v060_ok=verify_media_emoji_checks(out_png_path);
     const bool v070_ok=verify_theme_wrap_checks(out_png_path);
-    const bool ok = v070_ok && v060_ok && v30_ok && v24_ok && v23_ok && v22_ok && v21_ok && v20_ok && v16_ok && v15_ok && png_ok && stats_ok && slug_ok && v10a_ok && v11_ok && v12_ok && v13_ok && v14_ok;
+    bool v022_headless_ok = true;
+    {
+        auto* t22 = etch::create_context({.headless = true, .gpu_driver = SDL_GetGPUDeviceDriver(etch::gpu_device(ctx))});
+        if (!t22) {
+            v022_headless_ok = false;
+        } else {
+            etch::set_current_context(t22);
+            const uint32_t pid = etch::id("sb_pivot_v22");
+            etch::begin_frame(t22, {.viewport_w = 240, .viewport_h = 160});
+            etch::begin_box({.width = etch::Sizing::fixed(240), .height = etch::Sizing::fixed(160), .padding = {.left = 100, .top = 60}});
+            ETCH_LAYER({.scale = {0.5f, 0.5f}, .pivot_norm = {1.0f, 0.5f}}) {
+                etch::box({.id = pid, .width = etch::Sizing::fixed(80), .height = etch::Sizing::fixed(40), .background = etch::Color::white()});
+            }
+            etch::end_box();
+            etch::begin_box({.width = etch::Sizing::fixed(80), .height = etch::Sizing::fixed(60), .clip_children = true, .edge_fade = {.top = 12.0f, .bottom = 12.0f}});
+            etch::draw_text({.text = etch::str_lit("Glow"), .pos = {8.0f, 16.0f}, .size = 18.0f, .color = etch::Color::white(),
+                .shadow_color = etch::Color::rgba8(0, 180, 255, 200), .shadow_blur = 6.0f});
+            etch::end_box();
+            etch::end_frame(t22);
+            etch::ElementGeometry pg = {};
+            v022_headless_ok &= etch::element_geometry(pid, &pg) &&
+                std::fabs(pg.bounds.x - 140.0f) < 1.0f && std::fabs(pg.bounds.y - 70.0f) < 1.0f &&
+                etch::load_system_font(t22, etch::str_lit("Segoe UI")) != etch::kInvalidFont &&
+                !etch::is_window_minimized(t22);
+            char p22[1024] = {};
+            std::snprintf(p22, sizeof(p22), "%s.v22sb.png", out_png_path);
+            v022_headless_ok &= etch::render_headless_png(t22, 240, 160, p22, etch::Color::black());
+            std::remove(p22);
+            etch::destroy_context(t22);
+            etch::set_current_context(ctx);
+        }
+        if (!v022_headless_ok) std::fprintf(stderr, "Headless assert [v022] failed\n");
+    }
+    const bool ok = v022_headless_ok && v070_ok && v060_ok && v30_ok && v24_ok && v23_ok && v22_ok && v21_ok && v20_ok && v16_ok && v15_ok && png_ok && stats_ok && slug_ok && v10a_ok && v11_ok && v12_ok && v13_ok && v14_ok;
     const char* driver = SDL_GetGPUDeviceDriver(etch::gpu_device(ctx));
     std::printf(
         "Headless %s (%s) -> %s (asserts=24/24, prims=%u, draw_calls=%u, slug_glyphs=%u, slug_curves=%u, layout_ms=%.3f, gpu_submit_ms=%.3f, arena_used=%zuB, scroll_y=%.1f, focus=0x%08X, idle=%d)\n",

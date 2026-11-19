@@ -47,6 +47,12 @@ int main() {
     char input[] = "@file";
     const etch::TextInputHighlight highlights[] = {{.byte_length = 5, .background = seed}};
     if (etch::text_input({.buffer = input, .capacity = sizeof(input), .suppress_popup_keys = true, .highlights = highlights}).byte_length != 5) return 1;
+    if (etch::is_window_minimized(ctx)) return 1;
+    if (etch::load_system_font(ctx, etch::str_lit("Segoe UI"), etch::FontWeight::Regular) == etch::kInvalidFont) return 1;
+    etch::box({.width = etch::Sizing::fixed(32), .height = etch::Sizing::fixed(32), .clip_children = true, .edge_fade = {.top = 4.0f, .bottom = 4.0f}});
+    etch::begin_box({.width = etch::Sizing::fixed(32), .height = etch::Sizing::fixed(32)});
+    etch::draw_text({.text = etch::str_lit("S"), .shadow_color = seed, .shadow_offset = {1.0f, 1.0f}, .shadow_blur = 2.0f});
+    etch::end_box();
     etch::end_frame(ctx);
     etch::destroy_shader_surface(ctx,0);
     etch::ElementGeometry geometry;

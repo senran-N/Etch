@@ -1303,6 +1303,213 @@ bool svg_is_command_char(char ch) noexcept {
 
 } // namespace
 
+namespace {
+bool ascii_iequals(Str a, const char* b) noexcept {
+    if (!a.chars || !b) return false;
+    const size_t blen = std::strlen(b);
+    if (a.length != blen) return false;
+    for (size_t i = 0u; i < blen; ++i) {
+        char ca = a.chars[i], cb = b[i];
+        if (ca >= 'A' && ca <= 'Z') ca = static_cast<char>(ca + ('a' - 'A'));
+        if (cb >= 'A' && cb <= 'Z') cb = static_cast<char>(cb + ('a' - 'A'));
+        if (ca != cb) return false;
+    }
+    return true;
+}
+
+uint16_t try_load_system_filename(Context* ctx, const char* filename, uint16_t slot_hint) noexcept {
+    if (!filename || !filename[0]) return kInvalidFont;
+    char buf[512];
+    const auto probe = [&](const char* root, const char* directory) noexcept -> uint16_t {
+        if (!root || !root[0]) return kInvalidFont;
+        const int n = std::snprintf(buf, sizeof(buf), "%s/%s%s", root, directory, filename);
+        if (n < 0 || static_cast<size_t>(n) >= sizeof(buf)) return kInvalidFont;
+        return load_font_file(ctx, buf, slot_hint, 0);
+    };
+#if defined(_WIN32)
+    if (const uint16_t s = probe(SDL_getenv("SystemRoot"), "Fonts/"); s != kInvalidFont) return s;
+    if (const uint16_t s = probe(SDL_getenv("WINDIR"), "Fonts/"); s != kInvalidFont) return s;
+    if (const uint16_t s = probe(SDL_getenv("LOCALAPPDATA"), "Microsoft/Windows/Fonts/"); s != kInvalidFont) return s;
+    return probe("C:/Windows", "Fonts/");
+#elif defined(__APPLE__)
+    if (const uint16_t s = probe(SDL_getenv("HOME"), "Library/Fonts/"); s != kInvalidFont) return s;
+    const char* directories[] = { "/Library/Fonts", "/System/Library/Fonts", "/System/Library/Fonts/Supplemental" };
+#else
+    if (const uint16_t s = probe(SDL_getenv("XDG_DATA_HOME"), "fonts/"); s != kInvalidFont) return s;
+    if (const uint16_t s = probe(SDL_getenv("HOME"), ".local/share/fonts/"); s != kInvalidFont) return s;
+    const char* directories[] = {
+        "/usr/share/fonts/TTF", "/usr/share/fonts/opentype", "/usr/share/fonts/truetype",
+        "/usr/share/fonts/truetype/dejavu", "/usr/share/fonts/truetype/noto",
+        "/usr/share/fonts/truetype/liberation", "/usr/share/fonts/noto", "/usr/share/fonts/noto-cjk",
+        "/usr/share/fonts/dejavu", "/usr/share/fonts/liberation", "/usr/local/share/fonts",
+        "/run/current-system/sw/share/fonts"
+    };
+#endif
+#if !defined(_WIN32)
+    for (const char* directory : directories) {
+        if (const uint16_t s = probe(directory, ""); s != kInvalidFont) return s;
+    }
+    return kInvalidFont;
+#endif
+}
+
+uint16_t try_load_alias_font(Context* ctx, Str family, FontWeight weight, uint16_t slot_hint) noexcept {
+    struct AliasRow { const char* name; const char* files[6]; };
+    static constexpr AliasRow kAliases[] = {
+        {"Segoe UI",      {"segoeui.ttf", "seguisb.ttf", "seguisb.ttf", "segoeuib.ttf", "segoeuii.ttf", "consola.ttf"}},
+        {"SegoeUI",       {"segoeui.ttf", "seguisb.ttf", "seguisb.ttf", "segoeuib.ttf", "segoeuii.ttf", "consola.ttf"}},
+        {"Microsoft YaHei", {"msyh.ttc", "msyh.ttc", "msyhbd.ttc", "msyhbd.ttc", "msyh.ttc", "msyh.ttc"}},
+        {"Microsoft YaHei UI", {"msyh.ttc", "msyh.ttc", "msyhbd.ttc", "msyhbd.ttc", "msyh.ttc", "msyh.ttc"}},
+        {"\xE5\xBE\xAE\xE8\xBD\xAF\xE9\x9B\x85\xE9\xBB\x91", {"msyh.ttc", "msyh.ttc", "msyhbd.ttc", "msyhbd.ttc", "msyh.ttc", "msyh.ttc"}},
+        {"msyh",          {"msyh.ttc", "msyh.ttc", "msyhbd.ttc", "msyhbd.ttc", "msyh.ttc", "msyh.ttc"}},
+        {"Yu Gothic",     {"YuGothR.ttc", "YuGothM.ttc", "YuGothB.ttc", "YuGothB.ttc", "YuGothR.ttc", "YuGothR.ttc"}},
+        {"Yu Gothic UI",  {"YuGothR.ttc", "YuGothM.ttc", "YuGothB.ttc", "YuGothB.ttc", "YuGothR.ttc", "YuGothR.ttc"}},
+        {"\xE6\xB8\xB8\xE3\x82\xB4\xE3\x82\xB7\xE3\x83\x83\xE3\x82\xAF", {"YuGothR.ttc", "YuGothM.ttc", "YuGothB.ttc", "YuGothB.ttc", "YuGothR.ttc", "YuGothR.ttc"}},
+        {"Cascadia Mono", {"CascadiaMono.ttf", "CascadiaMono.ttf", "CascadiaMono.ttf", "CascadiaMono.ttf", "CascadiaMono.ttf", "CascadiaMono.ttf"}},
+        {"Cascadia Code", {"CascadiaCode.ttf", "CascadiaCode.ttf", "CascadiaCode.ttf", "CascadiaCode.ttf", "CascadiaCode.ttf", "CascadiaCode.ttf"}},
+        {"Consolas",      {"consola.ttf", "consola.ttf", "consolab.ttf", "consolab.ttf", "consolai.ttf", "consola.ttf"}},
+        {"Arial",         {"arial.ttf", "arial.ttf", "arialbd.ttf", "arialbd.ttf", "ariali.ttf", "consola.ttf"}},
+        {"PingFang",      {"PingFang.ttc", "PingFang.ttc", "PingFang.ttc", "PingFang.ttc", "PingFang.ttc", "Menlo.ttc"}},
+        {"PingFang SC",   {"PingFang.ttc", "PingFang.ttc", "PingFang.ttc", "PingFang.ttc", "PingFang.ttc", "Menlo.ttc"}},
+        {"Noto Sans CJK", {"NotoSansCJK-Regular.ttc", "NotoSansCJK-Medium.ttc", "NotoSansCJK-Bold.ttc", "NotoSansCJK-Bold.ttc", "NotoSansCJK-Regular.ttc", "NotoSansMonoCJK-Regular.ttc"}},
+        {"Inter",         {"Inter-Regular.ttf", "Inter-Medium.ttf", "Inter-SemiBold.ttf", "Inter-Bold.ttf", "Inter-Italic.ttf", "Inter-Regular.ttf"}},
+    };
+    const uint32_t widx = static_cast<uint32_t>(weight) < 6u ? static_cast<uint32_t>(weight) : 0u;
+    for (const AliasRow& row : kAliases) {
+        if (ascii_iequals(family, row.name)) {
+            if (const uint16_t s = try_load_system_filename(ctx, row.files[widx], slot_hint); s != kInvalidFont) return s;
+            if (const uint16_t s = try_load_system_filename(ctx, row.files[0], slot_hint); s != kInvalidFont) return s;
+        }
+    }
+    return kInvalidFont;
+}
+} // namespace
+
+uint16_t load_system_font(
+    Context* ctx,
+    Str family_name,
+    FontWeight weight,
+    uint16_t slot_hint) noexcept
+{
+    if (!ctx || resolve_target_font_slot(&ctx->atlas, slot_hint) == kInvalidFont) {
+        return kInvalidFont;
+    }
+
+    if (family_name.chars && family_name.length > 0u) {
+        if (const uint16_t s = try_load_alias_font(ctx, family_name, weight, slot_hint); s != kInvalidFont) {
+            return s;
+        }
+        char reg_path[512] = {};
+        if (win32_find_system_font_path(family_name, weight, reg_path, sizeof(reg_path))) {
+            const bool is_abs = (reg_path[0] && reg_path[1] == ':') || reg_path[0] == '\\' || reg_path[0] == '/';
+            const uint16_t s = is_abs
+                ? load_font_file(ctx, reg_path, slot_hint, 0)
+                : try_load_system_filename(ctx, reg_path, slot_hint);
+            if (s != kInvalidFont) return s;
+        }
+        char stem[96] = {};
+        char compact[96] = {};
+        uint32_t slen = 0u, clen = 0u;
+        for (uint32_t i = 0u; i < family_name.length && slen + 1u < sizeof(stem); ++i) {
+            const char ch = family_name.chars[i];
+            if (ch == '/' || ch == '\\' || ch == '\0') continue;
+            stem[slen++] = ch;
+            if (ch != ' ' && clen + 1u < sizeof(compact)) compact[clen++] = ch;
+        }
+        static constexpr const char* kWeightSuffixes[6] = {"", "-Medium", "-SemiBold", "-Bold", "-Italic", "-Mono"};
+        static constexpr const char* kExts[3] = {".ttf", ".ttc", ".otf"};
+        const uint32_t widx = static_cast<uint32_t>(weight) < 6u ? static_cast<uint32_t>(weight) : 0u;
+        const char* stems[2] = {stem, compact};
+        for (const char* st : stems) {
+            if (!st[0]) continue;
+            const char* suffixes[2] = {kWeightSuffixes[widx], ""};
+            for (int si = 0; si < (widx == 0u ? 1 : 2); ++si) {
+                for (const char* ext : kExts) {
+                    char candidate[160] = {};
+                    const int n = std::snprintf(candidate, sizeof(candidate), "%s%s%s", st, suffixes[si], ext);
+                    if (n > 0 && static_cast<size_t>(n) < sizeof(candidate)) {
+                        if (const uint16_t s = try_load_system_filename(ctx, candidate, slot_hint); s != kInvalidFont) return s;
+                    }
+                }
+            }
+        }
+    }
+
+    static constexpr const char* kFallbackMono[] = {
+#if defined(_WIN32)
+        "consola.ttf", "lucon.ttf",
+#elif defined(__APPLE__)
+        "Menlo.ttc", "Monaco.ttf",
+#else
+        "DejaVuSansMono.ttf", "LiberationMono-Regular.ttf",
+#endif
+    };
+    static constexpr const char* kFallbackBold[] = {
+#if defined(_WIN32)
+        "segoeuib.ttf", "msyhbd.ttc", "arialbd.ttf",
+#elif defined(__APPLE__)
+        "HelveticaNeue.ttc", "PingFang.ttc",
+#else
+        "DejaVuSans-Bold.ttf", "NotoSans-Bold.ttf", "NotoSansCJK-Bold.ttc",
+#endif
+    };
+    static constexpr const char* kFallbackSemiBold[] = {
+#if defined(_WIN32)
+        "seguisb.ttf", "segoeuib.ttf", "msyhbd.ttc",
+#elif defined(__APPLE__)
+        "HelveticaNeue.ttc", "PingFang.ttc",
+#else
+        "NotoSans-SemiBold.ttf", "DejaVuSans-Bold.ttf",
+#endif
+    };
+    static constexpr const char* kFallbackMedium[] = {
+#if defined(_WIN32)
+        "seguisb.ttf", "segoeui.ttf",
+#elif defined(__APPLE__)
+        "HelveticaNeue.ttc", "PingFang.ttc",
+#else
+        "NotoSans-Medium.ttf", "DejaVuSans.ttf",
+#endif
+    };
+    static constexpr const char* kFallbackItalic[] = {
+#if defined(_WIN32)
+        "segoeuii.ttf", "ariali.ttf",
+#elif defined(__APPLE__)
+        "Arial Italic.ttf", "HelveticaNeue.ttc",
+#else
+        "DejaVuSans-Oblique.ttf", "NotoSans-Italic.ttf", "Ubuntu-Italic.ttf",
+#endif
+    };
+    static constexpr const char* kFallbackRegular[] = {
+#if defined(_WIN32)
+        "segoeui.ttf", "msyh.ttc", "arial.ttf",
+#elif defined(__APPLE__)
+        "Helvetica.ttc", "PingFang.ttc",
+#else
+        "DejaVuSans.ttf", "NotoSans-Regular.ttf", "LiberationSans-Regular.ttf", "NotoSansCJK-Regular.ttc",
+#endif
+    };
+    std::span<const char* const> fb = kFallbackRegular;
+    switch (weight) {
+        case FontWeight::Mono:     fb = kFallbackMono; break;
+        case FontWeight::Bold:     fb = kFallbackBold; break;
+        case FontWeight::SemiBold: fb = kFallbackSemiBold; break;
+        case FontWeight::Medium:   fb = kFallbackMedium; break;
+        case FontWeight::Italic:   fb = kFallbackItalic; break;
+        case FontWeight::Regular:
+        default:                   fb = kFallbackRegular; break;
+    }
+    for (const char* f : fb) {
+        if (const uint16_t s = try_load_system_filename(ctx, f, slot_hint); s != kInvalidFont) return s;
+    }
+    if (weight != FontWeight::Regular) {
+        for (const char* f : kFallbackRegular) {
+            if (const uint16_t s = try_load_system_filename(ctx, f, slot_hint); s != kInvalidFont) return s;
+        }
+    }
+    return kInvalidFont;
+}
+
 uint16_t load_font_file(
     Context* ctx,
     const char* path,

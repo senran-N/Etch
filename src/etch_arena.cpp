@@ -369,6 +369,7 @@ struct BoxExtra;
 struct VisualLayerNode {
     const VisualLayerNode* parent = nullptr;
     BoxExtra* source_box = nullptr;
+    BoxExtra* pivot_box = nullptr;
     LayerDesc local = {};
     mutable float resolved_opacity = 1;
     mutable Vec2 resolved_scale = {1,1}, resolved_offset_px = {};
@@ -609,7 +610,7 @@ struct BlurSplit {
     Rect     union_bounds = {};
 };
 
-inline constexpr uint32_t kMaxFilterSlices = 4u;
+inline constexpr uint32_t kMaxFilterSlices = 8u;
 inline constexpr uint32_t kMaxFilterLevels = 5u; // 0: 1x, 1: 1/2, 2: 1/4, 3: 1/8, 4: 1/16
 
 struct FilterSliceTargets {
@@ -772,6 +773,7 @@ struct WindowUiState {
     FilterSliceTargets filter_slices[kMaxFilterSlices] = {};
     uint32_t filter_rt_w = 0;
     uint32_t filter_rt_h = 0;
+    uint32_t filter_idle_frames = 0;
     bool keyboard_focus_active = false;
     uint32_t focus_scope = 0;
     uint32_t focus_scopes[32] = {};
@@ -966,6 +968,8 @@ struct ShaderSurfaceSlot {
     SDL_GPUGraphicsPipeline* pipeline = nullptr;
     SDL_GPUTexture* texture = nullptr;
     SDL_GPUTexture* retired_tex = nullptr;
+    SDL_GPUTexture* prev_texture = nullptr;
+    SDL_GPUTexture* retired_prev_tex = nullptr;
     SDL_Window* window = nullptr;
     ShaderSurfaceEvalDesc eval = {};
     uint64_t last_render_tick = 0;
@@ -975,7 +979,7 @@ struct ShaderSurfaceSlot {
     uint64_t pending_sampled_epochs[4] = {};
     uint32_t generation = 1, seen_frame = 0, num_samplers = 0;
     float max_fps = 60;
-    bool continuous_time = false, sampler_mirror_repeat = false, owner_bound = false, initialized = false, dirty = true, recorded = false;
+    bool continuous_time = false, sampler_mirror_repeat = false, enable_feedback = false, owner_bound = false, initialized = false, dirty = true, recorded = false;
 };
 
 struct Context {
@@ -1464,6 +1468,7 @@ void os_a11y_notify_commit(Context* ctx) noexcept;
 void apply_platform_window_chrome(Context* ctx, ClaimedWindowSlot* slot) noexcept;
 void apply_win32_chrome(Context* ctx, ClaimedWindowSlot* slot) noexcept;
 void detach_win32_chrome(ClaimedWindowSlot* slot) noexcept;
+bool win32_find_system_font_path(Str family_name, FontWeight weight, char* out_path, size_t out_cap) noexcept;
 void sync_window_event_watch(Context* ctx) noexcept;
 void detach_window_event_watch(Context* ctx) noexcept;
 bool sync_window_metrics_from_os(WindowUiState* ui, SDL_Window* window) noexcept;

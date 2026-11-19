@@ -257,7 +257,8 @@ void end_frame(Context* ctx_arg) noexcept {
                 if ((d.scroll_x || d.scroll_y || extra->is_virtual_list) && d.show_scrollbar && d.id != 0u) {
                     // Retain the container's geometry and ancestor masks, excluding its content fade.
                     const ClipEntry& parent_clip=clip_stack.depth>1u ? clip_stack.entries[clip_stack.depth-2u] : cur_clip;
-                    const ClipEntry scrollbar_clip=d.scroll_fade_px>0
+                    const bool has_fade = d.scroll_fade_px > 0 || d.edge_fade.left > 0 || d.edge_fade.right > 0 || d.edge_fade.top > 0 || d.edge_fade.bottom > 0;
+                    const ClipEntry scrollbar_clip = has_fade
                         ? make_box_clip(ctx,parent_clip,box_px,scale_corners(d.radius,dpi),d.continuous_corners) : cur_clip;
                     ctx->render_clip_index=scrollbar_clip.indexed ? scrollbar_clip.shape : 0;
                     if (const WidgetState* ws = state_map_find(&ctx->active_ui->states, d.id)) {

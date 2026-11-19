@@ -170,6 +170,7 @@ inline etch::BoxDesc to_cpp(const EtchBoxDesc& d) noexcept {
     out.border_sides = to_cpp(d.border_sides);
     out.border_dash_px = d.border_dash_px;
     out.border_gap_px = d.border_gap_px;
+    out.edge_fade = to_cpp(d.edge_fade);
     return out;
 }
 
@@ -266,7 +267,7 @@ EtchBoxDesc etch_box_desc_default(void) {
             from_cpp(d.floating_offset), d.z_index, d.pointer_passthrough, d.clip_to_parent,
             d.backdrop_blur, d.clamp_to_viewport, d.wrap, d.row_gap, d.aspect_ratio,
             d.grid_columns, nullptr, 0u, d.grid_col_span, d.shrink_width, d.shrink_height, d.continuous_corners, d.shadow_spread, d.window_drag_passthrough,static_cast<EtchBorderAlign>(d.border_align),d.opacity,from_cpp(d.hover_background),from_cpp(d.hover_border_color),d.hover_scale,d.press_scale,d.animate_layout,d.hero_id,from_cpp(d.transition),from_cpp(d.border_beam),d.top_rim_alpha,d.scroll_fade_px,
-            from_cpp(d.border_sides), d.border_dash_px, d.border_gap_px};
+            from_cpp(d.border_sides), d.border_dash_px, d.border_gap_px, from_cpp(d.edge_fade)};
 }
 
 EtchTextDesc etch_text_desc_default(void) {
@@ -375,7 +376,8 @@ EtchTextDrawDesc etch_text_draw_desc_default(void) {
     return {from_cpp(d.text), from_cpp(d.pos), d.font_id, d.size, from_cpp(d.color),
             d.letter_spacing, static_cast<EtchAlignX>(d.align_x),
             static_cast<EtchAlignY>(d.align_y), d.foreground, d.max_width_px, d.ellipsis,
-            d.has_wipe, from_cpp(d.color_end), d.wipe_x, d.wipe_feather_px};
+            d.has_wipe, from_cpp(d.color_end), d.wipe_x, d.wipe_feather_px,
+            from_cpp(d.shadow_color), from_cpp(d.shadow_offset), d.shadow_blur};
 }
 
 EtchImageDrawDesc etch_image_draw_desc_default(void) {
@@ -701,6 +703,10 @@ EtchContext* etch_current_context(void) { return from_ctx(etch::current_context(
 void etch_set_current_context(EtchContext* ctx) { etch::set_current_context(to_ctx(ctx)); }
 struct SDL_GPUDevice* etch_gpu_device(EtchContext* ctx) { return etch::gpu_device(to_ctx(ctx)); }
 
+uint16_t etch_load_system_font(EtchContext* ctx, EtchStr family_name, EtchFontWeight weight, uint16_t slot_hint) {
+    return etch::load_system_font(to_ctx(ctx), to_cpp(family_name), static_cast<etch::FontWeight>(weight), slot_hint);
+}
+
 uint16_t etch_load_font_file(EtchContext* ctx, const char* path, uint16_t slot_hint, int32_t face_index) {
     return etch::load_font_file(to_ctx(ctx), path, slot_hint, face_index);
 }
@@ -827,6 +833,7 @@ void etch_minimize_window(struct SDL_Window* window) { etch::minimize_window(win
 void etch_maximize_window(struct SDL_Window* window) { etch::maximize_window(window); }
 void etch_restore_window(struct SDL_Window* window) { etch::restore_window(window); }
 bool etch_is_window_maximized(const EtchContext* ctx, struct SDL_Window* window) { return etch::is_window_maximized(to_ctx(ctx), window); }
+bool etch_is_window_minimized(const EtchContext* ctx, struct SDL_Window* window) { return etch::is_window_minimized(to_ctx(ctx), window); }
 bool etch_set_window_fullscreen(bool fullscreen, struct SDL_Window* window) { return etch::set_window_fullscreen(fullscreen, window); }
 bool etch_is_window_fullscreen(const EtchContext* ctx, struct SDL_Window* window) { return etch::is_window_fullscreen(to_ctx(ctx), window); }
 EtchPadding etch_window_safe_insets(const EtchContext* ctx, struct SDL_Window* window) { return from_cpp(etch::window_safe_insets(to_ctx(ctx), window)); }
@@ -1012,7 +1019,8 @@ void etch_draw_text(const EtchTextDrawDesc* desc) {
                      to_cpp(desc->color), desc->letter_spacing,
                      static_cast<etch::AlignX>(desc->align_x),
                      static_cast<etch::AlignY>(desc->align_y), desc->foreground, desc->max_width_px, desc->ellipsis,
-                     desc->has_wipe, to_cpp(desc->color_end), desc->wipe_x, desc->wipe_feather_px});
+                     desc->has_wipe, to_cpp(desc->color_end), desc->wipe_x, desc->wipe_feather_px,
+                     to_cpp(desc->shadow_color), to_cpp(desc->shadow_offset), desc->shadow_blur});
 }
 void etch_draw_image(const EtchImageDrawDesc* desc) {
     if (!desc) return;
@@ -1601,7 +1609,7 @@ EtchShaderSurfaceId etch_create_shader_surface(EtchContext* ctx, const EtchShade
     if (!d) return 0;
     return etch::create_shader_surface(to_ctx(ctx), {{d->spirv.data,d->spirv.size,d->spirv.entrypoint},
         {d->dxil.data,d->dxil.size,d->dxil.entrypoint}, {d->msl.data,d->msl.size,d->msl.entrypoint},
-        d->continuous_time, d->max_fps, d->num_samplers, d->sampler_mirror_repeat});
+        d->continuous_time, d->max_fps, d->num_samplers, d->sampler_mirror_repeat, d->enable_feedback});
 }
 void etch_destroy_shader_surface(EtchContext* ctx, EtchShaderSurfaceId id) { etch::destroy_shader_surface(to_ctx(ctx),id); }
 SDL_GPUTexture* etch_eval_shader_surface(EtchContext* ctx, EtchShaderSurfaceId id, const EtchShaderSurfaceEvalDesc* d) {

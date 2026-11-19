@@ -8,7 +8,7 @@
 
 #ifndef ETCH_VERSION_MAJOR
 #define ETCH_VERSION_MAJOR 0
-#define ETCH_VERSION_MINOR 21
+#define ETCH_VERSION_MINOR 22
 #define ETCH_VERSION_PATCH 0
 #define ETCH_VERSION_STR_DETAIL(x) #x
 #define ETCH_VERSION_STR(x) ETCH_VERSION_STR_DETAIL(x)
@@ -320,6 +320,7 @@ typedef struct EtchShaderSurfaceCreateDesc {
     float max_fps;
     uint32_t num_samplers;
     bool sampler_mirror_repeat;
+    bool enable_feedback;
 } EtchShaderSurfaceCreateDesc;
 typedef struct EtchShaderSurfaceEvalDesc {
     uint32_t width, height;
@@ -869,6 +870,7 @@ typedef struct EtchBoxDesc {
     EtchPadding border_sides;
     float border_dash_px;
     float border_gap_px;
+    EtchPadding edge_fade;
 } EtchBoxDesc;
 
 typedef struct EtchTextDesc {
@@ -1147,6 +1149,9 @@ typedef struct EtchTextDrawDesc {
     EtchColor color_end;
     float wipe_x;
     float wipe_feather_px;
+    EtchColor shadow_color;
+    EtchVec2 shadow_offset;
+    float shadow_blur;
 } EtchTextDrawDesc;
 
 typedef struct EtchImageDrawDesc {
@@ -1893,6 +1898,16 @@ EtchContext* etch_current_context(void);
 void etch_set_current_context(EtchContext* ctx);
 struct SDL_GPUDevice* etch_gpu_device(EtchContext* ctx);
 
+typedef enum EtchFontWeight {
+    ETCH_FONT_WEIGHT_REGULAR = 0,
+    ETCH_FONT_WEIGHT_MEDIUM = 1,
+    ETCH_FONT_WEIGHT_SEMIBOLD = 2,
+    ETCH_FONT_WEIGHT_BOLD = 3,
+    ETCH_FONT_WEIGHT_ITALIC = 4,
+    ETCH_FONT_WEIGHT_MONO = 5
+} EtchFontWeight;
+
+uint16_t etch_load_system_font(EtchContext* ctx, EtchStr family_name, EtchFontWeight weight, uint16_t slot_hint);
 uint16_t etch_load_font_file(EtchContext* ctx, const char* path, uint16_t slot_hint, int32_t face_index);
 uint16_t etch_load_font_memory(EtchContext* ctx, const void* data, size_t size_bytes, uint16_t slot_hint, int32_t face_index);
 bool etch_is_font_loaded(const EtchContext* ctx, uint16_t font_id);
@@ -1954,6 +1969,7 @@ void etch_minimize_window(struct SDL_Window* window);
 void etch_maximize_window(struct SDL_Window* window);
 void etch_restore_window(struct SDL_Window* window);
 bool etch_is_window_maximized(const EtchContext* ctx, struct SDL_Window* window);
+bool etch_is_window_minimized(const EtchContext* ctx, struct SDL_Window* window);
 bool etch_set_window_fullscreen(bool fullscreen, struct SDL_Window* window);
 bool etch_is_window_fullscreen(const EtchContext* ctx, struct SDL_Window* window);
 EtchPadding etch_window_safe_insets(const EtchContext* ctx, struct SDL_Window* window);

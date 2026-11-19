@@ -600,7 +600,16 @@ int main(void) {
     const EtchTextDrawDesc v21_text_draw=etch_text_draw_desc_default();
     const EtchImageDesc v21_img=etch_image_desc_default();
     const EtchImageDrawDesc v21_img_draw=etch_image_draw_desc_default();
-    const bool ok_material_defaults=surface.max_fps==60 && surface.spirv.entrypoint!=NULL &&
+    EtchBoxDesc v22_box = etch_box_desc_default();
+    v22_box.edge_fade = (EtchPadding){8.0f, 8.0f, 12.0f, 12.0f};
+    const uint16_t sys_font = etch_load_system_font(ctx, ETCH_STR_LIT("Segoe UI"), ETCH_FONT_WEIGHT_BOLD, ETCH_INVALID_FONT);
+    const bool ok_v22_c99 = !surface.enable_feedback &&
+        v21_text_draw.shadow_color.a == 0u && v21_text_draw.shadow_offset.x == 0.0f &&
+        v21_text_draw.shadow_offset.y == 0.0f && v21_text_draw.shadow_blur == 0.0f &&
+        etch_box_desc_default().edge_fade.left == 0.0f && etch_box_desc_default().edge_fade.top == 0.0f &&
+        sys_font != ETCH_INVALID_FONT && etch_is_font_loaded(ctx, sys_font) &&
+        !etch_is_window_minimized(ctx, NULL);
+    const bool ok_material_defaults=ok_v22_c99 && surface.max_fps==60 && surface.spirv.entrypoint!=NULL &&
         surface.num_samplers==0u && !surface.sampler_mirror_repeat &&
         eval.width==1 && eval.enabled && eval.textures[0]==NULL && cell.width==1 && sheet.snap_count==3 &&
         v21_layer.blur_px==0.0f && !v21_layer.blend_plus_lighter &&
