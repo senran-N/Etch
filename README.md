@@ -74,7 +74,6 @@ ETCH_GPU_DRIVER=vulkan ./build/sandbox --headless
 
 If SDL3 is absent or older, build a compatible SDL3 release with CMake and
 pass its installation prefix using `-DCMAKE_PREFIX_PATH=/path/to/sdl3`.
-The Linux [CI workflow](.github/workflows/ci.yml) includes the source-build path.
 
 macOS:
 
@@ -88,7 +87,7 @@ ETCH_GPU_DRIVER=metal ./build/sandbox --headless
 
 ## Verification
 
-CI builds all targets and runs these seven suites without requiring a GPU:
+These seven suites run without requiring a GPU:
 
 ```sh
 ctest --test-dir build --output-on-failure -R "^(repo_guardrails|downstream_consumers|arena_and_elasticity|unicode_bidi_grapheme|layout_clay_flex_grid|fenwick_virtual_list_1m|c99_abi_smoke)$"
@@ -100,7 +99,7 @@ versions, pure C99 header includes, artifacts and OSS notices;
 `downstream_consumers` installs Etch and builds/runs strict C++20 and pure C99
 public-API consumers using both `find_package` and `add_subdirectory`. The five
 core CPU suites have a 5s timeout, guardrails 10s, and downstream consumers 120s.
-CI also requires a clean working tree and zero PNG files in the repository root.
+Verification also requires a clean working tree and zero PNG files in the repository root.
 `--headless` renders
 offscreen and writes `frame_check.png` in the working directory; it still
 requires a supported GPU device/driver. Check the image as well as assertions.
