@@ -630,7 +630,10 @@ int main(void) {
         etch_box_desc_default().edge_fade.left == 0.0f && etch_box_desc_default().edge_fade.top == 0.0f &&
         sys_font != ETCH_INVALID_FONT && etch_is_font_loaded(ctx, sys_font) &&
         !etch_is_window_minimized(ctx, NULL);
-    const bool ok_material_defaults=ok_v22_c99 && surface.max_fps==60 && surface.spirv.entrypoint!=NULL &&
+    const EtchFileDialogResult empty_dlg = etch_poll_file_dialog(ctx, NULL);
+    const bool ok_v24_c99 = !empty_dlg.ready && !etch_open_folder_dialog(ctx, NULL, NULL, 7u, false) &&
+        sheet.show_handle && !sheet.dismiss_on_backdrop && !sheet.dismiss_on_escape && sheet.corner_radius_px == 16.0f;
+    const bool ok_material_defaults=ok_v22_c99 && ok_v24_c99 && surface.max_fps==60 && surface.spirv.entrypoint!=NULL &&
         surface.num_samplers==0u && !surface.sampler_mirror_repeat &&
         eval.width==1 && eval.enabled && eval.textures[0]==NULL && cell.width==1 && sheet.snap_count==3 &&
         v21_layer.blur_px==0.0f && !v21_layer.blend_plus_lighter &&

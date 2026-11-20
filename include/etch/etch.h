@@ -12,7 +12,7 @@
 #include <type_traits>
 
 #define ETCH_VERSION_MAJOR 0
-#define ETCH_VERSION_MINOR 23
+#define ETCH_VERSION_MINOR 24
 #define ETCH_VERSION_PATCH 0
 #define ETCH_VERSION_STR_DETAIL(x) #x
 #define ETCH_VERSION_STR(x) ETCH_VERSION_STR_DETAIL(x)
@@ -2336,6 +2336,16 @@ struct SheetDesc {
     Color background = Color::theme_auto();
     SpringSpec motion = SpringSpec::fluid();
     int16_t z_index = 16000;
+    bool* open_state = nullptr;       // Optional writable open flag updated on backdrop/Escape/snap-0 dismissal.
+    bool dismiss_on_backdrop = false;
+    bool dismiss_on_escape = false;
+    bool show_handle = true;
+    Color backdrop_color = {};
+    Color border_color = {};
+    float border_width = 0.0f;
+    float corner_radius_px = 16.0f;
+    float inset_px = 0.0f;
+    float backdrop_blur = 0.0f;
 };
 bool begin_sheet(const SheetDesc&) noexcept; // Call end_sheet only when true.
 void end_sheet() noexcept;
@@ -2418,6 +2428,24 @@ struct ClipboardImageData {
 bool set_clipboard_text(const char* utf8_text) noexcept;
 Str get_clipboard_text(Arena* arena = nullptr) noexcept;
 ClipboardImageData get_clipboard_image(Arena* arena = nullptr) noexcept;
+
+// Asynchronous native OS folder & file dialogs (non-blocking; completion wakes wait_events()).
+struct FileDialogFilter {
+    const char* name = nullptr;    // Human-readable label, e.g. "Images"
+    const char* pattern = nullptr; // Semicolon-separated extensions ("png;jpg") or "*"
+};
+struct FileDialogResult {
+    bool ready = false;
+    bool cancelled = false;
+    bool error = false;
+    uint32_t request_tag = 0;
+    int32_t selected_filter = -1;
+    std::span<const Str> paths = {};
+};
+bool open_folder_dialog(Context* ctx, SDL_Window* parent_window = nullptr, const char* default_location = nullptr, uint32_t request_tag = 0, bool allow_many = false) noexcept;
+bool open_file_dialog(Context* ctx, SDL_Window* parent_window = nullptr, std::span<const FileDialogFilter> filters = {}, const char* default_location = nullptr, uint32_t request_tag = 0, bool allow_many = false) noexcept;
+bool open_save_file_dialog(Context* ctx, SDL_Window* parent_window = nullptr, std::span<const FileDialogFilter> filters = {}, const char* default_location = nullptr, uint32_t request_tag = 0) noexcept;
+FileDialogResult poll_file_dialog(Context* ctx = nullptr, Arena* arena = nullptr) noexcept;
 
 // Interaction, pointer capture, focus navigation, cursor & layout queries
 bool hovered(uint32_t element_id) noexcept;

@@ -128,6 +128,43 @@ inline bool verify_snap_sheet() noexcept {
         ok &= !needs_redraw(c);
         snap=2;
     }
+    // Verify desktop drawer backdrop dismissal + async folder dialog queue
+    {
+        bool drawer_open = true;
+        const uint32_t drawer_id = id("drawer_dismiss_test");
+        for (int f = 0; f < 30; ++f) {
+            begin_frame(c, {.viewport_w = 320, .viewport_h = 240, .dt_seconds = 1.f / 60});
+            if (begin_sheet({.id = drawer_id, .edge = SheetEdge::Right, .extent_px = 140,
+                             .open_state = &drawer_open, .dismiss_on_backdrop = true,
+                             .show_handle = false, .backdrop_color = Color::rgba8(0, 0, 0, 120),
+                             .inset_px = 8.f})) {
+                text(str_lit("Drawer"));
+                end_sheet();
+            }
+            end_frame(c);
+        }
+        const Rect dr = element_bounds(drawer_id);
+        ok &= drawer_open && std::fabs(dr.x - (320.f - 148.f)) < 1.f;
+        // Click outside on backdrop scrim (x = 20, y = 120)
+        begin_frame(c, {.viewport_w = 320, .viewport_h = 240, .dt_seconds = 1.f / 60, .pointer_pos = {20.f, 120.f}, .pointer_down = true});
+        if (begin_sheet({.id = drawer_id, .edge = SheetEdge::Right, .extent_px = 140, .open_state = &drawer_open, .dismiss_on_backdrop = true, .show_handle = false, .backdrop_color = Color::rgba8(0, 0, 0, 120), .inset_px = 8.f})) end_sheet();
+        end_frame(c);
+        begin_frame(c, {.viewport_w = 320, .viewport_h = 240, .dt_seconds = 1.f / 60, .pointer_pos = {20.f, 120.f}, .pointer_down = false});
+        if (begin_sheet({.id = drawer_id, .edge = SheetEdge::Right, .extent_px = 140, .open_state = &drawer_open, .dismiss_on_backdrop = true, .show_handle = false, .backdrop_color = Color::rgba8(0, 0, 0, 120), .inset_px = 8.f})) end_sheet();
+        end_frame(c);
+        begin_frame(c, {.viewport_w = 320, .viewport_h = 240, .dt_seconds = 1.f / 60, .pointer_pos = {20.f, 120.f}, .pointer_down = false});
+        if (begin_sheet({.id = drawer_id, .edge = SheetEdge::Right, .extent_px = 140, .open_state = &drawer_open, .dismiss_on_backdrop = true, .show_handle = false, .backdrop_color = Color::rgba8(0, 0, 0, 120), .inset_px = 8.f})) end_sheet();
+        end_frame(c);
+        ok &= !drawer_open;
+
+        const Str injected[2] = {str_lit("D:/Myproject/OMP-E"), str_lit("D:/Myproject/Etch")};
+        inject_file_dialog_result(c, 42u, injected, false, 0);
+        begin_frame(c, {.viewport_w = 320, .viewport_h = 240, .dt_seconds = 1.f / 60});
+        const FileDialogResult dlg = poll_file_dialog(c);
+        ok &= dlg.ready && !dlg.cancelled && !dlg.error && dlg.request_tag == 42u && dlg.paths.size() == 2u &&
+              dlg.paths[0].length == 18u && !poll_file_dialog(c).ready;
+        end_frame(c);
+    }
     destroy_context(c);set_current_context(nullptr);
     if(!ok)std::fprintf(stderr,"Snap sheet position/drag/exit/sleep failure\n");
     return ok;

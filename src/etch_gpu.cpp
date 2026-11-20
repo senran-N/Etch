@@ -1698,6 +1698,7 @@ void destroy_context(Context* ctx) noexcept {
     }
 
     font_atlas_destroy(&ctx->atlas);
+    shutdown_dialog_queue(ctx);
     std::free(ctx->clipboard_fallback);
     ctx->clipboard_fallback = nullptr;
     ctx->clipboard_fallback_cap = 0u;

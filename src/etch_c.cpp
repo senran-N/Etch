@@ -1158,6 +1158,73 @@ EtchClipboardImageData etch_get_clipboard_image(EtchArena* arena) {
     return {d.bytes, d.size_bytes, from_cpp(d.mime_type)};
 }
 
+bool etch_open_folder_dialog(EtchContext* ctx, struct SDL_Window* parent_window, const char* default_location, uint32_t request_tag, bool allow_many) {
+    return etch::open_folder_dialog(to_ctx(ctx), parent_window, default_location, request_tag, allow_many);
+}
+
+bool etch_open_file_dialog(EtchContext* ctx, struct SDL_Window* parent_window, const EtchFileDialogFilter* filters, uint32_t filter_count, const char* default_location, uint32_t request_tag, bool allow_many) {
+    etch::Context* c = to_ctx(ctx);
+    c = c ? c : etch::current_context();
+    if (!c) return false;
+    etch::FileDialogFilter stack_filters[16];
+    etch::FileDialogFilter* heap_filters = nullptr;
+    etch::FileDialogFilter* dst = stack_filters;
+    const uint32_t n = (filters && filter_count > 0u) ? filter_count : 0u;
+    if (n > 16u) {
+        heap_filters = static_cast<etch::FileDialogFilter*>(SDL_calloc(n, sizeof(etch::FileDialogFilter)));
+        if (!heap_filters) return false;
+        dst = heap_filters;
+    }
+    for (uint32_t i = 0; i < n; ++i) {
+        dst[i] = {filters[i].name, filters[i].pattern};
+    }
+    const bool ok = etch::open_file_dialog(c, parent_window, std::span<const etch::FileDialogFilter>(dst, n), default_location, request_tag, allow_many);
+    SDL_free(heap_filters);
+    return ok;
+}
+
+bool etch_open_save_file_dialog(EtchContext* ctx, struct SDL_Window* parent_window, const EtchFileDialogFilter* filters, uint32_t filter_count, const char* default_location, uint32_t request_tag) {
+    etch::Context* c = to_ctx(ctx);
+    c = c ? c : etch::current_context();
+    if (!c) return false;
+    etch::FileDialogFilter stack_filters[16];
+    etch::FileDialogFilter* heap_filters = nullptr;
+    etch::FileDialogFilter* dst = stack_filters;
+    const uint32_t n = (filters && filter_count > 0u) ? filter_count : 0u;
+    if (n > 16u) {
+        heap_filters = static_cast<etch::FileDialogFilter*>(SDL_calloc(n, sizeof(etch::FileDialogFilter)));
+        if (!heap_filters) return false;
+        dst = heap_filters;
+    }
+    for (uint32_t i = 0; i < n; ++i) {
+        dst[i] = {filters[i].name, filters[i].pattern};
+    }
+    const bool ok = etch::open_save_file_dialog(c, parent_window, std::span<const etch::FileDialogFilter>(dst, n), default_location, request_tag);
+    SDL_free(heap_filters);
+    return ok;
+}
+
+EtchFileDialogResult etch_poll_file_dialog(EtchContext* ctx, EtchArena* arena) {
+    etch::Context* c = to_ctx(ctx);
+    c = c ? c : etch::current_context();
+    if (!c) return {false, false, false, 0u, -1, nullptr, 0u};
+    etch::Arena a = arena ? to_cpp_arena(arena) : c->frame_arena;
+    const etch::FileDialogResult r = etch::poll_file_dialog(c, &a);
+    EtchStr* c_paths = nullptr;
+    const uint32_t cnt = static_cast<uint32_t>(r.paths.size());
+    if (cnt > 0u) {
+        c_paths = a.alloc<EtchStr>(cnt);
+        if (c_paths) {
+            for (uint32_t i = 0; i < cnt; ++i) {
+                c_paths[i] = from_cpp(r.paths[i]);
+            }
+        }
+    }
+    if (arena) sync_c_arena(arena, a);
+    else c->frame_arena = a;
+    return {r.ready, r.cancelled, r.error, r.request_tag, r.selected_filter, c_paths, c_paths ? cnt : 0u};
+}
+
 EtchTextBuffer* etch_create_text_buffer(EtchStr initial_utf8, uint32_t initial_cap) {
     auto* tb = static_cast<etch::TextBuffer*>(std::calloc(1u, sizeof(etch::TextBuffer)));
     if (!tb) return nullptr;
@@ -1693,14 +1760,19 @@ void etch_terminal_grid(const EtchTerminalGridDesc* d) {
 EtchSheetDesc etch_sheet_desc_default(void) {
     const etch::SheetDesc d;
     EtchSheetDesc result={d.id,d.open,static_cast<EtchSheetEdge>(d.edge),d.extent_px,{},d.snap_count,nullptr,
-        from_cpp(d.background),from_cpp(d.motion),d.z_index};
+        from_cpp(d.background),from_cpp(d.motion),d.z_index,nullptr,d.dismiss_on_backdrop,d.dismiss_on_escape,
+        d.show_handle,from_cpp(d.backdrop_color),from_cpp(d.border_color),d.border_width,
+        d.corner_radius_px,d.inset_px,d.backdrop_blur};
     for(uint32_t i=0;i<8;++i) result.snap_points[i]=d.snap_points[i];
     return result;
 }
 bool etch_begin_sheet(const EtchSheetDesc* d) {
     if(!d) return false;
     etch::SheetDesc desc={.id=d->id,.open=d->open,.edge=static_cast<etch::SheetEdge>(d->edge),.extent_px=d->extent_px,
-        .snap_count=d->snap_count,.snap_index=d->snap_index,.background=to_cpp(d->background),.motion=to_cpp(d->motion),.z_index=d->z_index};
+        .snap_count=d->snap_count,.snap_index=d->snap_index,.background=to_cpp(d->background),.motion=to_cpp(d->motion),.z_index=d->z_index,
+        .open_state=d->open_state,.dismiss_on_backdrop=d->dismiss_on_backdrop,.dismiss_on_escape=d->dismiss_on_escape,
+        .show_handle=d->show_handle,.backdrop_color=to_cpp(d->backdrop_color),.border_color=to_cpp(d->border_color),
+        .border_width=d->border_width,.corner_radius_px=d->corner_radius_px,.inset_px=d->inset_px,.backdrop_blur=d->backdrop_blur};
     for(uint32_t i=0;i<8;++i) desc.snap_points[i]=d->snap_points[i];
     return etch::begin_sheet(desc);
 }

@@ -1,5 +1,6 @@
 #include "etch/etch.h"
 #include "etch/etch_c.h"
+#include "etch_testing.h"
 #include <SDL3/SDL.h>
 #include <cstdio>
 #include <cstdlib>

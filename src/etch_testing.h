@@ -12,5 +12,6 @@ void inject_drop_text(Context* ctx, Str utf8_text, SDL_Window* window = nullptr)
 void inject_os_drop_begin(Context* ctx, Vec2 logical_pos, SDL_Window* window = nullptr) noexcept;
 void inject_os_drop_move(Context* ctx, Vec2 logical_pos, SDL_Window* window = nullptr) noexcept;
 void inject_os_drop_complete(Context* ctx, Vec2 logical_pos, SDL_Window* window = nullptr) noexcept;
+void inject_file_dialog_result(Context* ctx, uint32_t request_tag, std::span<const Str> paths, bool cancelled = false, int32_t selected_filter = -1) noexcept;
 
 } // namespace etch

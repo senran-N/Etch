@@ -4,6 +4,19 @@ All notable changes to Etch are documented here. This file follows
 [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html).
 
+## [0.24.0] - 2026-11-20
+
+- Add cross-platform asynchronous native OS folder and file dialogs (`FileDialogFilter`,
+  `FileDialogResult`, `open_folder_dialog`, `open_file_dialog`, `open_save_file_dialog`,
+  `poll_file_dialog`, and pure C99 ABI parity `etch_open_folder_dialog` /
+  `etch_open_file_dialog` / `etch_open_save_file_dialog` / `etch_poll_file_dialog`),
+  backed by `SDL_ShowOpenFolderDialog`, `SDL_ShowOpenFileDialog`, and
+  `SDL_ShowSaveFileDialog` with a refcounted thread-safe completion queue that copies
+  filter slices safely and calls `wake_up` so 0%-idle event loops resume immediately.
+- Extend `SheetDesc` (`EtchSheetDesc`) for desktop drawers with `open_state`,
+  `dismiss_on_backdrop`, `dismiss_on_escape`, `show_handle`, `backdrop_color`,
+  `border_color`, `border_width`, `corner_radius_px`, `inset_px`, and `backdrop_blur`.
+
 ## [0.23.0] - 2026-11-20
 
 - Add smart sticky-bottom streaming scroll to `VirtualListDesc::stick_to_bottom`

@@ -1093,6 +1093,7 @@ struct Context {
 
     char*         clipboard_fallback = nullptr;
     uint32_t      clipboard_fallback_cap = 0;
+    struct DialogSharedQueue* dialog_queue = nullptr;
 
     uint64_t   layout_start_ticks = 0;
     SlugCurveGpu* dyn_slug_curves = nullptr;

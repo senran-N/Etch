@@ -8,7 +8,7 @@
 
 #ifndef ETCH_VERSION_MAJOR
 #define ETCH_VERSION_MAJOR 0
-#define ETCH_VERSION_MINOR 23
+#define ETCH_VERSION_MINOR 24
 #define ETCH_VERSION_PATCH 0
 #define ETCH_VERSION_STR_DETAIL(x) #x
 #define ETCH_VERSION_STR(x) ETCH_VERSION_STR_DETAIL(x)
@@ -1890,6 +1890,16 @@ typedef struct EtchSheetDesc {
     EtchColor background;
     EtchSpringSpec motion;
     int16_t z_index;
+    bool* open_state;
+    bool dismiss_on_backdrop;
+    bool dismiss_on_escape;
+    bool show_handle;
+    EtchColor backdrop_color;
+    EtchColor border_color;
+    float border_width;
+    float corner_radius_px;
+    float inset_px;
+    float backdrop_blur;
 } EtchSheetDesc;
 EtchTerminalGridDesc etch_terminal_grid_desc_default(void);
 EtchTerminalCell etch_terminal_cell_default(void);
@@ -2082,6 +2092,26 @@ typedef struct EtchClipboardImageData {
 bool etch_set_clipboard_text(const char* utf8_text);
 EtchStr etch_get_clipboard_text(EtchArena* arena);
 EtchClipboardImageData etch_get_clipboard_image(EtchArena* arena);
+
+typedef struct EtchFileDialogFilter {
+    const char* name;
+    const char* pattern;
+} EtchFileDialogFilter;
+
+typedef struct EtchFileDialogResult {
+    bool ready;
+    bool cancelled;
+    bool error;
+    uint32_t request_tag;
+    int32_t selected_filter;
+    const EtchStr* paths;
+    uint32_t path_count;
+} EtchFileDialogResult;
+
+bool etch_open_folder_dialog(EtchContext* ctx, struct SDL_Window* parent_window, const char* default_location, uint32_t request_tag, bool allow_many);
+bool etch_open_file_dialog(EtchContext* ctx, struct SDL_Window* parent_window, const EtchFileDialogFilter* filters, uint32_t filter_count, const char* default_location, uint32_t request_tag, bool allow_many);
+bool etch_open_save_file_dialog(EtchContext* ctx, struct SDL_Window* parent_window, const EtchFileDialogFilter* filters, uint32_t filter_count, const char* default_location, uint32_t request_tag);
+EtchFileDialogResult etch_poll_file_dialog(EtchContext* ctx, EtchArena* arena);
 
 EtchTextBuffer* etch_create_text_buffer(EtchStr initial_utf8, uint32_t initial_cap);
 void etch_destroy_text_buffer(EtchTextBuffer* buf);

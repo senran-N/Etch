@@ -113,24 +113,36 @@ bool begin_sheet(const SheetDesc& d) noexcept {
     if(!desktop_frame(d.id) || uint8_t(d.edge)>uint8_t(SheetEdge::Right) || !std::isfinite(d.extent_px) ||
         d.extent_px<=0 || d.extent_px>8192 || d.snap_count==0 || d.snap_count>8 ||
         !std::isfinite(d.motion.response) || d.motion.response<=0 ||
-        !std::isfinite(d.motion.damping_ratio) || d.motion.damping_ratio<0) return false;
+        !std::isfinite(d.motion.damping_ratio) || d.motion.damping_ratio<0 ||
+        !std::isfinite(d.corner_radius_px) || d.corner_radius_px<0 ||
+        !std::isfinite(d.inset_px) || d.inset_px<0 ||
+        !std::isfinite(d.border_width) || d.border_width<0 ||
+        !std::isfinite(d.backdrop_blur) || d.backdrop_blur<0) return false;
     for(uint32_t i=0;i<d.snap_count;++i)
         if(!std::isfinite(d.snap_points[i]) || d.snap_points[i]<0 || d.snap_points[i]>1 || (i && d.snap_points[i]<=d.snap_points[i-1])) return false;
     Context* ctx=current_context();auto& ui=*ctx->active_ui;
+    bool open_val=d.open_state ? *d.open_state : d.open;
     const uint32_t handle=id_index(d.id,0x53484545);
-    const bool handle_pressed=pressed(handle);
+    const uint32_t scrim_id=id_index(d.id,0x5343524D);
+    const bool handle_pressed=d.show_handle && pressed(handle);
     WidgetState* ws=state_map_get_or_insert(&ui.states,d.id,ui.frame_index);
     if(!ws) return false;
     if(!ws->sheet_initialized) {ws->sheet_snap=d.snap_count-1;ws->sheet_initialized=true;}
     if(d.snap_index) ws->sheet_snap=*d.snap_index<d.snap_count ? *d.snap_index : d.snap_count-1;
     if(ws->sheet_snap>=d.snap_count) ws->sheet_snap=d.snap_count-1;
+    if(open_val && d.open_state && d.dismiss_on_escape && key_pressed(SDLK_ESCAPE,false)) {
+        *d.open_state=false;open_val=false;request_redraw(ctx);
+    }
+    if(open_val && d.open_state && d.dismiss_on_backdrop && clicked(scrim_id)) {
+        *d.open_state=false;open_val=false;request_redraw(ctx);
+    }
     const float pointer=d.edge==SheetEdge::Bottom ? ui.pointer_pos.y : ui.pointer_pos.x;
     const float direction=d.edge==SheetEdge::Left ? 1.f : -1.f;
-    if(d.open && handle_pressed && ui.prev_pointer_down && !ws->sheet_dragging) {
+    if(open_val && handle_pressed && ui.prev_pointer_down && !ws->sheet_dragging) {
         ws->sheet_dragging=true;ws->sheet_last_pointer=pointer;ws->sheet_velocity=0;
     }
     if(ws->sheet_dragging) {
-        if(ui.prev_pointer_down && d.open) {
+        if(ui.prev_pointer_down && open_val) {
             const float delta=(pointer-ws->sheet_last_pointer)*direction/d.extent_px;
             ws->sheet_pos=clamp_range(ws->sheet_pos+delta,0,1);
             if(ui.sim_dt>0) ws->sheet_velocity=delta/ui.sim_dt;
@@ -142,30 +154,50 @@ bool begin_sheet(const SheetDesc& d) noexcept {
                 if(std::fabs(d.snap_points[i]-projected)<std::fabs(d.snap_points[nearest]-projected)) nearest=i;
             ws->sheet_snap=nearest;
             if(d.snap_index) *d.snap_index=nearest;
+            if(d.open_state && d.snap_points[nearest]<=0.0001f) {
+                *d.open_state=false;open_val=false;ws->sheet_snap=d.snap_count-1;
+                if(d.snap_index) *d.snap_index=ws->sheet_snap;
+            }
             ws->sheet_dragging=false;
         }
     }
-    if(!ws->sheet_dragging) advance_motion(ctx,&ws->sheet_pos,&ws->sheet_velocity,d.open ? d.snap_points[ws->sheet_snap] : 0,d.motion);
+    if(!ws->sheet_dragging) advance_motion(ctx,&ws->sheet_pos,&ws->sheet_velocity,open_val ? d.snap_points[ws->sheet_snap] : 0,d.motion);
     const float visible=clamp_range(ws->sheet_pos,0,1);
-    if(!d.open && ws->sheet_pos==0 && ws->sheet_velocity==0) return false;
+    if(!open_val && ws->sheet_pos==0 && ws->sheet_velocity==0) return false;
     const float width=float(ui.viewport_w)/ui.dpi_scale,height=float(ui.viewport_h)/ui.dpi_scale;
+    if((d.backdrop_color.a>0 || d.dismiss_on_backdrop) && visible>0.002f) {
+        Color sc=d.backdrop_color;
+        sc.a=static_cast<uint8_t>(std::round(float(sc.a)*visible));
+        box({.id=scrim_id,.width=Sizing::fixed(width),.height=Sizing::fixed(height),
+            .background=sc,.attach_to=AttachTo::Root,.anchor_parent=Anchor::TopLeft,
+            .z_index=static_cast<int16_t>(d.z_index>0 ? d.z_index-1 : 0)});
+    }
     const bool bottom=d.edge==SheetEdge::Bottom;
-    const float extent=std::fmin(d.extent_px,bottom ? height : width);
-    const Vec2 offset=bottom ? Vec2{0,height-extent*visible} :
-        d.edge==SheetEdge::Left ? Vec2{-extent*(1-visible),0} : Vec2{width-extent*visible,0};
+    const float inset=std::fmin(d.inset_px,std::fmin(width,height)*.25f);
+    const float avail_along=std::fmax(1.f,(bottom ? height : width)-inset*2.f);
+    const float avail_cross=std::fmax(1.f,(bottom ? width : height)-inset*2.f);
+    const float extent=std::fmin(d.extent_px,avail_along);
+    const float slide_dist=extent+inset;
+    const Vec2 offset=bottom ? Vec2{inset,height-slide_dist*visible} :
+        d.edge==SheetEdge::Left ? Vec2{inset-slide_dist*(1-visible),inset} : Vec2{width-slide_dist*visible,inset};
     const Color background=resolve_theme_color(d.background,active_theme(ctx).surface_control);
-    begin_box({.id=d.id,.axis=bottom ? Axis::Col : Axis::Row,.width=Sizing::fixed(bottom ? width : extent),
-        .height=Sizing::fixed(bottom ? extent : height),.background=background,.radius=Corners::all(16),.clip_children=true,
-        .attach_to=AttachTo::Root,.anchor_parent=Anchor::TopLeft,.floating_offset=offset,.z_index=d.z_index});
-    begin_box({.id=handle,.width=bottom ? Sizing::grow() : Sizing::fixed(24),
-        .height=bottom ? Sizing::fixed(24) : Sizing::grow(),.align_x=AlignX::Center,.align_y=AlignY::Center,
-        .attach_to=d.edge==SheetEdge::Left ? AttachTo::Parent : AttachTo::None,
-        .anchor_parent=Anchor::TopLeft,
-        .floating_offset=d.edge==SheetEdge::Left ? Vec2{extent-24,0} : Vec2{},
-        .z_index=d.z_index});
-    box({.width=Sizing::fixed(bottom ? 36.f : 4.f),.height=Sizing::fixed(bottom ? 4.f : 36.f),
-        .background=active_theme(ctx).text_secondary,.radius=Corners::all(2)});
-    end_box();
+    begin_box({.id=d.id,.axis=bottom ? Axis::Col : Axis::Row,.width=Sizing::fixed(bottom ? avail_cross : extent),
+        .height=Sizing::fixed(bottom ? extent : avail_cross),.background=background,
+        .border_color=d.border_color,.border_width=d.border_width,
+        .radius=Corners::all(d.corner_radius_px),.clip_children=true,
+        .attach_to=AttachTo::Root,.anchor_parent=Anchor::TopLeft,.floating_offset=offset,.z_index=d.z_index,
+        .backdrop_blur=d.backdrop_blur,.continuous_corners=inset>0.f});
+    if(d.show_handle) {
+        begin_box({.id=handle,.width=bottom ? Sizing::grow() : Sizing::fixed(24),
+            .height=bottom ? Sizing::fixed(24) : Sizing::grow(),.align_x=AlignX::Center,.align_y=AlignY::Center,
+            .attach_to=d.edge==SheetEdge::Left ? AttachTo::Parent : AttachTo::None,
+            .anchor_parent=Anchor::TopLeft,
+            .floating_offset=d.edge==SheetEdge::Left ? Vec2{extent-24,0} : Vec2{},
+            .z_index=d.z_index});
+        box({.width=Sizing::fixed(bottom ? 36.f : 4.f),.height=Sizing::fixed(bottom ? 4.f : 36.f),
+            .background=active_theme(ctx).text_secondary,.radius=Corners::all(2)});
+        end_box();
+    }
     return true;
 }
 void end_sheet() noexcept {end_box();}
