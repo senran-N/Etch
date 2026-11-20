@@ -2174,6 +2174,7 @@ void apply_scrollbar_drag(WidgetState* ws, float pointer_y, float grab_offset, b
             ws->vscroll_pos_y = static_cast<double>(ratio) * ws->vscroll_max_y;
             ws->vscroll_vel_y = 0.0;
             ws->vlist_pending_scroll = false;
+            ws->vlist_stuck_bottom = (ws->vscroll_max_y <= 0.5) || (ws->vscroll_pos_y >= ws->vscroll_max_y - 2.0);
         } else {
             ws->scroll_pos.y = ratio * ws->scroll_max.y;
             ws->scroll_vel.y = 0.0f;

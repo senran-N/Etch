@@ -574,6 +574,16 @@ VirtualListSlice begin_virtual_list_with_c_measure(const VirtualListDesc& desc, 
         }
     }
     const double max_scroll = (total_h > view_h) ? (total_h - view_h) : 0.0;
+    const double prev_max_scroll = ws->vscroll_max_y;
+    if (desc.stick_to_bottom) {
+        if (!ws->vlist_stick_initialized) {
+            ws->vlist_stick_initialized = true;
+            ws->vlist_stuck_bottom = true;
+        } else if (!ws->vlist_stuck_bottom && !ws->vlist_pending_scroll && ws->vscroll_vel_y >= 0.0 &&
+                   (prev_max_scroll <= 0.5 || ws->vscroll_pos_y >= prev_max_scroll - 2.0)) {
+            ws->vlist_stuck_bottom = true;
+        }
+    }
     ws->vscroll_total_h = total_h;
     ws->vscroll_max_y = max_scroll;
     if (ws->vlist_pending_scroll) {
@@ -586,13 +596,20 @@ VirtualListSlice begin_virtual_list_with_c_measure(const VirtualListDesc& desc, 
                 ctx, ws, cache, pending_row,
                 ws->vlist_pending_scroll_item_h, ws->vlist_pending_scroll_align, view_h);
         }
+        ws->vlist_stuck_bottom = (ws->vscroll_max_y <= 0.5) || (ws->vscroll_pos_y >= ws->vscroll_max_y - 2.0);
     }
     PendingA11yAction lv_cmd = {};
     while(a11y_take_any(desc.id,12u,&lv_cmd)) {
         ws->vscroll_pos_y += (lv_cmd.action==A11yAction::Increment) ? 40.0 : -40.0;
+        if (lv_cmd.action == A11yAction::Decrement) ws->vlist_stuck_bottom = false;
         request_redraw(ctx);
     }
-    ws->vscroll_pos_y = clamp_double(ws->vscroll_pos_y, 0.0, ws->vscroll_max_y);
+    if (desc.stick_to_bottom && ws->vlist_stuck_bottom) {
+        ws->vscroll_pos_y = ws->vscroll_max_y;
+        ws->vscroll_vel_y = 0.0;
+    } else {
+        ws->vscroll_pos_y = clamp_double(ws->vscroll_pos_y, 0.0, ws->vscroll_max_y);
+    }
     ws->viewport_dim.y = static_cast<float>(view_h);
 
     const double content_scroll_y = (ws->vscroll_pos_y > static_cast<double>(desc.padding.top))
@@ -643,9 +660,14 @@ VirtualListSlice begin_virtual_list_with_c_measure(const VirtualListDesc& desc, 
             ws->vscroll_total_h = cache->total_stride_sum - (desc.item_count ? gap_px : 0) + pad_v;
             ws->vscroll_max_y = ws->vscroll_total_h > view_h ? ws->vscroll_total_h - view_h : 0;
             const double before_clamp = ws->vscroll_pos_y;
-            ws->vscroll_pos_y = clamp_double(ws->vscroll_pos_y, 0.0, ws->vscroll_max_y);
-            // Shrinking estimates near the bottom can move the viewport before this slice.
-            if (ws->vscroll_pos_y == before_clamp || ws->vscroll_pos_y - desc.padding.top >= first_row_top) break;
+            if (desc.stick_to_bottom && ws->vlist_stuck_bottom) {
+                ws->vscroll_pos_y = ws->vscroll_max_y;
+            } else {
+                ws->vscroll_pos_y = clamp_double(ws->vscroll_pos_y, 0.0, ws->vscroll_max_y);
+            }
+            // Shrinking or growing estimates near the bottom can shift the visible slice.
+            if (ws->vscroll_pos_y == before_clamp ||
+                (!(desc.stick_to_bottom && ws->vlist_stuck_bottom) && ws->vscroll_pos_y - desc.padding.top >= first_row_top)) break;
             adj_content_scroll_y = ws->vscroll_pos_y > desc.padding.top ? ws->vscroll_pos_y - desc.padding.top : 0.0;
         }
         auto* rec = ctx->frame_arena.alloc<ActiveVarListRecord>();
@@ -717,6 +739,7 @@ VirtualListSlice begin_virtual_list_with_c_measure(const VirtualListDesc& desc, 
     Clay__ConfigureOpenElement(decl);
 
     ctx->a11y_parent=a11y_emit(ctx,desc.id,A11yRole::List,{}, {},0,12u);
+    const bool at_bottom = (ws->vscroll_max_y <= 0.5) || (ws->vscroll_pos_y >= ws->vscroll_max_y - 2.0);
     return VirtualListSlice{
         .first_index = first_idx,
         .end_index = end_idx,
@@ -724,6 +747,7 @@ VirtualListSlice begin_virtual_list_with_c_measure(const VirtualListDesc& desc, 
         .scroll_y = ws->vscroll_pos_y,
         .max_scroll_y = ws->vscroll_max_y,
         .viewport_height = static_cast<float>(view_h),
+        .at_bottom = at_bottom,
     };
 }
 
@@ -758,6 +782,38 @@ void set_virtual_list_scroll_offset(uint32_t list_id, double offset_y, bool stop
             clamped = clamp_double(clamped, 0.0, ws->vscroll_max_y);
         }
         ws->vscroll_pos_y = clamped;
+        ws->vlist_stuck_bottom = (ws->vscroll_max_y <= 0.5) || (ws->vscroll_pos_y >= ws->vscroll_max_y - 2.0);
+        if (stop_momentum) {
+            ws->vscroll_vel_y = 0.0;
+        }
+        request_redraw(ctx);
+    }
+}
+
+bool virtual_list_is_at_bottom(uint32_t list_id) noexcept {
+    Context* ctx = current_context();
+    if (!ctx || list_id == 0u) {
+        return true;
+    }
+    const WidgetState* ws = state_map_find(&ctx->active_ui->states, list_id);
+    if (!ws) {
+        return true;
+    }
+    return (ws->vscroll_max_y <= 0.5) || (ws->vscroll_pos_y >= ws->vscroll_max_y - 2.0);
+}
+
+void virtual_list_scroll_to_bottom(uint32_t list_id, bool stop_momentum) noexcept {
+    Context* ctx = current_context();
+    if (!ctx || list_id == 0u) {
+        return;
+    }
+    if (WidgetState* ws = state_map_get_or_insert(&ctx->active_ui->states, list_id, ctx->active_ui->frame_index)) {
+        ws->is_user_element = true;
+        ws->is_virtual_list = true;
+        ws->vlist_pending_scroll = false;
+        ws->vlist_stick_initialized = true;
+        ws->vlist_stuck_bottom = true;
+        ws->vscroll_pos_y = ws->vscroll_max_y;
         if (stop_momentum) {
             ws->vscroll_vel_y = 0.0;
         }
@@ -792,6 +848,7 @@ void virtual_list_scroll_to_row(
         return;
     }
     apply_vlist_scroll_to_row(ctx, ws, cache, row_index, item_height_px, align, 0.0);
+    ws->vlist_stuck_bottom = (ws->vscroll_max_y <= 0.5) || (ws->vscroll_pos_y >= ws->vscroll_max_y - 2.0);
     request_redraw(ctx);
 }
 

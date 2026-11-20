@@ -8,8 +8,8 @@
 
 #ifndef ETCH_VERSION_MAJOR
 #define ETCH_VERSION_MAJOR 0
-#define ETCH_VERSION_MINOR 22
-#define ETCH_VERSION_PATCH 1
+#define ETCH_VERSION_MINOR 23
+#define ETCH_VERSION_PATCH 0
 #define ETCH_VERSION_STR_DETAIL(x) #x
 #define ETCH_VERSION_STR(x) ETCH_VERSION_STR_DETAIL(x)
 #define ETCH_VERSION_STRING ETCH_VERSION_STR(ETCH_VERSION_MAJOR) "." ETCH_VERSION_STR(ETCH_VERSION_MINOR) "." ETCH_VERSION_STR(ETCH_VERSION_PATCH)
@@ -1222,6 +1222,14 @@ typedef uint32_t (*EtchSyntaxTokenizeFn)(
     uint32_t max_tokens,
     void* user_data);
 
+typedef struct EtchCodeLineDecoration {
+    EtchColor row_bg;
+    EtchColor gutter_bar_color;
+    EtchStr gutter_tag;
+    EtchColor gutter_tag_color;
+} EtchCodeLineDecoration;
+typedef bool (*EtchCodeLineDecorateFn)(uint32_t line_index, EtchCodeLineDecoration* out_dec, void* user_data);
+
 typedef struct EtchCodeEditorDesc {
     uint32_t id;
     EtchTextBuffer* buffer;
@@ -1254,6 +1262,9 @@ typedef struct EtchCodeEditorDesc {
     float focus_border_width;
     EtchCorners radius;
     float scroll_fade_px;
+    EtchCodeLineDecorateFn line_decorator;
+    void* line_decorator_user_data;
+    float gutter_tag_width_px;
 } EtchCodeEditorDesc;
 
 typedef struct EtchCodeEditorResult {
@@ -1268,6 +1279,8 @@ typedef struct EtchCodeEditorResult {
     uint32_t end_visible_line;
     uint32_t total_lines;
     EtchRect ime_cursor_rect;
+    int32_t hovered_line;
+    int32_t clicked_gutter_line;
 } EtchCodeEditorResult;
 
 typedef struct EtchTextInputHighlight {
@@ -1308,6 +1321,9 @@ typedef struct EtchTextInputDesc {
     bool context_menu, clear_button, escape_blurs, suppress_popup_keys;
     const EtchTextInputHighlight* highlights;
     uint32_t highlight_count;
+    EtchStr ghost_text;
+    EtchColor ghost_color;
+    bool accept_ghost_on_tab;
 } EtchTextInputDesc;
 
 typedef struct EtchTextInputResult {
@@ -1319,6 +1335,7 @@ typedef struct EtchTextInputResult {
     uint32_t cursor_byte;
     uint32_t selection_anchor_byte;
     EtchRect ime_cursor_rect;
+    bool ghost_accepted;
 } EtchTextInputResult;
 
 typedef struct EtchButtonDesc {
@@ -1550,6 +1567,7 @@ typedef struct EtchVirtualListDesc {
     void* measure_user_data;
     bool variable_height;
     float scroll_fade_px;
+    bool stick_to_bottom;
 } EtchVirtualListDesc;
 
 typedef struct EtchVirtualListSlice {
@@ -1559,6 +1577,7 @@ typedef struct EtchVirtualListSlice {
     double scroll_y;
     double max_scroll_y;
     float viewport_height;
+    bool at_bottom;
 } EtchVirtualListSlice;
 
 typedef struct EtchDockPaneDesc {
@@ -2055,8 +2074,14 @@ void etch_clear_text_selection(uint32_t element_id);
 EtchRect etch_ime_cursor_rect(const EtchContext* ctx);
 void etch_request_text_input(uint32_t element_id, EtchRect ime_cursor_rect);
 EtchStr etch_typed_text(uint32_t element_id);
+typedef struct EtchClipboardImageData {
+    const uint8_t* bytes;
+    uint32_t size_bytes;
+    EtchStr mime_type;
+} EtchClipboardImageData;
 bool etch_set_clipboard_text(const char* utf8_text);
 EtchStr etch_get_clipboard_text(EtchArena* arena);
+EtchClipboardImageData etch_get_clipboard_image(EtchArena* arena);
 
 EtchTextBuffer* etch_create_text_buffer(EtchStr initial_utf8, uint32_t initial_cap);
 void etch_destroy_text_buffer(EtchTextBuffer* buf);
@@ -2196,6 +2221,8 @@ void etch_virtual_list_invalidate_heights(uint32_t list_id);
 double etch_virtual_list_scroll_offset(uint32_t list_id);
 void etch_set_virtual_list_scroll_offset(uint32_t list_id, double offset_y, bool stop_momentum);
 void etch_virtual_list_scroll_to_row(uint32_t list_id, uint32_t row_index, float item_height_px, EtchAlignY align);
+bool etch_virtual_list_is_at_bottom(uint32_t list_id);
+void etch_virtual_list_scroll_to_bottom(uint32_t list_id, bool stop_momentum);
 
 bool etch_dock_space_initialized(uint32_t dock_id);
 uint32_t etch_dock_reset_root(uint32_t dock_id);

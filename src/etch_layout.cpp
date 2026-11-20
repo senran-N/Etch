@@ -958,8 +958,9 @@ static void process_window_event(Context* ctx, const SDL_Event& event) noexcept 
                 }
             } else {
                 const WidgetState* tab_ws=state_map_find(&ctx->active_ui->states,ctx->active_ui->focus_id);
-                if (event.key.key == SDLK_TAB && !(tab_ws && (tab_ws->edit_text_buffer || tab_ws->suppress_popup_keys))) {
-                    ctx->active_ui->pending_tab_delta += ((event.key.mod & SDL_KMOD_SHIFT) != 0u) ? -1 : 1;
+                const bool tab_shift = (event.key.mod & SDL_KMOD_SHIFT) != 0u;
+                if (event.key.key == SDLK_TAB && !(tab_ws && (tab_ws->edit_text_buffer || tab_ws->suppress_popup_keys || (tab_ws->accept_ghost_on_tab && !tab_shift)))) {
+                    ctx->active_ui->pending_tab_delta += tab_shift ? -1 : 1;
                 } else {
                     push_pending_text_op(
                         ctx,
@@ -1157,8 +1158,9 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
         }
         if (ctx->active_ui->ime_comp_len == 0u) {
             const WidgetState* tab_ws=state_map_find(&ctx->active_ui->states,ctx->active_ui->focus_id);
-            if (desc.key_pressed_code == SDLK_TAB && !(tab_ws && (tab_ws->edit_text_buffer || tab_ws->suppress_popup_keys))) {
-                ctx->active_ui->pending_tab_delta += ((ctx->active_ui->frame_key_mods & Mod_Shift) != 0u) ? -1 : 1;
+            const bool tab_shift = (ctx->active_ui->frame_key_mods & Mod_Shift) != 0u;
+            if (desc.key_pressed_code == SDLK_TAB && !(tab_ws && (tab_ws->edit_text_buffer || tab_ws->suppress_popup_keys || (tab_ws->accept_ghost_on_tab && !tab_shift)))) {
+                ctx->active_ui->pending_tab_delta += tab_shift ? -1 : 1;
             } else if (ctx->active_ui->frame_text_op_count < kMaxTextOpsPerFrame) {
                 ctx->active_ui->frame_text_ops[ctx->active_ui->frame_text_op_count++] = PendingTextOp{
                     .kind = TextEditOpKind::KeyPress,
@@ -1675,6 +1677,9 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
         if (target_scroll) {
             if (target_scroll->is_virtual_list) {
                 target_scroll->vlist_pending_scroll = false;
+                if (scroll.y > 0.0f) {
+                    target_scroll->vlist_stuck_bottom = false;
+                }
                 if (ctx->active_ui->sim_dt <= 0.0f) {
                     target_scroll->vscroll_pos_y = clamp_double(
                         target_scroll->vscroll_pos_y - static_cast<double>(scroll.y) * 48.0,
@@ -1718,6 +1723,9 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
         } else if (fallback_scroll) {
             if (fallback_scroll->is_virtual_list) {
                 fallback_scroll->vlist_pending_scroll = false;
+                if (scroll.y > 0.0f) {
+                    fallback_scroll->vlist_stuck_bottom = false;
+                }
                 if (ctx->active_ui->sim_dt <= 0.0f) {
                     fallback_scroll->vscroll_pos_y = clamp_double(
                         fallback_scroll->vscroll_pos_y - static_cast<double>(scroll.y) * 48.0,
@@ -3094,6 +3102,40 @@ Str get_clipboard_text(Arena* arena) noexcept {
     return Str{};
 }
 
+ClipboardImageData get_clipboard_image(Arena* arena) noexcept {
+    Context* ctx = current_context();
+    Arena* dst_arena = arena ? arena : (ctx ? &ctx->frame_arena : nullptr);
+    if (!dst_arena || (ctx && ctx->headless)) {
+        return ClipboardImageData{};
+    }
+    static constexpr const char* kMimes[] = { "image/png", "image/jpeg", "image/webp", "image/bmp" };
+    for (const char* mime : kMimes) {
+        if (!SDL_HasClipboardData(mime)) {
+            continue;
+        }
+        size_t sz = 0;
+        void* raw = SDL_GetClipboardData(mime, &sz);
+        if (!raw) {
+            continue;
+        }
+        ClipboardImageData out = {};
+        if (sz > 0u && sz <= static_cast<size_t>(UINT32_MAX) && sz <= dst_arena->remaining()) {
+            uint8_t* copy = dst_arena->alloc_uninit<uint8_t>(sz);
+            if (copy) {
+                std::memcpy(copy, raw, sz);
+                out.bytes = copy;
+                out.size_bytes = static_cast<uint32_t>(sz);
+                out.mime_type = str_cstr(mime);
+            }
+        }
+        SDL_free(raw);
+        if (out.bytes) {
+            return out;
+        }
+    }
+    return ClipboardImageData{};
+}
+
 void set_text_selection(uint32_t element_id, uint32_t anchor_byte, uint32_t cursor_byte) noexcept {
     Context* ctx = current_context();
     if (!ctx || element_id == 0u) {
@@ -3205,6 +3247,7 @@ static TextInputResult text_input_impl(const TextInputDesc& desc_in, const void*
     TextInputDesc desc = desc_in;
     desc.text_color = resolve_theme_color(desc.text_color, thm.text_body);
     desc.placeholder_color = resolve_theme_color(desc.placeholder_color, thm.text_disabled);
+    desc.ghost_color = resolve_theme_color(desc.ghost_color, thm.text_disabled);
     desc.selection_color = resolve_theme_color(desc.selection_color, thm.selection);
     desc.caret_color = resolve_theme_color(desc.caret_color, thm.accent);
     desc.composition_color = resolve_theme_color(desc.composition_color, thm.warning);
@@ -3404,6 +3447,7 @@ static TextInputResult text_input_impl(const TextInputDesc& desc_in, const void*
         cancel_ime_composition(ctx);
     }
     bool submitted = false;
+    bool ghost_accepted = false;
     if (is_focused) {
         if (undo_slot && undo_slot->count > 0u) {
             TextUndoRecord& cur_rec = undo_slot->entries[(undo_slot->head + undo_slot->cur) % undo_slot->entries_cap];
@@ -3690,6 +3734,14 @@ static TextInputResult text_input_impl(const TextInputDesc& desc_in, const void*
                         submitted = true;
                     }
                     break;
+                case SDLK_TAB:
+                    if (desc.accept_ghost_on_tab && !shift && !primary && !alt && writable && !desc.password &&
+                        desc.ghost_text.chars && desc.ghost_text.length > 0u && cursor == len && cursor == anchor)
+                    {
+                        ghost_accepted = true;
+                        request_redraw(ctx);
+                    }
+                    break;
                 case SDLK_ESCAPE:
                     if (has_sel) anchor = cursor;
                     else if (desc.escape_blurs) { request_focus(0);is_focused=false; }
@@ -3712,6 +3764,9 @@ static TextInputResult text_input_impl(const TextInputDesc& desc_in, const void*
     if (ws) {
         ws->edit_cursor = cursor;
         ws->edit_sel_anchor = anchor;
+        ws->accept_ghost_on_tab = desc.accept_ghost_on_tab && writable && !desc.password &&
+            desc.ghost_text.chars && desc.ghost_text.length > 0u &&
+            cursor == len && cursor == anchor && !ghost_accepted;
         if (active_wrap_w > 0.0f) {
             ws->edit_scroll_x = 0.0f;
         }
@@ -3766,6 +3821,11 @@ static TextInputResult text_input_impl(const TextInputDesc& desc_in, const void*
         }
         if (desc.placeholder.chars && desc.placeholder.length > 0u && !desc.placeholder.is_static) {
             ti_extra->desc.placeholder = ctx->frame_arena.push_str(desc.placeholder.chars, desc.placeholder.length);
+        }
+        if (ghost_accepted) {
+            ti_extra->desc.ghost_text = {};
+        } else if (desc.ghost_text.chars && desc.ghost_text.length > 0u && !desc.ghost_text.is_static) {
+            ti_extra->desc.ghost_text = ctx->frame_arena.push_str(desc.ghost_text.chars, desc.ghost_text.length);
         }
         ti_extra->committed_text = committed_slice;
         ti_extra->cursor_byte = cursor;
@@ -3825,6 +3885,7 @@ static TextInputResult text_input_impl(const TextInputDesc& desc_in, const void*
         .cursor_byte = cursor,
         .selection_anchor_byte = anchor,
         .ime_cursor_rect = (is_focused && !desc.read_only && !desc.password) ? ctx->active_ui->ime_cursor_logical : Rect{},
+        .ghost_accepted = ghost_accepted,
     };
 }
 

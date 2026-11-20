@@ -4,6 +4,26 @@ All notable changes to Etch are documented here. This file follows
 [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html).
 
+## [0.23.0] - 2026-11-20
+
+- Add smart sticky-bottom streaming scroll to `VirtualListDesc::stick_to_bottom`
+  (`EtchVirtualListDesc::stick_to_bottom`), `VirtualListSlice::at_bottom`
+  (`EtchVirtualListSlice::at_bottom`), `virtual_list_is_at_bottom`
+  (`etch_virtual_list_is_at_bottom`), and `virtual_list_scroll_to_bottom`
+  (`etch_virtual_list_scroll_to_bottom`). Scrolling up detaches immediately; reaching
+  the bottom re-attaches cleanly with zero frame-bounce on variable-height growth.
+- Add inline predictive ghost text to `TextInputDesc` (`ghost_text`, `ghost_color`,
+  `accept_ghost_on_tab`) and `TextInputResult::ghost_accepted` (plus pure C99 ABI
+  parity), rendering non-mutating continuation glyphs at the caret with Tab acceptance
+  that preserves focus when a ghost suggestion is active.
+- Add per-line diff/review decoration and gutter click reporting to `CodeEditorDesc`
+  (`CodeLineDecoration`, `CodeLineDecorateFn`, `line_decorator`,
+  `line_decorator_user_data`, `gutter_tag_width_px`) and `CodeEditorResult`
+  (`hovered_line`, `clicked_gutter_line`), with full C99 ABI trampoline parity.
+- Add cross-platform clipboard image retrieval (`ClipboardImageData`,
+  `get_clipboard_image` / `etch_get_clipboard_image`) backed by `SDL_GetClipboardData`
+  into caller/frame `Arena` memory without heap leaks.
+
 ## [0.22.1] - 2026-11-19
 
 - Fix `src/etch_gpu.cpp` mid-frame `filter_slices` release bug when `LayerDesc::blur_px`

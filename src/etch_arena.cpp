@@ -55,6 +55,7 @@ struct WidgetState {
     bool     is_text_input_writable = false;
     bool     is_multiline_input = false, edit_reveal_caret = true;
     bool     suppress_popup_keys = false;
+    bool     accept_ghost_on_tab = false;
     float    edit_max_scroll_y = 0;
     float hover_t=0, hover_vel=0, press_t=0, press_vel=0;
     Vec2 terminal_cursor = {}, terminal_velocity = {};
@@ -128,6 +129,8 @@ struct WidgetState {
     // Virtual List state (double-precision scroll prevents float32 ULP degradation past 16.7M px)
     bool     is_virtual_list = false;
     bool     vlist_pending_scroll = false;
+    bool     vlist_stick_initialized = false;
+    bool     vlist_stuck_bottom = true;
     uint32_t vlist_built_frame = 0;
     uint32_t vlist_pending_scroll_row = 0;
     float    vlist_pending_scroll_item_h = 0.0f;
@@ -1381,6 +1384,7 @@ void state_map_clear_flags(StateMap* map, bool clear_frame_edges, bool clear_pre
             slot.double_clicked_this_frame = false;
             slot.span_hovered = false;
             slot.suppress_popup_keys = false;
+            slot.accept_ghost_on_tab = false;
         }
         if (clear_pressed) {
             slot.pressed_down = false;

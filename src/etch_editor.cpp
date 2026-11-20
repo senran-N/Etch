@@ -443,11 +443,16 @@ Str editor_slice(Context* ctx, const TextBuffer* b, uint32_t a, uint32_t z) noex
     return { p, z - a };
 }
 float editor_gutter(const CodeEditorDesc& d, uint32_t lines) noexcept {
-    if (!d.show_line_numbers) return 0.0f;
-    if (d.gutter_width_px > 0.0f) return d.gutter_width_px;
-    uint32_t digits = 1u;
-    while (lines >= 10u) { lines /= 10u; ++digits; }
-    return float(digits) * d.font_size_px * 0.65f + 20.0f;
+    const float tag_w = (d.line_decorator && d.gutter_tag_width_px > 0.0f) ? d.gutter_tag_width_px : 0.0f;
+    if (!d.show_line_numbers && tag_w <= 0.0f) return 0.0f;
+    if (d.gutter_width_px > 0.0f) return d.gutter_width_px + tag_w;
+    float num_w = 0.0f;
+    if (d.show_line_numbers) {
+        uint32_t digits = 1u;
+        while (lines >= 10u) { lines /= 10u; ++digits; }
+        num_w = float(digits) * d.font_size_px * 0.65f + 20.0f;
+    }
+    return num_w + tag_w;
 }
 }
 void code_editor_set_cursor(uint32_t id, uint32_t a, uint32_t c, bool reveal) noexcept {
@@ -585,8 +590,27 @@ CodeEditorResult code_editor(const CodeEditorDesc& input) noexcept {
         ws->edit_wrap_width = 0.0f;
     }
 
+    int32_t hovered_line = -1;
+    int32_t clicked_gutter_line = -1;
     if (Clay_PointerOver(make_clay_id(d.id))) {
-        set_cursor(ui.pointer_pos.x >= origin_x && ui.pointer_pos.x < bounds.x + bounds.w - 14.0f ? Cursor::IBeam : Cursor::Arrow);
+        const bool in_gutter = gutter > 0.0f && ui.pointer_pos.x >= bounds.x && ui.pointer_pos.x < origin_x;
+        set_cursor(ui.pointer_pos.x >= origin_x && ui.pointer_pos.x < bounds.x + bounds.w - 14.0f
+            ? Cursor::IBeam
+            : ((in_gutter && d.line_decorator) ? Cursor::Hand : Cursor::Arrow));
+        if (bounds.w > 0.0f && pre_lines > 0u && ui.pointer_pos.y >= origin_y && ui.pointer_pos.y < origin_y + view_h) {
+            uint32_t hit_line = 0u;
+            const double y_doc = double(ui.pointer_pos.y - origin_y) + ws->vscroll_pos_y;
+            if (wrap_w > 0.0f && vc) {
+                hit_line = (y_doc <= 0.0) ? 0u
+                    : ((y_doc >= vc->total_stride_sum) ? (pre_lines - 1u) : editor_vlist_find_first_at_y(vc, y_doc));
+            } else {
+                hit_line = static_cast<uint32_t>(clamp_double(std::floor(y_doc / double(stride)), 0.0, double(pre_lines - 1u)));
+            }
+            hovered_line = static_cast<int32_t>(hit_line);
+            if (in_gutter && ws->pressed_this_frame) {
+                clicked_gutter_line = hovered_line;
+            }
+        }
     }
     if (bounds.w > 0.0f && (ws->pressed_this_frame || (ui.active_id == d.id && ws->pressed_down))) {
         const bool dragging = !ws->pressed_this_frame;
@@ -1157,7 +1181,7 @@ CodeEditorResult code_editor(const CodeEditorDesc& input) noexcept {
         semantic->node.max_value = float(post_lines);
         semantic->node.value_num = float(lc.line + 1u);
     }
-    return { changed, focus, composing, c, a, lc.line, lc.col_byte, first, end, post_lines, focus ? ui.ime_cursor_logical : Rect{} };
+    return { changed, focus, composing, c, a, lc.line, lc.col_byte, first, end, post_lines, focus ? ui.ime_cursor_logical : Rect{}, hovered_line, clicked_gutter_line };
 }
 
 namespace {
@@ -1257,17 +1281,30 @@ void emit_code_editor_command(Context* ctx, const CodeEditorExtra* e, Clay_Bound
     ctx->theme_depth = 1u;
     ctx->theme_overflow = 0u;
 
+    const float tag_w = (d.line_decorator && d.gutter_tag_width_px > 0.0f) ? d.gutter_tag_width_px : 0.0f;
     for (uint32_t i = 0u; i < e->count; ++i) {
         const auto& l = e->lines[i];
         const float y = oy + l.y_rel;
+        CodeLineDecoration dec = {};
+        const bool has_dec = d.line_decorator && d.line_decorator(l.index, &dec, d.line_decorator_user_data);
+        if (has_dec && dec.row_bg.a > 0u) {
+            push_prim(ctx, Prim::make_rect({ ox * dpi, y * dpi, (box.w - e->gutter - d.padding.left - d.padding.right) * dpi, l.height * dpi }, clip.rect, dec.row_bg));
+        }
         if (l.index == e->active_line) {
             push_prim(ctx, Prim::make_rect({ ox * dpi, y * dpi, (box.w - e->gutter - d.padding.left - d.padding.right) * dpi, l.height * dpi }, clip.rect, d.active_line_color));
+        }
+        if (has_dec && dec.gutter_bar_color.a > 0u && e->gutter > 0.0f) {
+            push_prim(ctx, Prim::make_rect({ (box.x + 1.0f) * dpi, y * dpi, 2.0f * dpi, l.height * dpi }, gutter_clip.rect, dec.gutter_bar_color));
         }
         if (d.show_line_numbers) {
             char n[16];
             const int len = std::snprintf(n, sizeof(n), "%u", l.index + 1u);
             const Str ns = { n, static_cast<uint32_t>(len) };
-            glyph(ns, l.index == e->active_line ? d.gutter_active_text_color : d.gutter_text_color, d.font_id, ox - 12.0f - editor_x(ctx, d, ns, ns.length), y, gutter_clip);
+            glyph(ns, l.index == e->active_line ? d.gutter_active_text_color : d.gutter_text_color, d.font_id, ox - tag_w - 12.0f - editor_x(ctx, d, ns, ns.length), y, gutter_clip);
+        }
+        if (has_dec && dec.gutter_tag.chars && dec.gutter_tag.length > 0u && tag_w > 0.0f) {
+            const Color tcol = resolve_theme_color(dec.gutter_tag_color, d.gutter_text_color);
+            glyph(dec.gutter_tag, tcol, d.font_id, ox - 8.0f - editor_x(ctx, d, dec.gutter_tag, dec.gutter_tag.length), y, gutter_clip);
         }
 
         const uint32_t length = l.text.length;

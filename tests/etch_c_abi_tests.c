@@ -63,6 +63,18 @@ static float c_custom_row_height(uint32_t index, void* user_data) {
     return 20.0f + (float)(index % 3u) * 4.0f;
 }
 
+static bool c_line_decorator(uint32_t line_index, EtchCodeLineDecoration* out_dec, void* user_data) {
+    uint32_t* calls = (uint32_t*)user_data;
+    if (calls) ++(*calls);
+    if (line_index == 0u && out_dec) {
+        out_dec->row_bg = (EtchColor){ 60u, 180u, 80u, 24u };
+        out_dec->gutter_bar_color = (EtchColor){ 63u, 185u, 80u, 255u };
+        out_dec->gutter_tag = ETCH_STR_LIT("a91f");
+        return true;
+    }
+    return false;
+}
+
 #if defined(ETCH_CMAKE_VERSION_MAJOR)
 #if ETCH_VERSION_MAJOR != ETCH_CMAKE_VERSION_MAJOR || \
     ETCH_VERSION_MINOR != ETCH_CMAKE_VERSION_MINOR || \
@@ -327,18 +339,24 @@ static bool test_text_buffer_and_code_editor(EtchContext* ctx) {
     const EtchCodeEditorResult r1 = etch_code_editor(&ed1);
 
     EtchCodeEditorDesc ed2 = etch_code_editor_desc_default();
+    uint32_t c_dec_calls = 0u;
     ed2.id = etch_id("c_ed_custom");
     ed2.buffer = tb;
     ed2.width = etch_sizing_fixed(600.0f);
     ed2.height = etch_sizing_fixed(180.0f);
     ed2.tokenizer = c_custom_tokenizer;
     ed2.tokenizer_user_data = &custom_tok;
+    ed2.line_decorator = c_line_decorator;
+    ed2.line_decorator_user_data = &c_dec_calls;
+    ed2.gutter_tag_width_px = 36.0f;
     const EtchCodeEditorResult r2 = etch_code_editor(&ed2);
 
     etch_end_box();
     etch_end_frame(ctx);
 
-    ok = ok && (r1.total_lines == 3u) && (r2.total_lines == 3u) && (custom_tok.calls > 0u);
+    const EtchClipboardImageData cimg = etch_get_clipboard_image(NULL);
+    ok = ok && (r1.total_lines == 3u) && (r2.total_lines == 3u) && (custom_tok.calls > 0u) && (c_dec_calls > 0u) &&
+         (cimg.bytes == NULL) && (cimg.size_bytes == 0u);
     etch_destroy_text_buffer(tb);
     return ok;
 }
@@ -369,8 +387,11 @@ static bool test_containers_and_canvas(EtchContext* ctx) {
         vld.variable_height = true;
         vld.measure_height_fn = c_custom_row_height;
         vld.measure_user_data = &mstate;
+        vld.stick_to_bottom = false;
         slice = etch_begin_virtual_list(&vld);
         etch_end_virtual_list();
+        etch_virtual_list_scroll_to_bottom(vlist_id, true);
+        (void)etch_virtual_list_is_at_bottom(vlist_id);
 
         EtchTableColumnDesc cols[2];
         cols[0] = etch_table_column_desc_default();

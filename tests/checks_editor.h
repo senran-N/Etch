@@ -175,5 +175,85 @@ static bool verify_editor_checks(etch::Context* restore) noexcept {
     step(0,0,{-1,-1},false,1,true);check(text_buffer_byte_length(&b)==22,__LINE__);
     clear_text_selection(eid);request_focus(0);for(uint32_t i=0;i<120;++i)step();
     const auto stats=frame_stats(test);check(stats.draw_call_count<=3 && stats.idle_sleeping,__LINE__);
+
+    // v0.23.0: ghost_text Tab acceptance without losing focus, code_editor line_decorator + gutter click,
+    // sticky-bottom VirtualList, and headless clipboard image probe.
+    {
+        char gbuf[64] = "bun test";
+        const uint32_t gid = id("v23_ghost_input");
+        const uint32_t other_id = id("v23_other_input");
+        char obuf[16] = "";
+        TextInputResult gres = {};
+        const auto gstep = [&](uint32_t key = 0u) noexcept {
+            begin_frame(test, {.viewport_w = 800, .viewport_h = 500, .key_pressed_code = key});
+            begin_box({.axis = Axis::Col, .width = Sizing::fixed(800), .height = Sizing::fixed(500)});
+            gres = text_input({.id = gid, .buffer = gbuf, .capacity = sizeof(gbuf),
+                .ghost_text = str_lit(" --bail"), .accept_ghost_on_tab = true});
+            text_input({.id = other_id, .buffer = obuf, .capacity = sizeof(obuf)});
+            end_box();
+            end_frame(test);
+        };
+        gstep(); request_focus(gid); gstep();
+        check(gres.focused && !gres.ghost_accepted, __LINE__);
+        gstep(SDLK_TAB);
+        check(gres.focused && gres.ghost_accepted, __LINE__);
+
+        uint32_t dec_calls = 0u;
+        const auto dec_fn = [](uint32_t line, CodeLineDecoration* out, void* ud) noexcept -> bool {
+            ++(*static_cast<uint32_t*>(ud));
+            if (line == 0u) {
+                out->row_bg = Color::rgba8(60, 180, 80, 24);
+                out->gutter_bar_color = Color::rgb_hex(0x3FB950);
+                out->gutter_tag = str_lit("70a2");
+                return true;
+            }
+            return false;
+        };
+        const uint32_t deid = id("v23_diff_ed");
+        CodeEditorResult dres = {};
+        const auto dstep = [&](Vec2 ptr, bool down) noexcept {
+            begin_frame(test, {.viewport_w = 800, .viewport_h = 500, .pointer_pos = ptr, .pointer_down = down});
+            begin_box({.width = Sizing::fixed(800), .height = Sizing::fixed(500)});
+            dres = code_editor({.id = deid, .buffer = &b, .width = Sizing::fixed(700), .height = Sizing::fixed(240),
+                .line_decorator = dec_fn, .line_decorator_user_data = &dec_calls, .gutter_tag_width_px = 40.0f});
+            end_box();
+            end_frame(test);
+        };
+        dstep({-1.0f, -1.0f}, false);
+        dstep({20.0f, 16.0f}, true);
+        check(dec_calls > 0u && dres.hovered_line == 0 && dres.clicked_gutter_line == 0, __LINE__);
+        dstep({20.0f, 16.0f}, false);
+
+        const uint32_t slid = id("v23_sticky_list");
+        VirtualListSlice sl = {};
+        const auto sstep = [&](uint32_t n, Vec2 wheel = {}) noexcept {
+            begin_frame(test, {.viewport_w = 800, .viewport_h = 500, .pointer_pos = {100.0f, 80.0f}, .scroll_delta = wheel});
+            begin_box({.width = Sizing::fixed(800), .height = Sizing::fixed(500)});
+            sl = begin_virtual_list({.id = slid, .item_count = n, .item_height_px = 30.0f,
+                .width = Sizing::fixed(400), .height = Sizing::fixed(150), .stick_to_bottom = true});
+            for (uint32_t i = sl.first_index; i < sl.end_index; ++i) {
+                box({.width = Sizing::grow(), .height = Sizing::fixed(30.0f)});
+            }
+            end_virtual_list();
+            end_box();
+            end_frame(test);
+        };
+        sstep(20u); sstep(20u);
+        check(sl.at_bottom && virtual_list_is_at_bottom(slid) && sl.scroll_y >= sl.max_scroll_y - 1.0, __LINE__);
+        sstep(40u);
+        check(sl.at_bottom && sl.scroll_y >= sl.max_scroll_y - 1.0, __LINE__);
+        sstep(40u, {0.0f, 2.0f});
+        check(!sl.at_bottom && !virtual_list_is_at_bottom(slid), __LINE__);
+        const double detached_y = sl.scroll_y;
+        sstep(50u);
+        check(!sl.at_bottom && std::fabs(sl.scroll_y - detached_y) < 1.0, __LINE__);
+        virtual_list_scroll_to_bottom(slid);
+        sstep(50u);
+        check(sl.at_bottom && virtual_list_is_at_bottom(slid) && sl.scroll_y >= sl.max_scroll_y - 1.0, __LINE__);
+
+        const ClipboardImageData img = get_clipboard_image();
+        check(img.bytes == nullptr && img.size_bytes == 0u, __LINE__);
+    }
+
     destroy_context(test);set_current_context(restore);free_text_buffer(&b);return ok;
 }

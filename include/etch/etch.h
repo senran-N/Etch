@@ -12,8 +12,8 @@
 #include <type_traits>
 
 #define ETCH_VERSION_MAJOR 0
-#define ETCH_VERSION_MINOR 22
-#define ETCH_VERSION_PATCH 1
+#define ETCH_VERSION_MINOR 23
+#define ETCH_VERSION_PATCH 0
 #define ETCH_VERSION_STR_DETAIL(x) #x
 #define ETCH_VERSION_STR(x) ETCH_VERSION_STR_DETAIL(x)
 #define ETCH_VERSION_STRING ETCH_VERSION_STR(ETCH_VERSION_MAJOR) "." ETCH_VERSION_STR(ETCH_VERSION_MINOR) "." ETCH_VERSION_STR(ETCH_VERSION_PATCH)
@@ -1712,6 +1712,13 @@ struct SyntaxToken {
 };
 using SyntaxTokenizeFn = uint32_t (*)(uint32_t, Str, SyntaxToken*, uint32_t, void*) noexcept;
 uint32_t tokenize_cpp_hlsl(uint32_t, Str, SyntaxToken*, uint32_t, void*) noexcept;
+struct CodeLineDecoration {
+    Color row_bg = {};
+    Color gutter_bar_color = {};
+    Str gutter_tag = {};
+    Color gutter_tag_color = Color::theme_auto();
+};
+using CodeLineDecorateFn = bool (*)(uint32_t line_index, CodeLineDecoration* out_dec, void* user_data) noexcept;
 struct CodeEditorDesc {
     uint32_t id = 0; TextBuffer* buffer = nullptr;
     Sizing width = Sizing::grow(); Sizing height = Sizing::grow();
@@ -1728,12 +1735,16 @@ struct CodeEditorDesc {
     Color focus_border_color = Color::theme_auto();
     float border_width = 1, focus_border_width = 1.5f; Corners radius = Corners::theme_auto();
     float scroll_fade_px = 0;
+    CodeLineDecorateFn line_decorator = nullptr;
+    void* line_decorator_user_data = nullptr;
+    float gutter_tag_width_px = 0;
 };
 struct CodeEditorResult {
     bool changed = false, focused = false, composing = false;
     uint32_t cursor_byte = 0, selection_anchor_byte = 0, cursor_line = 0, cursor_col_byte = 0;
     uint32_t first_visible_line = 0, end_visible_line = 0, total_lines = 0;
     Rect ime_cursor_rect = {};
+    int32_t hovered_line = -1, clicked_gutter_line = -1;
 };
 CodeEditorResult code_editor(const CodeEditorDesc&) noexcept;
 void code_editor_set_cursor(uint32_t, uint32_t anchor_byte, uint32_t cursor_byte, bool scroll_into_view = true) noexcept;
@@ -1779,6 +1790,9 @@ struct TextInputDesc {
     bool escape_blurs = true;
     bool suppress_popup_keys = false;
     std::span<const TextInputHighlight> highlights = {};
+    Str ghost_text = {};
+    Color ghost_color = Color::theme_auto();
+    bool accept_ghost_on_tab = false;
 };
 
 struct TextInputResult {
@@ -1790,6 +1804,7 @@ struct TextInputResult {
     uint32_t cursor_byte = 0;
     uint32_t selection_anchor_byte = 0;
     Rect ime_cursor_rect = {};
+    bool ghost_accepted = false;
 };
 
 // Standard desktop controls. Mutable values remain caller-owned.
@@ -1932,6 +1947,7 @@ struct VirtualListDesc {
     void* measure_user_data = nullptr;
     bool variable_height = false;
     float scroll_fade_px = 0;
+    bool stick_to_bottom = false;
 };
 
 struct VirtualListSlice {
@@ -1941,6 +1957,7 @@ struct VirtualListSlice {
     double scroll_y = 0.0;
     double max_scroll_y = 0.0;
     float viewport_height = 0.0f;
+    bool at_bottom = false;
 };
 
 
@@ -2393,8 +2410,14 @@ void clear_text_selection(uint32_t element_id = 0) noexcept;
 Rect ime_cursor_rect(const Context* ctx = nullptr) noexcept;
 void request_text_input(uint32_t element_id, Rect ime_cursor_rect = {}) noexcept;
 Str typed_text(uint32_t element_id = 0) noexcept;
+struct ClipboardImageData {
+    const uint8_t* bytes = nullptr;
+    uint32_t size_bytes = 0;
+    Str mime_type = {};
+};
 bool set_clipboard_text(const char* utf8_text) noexcept;
 Str get_clipboard_text(Arena* arena = nullptr) noexcept;
+ClipboardImageData get_clipboard_image(Arena* arena = nullptr) noexcept;
 
 // Interaction, pointer capture, focus navigation, cursor & layout queries
 bool hovered(uint32_t element_id) noexcept;
@@ -2485,6 +2508,8 @@ void virtual_list_scroll_to_row(
     uint32_t row_index,
     float item_height_px,
     AlignY align = AlignY::Top) noexcept;
+bool virtual_list_is_at_bottom(uint32_t list_id) noexcept;
+void virtual_list_scroll_to_bottom(uint32_t list_id, bool stop_momentum = true) noexcept;
 
 // Infinite 2D Canvas & Node-Graph Wires
 CanvasState begin_canvas(const CanvasDesc& desc) noexcept;

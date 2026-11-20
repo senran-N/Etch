@@ -1969,6 +1969,20 @@ void emit_text_input_command(
         caret_vy = cpos.y;
     }
 
+    // 2b. Emit inline predictive ghost text after caret (never mutates caller buffer)
+    if (!composing && is_focused && !desc.read_only && !desc.password &&
+        desc.ghost_text.chars && desc.ghost_text.length > 0u &&
+        c_byte == len && c_byte == a_byte && desc.ghost_color.a > 0u)
+    {
+        float gpx = caret_vx;
+        float gpy = caret_vy;
+        emit_utf8_glyph_run(
+            ctx, desc.font_id, desc.ghost_text.chars, desc.ghost_text.length,
+            base_px, desc.letter_spacing, ascender_px, geom.line_adv,
+            desc.ghost_color, geom.origin_x, geom.origin_y, scroll_x, scroll_y,
+            inner_clip, dpi, desc.multiline, false, &gpx, &gpy);
+    }
+
     if(desc.multiline && ws) {
         const ScrollbarGeom sb=compute_vscrollbar_geom(ws);
         if(sb.visible) {

@@ -220,8 +220,30 @@ uint32_t c_syntax_tokenizer_trampoline(
     return n;
 }
 
+struct CCodeLineDecorateThunk {
+    EtchCodeLineDecorateFn fn;
+    void* user_data;
+};
+
+bool c_code_line_decorate_trampoline(
+    uint32_t line_index,
+    etch::CodeLineDecoration* out_dec,
+    void* user_data) noexcept
+{
+    const auto* thunk = static_cast<const CCodeLineDecorateThunk*>(user_data);
+    if (!thunk || !thunk->fn || !out_dec) return false;
+    EtchCodeLineDecoration c_dec = {};
+    c_dec.gutter_tag_color = from_cpp(etch::Color::theme_auto());
+    if (!thunk->fn(line_index, &c_dec, thunk->user_data)) return false;
+    out_dec->row_bg = to_cpp(c_dec.row_bg);
+    out_dec->gutter_bar_color = to_cpp(c_dec.gutter_bar_color);
+    out_dec->gutter_tag = to_cpp(c_dec.gutter_tag);
+    out_dec->gutter_tag_color = to_cpp(c_dec.gutter_tag_color);
+    return true;
+}
+
 inline EtchVirtualListSlice from_cpp(const etch::VirtualListSlice& s) noexcept {
-    return {s.first_index, s.end_index, s.total_count, s.scroll_y, s.max_scroll_y, s.viewport_height};
+    return {s.first_index, s.end_index, s.total_count, s.scroll_y, s.max_scroll_y, s.viewport_height, s.at_bottom};
 }
 
 inline EtchCanvasState from_cpp(const etch::CanvasState& s) noexcept {
@@ -408,7 +430,7 @@ EtchCodeEditorDesc etch_code_editor_desc_default(void) {
             from_cpp(d.gutter_text_color), from_cpp(d.gutter_active_text_color),
             from_cpp(d.caret_color), from_cpp(d.composition_color), from_cpp(d.border_color),
             from_cpp(d.focus_border_color), d.border_width, d.focus_border_width,
-            from_cpp(d.radius),d.scroll_fade_px};
+            from_cpp(d.radius), d.scroll_fade_px, nullptr, nullptr, d.gutter_tag_width_px};
 }
 
 EtchTextInputHighlight etch_text_input_highlight_default(void) {
@@ -425,7 +447,8 @@ EtchTextInputDesc etch_text_input_desc_default(void) {
             from_cpp(d.selection_color), from_cpp(d.caret_color), from_cpp(d.composition_color),
             from_cpp(d.background), from_cpp(d.border_color), from_cpp(d.focus_border_color),
             d.border_width, d.focus_border_width, from_cpp(d.radius), d.multiline, d.word_wrap,
-            d.read_only, d.password, d.context_menu, d.clear_button, d.escape_blurs, d.suppress_popup_keys, nullptr, 0u};
+            d.read_only, d.password, d.context_menu, d.clear_button, d.escape_blurs, d.suppress_popup_keys, nullptr, 0u,
+            from_cpp(d.ghost_text), from_cpp(d.ghost_color), d.accept_ghost_on_tab};
 }
 
 EtchButtonDesc etch_button_desc_default(void) {
@@ -535,7 +558,7 @@ EtchVirtualListDesc etch_virtual_list_desc_default(void) {
     return {d.id, d.item_count, d.item_height_px, d.row_gap_px, d.overscan_rows,
             from_cpp(d.width), from_cpp(d.height), from_cpp(d.padding), from_cpp(d.background),
             from_cpp(d.border_color), d.border_width, from_cpp(d.radius), d.show_scrollbar,
-            nullptr, d.measure_user_data, d.variable_height,d.scroll_fade_px};
+            nullptr, d.measure_user_data, d.variable_height, d.scroll_fade_px, d.stick_to_bottom};
 }
 
 EtchDockPaneDesc etch_dock_pane_desc_default(void) {
@@ -1091,6 +1114,7 @@ EtchTextInputResult etch_text_input(const EtchTextInputDesc* desc) {
         to_cpp(desc->background), to_cpp(desc->border_color), to_cpp(desc->focus_border_color),
         desc->border_width, desc->focus_border_width, to_cpp(desc->radius), desc->multiline,
         desc->word_wrap, desc->read_only, desc->password, desc->context_menu, desc->clear_button, desc->escape_blurs, desc->suppress_popup_keys,
+        {}, to_cpp(desc->ghost_text), to_cpp(desc->ghost_color), desc->accept_ghost_on_tab,
     }, desc->highlights, desc->highlights ? desc->highlight_count : 0u,
         [](const void* ranges, size_t i) noexcept {
             const auto& h = static_cast<const EtchTextInputHighlight*>(ranges)[i];
@@ -1098,7 +1122,7 @@ EtchTextInputResult etch_text_input(const EtchTextInputDesc* desc) {
                                             to_cpp(h.background), to_cpp(h.border_color), h.radius_px};
         });
     return {r.changed, r.submitted, r.focused, r.composing, r.byte_length,
-            r.cursor_byte, r.selection_anchor_byte, from_cpp(r.ime_cursor_rect)};
+            r.cursor_byte, r.selection_anchor_byte, from_cpp(r.ime_cursor_rect), r.ghost_accepted};
 }
 void etch_set_text_selection(uint32_t element_id, uint32_t anchor_byte, uint32_t cursor_byte) {
     etch::set_text_selection(element_id, anchor_byte, cursor_byte);
@@ -1122,6 +1146,16 @@ EtchStr etch_get_clipboard_text(EtchArena* arena) {
     const etch::Str out = etch::get_clipboard_text(&a);
     sync_c_arena(arena, a);
     return from_cpp(out);
+}
+EtchClipboardImageData etch_get_clipboard_image(EtchArena* arena) {
+    if (!arena) {
+        const etch::ClipboardImageData d = etch::get_clipboard_image(nullptr);
+        return {d.bytes, d.size_bytes, from_cpp(d.mime_type)};
+    }
+    etch::Arena a = to_cpp_arena(arena);
+    const etch::ClipboardImageData d = etch::get_clipboard_image(&a);
+    sync_c_arena(arena, a);
+    return {d.bytes, d.size_bytes, from_cpp(d.mime_type)};
 }
 
 EtchTextBuffer* etch_create_text_buffer(EtchStr initial_utf8, uint32_t initial_cap) {
@@ -1203,6 +1237,18 @@ EtchCodeEditorResult etch_code_editor(const EtchCodeEditorDesc* desc) {
             tok_ud = thunk;
         }
     }
+    etch::CodeLineDecorateFn dec_fn = nullptr;
+    void* dec_ud = nullptr;
+    if (desc->line_decorator) {
+        etch::Context* ctx = etch::current_context();
+        CCodeLineDecorateThunk* dthunk = (ctx && ctx->in_frame) ? ctx->frame_arena.alloc<CCodeLineDecorateThunk>() : nullptr;
+        if (dthunk) {
+            dthunk->fn = desc->line_decorator;
+            dthunk->user_data = desc->line_decorator_user_data;
+            dec_fn = c_code_line_decorate_trampoline;
+            dec_ud = dthunk;
+        }
+    }
     const etch::CodeEditorResult r = etch::code_editor({
         desc->id, to_tb(desc->buffer), to_cpp(desc->width), to_cpp(desc->height),
         to_cpp(desc->padding), desc->font_size_px, desc->font_id, desc->line_height_px,
@@ -1213,10 +1259,10 @@ EtchCodeEditorResult etch_code_editor(const EtchCodeEditorDesc* desc) {
         to_cpp(desc->gutter_active_text_color), to_cpp(desc->caret_color),
         to_cpp(desc->composition_color), to_cpp(desc->border_color),
         to_cpp(desc->focus_border_color), desc->border_width, desc->focus_border_width,
-        to_cpp(desc->radius),desc->scroll_fade_px});
+        to_cpp(desc->radius), desc->scroll_fade_px, dec_fn, dec_ud, desc->gutter_tag_width_px});
     return {r.changed, r.focused, r.composing, r.cursor_byte, r.selection_anchor_byte,
             r.cursor_line, r.cursor_col_byte, r.first_visible_line, r.end_visible_line,
-            r.total_lines, from_cpp(r.ime_cursor_rect)};
+            r.total_lines, from_cpp(r.ime_cursor_rect), r.hovered_line, r.clicked_gutter_line};
 }
 void etch_code_editor_set_cursor(uint32_t element_id, uint32_t anchor_byte, uint32_t cursor_byte, bool scroll_into_view) {
     etch::code_editor_set_cursor(element_id, anchor_byte, cursor_byte, scroll_into_view);
@@ -1453,7 +1499,7 @@ EtchVirtualListSlice etch_begin_virtual_list(const EtchVirtualListDesc* desc) {
         desc->id, desc->item_count, desc->item_height_px, desc->row_gap_px, desc->overscan_rows,
         to_cpp(desc->width), to_cpp(desc->height), to_cpp(desc->padding), to_cpp(desc->background),
         to_cpp(desc->border_color), desc->border_width, to_cpp(desc->radius), desc->show_scrollbar,
-        nullptr, desc->measure_user_data, desc->variable_height,desc->scroll_fade_px};
+        nullptr, desc->measure_user_data, desc->variable_height, desc->scroll_fade_px, desc->stick_to_bottom};
     return from_cpp(etch::begin_virtual_list_with_c_measure(cpp_desc, desc->measure_height_fn));
 }
 void etch_end_virtual_list(void) { etch::end_virtual_list(); }
@@ -1464,6 +1510,8 @@ void etch_set_virtual_list_scroll_offset(uint32_t list_id, double offset_y, bool
 void etch_virtual_list_scroll_to_row(uint32_t list_id, uint32_t row_index, float item_height_px, EtchAlignY align) {
     etch::virtual_list_scroll_to_row(list_id, row_index, item_height_px, static_cast<etch::AlignY>(align));
 }
+bool etch_virtual_list_is_at_bottom(uint32_t list_id) { return etch::virtual_list_is_at_bottom(list_id); }
+void etch_virtual_list_scroll_to_bottom(uint32_t list_id, bool stop_momentum) { etch::virtual_list_scroll_to_bottom(list_id, stop_momentum); }
 
 bool etch_dock_space_initialized(uint32_t dock_id) { return etch::dock_space_initialized(dock_id); }
 uint32_t etch_dock_reset_root(uint32_t dock_id) { return etch::dock_reset_root(dock_id); }
