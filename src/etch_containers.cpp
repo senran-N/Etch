@@ -399,7 +399,9 @@ void update_vlist_height(Context* ctx, VarVirtualListCache* c, uint32_t row, flo
     double delta = double(h)-old; c->chunks[row/256][row%256] = h; fenwick_add(c,row/256,delta);
     if (ws) {
         ws->vscroll_total_h += measured_delta+delta; ws->vscroll_max_y = ws->vscroll_total_h > ws->viewport_dim.y ? ws->vscroll_total_h-ws->viewport_dim.y : 0;
-        if (row < c->last_anchor_row && ws->vscroll_pos_y > 0.0 && c->last_anchor_row < c->item_count)
+        if (ws->vlist_stick_initialized && ws->vlist_stuck_bottom)
+            ws->vscroll_pos_y = ws->vscroll_max_y;
+        else if (row < c->last_anchor_row && ws->vscroll_pos_y > 0.0 && c->last_anchor_row < c->item_count)
             ws->vscroll_pos_y = clamp_double(ws->vscroll_pos_y + (vlist_current_row_top(c, c->last_anchor_row) - anchor_before), 0.0, ws->vscroll_max_y);
     }
 }
@@ -407,7 +409,9 @@ void sync_vlist_scroll_bounds(Context* ctx, VarVirtualListCache* c, double previ
     if (auto* ws = state_map_find(&ctx->active_ui->states, c->list_id)) {
         ws->vscroll_total_h += c->total_stride_sum - previous_total;
         ws->vscroll_max_y = std::fmax(ws->vscroll_total_h - ws->viewport_dim.y, 0.0);
-        ws->vscroll_pos_y = clamp_double(ws->vscroll_pos_y, 0.0, ws->vscroll_max_y);
+        ws->vscroll_pos_y = (ws->vlist_stick_initialized && ws->vlist_stuck_bottom)
+            ? ws->vscroll_max_y
+            : clamp_double(ws->vscroll_pos_y, 0.0, ws->vscroll_max_y);
     }
 }
 void apply_vlist_scroll_to_row(
@@ -517,6 +521,9 @@ void virtual_list_invalidate_heights(uint32_t id) noexcept {
         if (auto* ws = state_map_find(&ctx->active_ui->states,id)) {
             ws->vscroll_total_h += c->total_stride_sum-previous_total;
             ws->vscroll_max_y = std::fmax(ws->vscroll_total_h-ws->viewport_dim.y,0.0);
+            if (ws->vlist_stick_initialized && ws->vlist_stuck_bottom) {
+                ws->vscroll_pos_y = ws->vscroll_max_y;
+            }
         }
         request_redraw(ctx); return;
     }
