@@ -618,9 +618,11 @@ void etch_clay_error_handler(Clay_ErrorData error) noexcept {
 }
 
 // Preserve subpixel primitives when rounding would collapse either dimension.
+// For thin hairlines/dividers (<= 2.5px), snap thickness independently so 1px borders stay uniform across fractional DPI.
 Rect snap_pixel_rect(Rect r) noexcept {
     const float x = std::round(r.x), y = std::round(r.y);
-    const float w = std::round(r.x + r.w) - x, h = std::round(r.y + r.h) - y;
+    const float w = (r.w > 0.0f && r.w <= 2.5f) ? std::fmax(1.0f, std::round(r.w)) : (std::round(r.x + r.w) - x);
+    const float h = (r.h > 0.0f && r.h <= 2.5f) ? std::fmax(1.0f, std::round(r.h)) : (std::round(r.y + r.h) - y);
     return w > 0 && h > 0 ? Rect{x, y, w, h} : r;
 }
 
@@ -1403,6 +1405,11 @@ void emit_slug_outline_quad(
     if (!ge.has_outline) {
         return;
     }
+    const bool snap_glyph = ctx->active_ui->pixel_snap &&
+        !(ctx->active_render_layer && ctx->active_render_layer->resolved_animating);
+    if (snap_glyph) {
+        baseline_y_px = std::round(baseline_y_px);
+    }
     const float scale_px = ctx->atlas.slots[slot_idx].scale_1px * phys_px;
     const float box_x = pen_x_px + (x_offset_em + ge.min_x_em) * scale_px;
     const float box_y = baseline_y_px - (y_offset_em + ge.max_y_em) * scale_px;
@@ -1701,7 +1708,10 @@ void emit_rich_text_command(
     const float top_lead = (content_h > 0.0f) ? (0.5f * (cmd->boundingBox.height - content_h)) : 0.0f;
     const float line_top_px = cmd->boundingBox.y * dpi;
     const float line_bot_px = (cmd->boundingBox.y + cmd->boundingBox.height) * dpi;
-    const float baseline_y_px = (cmd->boundingBox.y + top_lead + rich->max_ascent_px) * dpi;
+    const bool snap_text = ctx->active_ui->pixel_snap &&
+        !(ctx->active_render_layer && ctx->active_render_layer->resolved_animating);
+    const float raw_baseline_y = (cmd->boundingBox.y + top_lead + rich->max_ascent_px) * dpi;
+    const float baseline_y_px = snap_text ? std::round(raw_baseline_y) : raw_baseline_y;
 
     struct RichLineSeg {
         const RichSpanInternal* sp = nullptr;
@@ -1910,15 +1920,15 @@ void emit_rich_text_command(
         const float sp_desc_px = (slot_idx != kInvalidFont)
             ? (std::abs(ctx->atlas.slots[slot_idx].descent_em) * sp->font_size_px * dpi)
             : (sp->font_size_px * 0.2f * dpi);
-        const float pad_y_px = 1.5f * dpi;
+        const float pad_y_px = 0.5f * dpi;
         float top_px = baseline_y_px - sp_asc_px - pad_y_px;
         float bot_px = baseline_y_px + sp_desc_px + pad_y_px;
         if (top_px < line_top_px) top_px = line_top_px;
         if (bot_px > line_bot_px) bot_px = line_bot_px;
         if (sg.has_left_edge && sp->icon_size > 0.0f) {
-            const float center_y = (line_top_px + line_bot_px) * 0.5f;
-            top_px = std::fmin(top_px, center_y - sp->icon_size * dpi * 0.5f);
-            bot_px = std::fmax(bot_px, center_y + sp->icon_size * dpi * 0.5f);
+            const float center_y = baseline_y_px - 0.36f * (sp->font_size_px * dpi);
+            top_px = std::fmin(top_px, center_y - sp->icon_size * dpi * 0.5f - pad_y_px);
+            bot_px = std::fmax(bot_px, center_y + sp->icon_size * dpi * 0.5f + pad_y_px);
         }
         top_px -= sp->padding_y * dpi;
         bot_px += sp->padding_y * dpi;
@@ -1977,7 +1987,8 @@ void emit_rich_text_command(
         if (ch.glyphs.empty()) {
             const float size = sp->icon_size * dpi;
             if (td.truncated && (elided || gx + size > text_limit_px + 0.01f)) break;
-            emit_vector_icon_quad(ctx, sp->icon_id, {gx, (line_top_px + line_bot_px - size) * 0.5f, size, size},
+            const float icon_y = baseline_y_px - 0.36f * phys_px - size * 0.5f;
+            emit_vector_icon_quad(ctx, sp->icon_id, {gx, icon_y, size, size},
                                   sp->icon_color, effective_clip);
             visible_end_px = gx + size;
             ellipsis_span = sp;
@@ -2094,7 +2105,9 @@ void emit_text_command(
     const float phys_px = logical_font_px * dpi;
     const float ascender_px = primary.ascent_em * phys_px;
     const float line_top_px = cmd->boundingBox.y * dpi;
-    const float baseline_y = line_top_px + ascender_px;
+    const bool snap_text = ctx->active_ui->pixel_snap &&
+        !(ctx->active_render_layer && ctx->active_render_layer->resolved_animating);
+    const float baseline_y = snap_text ? std::round(line_top_px + ascender_px) : (line_top_px + ascender_px);
     const float letter_spacing_px = static_cast<float>(td.letterSpacing) * dpi;
 
     const Color tint = Color::rgba8(
@@ -2113,7 +2126,7 @@ void emit_text_command(
         emit_elided_line(ctx,chars,static_cast<uint32_t>(len),primary_slot,logical_font_px,static_cast<float>(td.letterSpacing),
             cmd->boundingBox.x,baseline_y/dpi,width,local_clip,tint,dpi);return;
     }
-    float pen_x = cmd->boundingBox.x * dpi;
+    float pen_x = snap_text ? std::round(cmd->boundingBox.x * dpi) : (cmd->boundingBox.x * dpi);
     const uint32_t ulen = static_cast<uint32_t>(len);
     uint32_t pos = 0u;
     while (pos < ulen) {

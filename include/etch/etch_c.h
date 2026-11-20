@@ -1324,6 +1324,7 @@ typedef struct EtchTextInputDesc {
     EtchStr ghost_text;
     EtchColor ghost_color;
     bool accept_ghost_on_tab;
+    bool submit_on_enter;
 } EtchTextInputDesc;
 
 typedef struct EtchTextInputResult {
@@ -1900,6 +1901,10 @@ typedef struct EtchSheetDesc {
     float corner_radius_px;
     float inset_px;
     float backdrop_blur;
+    float top_inset_px;
+    EtchColor shadow_color;
+    float shadow_blur;
+    EtchVec2 shadow_offset;
 } EtchSheetDesc;
 EtchTerminalGridDesc etch_terminal_grid_desc_default(void);
 EtchTerminalCell etch_terminal_cell_default(void);

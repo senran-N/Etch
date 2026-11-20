@@ -22,12 +22,13 @@ void emit_vector_icon_quad(
     const float s = (sx < sy) ? sx : sy;
     const float w = ic.view_size.x * s;
     const float h = ic.view_size.y * s;
-    const Rect quad = {
-        .x = target_px.x + 0.5f * (target_px.w - w),
-        .y = target_px.y + 0.5f * (target_px.h - h),
-        .w = w,
-        .h = h,
-    };
+    const bool snap_icon = angle_rad == 0.0f && ctx->active_ui->pixel_snap &&
+        !(ctx->active_render_layer && ctx->active_render_layer->resolved_animating);
+    const float qx = target_px.x + 0.5f * (target_px.w - w);
+    const float qy = target_px.y + 0.5f * (target_px.h - h);
+    const Rect quad = snap_icon
+        ? Rect{ std::round(qx), std::round(qy), std::fmax(1.0f, std::round(w)), std::fmax(1.0f, std::round(h)) }
+        : Rect{ qx, qy, w, h };
     push_prim(
         ctx,
         Prim::make_slug_glyph(
@@ -3715,7 +3716,7 @@ static TextInputResult text_input_impl(const TextInputDesc& desc_in, const void*
                     if (desc.suppress_popup_keys) {
                         break;
                     }
-                    if (desc.multiline && !primary) {
+                    if (desc.multiline && (desc.submit_on_enter ? (shift || alt) : !primary)) {
                         if (writable) {
                             const uint32_t prev_len = len;
                             const uint32_t new_pos = insert_utf8_filtered(

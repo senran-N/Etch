@@ -399,7 +399,12 @@ void ensure_weighted_loaded(FontAtlas* atlas, uint16_t slot) noexcept {
     const uint8_t bit = static_cast<uint8_t>(1u << (slot - kFontMedium));
     if (atlas->slots[slot].loaded || (atlas->weighted_probed & bit)) return;
     atlas->weighted_probed |= bit;
-    const char* medium[] = {"Inter-Medium.ttf", "Roboto-Medium.ttf", "NotoSans-Medium.ttf"};
+    const char* medium[] = {
+        "Inter-Medium.ttf", "Roboto-Medium.ttf", "NotoSans-Medium.ttf",
+#if defined(_WIN32)
+        "seguisb.ttf",
+#endif
+    };
     const char* semibold[] = {"seguisb.ttf", "Inter-SemiBold.ttf", "NotoSans-SemiBold.ttf"};
     const char* italic[] = {
 #if defined(_WIN32)
@@ -412,7 +417,7 @@ void ensure_weighted_loaded(FontAtlas* atlas, uint16_t slot) noexcept {
     };
     const std::span<const char* const> candidates = slot == kFontItalic
         ? std::span<const char* const>(italic)
-        : std::span<const char* const>(slot == kFontMedium ? medium : semibold, 3);
+        : (slot == kFontMedium ? std::span<const char* const>(medium) : std::span<const char* const>(semibold));
     for (const char* path : candidates)
         if (try_load_system_font(atlas, slot, path)) break;
     rebuild_fallback_order(atlas);

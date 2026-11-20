@@ -765,7 +765,23 @@ float4 ps_main(VSOut input) : SV_Target0
         float2 render_coord = float2(
             (p_local.x + half_size.x) / size.x,
             1.0f - (p_local.y + half_size.y) / size.y);
-        float cov = slug_render(render_coord, size, input.slug_meta.x, input.slug_meta.y);
+        static const float2 kRgss[4] = {
+            float2(-0.125f, -0.375f),
+            float2( 0.375f, -0.125f),
+            float2( 0.125f,  0.375f),
+            float2(-0.375f,  0.125f),
+        };
+        const bool ssaa = min(size.x, size.y) < 42.0f;
+        const uint taps = ssaa ? 4u : 1u;
+        const float2 inv_sz = 1.0f / size;
+        const float2 ppu = ssaa ? (size * 4.0f) : size;
+        float cov = 0.0f;
+        [loop] for (uint s = 0u; s < taps; ++s)
+        {
+            float2 tc = ssaa ? (render_coord + kRgss[s] * inv_sz) : render_coord;
+            cov += slug_render(tc, ppu, input.slug_meta.x, input.slug_meta.y);
+        }
+        cov *= ssaa ? 0.25f : 1.0f;
         if (any(input.rotation != float2(1.0f, 0.0f)))
             cov *= saturate(0.5f - max(abs(p_local.x)-half_size.x, abs(p_local.y)-half_size.y));
         float4 glyph_col = input.color0;
@@ -778,15 +794,36 @@ float4 ps_main(VSOut input) : SV_Target0
         }
         if ((flags & ETCH_FLAG_STEM_DARKEN) != 0u)
         {
-            float darken_t = saturate((28.0f - size.y) / 16.0f);
-            float luma = saturate(dot(glyph_col.rgb, float3(0.2126f, 0.7152f, 0.0722f)));
-            cov = lerp(cov, cov * (2.0f - cov), (0.18f + 0.12f * luma) * darken_t);
+            float darken_t  = saturate((28.0f - size.y) / 16.0f);
+            float lin_luma  = saturate(dot(glyph_col.rgb, float3(0.2126f, 0.7152f, 0.0722f)));
+            float srgb_luma = pow(lin_luma, 1.0f / 2.2f);
+            float dark_boost = saturate(1.0f - 2.0f * srgb_luma) * 0.24f * darken_t;
+            float light_trim = saturate(2.0f * srgb_luma - 1.0f) * 0.14f * darken_t;
+            cov = lerp(cov, cov * (2.0f - cov), dark_boost);
+            cov = lerp(cov, cov * cov, light_trim);
         }
         out_pm = float4(glyph_col.rgb, 1.0f) * (glyph_col.a * cov);
     }
     else if (kind == ETCH_PRIM_SLUG_FILL) {
         float2 uv = (p_rel + half_size) / size;
-        float cov = slug_render_dyn(float2(uv.x, 1.0f-uv.y), size, input.slug_meta.x, input.slug_meta.y);
+        float2 rc = float2(uv.x, 1.0f - uv.y);
+        static const float2 kRgssFill[4] = {
+            float2(-0.125f, -0.375f),
+            float2( 0.375f, -0.125f),
+            float2( 0.125f,  0.375f),
+            float2(-0.375f,  0.125f),
+        };
+        const bool ssaa = min(size.x, size.y) < 42.0f;
+        const uint taps = ssaa ? 4u : 1u;
+        const float2 inv_sz = 1.0f / size;
+        const float2 ppu = ssaa ? (size * 4.0f) : size;
+        float cov = 0.0f;
+        [loop] for (uint s = 0u; s < taps; ++s)
+        {
+            float2 tc = ssaa ? (rc + kRgssFill[s] * inv_sz) : rc;
+            cov += slug_render_dyn(tc, ppu, input.slug_meta.x, input.slug_meta.y);
+        }
+        cov *= ssaa ? 0.25f : 1.0f;
         float4 col = gradient_color(input, uv);
         out_pm = float4(col.rgb, 1.0f) * (col.a * cov);
     }

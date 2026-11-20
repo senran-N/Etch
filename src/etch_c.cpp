@@ -448,7 +448,7 @@ EtchTextInputDesc etch_text_input_desc_default(void) {
             from_cpp(d.background), from_cpp(d.border_color), from_cpp(d.focus_border_color),
             d.border_width, d.focus_border_width, from_cpp(d.radius), d.multiline, d.word_wrap,
             d.read_only, d.password, d.context_menu, d.clear_button, d.escape_blurs, d.suppress_popup_keys, nullptr, 0u,
-            from_cpp(d.ghost_text), from_cpp(d.ghost_color), d.accept_ghost_on_tab};
+            from_cpp(d.ghost_text), from_cpp(d.ghost_color), d.accept_ghost_on_tab, d.submit_on_enter};
 }
 
 EtchButtonDesc etch_button_desc_default(void) {
@@ -1114,7 +1114,7 @@ EtchTextInputResult etch_text_input(const EtchTextInputDesc* desc) {
         to_cpp(desc->background), to_cpp(desc->border_color), to_cpp(desc->focus_border_color),
         desc->border_width, desc->focus_border_width, to_cpp(desc->radius), desc->multiline,
         desc->word_wrap, desc->read_only, desc->password, desc->context_menu, desc->clear_button, desc->escape_blurs, desc->suppress_popup_keys,
-        {}, to_cpp(desc->ghost_text), to_cpp(desc->ghost_color), desc->accept_ghost_on_tab,
+        {}, to_cpp(desc->ghost_text), to_cpp(desc->ghost_color), desc->accept_ghost_on_tab, desc->submit_on_enter,
     }, desc->highlights, desc->highlights ? desc->highlight_count : 0u,
         [](const void* ranges, size_t i) noexcept {
             const auto& h = static_cast<const EtchTextInputHighlight*>(ranges)[i];
@@ -1762,7 +1762,7 @@ EtchSheetDesc etch_sheet_desc_default(void) {
     EtchSheetDesc result={d.id,d.open,static_cast<EtchSheetEdge>(d.edge),d.extent_px,{},d.snap_count,nullptr,
         from_cpp(d.background),from_cpp(d.motion),d.z_index,nullptr,d.dismiss_on_backdrop,d.dismiss_on_escape,
         d.show_handle,from_cpp(d.backdrop_color),from_cpp(d.border_color),d.border_width,
-        d.corner_radius_px,d.inset_px,d.backdrop_blur};
+        d.corner_radius_px,d.inset_px,d.backdrop_blur,d.top_inset_px,from_cpp(d.shadow_color),d.shadow_blur,from_cpp(d.shadow_offset)};
     for(uint32_t i=0;i<8;++i) result.snap_points[i]=d.snap_points[i];
     return result;
 }
@@ -1772,7 +1772,8 @@ bool etch_begin_sheet(const EtchSheetDesc* d) {
         .snap_count=d->snap_count,.snap_index=d->snap_index,.background=to_cpp(d->background),.motion=to_cpp(d->motion),.z_index=d->z_index,
         .open_state=d->open_state,.dismiss_on_backdrop=d->dismiss_on_backdrop,.dismiss_on_escape=d->dismiss_on_escape,
         .show_handle=d->show_handle,.backdrop_color=to_cpp(d->backdrop_color),.border_color=to_cpp(d->border_color),
-        .border_width=d->border_width,.corner_radius_px=d->corner_radius_px,.inset_px=d->inset_px,.backdrop_blur=d->backdrop_blur};
+        .border_width=d->border_width,.corner_radius_px=d->corner_radius_px,.inset_px=d->inset_px,.backdrop_blur=d->backdrop_blur,
+        .top_inset_px=d->top_inset_px,.shadow_color=to_cpp(d->shadow_color),.shadow_blur=d->shadow_blur,.shadow_offset=to_cpp(d->shadow_offset)};
     for(uint32_t i=0;i<8;++i) desc.snap_points[i]=d->snap_points[i];
     return etch::begin_sheet(desc);
 }

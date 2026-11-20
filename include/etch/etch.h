@@ -1793,6 +1793,7 @@ struct TextInputDesc {
     Str ghost_text = {};
     Color ghost_color = Color::theme_auto();
     bool accept_ghost_on_tab = false;
+    bool submit_on_enter = false; // When multiline: bare Enter submits; Shift/Alt+Enter inserts newline.
 };
 
 struct TextInputResult {
@@ -2346,6 +2347,10 @@ struct SheetDesc {
     float corner_radius_px = 16.0f;
     float inset_px = 0.0f;
     float backdrop_blur = 0.0f;
+    float top_inset_px = 0.0f; // When > 0, overrides top edge inset independently of inset_px (e.g. clear frameless titlebar).
+    Color shadow_color = {};
+    float shadow_blur = 0.0f;
+    Vec2 shadow_offset = {};
 };
 bool begin_sheet(const SheetDesc&) noexcept; // Call end_sheet only when true.
 void end_sheet() noexcept;

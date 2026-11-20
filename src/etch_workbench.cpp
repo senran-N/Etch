@@ -117,7 +117,9 @@ bool begin_sheet(const SheetDesc& d) noexcept {
         !std::isfinite(d.corner_radius_px) || d.corner_radius_px<0 ||
         !std::isfinite(d.inset_px) || d.inset_px<0 ||
         !std::isfinite(d.border_width) || d.border_width<0 ||
-        !std::isfinite(d.backdrop_blur) || d.backdrop_blur<0) return false;
+        !std::isfinite(d.backdrop_blur) || d.backdrop_blur<0 ||
+        !std::isfinite(d.top_inset_px) || d.top_inset_px<0 ||
+        !std::isfinite(d.shadow_blur) || d.shadow_blur<0) return false;
     for(uint32_t i=0;i<d.snap_count;++i)
         if(!std::isfinite(d.snap_points[i]) || d.snap_points[i]<0 || d.snap_points[i]>1 || (i && d.snap_points[i]<=d.snap_points[i-1])) return false;
     Context* ctx=current_context();auto& ui=*ctx->active_ui;
@@ -174,19 +176,22 @@ bool begin_sheet(const SheetDesc& d) noexcept {
     }
     const bool bottom=d.edge==SheetEdge::Bottom;
     const float inset=std::fmin(d.inset_px,std::fmin(width,height)*.25f);
-    const float avail_along=std::fmax(1.f,(bottom ? height : width)-inset*2.f);
-    const float avail_cross=std::fmax(1.f,(bottom ? width : height)-inset*2.f);
+    const float top_inset=d.top_inset_px>0.f ? std::fmin(d.top_inset_px,height*.45f) : inset;
+    const float avail_along=std::fmax(1.f,bottom ? (height-top_inset-inset) : (width-inset*2.f));
+    const float avail_cross=std::fmax(1.f,bottom ? (width-inset*2.f) : (height-top_inset-inset));
     const float extent=std::fmin(d.extent_px,avail_along);
     const float slide_dist=extent+inset;
     const Vec2 offset=bottom ? Vec2{inset,height-slide_dist*visible} :
-        d.edge==SheetEdge::Left ? Vec2{inset-slide_dist*(1-visible),inset} : Vec2{width-slide_dist*visible,inset};
+        d.edge==SheetEdge::Left ? Vec2{inset-slide_dist*(1-visible),top_inset} : Vec2{width-slide_dist*visible,top_inset};
     const Color background=resolve_theme_color(d.background,active_theme(ctx).surface_control);
     begin_box({.id=d.id,.axis=bottom ? Axis::Col : Axis::Row,.width=Sizing::fixed(bottom ? avail_cross : extent),
         .height=Sizing::fixed(bottom ? extent : avail_cross),.background=background,
         .border_color=d.border_color,.border_width=d.border_width,
-        .radius=Corners::all(d.corner_radius_px),.clip_children=true,
+        .radius=Corners::all(d.corner_radius_px),
+        .shadow_color=d.shadow_color,.shadow_blur=d.shadow_blur,.shadow_offset=d.shadow_offset,
+        .clip_children=true,
         .attach_to=AttachTo::Root,.anchor_parent=Anchor::TopLeft,.floating_offset=offset,.z_index=d.z_index,
-        .backdrop_blur=d.backdrop_blur,.continuous_corners=inset>0.f});
+        .backdrop_blur=d.backdrop_blur,.continuous_corners=(inset>0.f || top_inset>0.f)});
     if(d.show_handle) {
         begin_box({.id=handle,.width=bottom ? Sizing::grow() : Sizing::fixed(24),
             .height=bottom ? Sizing::fixed(24) : Sizing::grow(),.align_x=AlignX::Center,.align_y=AlignY::Center,
