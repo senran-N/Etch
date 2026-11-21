@@ -10,6 +10,7 @@
 typedef char c_chk_prim[(sizeof(EtchPrim) == 64u) ? 1 : -1];
 
 int main(void) {
+    if (etch_abi_version() != ETCH_ABI_VERSION || ETCH_ABI_VERSION != 1u) return 1;
     if (etch_font_metrics(ETCH_FONT_SANS,14).ascent != 0) return 1;
 
     const EtchColor seed=etch_color_oklch(.6f,.15f,240.f,1.f);
@@ -27,7 +28,17 @@ int main(void) {
         return 1;
     }
 
+    EtchContextDesc bad_cd = etch_context_desc_default();
+    bad_cd.headless = true;
+    bad_cd.struct_size = 2u;
+    if (etch_create_context(&bad_cd) != NULL) {
+        return 1;
+    }
+
     EtchContextDesc cd = etch_context_desc_default();
+    if (cd.struct_size != (uint32_t)sizeof(EtchContextDesc)) {
+        return 1;
+    }
     cd.headless = true;
     EtchContext* ctx = etch_create_context(&cd);
     if (!ctx) {
@@ -38,18 +49,21 @@ int main(void) {
     const uint16_t icon = etch_register_svg_stroke_icon(ctx, ETCH_STR_LIT("M4 12h16"), &stroke);
     if (!etch_is_icon_loaded(ctx, icon)) return 1;
     EtchFrameDesc fd = etch_frame_desc_default();
+    if (fd.struct_size != (uint32_t)sizeof(EtchFrameDesc)) return 1;
     fd.viewport_w = 128u;
     fd.viewport_h = 96u;
     etch_begin_frame(ctx, &fd);
     etch_set_time_scale(ctx,.2f);
     if(!etch_presence(etch_id("presence"),true,etch_spring_spec_fluid()).visible) return 1;
     EtchLayerDesc layer=etch_layer_desc_default();
+    if (layer.struct_size != (uint32_t)sizeof(EtchLayerDesc)) return 1;
     layer.blur_px = 2.0f;
     layer.blend_plus_lighter = true;
     etch_push_layer(&layer);etch_pop_layer();
 
 
     EtchBoxDesc box = etch_box_desc_default();
+    if (box.struct_size != (uint32_t)sizeof(EtchBoxDesc)) return 1;
     box.id = etch_id("smoke_c");
     box.width = etch_sizing_fixed(64.0f);
     box.height = etch_sizing_fixed(48.0f);
@@ -134,6 +148,50 @@ int main(void) {
     node.id = 0u;
     const bool found = etch_find_a11y_node(etch_id("smoke_c"), &node, ctx, NULL) &&
                        etch_find_a11y_node(etch_id("smoke_c_btn"), &node, ctx, NULL);
+
+    /* Verify zero-init and older partial struct_size acceptance in downstream C99 consumers. */
+    {
+        typedef struct DownstreamOldFramePrefix {
+            uint32_t struct_size;
+            uint32_t viewport_w;
+            uint32_t viewport_h;
+        } DownstreamOldFramePrefix;
+        typedef struct DownstreamOldBoxPrefix {
+            uint32_t struct_size;
+            uint32_t id;
+            EtchAxis axis;
+            EtchSizing width;
+            EtchSizing height;
+        } DownstreamOldBoxPrefix;
+        DownstreamOldFramePrefix old_fd = { (uint32_t)sizeof(DownstreamOldFramePrefix), 128u, 96u };
+        DownstreamOldBoxPrefix old_box = {
+            (uint32_t)sizeof(DownstreamOldBoxPrefix),
+            etch_id("smoke_old_box"),
+            ETCH_AXIS_ROW,
+            etch_sizing_fixed(40.0f),
+            etch_sizing_fixed(20.0f)
+        };
+        EtchBoxDesc zero_box = etch_box_desc_default();
+        zero_box.struct_size = 0u;
+        zero_box.id = etch_id("smoke_zero_box");
+        zero_box.width = etch_sizing_fixed(32.0f);
+        zero_box.height = etch_sizing_fixed(16.0f);
+        etch_begin_frame(ctx, (const EtchFrameDesc*)&old_fd);
+        etch_box((const EtchBoxDesc*)&old_box);
+        etch_box(&zero_box);
+        etch_end_frame(ctx);
+        EtchElementGeometry og;
+        if (!etch_element_geometry(old_box.id, &og) || og.bounds.w != 40.0f || og.bounds.h != 20.0f || og.opacity != 1.0f) {
+            etch_destroy_context(ctx);
+            return 1;
+        }
+        EtchElementGeometry zg;
+        if (!etch_element_geometry(zero_box.id, &zg) || zg.bounds.w != 32.0f || zg.bounds.h != 16.0f) {
+            etch_destroy_context(ctx);
+            return 1;
+        }
+    }
+
     etch_destroy_context(ctx);
     etch_set_current_context(NULL);
     return found ? 0 : 1;

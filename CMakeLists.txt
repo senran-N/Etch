@@ -6,6 +6,7 @@ option(ETCH_BUILD_TESTS "Build Etch CTest suite" ${PROJECT_IS_TOP_LEVEL})
 option(ETCH_INSTALL "Enable Etch install and package export targets" ${PROJECT_IS_TOP_LEVEL})
 option(ETCH_COMPILE_SHADERS "Compile HLSL shaders offline when DXC/shadercross are available" ON)
 option(ETCH_ENABLE_OS_A11Y "Enable optional native OS accessibility bridge" ON)
+option(ETCH_UNITY_BUILD "Build Etch as a unity translation unit" ON)
 
 include(GNUInstallDirs)
 
@@ -137,7 +138,56 @@ if (ETCH_COMPILE_SHADERS AND ETCH_DXC_EXE)
     endforeach ()
 endif ()
 if (ETCH_GENERATED_SHADER_HEADERS)
+    set(_etch_gen_extern_script "${CMAKE_CURRENT_BINARY_DIR}/gen_shaders_extern.cmake")
+    file(WRITE "${_etch_gen_extern_script}" [=[
+set(_lines "// Auto-generated shader extern declarations matching compiled shader headers.\n#ifndef ETCH_SHADERS_EXTERN_H\n#define ETCH_SHADERS_EXTERN_H\n\n")
+foreach(_shader etch_uber etch_quad etch_subpixel etch_kawase)
+    foreach(_stage vs ps)
+        foreach(_fmt dxil spv msl)
+            set(_var "g_${_shader}_${_stage}_${_fmt}")
+            set(_path "${GEN_DIR}/${_shader}_${_stage}_${_fmt}.h")
+            if (NOT EXISTS "${_path}")
+                set(_path "${SRC_DIR}/${_shader}_${_stage}_${_fmt}.h")
+            endif ()
+            file(READ "${_path}" _txt)
+            set(_needle "const unsigned char ${_var}[] = {")
+            string(FIND "${_txt}" "${_needle}" _pos)
+            if (_pos EQUAL -1)
+                message(FATAL_ERROR "${_path}: missing ${_needle}")
+            endif ()
+            string(LENGTH "${_needle}" _nlen)
+            math(EXPR _start "${_pos} + ${_nlen}")
+            string(SUBSTRING "${_txt}" ${_start} -1 _tail)
+            string(FIND "${_tail}" "};" _end)
+            if (_end EQUAL -1)
+                message(FATAL_ERROR "${_path}: missing array terminator for ${_var}")
+            endif ()
+            string(SUBSTRING "${_tail}" 0 ${_end} _body)
+            string(LENGTH "${_body}" _len_before)
+            string(REPLACE "," "" _stripped "${_body}")
+            string(LENGTH "${_stripped}" _len_after)
+            math(EXPR _count "${_len_before} - ${_len_after} + 1")
+            string(APPEND _lines "extern const unsigned char ${_var}[${_count}];\n")
+        endforeach()
+    endforeach()
+endforeach()
+string(APPEND _lines "\n#endif // ETCH_SHADERS_EXTERN_H\n")
+file(WRITE "${OUT_FILE}" "${_lines}")
+]=])
+    add_custom_command(
+        OUTPUT "${ETCH_SHADER_OUT_DIR}/etch_shaders_extern.h"
+        COMMAND "${CMAKE_COMMAND}"
+                "-DGEN_DIR=${ETCH_SHADER_OUT_DIR}"
+                "-DSRC_DIR=${CMAKE_CURRENT_SOURCE_DIR}/src/shaders_gen"
+                "-DOUT_FILE=${ETCH_SHADER_OUT_DIR}/etch_shaders_extern.h"
+                -P "${_etch_gen_extern_script}"
+        DEPENDS ${ETCH_GENERATED_SHADER_HEADERS} "${_etch_gen_extern_script}"
+        COMMENT "Generating etch_shaders_extern.h"
+        VERBATIM)
+    list(APPEND ETCH_GENERATED_SHADER_HEADERS "${ETCH_SHADER_OUT_DIR}/etch_shaders_extern.h")
     add_custom_target(etch_shaders DEPENDS ${ETCH_GENERATED_SHADER_HEADERS})
+else ()
+    file(REMOVE "${ETCH_SHADER_OUT_DIR}/etch_shaders_extern.h")
 endif ()
 
 # Archive dependencies use build paths locally and relocatable installed paths.
@@ -191,9 +241,23 @@ if (NOT ETCH_HB_LIB_TARGET)
     message(FATAL_ERROR "HarfBuzz not found. Provide a vendored archive/source tree or install system HarfBuzz.")
 endif ()
 
-add_library(etch STATIC src/etch_unity.cpp)
+if (ETCH_UNITY_BUILD)
+    set(_etch_sources src/etch_unity.cpp)
+else ()
+    set(_etch_sources
+        src/etch_unity.cpp
+        src/etch_stb_impl.cpp
+        src/etch_shaders_data.cpp
+        src/etch_color.cpp
+        src/etch_c.cpp
+    )
+endif ()
+add_library(etch STATIC ${_etch_sources})
 add_library(Etch::etch ALIAS etch)
 etch_configure_orthodox_cpp(etch)
+if (NOT ETCH_UNITY_BUILD)
+    set_source_files_properties(src/etch_unity.cpp PROPERTIES COMPILE_DEFINITIONS ETCH_MODULAR_BUILD=1)
+endif ()
 target_include_directories(etch
     PUBLIC "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
            "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
@@ -228,7 +292,26 @@ set(_etch_common_dependencies
     "${CMAKE_CURRENT_SOURCE_DIR}/include/etch/etch.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/include/etch/etch_c.h"
     ${_etch_engine_dependencies} ${ETCH_GENERATED_SHADER_HEADERS})
-set_source_files_properties(src/etch_unity.cpp PROPERTIES OBJECT_DEPENDS "${_etch_common_dependencies}")
+if (ETCH_UNITY_BUILD)
+    set_source_files_properties(src/etch_unity.cpp PROPERTIES OBJECT_DEPENDS "${_etch_common_dependencies}")
+else ()
+    set(_etch_unity_mod_deps ${_etch_common_dependencies})
+    list(REMOVE_ITEM _etch_unity_mod_deps
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/etch_stb_impl.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/etch_shaders_data.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/etch_color.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/etch_c.cpp")
+    file(GLOB _etch_shader_src_deps CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders_gen/*.h")
+    set_source_files_properties(src/etch_unity.cpp PROPERTIES OBJECT_DEPENDS "${_etch_unity_mod_deps}")
+    set_source_files_properties(src/etch_stb_impl.cpp PROPERTIES OBJECT_DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/stb_truetype.h;${CMAKE_CURRENT_SOURCE_DIR}/third_party/stb_image_write.h;${CMAKE_CURRENT_SOURCE_DIR}/third_party/stb_image.h")
+    set_source_files_properties(src/etch_shaders_data.cpp PROPERTIES OBJECT_DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/etch_shaders_extern.h;${_etch_shader_src_deps};${ETCH_GENERATED_SHADER_HEADERS}")
+    set_source_files_properties(src/etch_color.cpp PROPERTIES OBJECT_DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/include/etch/etch.h")
+    set_source_files_properties(src/etch_c.cpp PROPERTIES OBJECT_DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/include/etch/etch.h;${CMAKE_CURRENT_SOURCE_DIR}/include/etch/etch_c.h;${CMAKE_CURRENT_SOURCE_DIR}/src/etch_c_internal.h")
+endif ()
 set_source_files_properties(examples/sandbox.cpp examples/etch_studio.cpp examples/etch_showcase.cpp tests/etch_tests.cpp
     PROPERTIES OBJECT_DEPENDS "${_etch_common_dependencies};${_etch_check_dependencies}")
 

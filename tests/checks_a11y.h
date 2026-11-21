@@ -6,9 +6,11 @@ static bool verify_a11y_checks(etch::Context* restore) noexcept {
     using namespace etch;
     Context* ctx=create_context({.headless=true});if(!ctx)return false;set_current_context(ctx);
     bool ok=true;const auto check=[&](bool pass,int line) noexcept {if(!pass){ok=false;std::fprintf(stderr,"v30 check line %d failed\n",line);}};
-    const uint32_t group=id("a11y_group"),bid=id("a11y_button"),bid_after=id("a11y_btn_after"),sid=id("a11y_slider"),tid=id("a11y_text"),tid2=id("a11y_text2"),pid=id("a11y_password"),cid=id("a11y_combo"),mid=id("a11y_modal");
+    const uint32_t group=id("a11y_group"),bid=id("a11y_button"),bid_after=id("a11y_btn_after"),sid=id("a11y_slider"),tid=id("a11y_text"),tid2=id("a11y_text2"),pid=id("a11y_password"),cid=id("a11y_combo"),mid=id("a11y_modal"),scrid=id("a11y_scroll"),tblid=id("a11y_table");
     float value=5;bool checked=false,modal=false;int hits=0,index=0;TextBuffer document={};check(init_text_buffer(&document,str_lit("first\nsecond")),__LINE__);char input[32]="initial",input2[32]="second",password[32]="a\xE4\xB8\xAD";
-    const Str items[]={str_lit("one"),str_lit("two")};bool changed=false;
+    const Str items[]={str_lit("one"),str_lit("two")};
+    const TableColumnDesc tbl_cols[]={{.title=str_lit("Key"),.width=100},{.title=str_lit("Val"),.width=100}};
+    bool changed=false;
     const auto step=[&]() noexcept {
         begin_frame(ctx,{.viewport_w=640,.viewport_h=480});
         check(!frame_a11y_nodes(ctx).empty() || hits==0,__LINE__);
@@ -21,6 +23,16 @@ static bool verify_a11y_checks(etch::Context* restore) noexcept {
         text_input({.id=tid,.buffer=input,.capacity=32});text_input({.id=tid2,.buffer=input2,.capacity=32});text_input({.id=pid,.buffer=password,.capacity=32,.password=true});
         button({.id=bid_after,.label=str_lit("after")});
         code_editor({.id=id("a11y_editor"),.buffer=&document,.height=Sizing::fixed(40)});
+        begin_box({.id=scrid,.axis=Axis::Col,.width=Sizing::fixed(160),.height=Sizing::fixed(40),.clip_children=true,.scroll_y=true});
+        for(uint32_t si=0;si<6;++si) box({.width=Sizing::fixed(120),.height=Sizing::fixed(20)});
+        end_box();
+        begin_table({.id=tblid,.columns=tbl_cols,.item_count=2,.row_height_px=20,.width=Sizing::fixed(220),.height=Sizing::fixed(80),.show_scrollbar=false});
+        uint32_t ridx=0;
+        while(table_next_row(&ridx)){
+            if(table_next_column()) text("k");
+            if(table_next_column()) text("v");
+        }
+        end_table();
         if(begin_collapsible({.id=id("a11y_collapse"),.title=str_lit("section"),.default_open=false}).visible)end_collapsible();
         if(begin_tree_node({.id=id("a11y_tree"),.label=str_lit("branch")}).open)end_tree_node();
         combo_box({.id=cid,.selected_index=&index,.items=items});
@@ -30,6 +42,16 @@ static bool verify_a11y_checks(etch::Context* restore) noexcept {
     };
     step();const auto nodes=frame_a11y_nodes(ctx);check(nodes.size()>8 && frame_stats(ctx).a11y_node_count==nodes.size(),__LINE__);
     for(uint32_t i=0;i<nodes.size();++i){const auto& n=nodes[i];uint32_t traversed=0;for(uint32_t c=n.first_child_idx;c!=0xFFFFFFFFu;c=nodes[c].next_sibling_idx){if(c>=nodes.size() || ++traversed>nodes.size()){check(false,__LINE__);break;}check(nodes[c].parent_id==n.id,__LINE__);}}
+    const auto* scr=find_a11y_node(scrid,ctx);check(scr && scr->role==A11yRole::ScrollArea && (scr->actions_mask & 12u)==12u,__LINE__);
+    const auto* tbl=find_a11y_node(tblid,ctx);check(tbl && tbl->role==A11yRole::Table && (tbl->actions_mask & 12u)==12u,__LINE__);
+    if(tbl){
+        uint32_t row_cnt=0,cell_cnt=0;
+        for(uint32_t r=tbl->first_child_idx;r!=0xFFFFFFFFu && r<nodes.size();r=nodes[r].next_sibling_idx){
+            ++row_cnt;
+            for(uint32_t c=nodes[r].first_child_idx;c!=0xFFFFFFFFu && c<nodes.size();c=nodes[c].next_sibling_idx) ++cell_cnt;
+        }
+        check(row_cnt==2u && cell_cnt==4u,__LINE__);
+    }
     const auto* b=find_a11y_node(bid,ctx);check(b && b->role==A11yRole::Button && b->bounds.w>0 && b->bounds.h>0 && b->label.length==11 && std::memcmp(b->label.chars,"stack label",11)==0,__LINE__);
     const auto* p=find_a11y_node(pid,ctx);check(p && p->value_text.length==6 && std::memcmp(p->value_text.chars,"\xE2\x80\xA2\xE2\x80\xA2",6)==0,__LINE__);
     const auto* s=find_a11y_node(sid,ctx);check(s && s->value_text.length==11 && std::memcmp(s->value_text.chars,"stack value",11)==0,__LINE__);

@@ -1,6 +1,9 @@
 // Perceptual color conversion; matrices from Bjorn Ottosson's Oklab reference.
 // https://bottosson.github.io/posts/oklab/ (public domain).
-// Compiled via src/etch_unity.cpp.
+// Compiled via src/etch_unity.cpp or standalone when ETCH_UNITY_BUILD=OFF.
+#include "etch/etch.h"
+#include <cmath>
+
 namespace etch {
 namespace {
 struct PerceptualColor { float L, a, b; };

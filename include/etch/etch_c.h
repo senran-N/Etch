@@ -15,6 +15,28 @@
 #define ETCH_VERSION_STRING ETCH_VERSION_STR(ETCH_VERSION_MAJOR) "." ETCH_VERSION_STR(ETCH_VERSION_MINOR) "." ETCH_VERSION_STR(ETCH_VERSION_PATCH)
 #endif
 
+#ifndef ETCH_ABI_VERSION
+#define ETCH_ABI_VERSION 1u
+#endif
+
+#ifndef ETCH_API
+#  if defined(ETCH_SHARED)
+#    if defined(_WIN32)
+#      if defined(ETCH_BUILD_DLL)
+#        define ETCH_API __declspec(dllexport)
+#      else
+#        define ETCH_API __declspec(dllimport)
+#      endif
+#    elif defined(__GNUC__) || defined(__clang__)
+#      define ETCH_API __attribute__((visibility("default")))
+#    else
+#      define ETCH_API
+#    endif
+#  else
+#    define ETCH_API
+#  endif
+#endif
+
 #if defined(__cplusplus)
 #define ETCH_C_ALIGN16 alignas(16)
 #define ETCH_C_INLINE inline
@@ -46,6 +68,8 @@ union SDL_Event;
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+ETCH_API uint32_t etch_abi_version(void);
 
 /* ============================================================================
  * Constants
@@ -338,6 +362,7 @@ typedef struct EtchShaderSurfaceCode {
     const char* entrypoint;
 } EtchShaderSurfaceCode;
 typedef struct EtchShaderSurfaceCreateDesc {
+    uint32_t struct_size;
     EtchShaderSurfaceCode spirv, dxil, msl;
     bool continuous_time;
     float max_fps;
@@ -346,17 +371,18 @@ typedef struct EtchShaderSurfaceCreateDesc {
     bool enable_feedback;
 } EtchShaderSurfaceCreateDesc;
 typedef struct EtchShaderSurfaceEvalDesc {
+    uint32_t struct_size;
     uint32_t width, height;
     uint64_t revision;
     EtchVec4 params[4];
     struct SDL_GPUTexture* textures[4];
     bool enabled;
 } EtchShaderSurfaceEvalDesc;
-EtchShaderSurfaceCreateDesc etch_shader_surface_create_desc_default(void);
-EtchShaderSurfaceEvalDesc etch_shader_surface_eval_desc_default(void);
-EtchShaderSurfaceId etch_create_shader_surface(EtchContext*, const EtchShaderSurfaceCreateDesc*);
-void etch_destroy_shader_surface(EtchContext*, EtchShaderSurfaceId);
-struct SDL_GPUTexture* etch_eval_shader_surface(EtchContext*, EtchShaderSurfaceId, const EtchShaderSurfaceEvalDesc*);
+ETCH_API EtchShaderSurfaceCreateDesc etch_shader_surface_create_desc_default(void);
+ETCH_API EtchShaderSurfaceEvalDesc etch_shader_surface_eval_desc_default(void);
+ETCH_API EtchShaderSurfaceId etch_create_shader_surface(EtchContext*, const EtchShaderSurfaceCreateDesc*);
+ETCH_API void etch_destroy_shader_surface(EtchContext*, EtchShaderSurfaceId);
+ETCH_API struct SDL_GPUTexture* etch_eval_shader_surface(EtchContext*, EtchShaderSurfaceId, const EtchShaderSurfaceEvalDesc*);
 typedef struct ETCH_C_ALIGN16 EtchUint4 {
     uint32_t x;
     uint32_t y;
@@ -697,6 +723,7 @@ typedef struct EtchA11yOverrideDesc {
 } EtchA11yOverrideDesc;
 
 typedef struct EtchContextDesc {
+    uint32_t struct_size;
     uint32_t max_layout_elements;
     struct SDL_Window* window;
     size_t frame_arena_bytes;
@@ -783,6 +810,7 @@ typedef struct EtchTheme {
 } EtchTheme;
 
 typedef struct EtchFrameDesc {
+    uint32_t struct_size;
     uint32_t viewport_w;
     uint32_t viewport_h;
     float dpi_scale;
@@ -799,6 +827,7 @@ typedef struct EtchFrameDesc {
 } EtchFrameDesc;
 
 typedef struct EtchWindowFrameDesc {
+    uint32_t struct_size;
     float dt;
     float min_scale;
     bool pixel_snap;
@@ -833,9 +862,10 @@ typedef struct EtchBorderBeamStyle {
     float width, angle_rad, sweep_fraction, glow_px, speed, softness;
     bool beam_active, symmetric_dual;
 } EtchBorderBeamStyle;
-EtchBorderBeamStyle etch_border_beam_style_default(void);
+ETCH_API EtchBorderBeamStyle etch_border_beam_style_default(void);
 
 typedef struct EtchBoxDesc {
+    uint32_t struct_size;
     uint32_t id;
     EtchAxis axis;
     EtchSizing width;
@@ -908,6 +938,7 @@ typedef struct EtchBoxDesc {
 } EtchBoxDesc;
 
 typedef struct EtchTextDesc {
+    uint32_t struct_size;
     EtchColor color;
     float font_size_px;
     uint16_t font_id;
@@ -948,6 +979,7 @@ typedef struct EtchTextSpan {
 } EtchTextSpan;
 
 typedef struct EtchRichTextDesc {
+    uint32_t struct_size;
     EtchColor color;
     float font_size_px;
     uint16_t font_id;
@@ -1040,8 +1072,8 @@ typedef struct EtchMeshRectDrawDesc {
     float grain_intensity, warp_phase;
     bool continuous_corners, foreground;
 } EtchMeshRectDrawDesc;
-EtchMeshRectDrawDesc etch_mesh_rect_draw_desc_default(void);
-void etch_draw_mesh_rect(const EtchMeshRectDrawDesc* desc);
+ETCH_API EtchMeshRectDrawDesc etch_mesh_rect_draw_desc_default(void);
+ETCH_API void etch_draw_mesh_rect(const EtchMeshRectDrawDesc* desc);
 
 typedef struct EtchPunchHoleDesc {
     EtchRect rect;
@@ -1049,8 +1081,8 @@ typedef struct EtchPunchHoleDesc {
     float softness;
     bool continuous_corners, foreground;
 } EtchPunchHoleDesc;
-EtchPunchHoleDesc etch_punch_hole_desc_default(void);
-void etch_punch_hole(const EtchPunchHoleDesc* desc);
+ETCH_API EtchPunchHoleDesc etch_punch_hole_desc_default(void);
+ETCH_API void etch_punch_hole(const EtchPunchHoleDesc* desc);
 
 typedef struct EtchBorderBeamDrawDesc {
     EtchRect rect;
@@ -1059,8 +1091,8 @@ typedef struct EtchBorderBeamDrawDesc {
     float top_rim_alpha;
     bool continuous_corners, foreground;
 } EtchBorderBeamDrawDesc;
-EtchBorderBeamDrawDesc etch_border_beam_draw_desc_default(void);
-void etch_draw_border_beam(const EtchBorderBeamDrawDesc* desc);
+ETCH_API EtchBorderBeamDrawDesc etch_border_beam_draw_desc_default(void);
+ETCH_API void etch_draw_border_beam(const EtchBorderBeamDrawDesc* desc);
 
 typedef struct EtchLineDesc {
     EtchVec2 from;
@@ -1219,6 +1251,7 @@ typedef enum EtchWindowBackdrop {
     ETCH_BACKDROP_OPAQUE, ETCH_BACKDROP_TRANSPARENT, ETCH_BACKDROP_SYSTEM_MICA, ETCH_BACKDROP_SYSTEM_ACRYLIC
 } EtchWindowBackdrop;
 typedef struct EtchWindowChromeDesc {
+    uint32_t struct_size;
     bool enabled;
     bool resizable;
     float border_thickness;
@@ -1265,6 +1298,7 @@ typedef struct EtchCodeLineDecoration {
 typedef bool (*EtchCodeLineDecorateFn)(uint32_t line_index, EtchCodeLineDecoration* out_dec, void* user_data);
 
 typedef struct EtchCodeEditorDesc {
+    uint32_t struct_size;
     uint32_t id;
     EtchTextBuffer* buffer;
     EtchSizing width;
@@ -1327,6 +1361,7 @@ typedef struct EtchTextInputHighlight {
 } EtchTextInputHighlight;
 
 typedef struct EtchTextInputDesc {
+    uint32_t struct_size;
     uint32_t id;
     char* buffer;
     uint32_t capacity;
@@ -1564,6 +1599,7 @@ typedef struct EtchMenuItemDesc {
 } EtchMenuItemDesc;
 
 typedef struct EtchSplitDesc {
+    uint32_t struct_size;
     uint32_t id;
     EtchAxis axis;
     EtchSizing width;
@@ -1585,6 +1621,7 @@ typedef struct EtchSplitResult {
 } EtchSplitResult;
 
 typedef struct EtchVirtualListDesc {
+    uint32_t struct_size;
     uint32_t id;
     uint32_t item_count;
     float item_height_px;
@@ -1658,8 +1695,9 @@ typedef struct EtchTableSelection {
     uint64_t* selected_words;
     uint32_t word_count;
 } EtchTableSelection;
-bool etch_table_row_selected(const EtchTableSelection* selection, uint32_t row);
+ETCH_API bool etch_table_row_selected(const EtchTableSelection* selection, uint32_t row);
 typedef struct EtchTableDesc {
+    uint32_t struct_size;
     uint32_t id;
     const EtchTableColumnDesc* columns;
     uint32_t column_count;
@@ -1725,6 +1763,7 @@ typedef struct EtchTreeNodeResult {
 } EtchTreeNodeResult;
 
 typedef struct EtchCanvasDesc {
+    uint32_t struct_size;
     uint32_t id;
     EtchSizing width;
     EtchSizing height;
@@ -1803,95 +1842,96 @@ typedef struct EtchCanvasNodeResult {
  * Descriptor Default Factories
  * ============================================================================ */
 
-EtchContextDesc etch_context_desc_default(void);
-EtchFrameDesc etch_frame_desc_default(void);
-EtchWindowFrameDesc etch_window_frame_desc_default(void);
-EtchBoxDesc etch_box_desc_default(void);
-EtchTextDesc etch_text_desc_default(void);
-EtchTextSpan etch_text_span_default(void);
-EtchRichTextDesc etch_rich_text_desc_default(void);
-EtchCollapsibleDesc etch_collapsible_desc_default(void);
-EtchImageDesc etch_image_desc_default(void);
-EtchIconDesc etch_icon_desc_default(void);
-EtchRectDrawDesc etch_rect_draw_desc_default(void);
-EtchLineDesc etch_line_draw_desc_default(void);
-EtchPolylineDesc etch_polyline_desc_default(void);
-EtchFilledPolygonDesc etch_filled_polygon_desc_default(void);
-EtchFilledPathDesc etch_filled_path_desc_default(void);
-EtchAreaSeriesDesc etch_area_series_desc_default(void);
-EtchBezierDesc etch_bezier_desc_default(void);
-EtchRingDesc etch_ring_desc_default(void);
-EtchIconDrawDesc etch_icon_draw_desc_default(void);
-EtchTextDrawDesc etch_text_draw_desc_default(void);
-EtchImageDrawDesc etch_image_draw_desc_default(void);
-EtchTextureDesc etch_texture_desc_default(void);
-EtchWindowChromeDesc etch_window_chrome_desc_default(void);
-EtchCodeEditorDesc etch_code_editor_desc_default(void);
-EtchTextInputHighlight etch_text_input_highlight_default(void);
-EtchTextInputDesc etch_text_input_desc_default(void);
-EtchButtonDesc etch_button_desc_default(void);
-EtchCheckboxDesc etch_checkbox_desc_default(void);
-EtchToggleSwitchDesc etch_toggle_switch_desc_default(void);
-EtchProgressBarDesc etch_progress_bar_desc_default(void);
-EtchTabBarDesc etch_tab_bar_desc_default(void);
-EtchTabItemDesc etch_tab_item_desc_default(void);
-EtchSliderDesc etch_slider_desc_default(void);
-EtchDragValueDesc etch_drag_value_desc_default(void);
-EtchTooltipDesc etch_tooltip_desc_default(void);
-EtchModalDesc etch_modal_desc_default(void);
-EtchComboBoxDesc etch_combo_box_desc_default(void);
-EtchPopupDesc etch_popup_desc_default(void);
-EtchMenuBarDesc etch_menu_bar_desc_default(void);
-EtchMenuDesc etch_menu_desc_default(void);
-EtchMenuItemDesc etch_menu_item_desc_default(void);
-EtchSplitDesc etch_split_desc_default(void);
-EtchVirtualListDesc etch_virtual_list_desc_default(void);
-EtchDockPaneDesc etch_dock_pane_desc_default(void);
-EtchDockSpaceDesc etch_dock_space_desc_default(void);
-EtchTableColumnDesc etch_table_column_desc_default(void);
-EtchTableDesc etch_table_desc_default(void);
-EtchTreeNodeDesc etch_tree_node_desc_default(void);
-EtchCanvasDesc etch_canvas_desc_default(void);
-EtchCanvasWireDesc etch_canvas_wire_desc_default(void);
-EtchCanvasNodeDesc etch_canvas_node_desc_default(void);
+ETCH_API EtchContextDesc etch_context_desc_default(void);
+ETCH_API EtchFrameDesc etch_frame_desc_default(void);
+ETCH_API EtchWindowFrameDesc etch_window_frame_desc_default(void);
+ETCH_API EtchBoxDesc etch_box_desc_default(void);
+ETCH_API EtchTextDesc etch_text_desc_default(void);
+ETCH_API EtchTextSpan etch_text_span_default(void);
+ETCH_API EtchRichTextDesc etch_rich_text_desc_default(void);
+ETCH_API EtchCollapsibleDesc etch_collapsible_desc_default(void);
+ETCH_API EtchImageDesc etch_image_desc_default(void);
+ETCH_API EtchIconDesc etch_icon_desc_default(void);
+ETCH_API EtchRectDrawDesc etch_rect_draw_desc_default(void);
+ETCH_API EtchLineDesc etch_line_draw_desc_default(void);
+ETCH_API EtchPolylineDesc etch_polyline_desc_default(void);
+ETCH_API EtchFilledPolygonDesc etch_filled_polygon_desc_default(void);
+ETCH_API EtchFilledPathDesc etch_filled_path_desc_default(void);
+ETCH_API EtchAreaSeriesDesc etch_area_series_desc_default(void);
+ETCH_API EtchBezierDesc etch_bezier_desc_default(void);
+ETCH_API EtchRingDesc etch_ring_desc_default(void);
+ETCH_API EtchIconDrawDesc etch_icon_draw_desc_default(void);
+ETCH_API EtchTextDrawDesc etch_text_draw_desc_default(void);
+ETCH_API EtchImageDrawDesc etch_image_draw_desc_default(void);
+ETCH_API EtchTextureDesc etch_texture_desc_default(void);
+ETCH_API EtchWindowChromeDesc etch_window_chrome_desc_default(void);
+ETCH_API EtchCodeEditorDesc etch_code_editor_desc_default(void);
+ETCH_API EtchTextInputHighlight etch_text_input_highlight_default(void);
+ETCH_API EtchTextInputDesc etch_text_input_desc_default(void);
+ETCH_API EtchButtonDesc etch_button_desc_default(void);
+ETCH_API EtchCheckboxDesc etch_checkbox_desc_default(void);
+ETCH_API EtchToggleSwitchDesc etch_toggle_switch_desc_default(void);
+ETCH_API EtchProgressBarDesc etch_progress_bar_desc_default(void);
+ETCH_API EtchTabBarDesc etch_tab_bar_desc_default(void);
+ETCH_API EtchTabItemDesc etch_tab_item_desc_default(void);
+ETCH_API EtchSliderDesc etch_slider_desc_default(void);
+ETCH_API EtchDragValueDesc etch_drag_value_desc_default(void);
+ETCH_API EtchTooltipDesc etch_tooltip_desc_default(void);
+ETCH_API EtchModalDesc etch_modal_desc_default(void);
+ETCH_API EtchComboBoxDesc etch_combo_box_desc_default(void);
+ETCH_API EtchPopupDesc etch_popup_desc_default(void);
+ETCH_API EtchMenuBarDesc etch_menu_bar_desc_default(void);
+ETCH_API EtchMenuDesc etch_menu_desc_default(void);
+ETCH_API EtchMenuItemDesc etch_menu_item_desc_default(void);
+ETCH_API EtchSplitDesc etch_split_desc_default(void);
+ETCH_API EtchVirtualListDesc etch_virtual_list_desc_default(void);
+ETCH_API EtchDockPaneDesc etch_dock_pane_desc_default(void);
+ETCH_API EtchDockSpaceDesc etch_dock_space_desc_default(void);
+ETCH_API EtchTableColumnDesc etch_table_column_desc_default(void);
+ETCH_API EtchTableDesc etch_table_desc_default(void);
+ETCH_API EtchTreeNodeDesc etch_tree_node_desc_default(void);
+ETCH_API EtchCanvasDesc etch_canvas_desc_default(void);
+ETCH_API EtchCanvasWireDesc etch_canvas_wire_desc_default(void);
+ETCH_API EtchCanvasNodeDesc etch_canvas_node_desc_default(void);
 
 /* ============================================================================
  * Arena, Theme & System API
  * ============================================================================ */
 
-EtchArena etch_arena_create(size_t capacity_bytes);
-EtchArena etch_arena_from_buffer(void* buffer, size_t capacity_bytes);
-void etch_arena_destroy(EtchArena* arena);
-void etch_arena_reset(EtchArena* arena);
-size_t etch_arena_mark(const EtchArena* arena);
-void etch_arena_rewind(EtchArena* arena, size_t saved_mark);
-void* etch_arena_alloc_bytes(EtchArena* arena, size_t size, size_t align);
-EtchStr etch_arena_push_str(EtchArena* arena, const char* s, size_t len);
-void* etch_frame_arena_alloc(EtchContext* ctx, size_t size, size_t align);
-EtchStr etch_frame_arena_push_str(EtchContext* ctx, const char* s, size_t len);
+ETCH_API EtchArena etch_arena_create(size_t capacity_bytes);
+ETCH_API EtchArena etch_arena_from_buffer(void* buffer, size_t capacity_bytes);
+ETCH_API void etch_arena_destroy(EtchArena* arena);
+ETCH_API void etch_arena_reset(EtchArena* arena);
+ETCH_API size_t etch_arena_mark(const EtchArena* arena);
+ETCH_API void etch_arena_rewind(EtchArena* arena, size_t saved_mark);
+ETCH_API void* etch_arena_alloc_bytes(EtchArena* arena, size_t size, size_t align);
+ETCH_API EtchStr etch_arena_push_str(EtchArena* arena, const char* s, size_t len);
+ETCH_API void* etch_frame_arena_alloc(EtchContext* ctx, size_t size, size_t align);
+ETCH_API EtchStr etch_frame_arena_push_str(EtchContext* ctx, const char* s, size_t len);
 
-EtchSystemTheme etch_system_theme(void);
-bool etch_system_dark_mode(bool default_when_unknown);
+ETCH_API EtchSystemTheme etch_system_theme(void);
+ETCH_API bool etch_system_dark_mode(bool default_when_unknown);
 
-EtchTheme etch_theme_dark(void);
-EtchTheme etch_theme_light(void);
-EtchColor etch_color_oklch(float L, float C, float hue_deg, float alpha);
-EtchColor etch_color_lerp_oklab(EtchColor a, EtchColor b, float t);
-EtchTheme etch_theme_from_seed(EtchColor seed, bool dark_mode, float chroma_scale);
-EtchSpringSpec etch_spring_spec_snappy(void);
-EtchSpringSpec etch_spring_spec_fluid(void);
-EtchSpringSpec etch_spring_spec_bouncy(void);
-EtchSpringSpec etch_spring_spec_gentle(void);
+ETCH_API EtchTheme etch_theme_dark(void);
+ETCH_API EtchTheme etch_theme_light(void);
+ETCH_API EtchColor etch_color_oklch(float L, float C, float hue_deg, float alpha);
+ETCH_API EtchColor etch_color_lerp_oklab(EtchColor a, EtchColor b, float t);
+ETCH_API EtchTheme etch_theme_from_seed(EtchColor seed, bool dark_mode, float chroma_scale);
+ETCH_API EtchSpringSpec etch_spring_spec_snappy(void);
+ETCH_API EtchSpringSpec etch_spring_spec_fluid(void);
+ETCH_API EtchSpringSpec etch_spring_spec_bouncy(void);
+ETCH_API EtchSpringSpec etch_spring_spec_gentle(void);
 typedef struct EtchLayerDesc {
+    uint32_t struct_size;
     float opacity;
     EtchVec2 translate, scale, pivot_norm, pivot_px;
     bool animating;
     float blur_px;
     bool blend_plus_lighter;
 } EtchLayerDesc;
-EtchLayerDesc etch_layer_desc_default(void);
-void etch_push_layer(const EtchLayerDesc* desc);
-void etch_pop_layer(void);
+ETCH_API EtchLayerDesc etch_layer_desc_default(void);
+ETCH_API void etch_push_layer(const EtchLayerDesc* desc);
+ETCH_API void etch_pop_layer(void);
 typedef struct EtchPresenceResult { bool visible; float opacity; bool exiting; } EtchPresenceResult;
 typedef enum EtchTerminalColorMode { ETCH_TERMINAL_DEFAULT, ETCH_TERMINAL_ANSI16, ETCH_TERMINAL_ANSI256, ETCH_TERMINAL_TRUE_COLOR } EtchTerminalColorMode;
 typedef struct EtchTerminalColor { EtchTerminalColorMode mode; uint32_t value; } EtchTerminalColor;
@@ -1915,6 +1955,7 @@ typedef struct EtchTerminalGridDesc {
 } EtchTerminalGridDesc;
 typedef enum EtchSheetEdge { ETCH_SHEET_BOTTOM, ETCH_SHEET_LEFT, ETCH_SHEET_RIGHT } EtchSheetEdge;
 typedef struct EtchSheetDesc {
+    uint32_t struct_size;
     uint32_t id;
     bool open;
     EtchSheetEdge edge;
@@ -1940,31 +1981,31 @@ typedef struct EtchSheetDesc {
     float shadow_blur;
     EtchVec2 shadow_offset;
 } EtchSheetDesc;
-EtchTerminalGridDesc etch_terminal_grid_desc_default(void);
-EtchTerminalCell etch_terminal_cell_default(void);
-void etch_terminal_grid(const EtchTerminalGridDesc*);
-EtchSheetDesc etch_sheet_desc_default(void);
-bool etch_begin_sheet(const EtchSheetDesc*);
-void etch_end_sheet(void);
+ETCH_API EtchTerminalGridDesc etch_terminal_grid_desc_default(void);
+ETCH_API EtchTerminalCell etch_terminal_cell_default(void);
+ETCH_API void etch_terminal_grid(const EtchTerminalGridDesc*);
+ETCH_API EtchSheetDesc etch_sheet_desc_default(void);
+ETCH_API bool etch_begin_sheet(const EtchSheetDesc*);
+ETCH_API void etch_end_sheet(void);
 
-EtchPresenceResult etch_presence(uint32_t id, bool mounted, EtchSpringSpec spec);
-void etch_set_time_scale(EtchContext* ctx, float scale);
-EtchTheme etch_theme_high_contrast(void);
-EtchTheme etch_theme_industrial(void);
-void etch_set_theme(const EtchTheme* theme, EtchContext* ctx);
-EtchTheme etch_get_theme(const EtchContext* ctx);
-void etch_push_theme(const EtchTheme* theme);
-void etch_pop_theme(void);
+ETCH_API EtchPresenceResult etch_presence(uint32_t id, bool mounted, EtchSpringSpec spec);
+ETCH_API void etch_set_time_scale(EtchContext* ctx, float scale);
+ETCH_API EtchTheme etch_theme_high_contrast(void);
+ETCH_API EtchTheme etch_theme_industrial(void);
+ETCH_API void etch_set_theme(const EtchTheme* theme, EtchContext* ctx);
+ETCH_API EtchTheme etch_get_theme(const EtchContext* ctx);
+ETCH_API void etch_push_theme(const EtchTheme* theme);
+ETCH_API void etch_pop_theme(void);
 
 /* ============================================================================
  * Context Lifecycle, Fonts, Icons, Events, Frames & Window Management
  * ============================================================================ */
 
-EtchContext* etch_create_context(const EtchContextDesc* desc);
-void etch_destroy_context(EtchContext* ctx);
-EtchContext* etch_current_context(void);
-void etch_set_current_context(EtchContext* ctx);
-struct SDL_GPUDevice* etch_gpu_device(EtchContext* ctx);
+ETCH_API EtchContext* etch_create_context(const EtchContextDesc* desc);
+ETCH_API void etch_destroy_context(EtchContext* ctx);
+ETCH_API EtchContext* etch_current_context(void);
+ETCH_API void etch_set_current_context(EtchContext* ctx);
+ETCH_API struct SDL_GPUDevice* etch_gpu_device(EtchContext* ctx);
 
 typedef enum EtchFontWeight {
     ETCH_FONT_WEIGHT_REGULAR = 0,
@@ -1975,13 +2016,13 @@ typedef enum EtchFontWeight {
     ETCH_FONT_WEIGHT_MONO = 5
 } EtchFontWeight;
 
-uint16_t etch_load_system_font(EtchContext* ctx, EtchStr family_name, EtchFontWeight weight, uint16_t slot_hint);
-uint16_t etch_load_font_file(EtchContext* ctx, const char* path, uint16_t slot_hint, int32_t face_index);
-uint16_t etch_load_font_memory(EtchContext* ctx, const void* data, size_t size_bytes, uint16_t slot_hint, int32_t face_index);
-bool etch_is_font_loaded(const EtchContext* ctx, uint16_t font_id);
-bool etch_set_font_tabular_numbers(EtchContext* ctx, uint16_t font_id, bool enabled);
-void etch_set_hinted_small_text(EtchContext* ctx, bool enabled);
-bool etch_hinted_small_text(const EtchContext* ctx);
+ETCH_API uint16_t etch_load_system_font(EtchContext* ctx, EtchStr family_name, EtchFontWeight weight, uint16_t slot_hint);
+ETCH_API uint16_t etch_load_font_file(EtchContext* ctx, const char* path, uint16_t slot_hint, int32_t face_index);
+ETCH_API uint16_t etch_load_font_memory(EtchContext* ctx, const void* data, size_t size_bytes, uint16_t slot_hint, int32_t face_index);
+ETCH_API bool etch_is_font_loaded(const EtchContext* ctx, uint16_t font_id);
+ETCH_API bool etch_set_font_tabular_numbers(EtchContext* ctx, uint16_t font_id, bool enabled);
+ETCH_API void etch_set_hinted_small_text(EtchContext* ctx, bool enabled);
+ETCH_API bool etch_hinted_small_text(const EtchContext* ctx);
 
 typedef enum EtchStrokeCap {
     ETCH_STROKE_CAP_BUTT = 0, ETCH_STROKE_CAP_ROUND = 1, ETCH_STROKE_CAP_SQUARE = 2
@@ -2000,139 +2041,139 @@ typedef struct EtchSvgStrokeDesc {
     uint16_t slot_hint;
 } EtchSvgStrokeDesc;
 
-EtchSvgStrokeDesc etch_svg_stroke_desc_default(void);
-uint16_t etch_register_svg_stroke_icon(EtchContext* ctx, EtchStr svg_path_d, const EtchSvgStrokeDesc* desc);
-uint16_t etch_register_svg_icon(EtchContext* ctx, EtchStr svg_path_d, EtchVec4 view_box, uint16_t slot_hint);
-bool etch_is_icon_loaded(const EtchContext* ctx, uint16_t icon_id);
+ETCH_API EtchSvgStrokeDesc etch_svg_stroke_desc_default(void);
+ETCH_API uint16_t etch_register_svg_stroke_icon(EtchContext* ctx, EtchStr svg_path_d, const EtchSvgStrokeDesc* desc);
+ETCH_API uint16_t etch_register_svg_icon(EtchContext* ctx, EtchStr svg_path_d, EtchVec4 view_box, uint16_t slot_hint);
+ETCH_API bool etch_is_icon_loaded(const EtchContext* ctx, uint16_t icon_id);
 
-void etch_process_event(EtchContext* ctx, const union SDL_Event* event);
-bool etch_needs_redraw(const EtchContext* ctx);
-void etch_request_redraw(EtchContext* ctx);
-void etch_wake_up(EtchContext* ctx);
-bool etch_wait_events(EtchContext* ctx, union SDL_Event* first_event_out, int32_t timeout_ms);
+ETCH_API void etch_process_event(EtchContext* ctx, const union SDL_Event* event);
+ETCH_API bool etch_needs_redraw(const EtchContext* ctx);
+ETCH_API void etch_request_redraw(EtchContext* ctx);
+ETCH_API void etch_wake_up(EtchContext* ctx);
+ETCH_API bool etch_wait_events(EtchContext* ctx, union SDL_Event* first_event_out, int32_t timeout_ms);
 
-void etch_begin_frame(EtchContext* ctx, const EtchFrameDesc* desc);
-void etch_end_frame(EtchContext* ctx);
-bool etch_frame_in_progress(const EtchContext* ctx);
-void etch_begin_window_frame(EtchContext* ctx, struct SDL_Window* window, const EtchWindowFrameDesc* desc);
-void etch_end_window_frame(EtchContext* ctx);
-bool etch_needs_window_redraw(const EtchContext* ctx, struct SDL_Window* window);
-void etch_request_window_redraw(EtchContext* ctx, struct SDL_Window* window);
+ETCH_API void etch_begin_frame(EtchContext* ctx, const EtchFrameDesc* desc);
+ETCH_API void etch_end_frame(EtchContext* ctx);
+ETCH_API bool etch_frame_in_progress(const EtchContext* ctx);
+ETCH_API void etch_begin_window_frame(EtchContext* ctx, struct SDL_Window* window, const EtchWindowFrameDesc* desc);
+ETCH_API void etch_end_window_frame(EtchContext* ctx);
+ETCH_API bool etch_needs_window_redraw(const EtchContext* ctx, struct SDL_Window* window);
+ETCH_API void etch_request_window_redraw(EtchContext* ctx, struct SDL_Window* window);
 
-uint32_t etch_frame_prim_count(const EtchContext* ctx);
-bool etch_get_frame_prim(const EtchContext* ctx, uint32_t index, EtchPrim* out_prim);
-EtchFrameStats etch_frame_stats(const EtchContext* ctx);
+ETCH_API uint32_t etch_frame_prim_count(const EtchContext* ctx);
+ETCH_API bool etch_get_frame_prim(const EtchContext* ctx, uint32_t index, EtchPrim* out_prim);
+ETCH_API EtchFrameStats etch_frame_stats(const EtchContext* ctx);
 
-bool etch_render_window(EtchContext* ctx, EtchColor clear_color, struct SDL_Window* window_override);
-void etch_release_window(EtchContext* ctx, struct SDL_Window* window);
-uint32_t etch_claimed_window_count(const EtchContext* ctx);
-bool etch_render_headless_png(EtchContext* ctx, uint32_t width, uint32_t height, const char* out_png_path, EtchColor clear_color);
+ETCH_API bool etch_render_window(EtchContext* ctx, EtchColor clear_color, struct SDL_Window* window_override);
+ETCH_API void etch_release_window(EtchContext* ctx, struct SDL_Window* window);
+ETCH_API uint32_t etch_claimed_window_count(const EtchContext* ctx);
+ETCH_API bool etch_render_headless_png(EtchContext* ctx, uint32_t width, uint32_t height, const char* out_png_path, EtchColor clear_color);
 
-void etch_set_window_refresh_callback(EtchContext* ctx, EtchWindowRefreshFn fn, void* user_data);
-void etch_set_window_chrome(const EtchWindowChromeDesc* desc, struct SDL_Window* window);
-void etch_window_drag_region(EtchRect rect_logical);
-void etch_window_client_region(EtchRect rect_logical);
-void etch_window_maximize_button_region(EtchRect rect_logical);
-void etch_window_maximize_button_element(uint32_t element_id);
-EtchWindowHit etch_evaluate_window_hit(const EtchContext* ctx, EtchVec2 logical_pos, struct SDL_Window* window);
-void etch_minimize_window(struct SDL_Window* window);
-void etch_maximize_window(struct SDL_Window* window);
-void etch_restore_window(struct SDL_Window* window);
-bool etch_is_window_maximized(const EtchContext* ctx, struct SDL_Window* window);
-bool etch_is_window_minimized(const EtchContext* ctx, struct SDL_Window* window);
-bool etch_set_window_fullscreen(bool fullscreen, struct SDL_Window* window);
-bool etch_is_window_fullscreen(const EtchContext* ctx, struct SDL_Window* window);
-EtchPadding etch_window_safe_insets(const EtchContext* ctx, struct SDL_Window* window);
+ETCH_API void etch_set_window_refresh_callback(EtchContext* ctx, EtchWindowRefreshFn fn, void* user_data);
+ETCH_API void etch_set_window_chrome(const EtchWindowChromeDesc* desc, struct SDL_Window* window);
+ETCH_API void etch_window_drag_region(EtchRect rect_logical);
+ETCH_API void etch_window_client_region(EtchRect rect_logical);
+ETCH_API void etch_window_maximize_button_region(EtchRect rect_logical);
+ETCH_API void etch_window_maximize_button_element(uint32_t element_id);
+ETCH_API EtchWindowHit etch_evaluate_window_hit(const EtchContext* ctx, EtchVec2 logical_pos, struct SDL_Window* window);
+ETCH_API void etch_minimize_window(struct SDL_Window* window);
+ETCH_API void etch_maximize_window(struct SDL_Window* window);
+ETCH_API void etch_restore_window(struct SDL_Window* window);
+ETCH_API bool etch_is_window_maximized(const EtchContext* ctx, struct SDL_Window* window);
+ETCH_API bool etch_is_window_minimized(const EtchContext* ctx, struct SDL_Window* window);
+ETCH_API bool etch_set_window_fullscreen(bool fullscreen, struct SDL_Window* window);
+ETCH_API bool etch_is_window_fullscreen(const EtchContext* ctx, struct SDL_Window* window);
+ETCH_API EtchPadding etch_window_safe_insets(const EtchContext* ctx, struct SDL_Window* window);
 
 /* ============================================================================
  * Accessibility (A11y) Snapshot, Actions & Native OS Bridge
  * ============================================================================ */
 
-void etch_set_a11y_override(const EtchA11yOverrideDesc* desc);
-uint32_t etch_a11y_node_count(const EtchContext* ctx, struct SDL_Window* window);
-bool etch_get_a11y_node(uint32_t index, EtchA11yNode* out_node, const EtchContext* ctx, struct SDL_Window* window);
-bool etch_find_a11y_node(uint32_t element_id, EtchA11yNode* out_node, const EtchContext* ctx, struct SDL_Window* window);
-bool etch_perform_a11y_action(uint32_t element_id, EtchA11yAction action, float numeric_value, EtchStr text_value, EtchContext* ctx, struct SDL_Window* window);
-const char* etch_a11y_role_name(EtchA11yRole role);
-void etch_set_os_a11y_enabled(EtchContext* ctx, bool enabled);
-bool etch_os_a11y_enabled(const EtchContext* ctx);
-bool etch_os_a11y_active(const EtchContext* ctx, struct SDL_Window* window);
+ETCH_API void etch_set_a11y_override(const EtchA11yOverrideDesc* desc);
+ETCH_API uint32_t etch_a11y_node_count(const EtchContext* ctx, struct SDL_Window* window);
+ETCH_API bool etch_get_a11y_node(uint32_t index, EtchA11yNode* out_node, const EtchContext* ctx, struct SDL_Window* window);
+ETCH_API bool etch_find_a11y_node(uint32_t element_id, EtchA11yNode* out_node, const EtchContext* ctx, struct SDL_Window* window);
+ETCH_API bool etch_perform_a11y_action(uint32_t element_id, EtchA11yAction action, float numeric_value, EtchStr text_value, EtchContext* ctx, struct SDL_Window* window);
+ETCH_API const char* etch_a11y_role_name(EtchA11yRole role);
+ETCH_API void etch_set_os_a11y_enabled(EtchContext* ctx, bool enabled);
+ETCH_API bool etch_os_a11y_enabled(const EtchContext* ctx);
+ETCH_API bool etch_os_a11y_active(const EtchContext* ctx, struct SDL_Window* window);
 
 /* ============================================================================
  * Layout Boxes, Text, Collapsibles, Images, Icons & 2D Draw Commands
  * ============================================================================ */
 
-void etch_begin_box(const EtchBoxDesc* desc);
-void etch_end_box(void);
-void etch_box(const EtchBoxDesc* desc);
-void etch_text(EtchStr content, const EtchTextDesc* desc);
-void etch_text_spans(const EtchTextSpan* spans, uint32_t span_count, const EtchRichTextDesc* desc);
-EtchCollapsibleResult etch_begin_collapsible(const EtchCollapsibleDesc* desc);
-void etch_end_collapsible(void);
-bool etch_is_collapsible_open(uint32_t element_id);
-void etch_set_collapsible_open(uint32_t element_id, bool open);
-void etch_image(const EtchImageDesc* desc);
-void etch_icon(const EtchIconDesc* desc);
+ETCH_API void etch_begin_box(const EtchBoxDesc* desc);
+ETCH_API void etch_end_box(void);
+ETCH_API void etch_box(const EtchBoxDesc* desc);
+ETCH_API void etch_text(EtchStr content, const EtchTextDesc* desc);
+ETCH_API void etch_text_spans(const EtchTextSpan* spans, uint32_t span_count, const EtchRichTextDesc* desc);
+ETCH_API EtchCollapsibleResult etch_begin_collapsible(const EtchCollapsibleDesc* desc);
+ETCH_API void etch_end_collapsible(void);
+ETCH_API bool etch_is_collapsible_open(uint32_t element_id);
+ETCH_API void etch_set_collapsible_open(uint32_t element_id, bool open);
+ETCH_API void etch_image(const EtchImageDesc* desc);
+ETCH_API void etch_icon(const EtchIconDesc* desc);
 
-void etch_draw_rect(const EtchRectDrawDesc* desc);
-void etch_draw_line(const EtchLineDesc* desc);
-void etch_draw_filled_polygon(const EtchFilledPolygonDesc* desc);
-void etch_draw_filled_path(const EtchFilledPathDesc* desc);
-void etch_draw_area_series(const EtchAreaSeriesDesc* desc);
-void etch_draw_polyline(const EtchPolylineDesc* desc);
-void etch_draw_bezier(const EtchBezierDesc* desc);
-void etch_draw_ring(const EtchRingDesc* desc);
-void etch_draw_icon(const EtchIconDrawDesc* desc);
+ETCH_API void etch_draw_rect(const EtchRectDrawDesc* desc);
+ETCH_API void etch_draw_line(const EtchLineDesc* desc);
+ETCH_API void etch_draw_filled_polygon(const EtchFilledPolygonDesc* desc);
+ETCH_API void etch_draw_filled_path(const EtchFilledPathDesc* desc);
+ETCH_API void etch_draw_area_series(const EtchAreaSeriesDesc* desc);
+ETCH_API void etch_draw_polyline(const EtchPolylineDesc* desc);
+ETCH_API void etch_draw_bezier(const EtchBezierDesc* desc);
+ETCH_API void etch_draw_ring(const EtchRingDesc* desc);
+ETCH_API void etch_draw_icon(const EtchIconDrawDesc* desc);
 typedef struct EtchFontMetrics {float ascent,descent,line_height;} EtchFontMetrics;
-EtchFontMetrics etch_font_metrics(uint16_t font_id,float size);
-EtchVec2 etch_measure_text(EtchStr text, uint16_t font_id, float size, float letter_spacing);
-void etch_draw_text(const EtchTextDrawDesc* desc);
+ETCH_API EtchFontMetrics etch_font_metrics(uint16_t font_id,float size);
+ETCH_API EtchVec2 etch_measure_text(EtchStr text, uint16_t font_id, float size, float letter_spacing);
+ETCH_API void etch_draw_text(const EtchTextDrawDesc* desc);
 typedef void (*EtchLayoutDrawFn)(EtchRect local_bounds, void* user_data);
-void etch_draw_after_layout(EtchLayoutDrawFn callback, void* user_data, bool foreground);
-void etch_draw_image(const EtchImageDrawDesc* desc);
+ETCH_API void etch_draw_after_layout(EtchLayoutDrawFn callback, void* user_data, bool foreground);
+ETCH_API void etch_draw_image(const EtchImageDrawDesc* desc);
 
 /* ============================================================================
  * Dynamic Sprites & External GPU Textures
  * ============================================================================ */
 
-uint32_t etch_create_sprite_rgba(EtchContext* ctx, const EtchTextureDesc* desc);
-bool etch_update_sprite_rgba(EtchContext* ctx, uint32_t sprite_id, uint32_t width, uint32_t height, const void* rgba_pixels, uint32_t row_pitch_bytes);
-uint32_t etch_load_sprite_file(EtchContext* ctx, const char* path, bool srgb);
-uint32_t etch_load_sprite_memory(EtchContext* ctx, const void* data, size_t size_bytes, bool srgb);
-void etch_destroy_sprite(EtchContext* ctx, uint32_t sprite_id);
-EtchVec2 etch_sprite_size(const EtchContext* ctx, uint32_t sprite_id);
-uint32_t etch_sprite_count(const EtchContext* ctx);
+ETCH_API uint32_t etch_create_sprite_rgba(EtchContext* ctx, const EtchTextureDesc* desc);
+ETCH_API bool etch_update_sprite_rgba(EtchContext* ctx, uint32_t sprite_id, uint32_t width, uint32_t height, const void* rgba_pixels, uint32_t row_pitch_bytes);
+ETCH_API uint32_t etch_load_sprite_file(EtchContext* ctx, const char* path, bool srgb);
+ETCH_API uint32_t etch_load_sprite_memory(EtchContext* ctx, const void* data, size_t size_bytes, bool srgb);
+ETCH_API void etch_destroy_sprite(EtchContext* ctx, uint32_t sprite_id);
+ETCH_API EtchVec2 etch_sprite_size(const EtchContext* ctx, uint32_t sprite_id);
+ETCH_API uint32_t etch_sprite_count(const EtchContext* ctx);
 
-EtchLoadedTexture etch_create_texture_rgba(EtchContext* ctx, const EtchTextureDesc* desc);
-bool etch_flush_texture_uploads(EtchContext* ctx);
-bool etch_update_texture_rgba(EtchContext* ctx, struct SDL_GPUTexture* texture, uint32_t width, uint32_t height, const void* rgba_pixels, uint32_t row_pitch_bytes);
+ETCH_API EtchLoadedTexture etch_create_texture_rgba(EtchContext* ctx, const EtchTextureDesc* desc);
+ETCH_API bool etch_flush_texture_uploads(EtchContext* ctx);
+ETCH_API bool etch_update_texture_rgba(EtchContext* ctx, struct SDL_GPUTexture* texture, uint32_t width, uint32_t height, const void* rgba_pixels, uint32_t row_pitch_bytes);
 /* Caller owns an RGBA8 texture; the rectangle must fit mip zero. Pixels are copied immediately. */
-bool etch_update_texture_region_rgba(EtchContext* ctx, struct SDL_GPUTexture* texture, uint32_t x, uint32_t y, uint32_t width, uint32_t height, const void* rgba_pixels, uint32_t row_pitch_bytes);
-EtchLoadedTexture etch_load_texture_file(EtchContext* ctx, const char* path, bool srgb);
-EtchLoadedTexture etch_load_texture_memory(EtchContext* ctx, const void* data, size_t size_bytes, bool srgb);
-void etch_destroy_loaded_texture(EtchContext* ctx, EtchLoadedTexture* tex);
-void etch_destroy_gpu_texture(EtchContext* ctx, struct SDL_GPUTexture* tex);
+ETCH_API bool etch_update_texture_region_rgba(EtchContext* ctx, struct SDL_GPUTexture* texture, uint32_t x, uint32_t y, uint32_t width, uint32_t height, const void* rgba_pixels, uint32_t row_pitch_bytes);
+ETCH_API EtchLoadedTexture etch_load_texture_file(EtchContext* ctx, const char* path, bool srgb);
+ETCH_API EtchLoadedTexture etch_load_texture_memory(EtchContext* ctx, const void* data, size_t size_bytes, bool srgb);
+ETCH_API void etch_destroy_loaded_texture(EtchContext* ctx, EtchLoadedTexture* tex);
+ETCH_API void etch_destroy_gpu_texture(EtchContext* ctx, struct SDL_GPUTexture* tex);
 
 /* ============================================================================
  * Text Editing, Selection, Clipboard, IME & Code Editor
  * ============================================================================ */
 
-EtchTextInputResult etch_text_input(const EtchTextInputDesc* desc);
-void etch_set_text_selection(uint32_t element_id, uint32_t anchor_byte, uint32_t cursor_byte);
-bool etch_has_text_selection(uint32_t element_id);
-EtchStr etch_selected_text(uint32_t element_id, EtchArena* arena);
-void etch_clear_text_selection(uint32_t element_id);
-EtchRect etch_ime_cursor_rect(const EtchContext* ctx);
-void etch_request_text_input(uint32_t element_id, EtchRect ime_cursor_rect);
-EtchStr etch_typed_text(uint32_t element_id);
+ETCH_API EtchTextInputResult etch_text_input(const EtchTextInputDesc* desc);
+ETCH_API void etch_set_text_selection(uint32_t element_id, uint32_t anchor_byte, uint32_t cursor_byte);
+ETCH_API bool etch_has_text_selection(uint32_t element_id);
+ETCH_API EtchStr etch_selected_text(uint32_t element_id, EtchArena* arena);
+ETCH_API void etch_clear_text_selection(uint32_t element_id);
+ETCH_API EtchRect etch_ime_cursor_rect(const EtchContext* ctx);
+ETCH_API void etch_request_text_input(uint32_t element_id, EtchRect ime_cursor_rect);
+ETCH_API EtchStr etch_typed_text(uint32_t element_id);
 typedef struct EtchClipboardImageData {
     const uint8_t* bytes;
     uint32_t size_bytes;
     EtchStr mime_type;
 } EtchClipboardImageData;
-bool etch_set_clipboard_text(const char* utf8_text);
-EtchStr etch_get_clipboard_text(EtchArena* arena);
-EtchClipboardImageData etch_get_clipboard_image(EtchArena* arena);
+ETCH_API bool etch_set_clipboard_text(const char* utf8_text);
+ETCH_API EtchStr etch_get_clipboard_text(EtchArena* arena);
+ETCH_API EtchClipboardImageData etch_get_clipboard_image(EtchArena* arena);
 
 typedef struct EtchFileDialogFilter {
     const char* name;
@@ -2149,81 +2190,81 @@ typedef struct EtchFileDialogResult {
     uint32_t path_count;
 } EtchFileDialogResult;
 
-bool etch_open_folder_dialog(EtchContext* ctx, struct SDL_Window* parent_window, const char* default_location, uint32_t request_tag, bool allow_many);
-bool etch_open_file_dialog(EtchContext* ctx, struct SDL_Window* parent_window, const EtchFileDialogFilter* filters, uint32_t filter_count, const char* default_location, uint32_t request_tag, bool allow_many);
-bool etch_open_save_file_dialog(EtchContext* ctx, struct SDL_Window* parent_window, const EtchFileDialogFilter* filters, uint32_t filter_count, const char* default_location, uint32_t request_tag);
-EtchFileDialogResult etch_poll_file_dialog(EtchContext* ctx, EtchArena* arena);
+ETCH_API bool etch_open_folder_dialog(EtchContext* ctx, struct SDL_Window* parent_window, const char* default_location, uint32_t request_tag, bool allow_many);
+ETCH_API bool etch_open_file_dialog(EtchContext* ctx, struct SDL_Window* parent_window, const EtchFileDialogFilter* filters, uint32_t filter_count, const char* default_location, uint32_t request_tag, bool allow_many);
+ETCH_API bool etch_open_save_file_dialog(EtchContext* ctx, struct SDL_Window* parent_window, const EtchFileDialogFilter* filters, uint32_t filter_count, const char* default_location, uint32_t request_tag);
+ETCH_API EtchFileDialogResult etch_poll_file_dialog(EtchContext* ctx, EtchArena* arena);
 
-EtchTextBuffer* etch_create_text_buffer(EtchStr initial_utf8, uint32_t initial_cap);
-void etch_destroy_text_buffer(EtchTextBuffer* buf);
-bool etch_text_buffer_set(EtchTextBuffer* buf, EtchStr utf8);
-bool etch_text_buffer_replace(EtchTextBuffer* buf, uint32_t byte_start, uint32_t byte_end, EtchStr utf8,
+ETCH_API EtchTextBuffer* etch_create_text_buffer(EtchStr initial_utf8, uint32_t initial_cap);
+ETCH_API void etch_destroy_text_buffer(EtchTextBuffer* buf);
+ETCH_API bool etch_text_buffer_set(EtchTextBuffer* buf, EtchStr utf8);
+ETCH_API bool etch_text_buffer_replace(EtchTextBuffer* buf, uint32_t byte_start, uint32_t byte_end, EtchStr utf8,
     bool record_undo, uint32_t before_cursor, uint32_t before_anchor,
     uint32_t after_cursor, uint32_t after_anchor, uint8_t op_group, double timestamp_s);
-uint32_t etch_text_buffer_byte_length(const EtchTextBuffer* buf);
-uint32_t etch_text_buffer_line_count(const EtchTextBuffer* buf);
-uint32_t etch_text_buffer_line_start(const EtchTextBuffer* buf, uint32_t line);
-uint32_t etch_text_buffer_line_end(const EtchTextBuffer* buf, uint32_t line);
-EtchStr etch_text_buffer_line(const EtchTextBuffer* buf, uint32_t line, EtchArena* scratch);
-uint32_t etch_text_buffer_copy_range(const EtchTextBuffer* buf, uint32_t byte_start, uint32_t byte_end, char* out_buf, uint32_t cap);
-EtchTextLineCol etch_text_buffer_line_col(const EtchTextBuffer* buf, uint32_t byte_offset);
-uint32_t etch_text_buffer_byte_offset(const EtchTextBuffer* buf, uint32_t line, uint32_t col_byte);
-bool etch_text_buffer_undo(EtchTextBuffer* buf, uint32_t* out_cursor, uint32_t* out_anchor);
-bool etch_text_buffer_redo(EtchTextBuffer* buf, uint32_t* out_cursor, uint32_t* out_anchor);
-void etch_text_buffer_clear_undo(EtchTextBuffer* buf);
+ETCH_API uint32_t etch_text_buffer_byte_length(const EtchTextBuffer* buf);
+ETCH_API uint32_t etch_text_buffer_line_count(const EtchTextBuffer* buf);
+ETCH_API uint32_t etch_text_buffer_line_start(const EtchTextBuffer* buf, uint32_t line);
+ETCH_API uint32_t etch_text_buffer_line_end(const EtchTextBuffer* buf, uint32_t line);
+ETCH_API EtchStr etch_text_buffer_line(const EtchTextBuffer* buf, uint32_t line, EtchArena* scratch);
+ETCH_API uint32_t etch_text_buffer_copy_range(const EtchTextBuffer* buf, uint32_t byte_start, uint32_t byte_end, char* out_buf, uint32_t cap);
+ETCH_API EtchTextLineCol etch_text_buffer_line_col(const EtchTextBuffer* buf, uint32_t byte_offset);
+ETCH_API uint32_t etch_text_buffer_byte_offset(const EtchTextBuffer* buf, uint32_t line, uint32_t col_byte);
+ETCH_API bool etch_text_buffer_undo(EtchTextBuffer* buf, uint32_t* out_cursor, uint32_t* out_anchor);
+ETCH_API bool etch_text_buffer_redo(EtchTextBuffer* buf, uint32_t* out_cursor, uint32_t* out_anchor);
+ETCH_API void etch_text_buffer_clear_undo(EtchTextBuffer* buf);
 
-uint32_t etch_tokenize_cpp_hlsl(uint32_t line_index, EtchStr line, EtchSyntaxToken* out_tokens, uint32_t max_tokens, void* user_data);
-EtchCodeEditorResult etch_code_editor(const EtchCodeEditorDesc* desc);
-void etch_code_editor_set_cursor(uint32_t element_id, uint32_t anchor_byte, uint32_t cursor_byte, bool scroll_into_view);
-void etch_code_editor_scroll_to_line(uint32_t element_id, uint32_t line_index, EtchAlignY align);
+ETCH_API uint32_t etch_tokenize_cpp_hlsl(uint32_t line_index, EtchStr line, EtchSyntaxToken* out_tokens, uint32_t max_tokens, void* user_data);
+ETCH_API EtchCodeEditorResult etch_code_editor(const EtchCodeEditorDesc* desc);
+ETCH_API void etch_code_editor_set_cursor(uint32_t element_id, uint32_t anchor_byte, uint32_t cursor_byte, bool scroll_into_view);
+ETCH_API void etch_code_editor_scroll_to_line(uint32_t element_id, uint32_t line_index, EtchAlignY align);
 
 /* ============================================================================
  * Desktop Widgets
  * ============================================================================ */
 
-bool etch_button(const EtchButtonDesc* desc);
-bool etch_checkbox(const EtchCheckboxDesc* desc);
-bool etch_toggle_switch(const EtchToggleSwitchDesc* desc);
-void etch_progress_bar(const EtchProgressBarDesc* desc);
-bool etch_begin_tab_bar(const EtchTabBarDesc* desc);
-EtchTabItemResult etch_tab_item(const EtchTabItemDesc* desc);
-void etch_end_tab_bar(void);
-bool etch_slider(const EtchSliderDesc* desc);
-bool etch_drag_value(const EtchDragValueDesc* desc);
-void etch_set_tooltip(uint32_t target_id, const EtchTooltipDesc* desc);
-void etch_set_tooltip_text(uint32_t target_id, EtchStr text);
-bool etch_begin_modal(const EtchModalDesc* desc);
-void etch_end_modal(void);
-bool etch_combo_box(const EtchComboBoxDesc* desc);
-void etch_open_popup(uint32_t popup_id, EtchVec2 anchor_pos);
-void etch_close_popup(uint32_t popup_id);
-bool etch_is_popup_open(uint32_t popup_id);
-bool etch_begin_popup(const EtchPopupDesc* desc);
-void etch_end_popup(void);
-bool etch_begin_context_menu(uint32_t popup_id, uint32_t target_id);
-void etch_end_context_menu(void);
-bool etch_begin_menu_bar(const EtchMenuBarDesc* desc);
-void etch_end_menu_bar(void);
-bool etch_begin_menu(const EtchMenuDesc* desc);
-void etch_end_menu(void);
-bool etch_menu_item(const EtchMenuItemDesc* desc);
-void etch_menu_separator(void);
+ETCH_API bool etch_button(const EtchButtonDesc* desc);
+ETCH_API bool etch_checkbox(const EtchCheckboxDesc* desc);
+ETCH_API bool etch_toggle_switch(const EtchToggleSwitchDesc* desc);
+ETCH_API void etch_progress_bar(const EtchProgressBarDesc* desc);
+ETCH_API bool etch_begin_tab_bar(const EtchTabBarDesc* desc);
+ETCH_API EtchTabItemResult etch_tab_item(const EtchTabItemDesc* desc);
+ETCH_API void etch_end_tab_bar(void);
+ETCH_API bool etch_slider(const EtchSliderDesc* desc);
+ETCH_API bool etch_drag_value(const EtchDragValueDesc* desc);
+ETCH_API void etch_set_tooltip(uint32_t target_id, const EtchTooltipDesc* desc);
+ETCH_API void etch_set_tooltip_text(uint32_t target_id, EtchStr text);
+ETCH_API bool etch_begin_modal(const EtchModalDesc* desc);
+ETCH_API void etch_end_modal(void);
+ETCH_API bool etch_combo_box(const EtchComboBoxDesc* desc);
+ETCH_API void etch_open_popup(uint32_t popup_id, EtchVec2 anchor_pos);
+ETCH_API void etch_close_popup(uint32_t popup_id);
+ETCH_API bool etch_is_popup_open(uint32_t popup_id);
+ETCH_API bool etch_begin_popup(const EtchPopupDesc* desc);
+ETCH_API void etch_end_popup(void);
+ETCH_API bool etch_begin_context_menu(uint32_t popup_id, uint32_t target_id);
+ETCH_API void etch_end_context_menu(void);
+ETCH_API bool etch_begin_menu_bar(const EtchMenuBarDesc* desc);
+ETCH_API void etch_end_menu_bar(void);
+ETCH_API bool etch_begin_menu(const EtchMenuDesc* desc);
+ETCH_API void etch_end_menu(void);
+ETCH_API bool etch_menu_item(const EtchMenuItemDesc* desc);
+ETCH_API void etch_menu_separator(void);
 
 /* ============================================================================
  * Interaction, Input, OS Drops, Drag Payload, Springs & Containers
  * ============================================================================ */
 
-bool etch_hovered(uint32_t element_id);
-bool etch_pressed(uint32_t element_id);
-bool etch_clicked(uint32_t element_id);
-bool etch_active(uint32_t element_id);
-uint32_t etch_active_id(void);
-void etch_set_active(uint32_t element_id);
-bool etch_focused(uint32_t element_id);
-uint32_t etch_focused_id(void);
-void etch_request_focus(uint32_t element_id);
-void etch_set_cursor(EtchCursor cursor);
-EtchRect etch_element_bounds(uint32_t element_id);
+ETCH_API bool etch_hovered(uint32_t element_id);
+ETCH_API bool etch_pressed(uint32_t element_id);
+ETCH_API bool etch_clicked(uint32_t element_id);
+ETCH_API bool etch_active(uint32_t element_id);
+ETCH_API uint32_t etch_active_id(void);
+ETCH_API void etch_set_active(uint32_t element_id);
+ETCH_API bool etch_focused(uint32_t element_id);
+ETCH_API uint32_t etch_focused_id(void);
+ETCH_API void etch_request_focus(uint32_t element_id);
+ETCH_API void etch_set_cursor(EtchCursor cursor);
+ETCH_API EtchRect etch_element_bounds(uint32_t element_id);
 /* Last completed frame; named boxes only. Visible bounds are ancestor clip AABBs,
    not a guarantee against sibling occlusion or rounded clip masks. */
 typedef struct EtchElementGeometry {
@@ -2231,131 +2272,131 @@ typedef struct EtchElementGeometry {
     EtchVec2 local_scale;
     float opacity;
 } EtchElementGeometry;
-bool etch_element_geometry(uint32_t element_id, EtchElementGeometry* out_geometry);
-bool etch_screen_to_element_local(uint32_t element_id, EtchVec2 screen_pos, EtchVec2* out_local);
+ETCH_API bool etch_element_geometry(uint32_t element_id, EtchElementGeometry* out_geometry);
+ETCH_API bool etch_screen_to_element_local(uint32_t element_id, EtchVec2 screen_pos, EtchVec2* out_local);
 
 
-void etch_push_id(uint32_t scope_id);
-void etch_push_id_str(EtchStr label);
-void etch_pop_id(void);
-uint32_t etch_scoped_id(uint32_t local_id);
-uint32_t etch_scoped_id_str(EtchStr label);
+ETCH_API void etch_push_id(uint32_t scope_id);
+ETCH_API void etch_push_id_str(EtchStr label);
+ETCH_API void etch_pop_id(void);
+ETCH_API uint32_t etch_scoped_id(uint32_t local_id);
+ETCH_API uint32_t etch_scoped_id_str(EtchStr label);
 
-uint16_t etch_key_mods(void);
-bool etch_key_pressed(uint32_t keycode, bool include_repeat);
-bool etch_consume_key_pressed(uint32_t keycode, bool include_repeat);
-bool etch_shortcut(uint16_t required_mods, uint32_t keycode, bool allow_when_typing);
-bool etch_consume_shortcut(uint16_t required_mods, uint32_t keycode, bool allow_when_typing);
+ETCH_API uint16_t etch_key_mods(void);
+ETCH_API bool etch_key_pressed(uint32_t keycode, bool include_repeat);
+ETCH_API bool etch_consume_key_pressed(uint32_t keycode, bool include_repeat);
+ETCH_API bool etch_shortcut(uint16_t required_mods, uint32_t keycode, bool allow_when_typing);
+ETCH_API bool etch_consume_shortcut(uint16_t required_mods, uint32_t keycode, bool allow_when_typing);
 
-EtchVec2 etch_pointer_pos(void);
-EtchVec2 etch_pointer_delta(void);
-bool etch_right_clicked(uint32_t element_id);
-bool etch_right_clicked_anywhere(void);
-bool etch_double_clicked(uint32_t element_id);
-bool etch_dragging(uint32_t element_id, float threshold_px);
-bool etch_clicked_without_drag(uint32_t element_id, float max_drag_px);
-uint32_t etch_topmost_hovered_id(void);
-bool etch_begin_cached_subtree(uint32_t id, uint64_t content_hash);
-void etch_end_cached_subtree(void);
-void etch_invalidate_cached_subtree(uint32_t id, EtchContext* ctx);
-bool etch_should_close_popover(uint32_t popover_id, uint32_t trigger_id);
+ETCH_API EtchVec2 etch_pointer_pos(void);
+ETCH_API EtchVec2 etch_pointer_delta(void);
+ETCH_API bool etch_right_clicked(uint32_t element_id);
+ETCH_API bool etch_right_clicked_anywhere(void);
+ETCH_API bool etch_double_clicked(uint32_t element_id);
+ETCH_API bool etch_dragging(uint32_t element_id, float threshold_px);
+ETCH_API bool etch_clicked_without_drag(uint32_t element_id, float max_drag_px);
+ETCH_API uint32_t etch_topmost_hovered_id(void);
+ETCH_API bool etch_begin_cached_subtree(uint32_t id, uint64_t content_hash);
+ETCH_API void etch_end_cached_subtree(void);
+ETCH_API void etch_invalidate_cached_subtree(uint32_t id, EtchContext* ctx);
+ETCH_API bool etch_should_close_popover(uint32_t popover_id, uint32_t trigger_id);
 
-uint32_t etch_dropped_file_count(void);
-EtchStr etch_dropped_file_at(uint32_t index);
-bool etch_is_os_dragging(void);
-EtchVec2 etch_os_drop_pos(void);
-bool etch_os_drag_hovering(uint32_t element_id);
-uint32_t etch_dropped_file_on_count(uint32_t element_id);
-EtchStr etch_dropped_file_on_at(uint32_t element_id, uint32_t index);
-uint32_t etch_dropped_text_count(void);
-EtchStr etch_dropped_text_at(uint32_t index);
-uint32_t etch_dropped_text_on_count(uint32_t element_id);
-EtchStr etch_dropped_text_on_at(uint32_t element_id, uint32_t index);
-void etch_begin_focus_scope(uint32_t scope_id, bool trap_tab);
-void etch_end_focus_scope(void);
-bool etch_keyboard_focus_visible(uint32_t element_id);
+ETCH_API uint32_t etch_dropped_file_count(void);
+ETCH_API EtchStr etch_dropped_file_at(uint32_t index);
+ETCH_API bool etch_is_os_dragging(void);
+ETCH_API EtchVec2 etch_os_drop_pos(void);
+ETCH_API bool etch_os_drag_hovering(uint32_t element_id);
+ETCH_API uint32_t etch_dropped_file_on_count(uint32_t element_id);
+ETCH_API EtchStr etch_dropped_file_on_at(uint32_t element_id, uint32_t index);
+ETCH_API uint32_t etch_dropped_text_count(void);
+ETCH_API EtchStr etch_dropped_text_at(uint32_t index);
+ETCH_API uint32_t etch_dropped_text_on_count(uint32_t element_id);
+ETCH_API EtchStr etch_dropped_text_on_at(uint32_t element_id, uint32_t index);
+ETCH_API void etch_begin_focus_scope(uint32_t scope_id, bool trap_tab);
+ETCH_API void etch_end_focus_scope(void);
+ETCH_API bool etch_keyboard_focus_visible(uint32_t element_id);
 
-bool etch_begin_drag_payload(uint32_t source_id, uint32_t kind_hash, EtchStr label, const void* data, uint32_t size, uint64_t u64, uint32_t u32);
-bool etch_is_dragging_payload(uint32_t kind_hash);
-bool etch_peek_drag_payload(EtchDragPayloadView* out_view, uint32_t kind_hash);
-bool etch_accept_drag_payload(uint32_t target_id, uint32_t kind_hash, EtchDragPayloadView* out_view);
+ETCH_API bool etch_begin_drag_payload(uint32_t source_id, uint32_t kind_hash, EtchStr label, const void* data, uint32_t size, uint64_t u64, uint32_t u32);
+ETCH_API bool etch_is_dragging_payload(uint32_t kind_hash);
+ETCH_API bool etch_peek_drag_payload(EtchDragPayloadView* out_view, uint32_t kind_hash);
+ETCH_API bool etch_accept_drag_payload(uint32_t target_id, uint32_t kind_hash, EtchDragPayloadView* out_view);
 
-struct SDL_Window* etch_create_desktop_window(const char* title, float logical_w, float logical_h, uint64_t flags);
-struct SDL_Window* etch_create_desktop_window_on_display(const char* title, float logical_w, float logical_h, uint32_t display_id, uint64_t flags);
-struct SDL_Window* etch_create_desktop_window_at_pointer(const char* title, float logical_w, float logical_h, uint64_t flags);
-bool etch_set_desktop_window_min_size(struct SDL_Window* window, float logical_w, float logical_h);
-float etch_spring_from(uint32_t anim_id, float target, float initial_value, EtchSpringSpec spec);
-float etch_spring(uint32_t anim_id, float target, EtchSpringSpec spec);
-EtchVec2 etch_spring_vec2(uint32_t anim_id, EtchVec2 target, EtchSpringSpec spec);
-EtchVec2 etch_scroll_delta(void);
-EtchVec2 etch_scroll_max(uint32_t element_id);
-EtchVec2 etch_scroll_offset(uint32_t element_id);
-void etch_set_scroll_offset(uint32_t element_id, EtchVec2 offset, bool stop_momentum);
+ETCH_API struct SDL_Window* etch_create_desktop_window(const char* title, float logical_w, float logical_h, uint64_t flags);
+ETCH_API struct SDL_Window* etch_create_desktop_window_on_display(const char* title, float logical_w, float logical_h, uint32_t display_id, uint64_t flags);
+ETCH_API struct SDL_Window* etch_create_desktop_window_at_pointer(const char* title, float logical_w, float logical_h, uint64_t flags);
+ETCH_API bool etch_set_desktop_window_min_size(struct SDL_Window* window, float logical_w, float logical_h);
+ETCH_API float etch_spring_from(uint32_t anim_id, float target, float initial_value, EtchSpringSpec spec);
+ETCH_API float etch_spring(uint32_t anim_id, float target, EtchSpringSpec spec);
+ETCH_API EtchVec2 etch_spring_vec2(uint32_t anim_id, EtchVec2 target, EtchSpringSpec spec);
+ETCH_API EtchVec2 etch_scroll_delta(void);
+ETCH_API EtchVec2 etch_scroll_max(uint32_t element_id);
+ETCH_API EtchVec2 etch_scroll_offset(uint32_t element_id);
+ETCH_API void etch_set_scroll_offset(uint32_t element_id, EtchVec2 offset, bool stop_momentum);
 
-EtchSplitResult etch_begin_split(const EtchSplitDesc* desc);
-void etch_split_second(void);
-void etch_end_split(void);
-float etch_split_ratio(uint32_t split_id);
-void etch_set_split_ratio(uint32_t split_id, float ratio);
+ETCH_API EtchSplitResult etch_begin_split(const EtchSplitDesc* desc);
+ETCH_API void etch_split_second(void);
+ETCH_API void etch_end_split(void);
+ETCH_API float etch_split_ratio(uint32_t split_id);
+ETCH_API void etch_set_split_ratio(uint32_t split_id, float ratio);
 
-EtchVirtualListSlice etch_begin_virtual_list(const EtchVirtualListDesc* desc);
-void etch_end_virtual_list(void);
-void etch_virtual_list_set_item_height(uint32_t list_id, uint32_t row_index, float height_px);
-void etch_virtual_list_invalidate_heights(uint32_t list_id);
-double etch_virtual_list_scroll_offset(uint32_t list_id);
-void etch_set_virtual_list_scroll_offset(uint32_t list_id, double offset_y, bool stop_momentum);
-void etch_virtual_list_scroll_to_row(uint32_t list_id, uint32_t row_index, float item_height_px, EtchAlignY align);
-bool etch_virtual_list_is_at_bottom(uint32_t list_id);
-void etch_virtual_list_scroll_to_bottom(uint32_t list_id, bool stop_momentum);
+ETCH_API EtchVirtualListSlice etch_begin_virtual_list(const EtchVirtualListDesc* desc);
+ETCH_API void etch_end_virtual_list(void);
+ETCH_API void etch_virtual_list_set_item_height(uint32_t list_id, uint32_t row_index, float height_px);
+ETCH_API void etch_virtual_list_invalidate_heights(uint32_t list_id);
+ETCH_API double etch_virtual_list_scroll_offset(uint32_t list_id);
+ETCH_API void etch_set_virtual_list_scroll_offset(uint32_t list_id, double offset_y, bool stop_momentum);
+ETCH_API void etch_virtual_list_scroll_to_row(uint32_t list_id, uint32_t row_index, float item_height_px, EtchAlignY align);
+ETCH_API bool etch_virtual_list_is_at_bottom(uint32_t list_id);
+ETCH_API void etch_virtual_list_scroll_to_bottom(uint32_t list_id, bool stop_momentum);
 
-bool etch_dock_space_initialized(uint32_t dock_id);
-uint32_t etch_dock_reset_root(uint32_t dock_id);
-bool etch_dock_split_node(uint32_t dock_id, uint32_t node_idx, EtchAxis axis, float default_ratio,
+ETCH_API bool etch_dock_space_initialized(uint32_t dock_id);
+ETCH_API uint32_t etch_dock_reset_root(uint32_t dock_id);
+ETCH_API bool etch_dock_split_node(uint32_t dock_id, uint32_t node_idx, EtchAxis axis, float default_ratio,
     uint32_t* out_first_node, uint32_t* out_second_node, uint32_t split_widget_id,
     float min_first_px, float min_second_px);
-bool etch_dock_add_pane(uint32_t dock_id, uint32_t leaf_node_idx, const EtchDockPaneDesc* pane);
-bool etch_dock_dock_pane(uint32_t dock_id, uint32_t pane_id, uint32_t target_pane_id, EtchDockZone zone, float split_ratio);
-bool etch_dock_reorder_pane(uint32_t dock_id, uint32_t pane_id, uint32_t target_pane_id, bool insert_after);
-void etch_dock_activate_pane(uint32_t dock_id, uint32_t pane_id);
-uint32_t etch_dock_active_pane(uint32_t dock_id, uint32_t leaf_node_idx);
-uint32_t etch_dock_find_pane_leaf(uint32_t dock_id, uint32_t pane_id);
-bool etch_dock_is_pane_open(uint32_t dock_id, uint32_t pane_id);
-void etch_dock_set_pane_open(uint32_t dock_id, uint32_t pane_id, bool open);
-void etch_begin_dock_space(const EtchDockSpaceDesc* desc);
-uint32_t etch_next_dock_pane(void);
-void etch_end_dock_space(void);
+ETCH_API bool etch_dock_add_pane(uint32_t dock_id, uint32_t leaf_node_idx, const EtchDockPaneDesc* pane);
+ETCH_API bool etch_dock_dock_pane(uint32_t dock_id, uint32_t pane_id, uint32_t target_pane_id, EtchDockZone zone, float split_ratio);
+ETCH_API bool etch_dock_reorder_pane(uint32_t dock_id, uint32_t pane_id, uint32_t target_pane_id, bool insert_after);
+ETCH_API void etch_dock_activate_pane(uint32_t dock_id, uint32_t pane_id);
+ETCH_API uint32_t etch_dock_active_pane(uint32_t dock_id, uint32_t leaf_node_idx);
+ETCH_API uint32_t etch_dock_find_pane_leaf(uint32_t dock_id, uint32_t pane_id);
+ETCH_API bool etch_dock_is_pane_open(uint32_t dock_id, uint32_t pane_id);
+ETCH_API void etch_dock_set_pane_open(uint32_t dock_id, uint32_t pane_id, bool open);
+ETCH_API void etch_begin_dock_space(const EtchDockSpaceDesc* desc);
+ETCH_API uint32_t etch_next_dock_pane(void);
+ETCH_API void etch_end_dock_space(void);
 
-EtchTableResult etch_begin_table(const EtchTableDesc* desc);
-bool etch_table_next_row(uint32_t* out_row_index, EtchColor row_bg_override, EtchColor row_border_override);
-bool etch_table_next_column(void);
+ETCH_API EtchTableResult etch_begin_table(const EtchTableDesc* desc);
+ETCH_API bool etch_table_next_row(uint32_t* out_row_index, EtchColor row_bg_override, EtchColor row_border_override);
+ETCH_API bool etch_table_next_column(void);
 typedef struct EtchTableRowResult {
     uint32_t id;
     bool hovered, pressed, clicked, double_clicked, right_clicked;
 } EtchTableRowResult;
-EtchTableRowResult etch_table_row_result(uint32_t table_id, uint32_t row_index);
-void etch_end_table(void);
-float etch_table_column_width(uint32_t table_id, uint32_t col_index);
-void etch_set_table_column_width(uint32_t table_id, uint32_t col_index, float width_px);
-void etch_set_table_sort(uint32_t table_id, uint32_t col_index, bool descending);
-void etch_table_scroll_to_row(uint32_t table_id, uint32_t row_index, float row_height_px, EtchAlignY align);
+ETCH_API EtchTableRowResult etch_table_row_result(uint32_t table_id, uint32_t row_index);
+ETCH_API void etch_end_table(void);
+ETCH_API float etch_table_column_width(uint32_t table_id, uint32_t col_index);
+ETCH_API void etch_set_table_column_width(uint32_t table_id, uint32_t col_index, float width_px);
+ETCH_API void etch_set_table_sort(uint32_t table_id, uint32_t col_index, bool descending);
+ETCH_API void etch_table_scroll_to_row(uint32_t table_id, uint32_t row_index, float row_height_px, EtchAlignY align);
 
-EtchTreeNodeResult etch_begin_tree_node(const EtchTreeNodeDesc* desc);
-void etch_end_tree_node(void);
-bool etch_is_tree_open(uint32_t node_id);
-void etch_set_tree_open(uint32_t node_id, bool open);
+ETCH_API EtchTreeNodeResult etch_begin_tree_node(const EtchTreeNodeDesc* desc);
+ETCH_API void etch_end_tree_node(void);
+ETCH_API bool etch_is_tree_open(uint32_t node_id);
+ETCH_API void etch_set_tree_open(uint32_t node_id, bool open);
 
-EtchCanvasState etch_begin_canvas(const EtchCanvasDesc* desc);
-void etch_end_canvas(void);
-void etch_canvas_wire(const EtchCanvasWireDesc* desc);
-EtchCanvasNodeResult etch_begin_canvas_node(const EtchCanvasNodeDesc* desc);
-void etch_end_canvas_node(void);
-EtchCanvasState etch_canvas_state(uint32_t canvas_id);
-void etch_set_canvas_view(uint32_t canvas_id, EtchVec2 pan, float zoom);
+ETCH_API EtchCanvasState etch_begin_canvas(const EtchCanvasDesc* desc);
+ETCH_API void etch_end_canvas(void);
+ETCH_API void etch_canvas_wire(const EtchCanvasWireDesc* desc);
+ETCH_API EtchCanvasNodeResult etch_begin_canvas_node(const EtchCanvasNodeDesc* desc);
+ETCH_API void etch_end_canvas_node(void);
+ETCH_API EtchCanvasState etch_canvas_state(uint32_t canvas_id);
+ETCH_API void etch_set_canvas_view(uint32_t canvas_id, EtchVec2 pan, float zoom);
 
-void etch_set_debug_hud_open(EtchContext* ctx, bool open);
-bool etch_debug_hud_open(const EtchContext* ctx);
-void etch_set_debug_wireframe(EtchContext* ctx, bool enabled);
-bool etch_debug_wireframe(const EtchContext* ctx);
+ETCH_API void etch_set_debug_hud_open(EtchContext* ctx, bool open);
+ETCH_API bool etch_debug_hud_open(const EtchContext* ctx);
+ETCH_API void etch_set_debug_wireframe(EtchContext* ctx, bool enabled);
+ETCH_API bool etch_debug_wireframe(const EtchContext* ctx);
 
 #ifdef __cplusplus
 }

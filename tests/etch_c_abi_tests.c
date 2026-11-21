@@ -596,6 +596,228 @@ static bool test_release_api(EtchContext* ctx) {
     return result.byte_length == sizeof(text) - 1 && etch_font_metrics(ETCH_FONT_ITALIC, 16).line_height > 0;
 }
 
+static bool test_versioned_c_abi(EtchContext* ctx) {
+    if (etch_abi_version() != ETCH_ABI_VERSION || ETCH_ABI_VERSION != 1u) {
+        return false;
+    }
+    if (etch_context_desc_default().struct_size != (uint32_t)sizeof(EtchContextDesc) ||
+        etch_frame_desc_default().struct_size != (uint32_t)sizeof(EtchFrameDesc) ||
+        etch_window_frame_desc_default().struct_size != (uint32_t)sizeof(EtchWindowFrameDesc) ||
+        etch_box_desc_default().struct_size != (uint32_t)sizeof(EtchBoxDesc) ||
+        etch_text_desc_default().struct_size != (uint32_t)sizeof(EtchTextDesc) ||
+        etch_rich_text_desc_default().struct_size != (uint32_t)sizeof(EtchRichTextDesc) ||
+        etch_text_input_desc_default().struct_size != (uint32_t)sizeof(EtchTextInputDesc) ||
+        etch_code_editor_desc_default().struct_size != (uint32_t)sizeof(EtchCodeEditorDesc) ||
+        etch_table_desc_default().struct_size != (uint32_t)sizeof(EtchTableDesc) ||
+        etch_virtual_list_desc_default().struct_size != (uint32_t)sizeof(EtchVirtualListDesc) ||
+        etch_split_desc_default().struct_size != (uint32_t)sizeof(EtchSplitDesc) ||
+        etch_canvas_desc_default().struct_size != (uint32_t)sizeof(EtchCanvasDesc) ||
+        etch_window_chrome_desc_default().struct_size != (uint32_t)sizeof(EtchWindowChromeDesc) ||
+        etch_shader_surface_create_desc_default().struct_size != (uint32_t)sizeof(EtchShaderSurfaceCreateDesc) ||
+        etch_shader_surface_eval_desc_default().struct_size != (uint32_t)sizeof(EtchShaderSurfaceEvalDesc) ||
+        etch_sheet_desc_default().struct_size != (uint32_t)sizeof(EtchSheetDesc) ||
+        etch_layer_desc_default().struct_size != (uint32_t)sizeof(EtchLayerDesc)) {
+        return false;
+    }
+
+    /* Corrupt tiny struct_size (1..3 bytes) must be rejected cleanly at public boundaries. */
+    {
+        EtchContextDesc bad_cd = etch_context_desc_default();
+        bad_cd.headless = true;
+        bad_cd.struct_size = 2u;
+        if (etch_create_context(&bad_cd) != NULL) return false;
+
+        EtchFrameDesc bad_fd = etch_frame_desc_default();
+        bad_fd.struct_size = 1u;
+        etch_begin_frame(ctx, &bad_fd);
+        if (etch_frame_in_progress(ctx)) return false;
+
+        EtchShaderSurfaceCreateDesc bad_sc = etch_shader_surface_create_desc_default();
+        bad_sc.struct_size = 3u;
+        if (etch_create_shader_surface(ctx, &bad_sc) != 0u) return false;
+
+        EtchShaderSurfaceEvalDesc bad_se = etch_shader_surface_eval_desc_default();
+        bad_se.struct_size = 2u;
+        if (etch_eval_shader_surface(ctx, 1u, &bad_se) != NULL) return false;
+    }
+
+    /* Zero-initialized descriptors (struct_size == 0) must be accepted cleanly. */
+    {
+        const uint32_t zero_box_id = etch_id("abi_zero_box");
+        const uint32_t bad_box_id = etch_id("abi_bad_box");
+        const uint32_t future_box_id = etch_id("abi_future_box");
+        EtchFrameDesc zero_fd;
+        memset(&zero_fd, 0, sizeof(zero_fd));
+        zero_fd.viewport_w = 400u;
+        zero_fd.viewport_h = 300u;
+        etch_begin_frame(ctx, &zero_fd);
+        if (!etch_frame_in_progress(ctx)) return false;
+
+        EtchBoxDesc root = etch_box_desc_default();
+        root.id = etch_id("abi_zero_root");
+        root.width = etch_sizing_fixed(400.0f);
+        root.height = etch_sizing_fixed(300.0f);
+        root.axis = ETCH_AXIS_COL;
+        etch_begin_box(&root);
+
+        EtchBoxDesc zero_box;
+        memset(&zero_box, 0, sizeof(zero_box));
+        zero_box.id = zero_box_id;
+        zero_box.width = etch_sizing_fixed(72.0f);
+        zero_box.height = etch_sizing_fixed(28.0f);
+        zero_box.opacity = 1.0f;
+        etch_box(&zero_box);
+
+        EtchTextDesc zero_td;
+        memset(&zero_td, 0, sizeof(zero_td));
+        zero_td.font_size_px = 14.0f;
+        zero_td.color = etch_color_white(255u);
+        etch_text(ETCH_STR_LIT("ZeroInit"), &zero_td);
+
+        EtchLayerDesc zero_layer;
+        memset(&zero_layer, 0, sizeof(zero_layer));
+        zero_layer.opacity = 1.0f;
+        zero_layer.scale = etch_vec2(1.0f, 1.0f);
+        etch_push_layer(&zero_layer);
+        etch_pop_layer();
+
+        /* Larger struct_size (caller compiled against newer minor ABI fields) must read prefix safely. */
+        EtchBoxDesc future_box = etch_box_desc_default();
+        future_box.struct_size = (uint32_t)sizeof(EtchBoxDesc) + 64u;
+        future_box.id = future_box_id;
+        future_box.width = etch_sizing_fixed(84.0f);
+        future_box.height = etch_sizing_fixed(36.0f);
+        etch_box(&future_box);
+
+        /* Corrupt tiny struct_size rejection inside active frame. */
+        EtchBoxDesc bad_box = etch_box_desc_default();
+        bad_box.struct_size = 3u;
+        bad_box.id = bad_box_id;
+        bad_box.width = etch_sizing_fixed(50.0f);
+        bad_box.height = etch_sizing_fixed(30.0f);
+        etch_box(&bad_box);
+
+        char ti_buf[16] = "abc";
+        EtchTextInputDesc bad_ti = etch_text_input_desc_default();
+        bad_ti.struct_size = 2u;
+        bad_ti.id = etch_id("abi_bad_ti");
+        bad_ti.buffer = ti_buf;
+        bad_ti.capacity = sizeof(ti_buf);
+        if (etch_text_input(&bad_ti).byte_length != 0u) {
+            etch_end_box();
+            etch_end_frame(ctx);
+            return false;
+        }
+
+        EtchCodeEditorDesc bad_ce = etch_code_editor_desc_default();
+        bad_ce.struct_size = 1u;
+        bad_ce.id = etch_id("abi_bad_ce");
+        if (etch_code_editor(&bad_ce).total_lines != 0u) {
+            etch_end_box();
+            etch_end_frame(ctx);
+            return false;
+        }
+
+        EtchTableDesc bad_tb = etch_table_desc_default();
+        bad_tb.struct_size = 3u;
+        bad_tb.id = etch_id("abi_bad_tb");
+        bad_tb.item_count = 10u;
+        if (etch_begin_table(&bad_tb).slice.total_count != 0u) {
+            etch_end_box();
+            etch_end_frame(ctx);
+            return false;
+        }
+
+        EtchVirtualListDesc bad_vl = etch_virtual_list_desc_default();
+        bad_vl.struct_size = 2u;
+        bad_vl.id = etch_id("abi_bad_vl");
+        bad_vl.item_count = 10u;
+        if (etch_begin_virtual_list(&bad_vl).total_count != 0u) {
+            etch_end_box();
+            etch_end_frame(ctx);
+            return false;
+        }
+
+        EtchSplitDesc bad_sp = etch_split_desc_default();
+        bad_sp.struct_size = 1u;
+        bad_sp.id = etch_id("abi_bad_sp");
+        if (etch_begin_split(&bad_sp).ratio != 0.0f) {
+            etch_end_box();
+            etch_end_frame(ctx);
+            return false;
+        }
+
+        EtchCanvasDesc bad_cv = etch_canvas_desc_default();
+        bad_cv.struct_size = 2u;
+        bad_cv.id = etch_id("abi_bad_cv");
+        if (etch_begin_canvas(&bad_cv).zoom != 0.0f) {
+            etch_end_box();
+            etch_end_frame(ctx);
+            return false;
+        }
+
+        EtchSheetDesc bad_sh = etch_sheet_desc_default();
+        bad_sh.struct_size = 3u;
+        bad_sh.id = etch_id("abi_bad_sh");
+        bad_sh.open = true;
+        if (etch_begin_sheet(&bad_sh)) {
+            etch_end_sheet();
+            etch_end_box();
+            etch_end_frame(ctx);
+            return false;
+        }
+
+        etch_end_box();
+        etch_end_frame(ctx);
+
+        const EtchRect zb = etch_element_bounds(zero_box_id);
+        const EtchRect fb = etch_element_bounds(future_box_id);
+        const EtchRect bb = etch_element_bounds(bad_box_id);
+        if (zb.w != 72.0f || zb.h != 28.0f || fb.w != 84.0f || fb.h != 36.0f || bb.w != 0.0f || bb.h != 0.0f) {
+            return false;
+        }
+    }
+
+    /* Partial older ABI struct_size: read only caller's prefix and preserve defaults for newer fields. */
+    {
+        typedef struct OldFramePrefix {
+            uint32_t struct_size;
+            uint32_t viewport_w;
+            uint32_t viewport_h;
+        } OldFramePrefix;
+        typedef struct OldBoxPrefix {
+            uint32_t struct_size;
+            uint32_t id;
+            EtchAxis axis;
+            EtchSizing width;
+            EtchSizing height;
+        } OldBoxPrefix;
+
+        const uint32_t old_box_id = etch_id("abi_old_prefix_box");
+        OldFramePrefix old_fd = { (uint32_t)sizeof(OldFramePrefix), 400u, 300u };
+        OldBoxPrefix old_box = {
+            (uint32_t)sizeof(OldBoxPrefix),
+            old_box_id,
+            ETCH_AXIS_ROW,
+            etch_sizing_fixed(96.0f),
+            etch_sizing_fixed(44.0f)
+        };
+        etch_begin_frame(ctx, (const EtchFrameDesc*)&old_fd);
+        if (!etch_frame_in_progress(ctx)) return false;
+        etch_box((const EtchBoxDesc*)&old_box);
+        etch_end_frame(ctx);
+
+        EtchElementGeometry geom;
+        memset(&geom, 0, sizeof(geom));
+        if (!etch_element_geometry(old_box_id, &geom) ||
+            geom.bounds.w != 96.0f || geom.bounds.h != 44.0f || geom.opacity != 1.0f) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
 int main(void) {
     if (!test_abi_and_arena()) {
         fprintf(stderr, "c99_abi_smoke: test_abi_and_arena failed\n");
@@ -679,7 +901,9 @@ int main(void) {
         !v21_text_draw.has_wipe && v21_text_draw.wipe_x==0.0f && v21_text_draw.wipe_feather_px==0.0f &&
         !v21_img.continuous_corners && !v21_img_draw.continuous_corners &&
         etch_window_chrome_desc_default().backdrop==ETCH_BACKDROP_OPAQUE;
-    const bool ok_release = test_release_api(ctx);
+    const bool ok_abi = test_versioned_c_abi(ctx);
+    if (!ok_abi) fprintf(stderr, "c99_abi_smoke: test_versioned_c_abi failed\n");
+    const bool ok_release = ok_abi && test_release_api(ctx);
     if (!ok_release) fprintf(stderr, "c99_abi_smoke: Etch %s public API failed\n", ETCH_VERSION_STRING);
     const bool ok_layout = ok_release && ok_material_defaults && ok_closure && ok_numerals && test_layout_widgets_and_a11y(ctx);
     const bool ok_editor = test_text_buffer_and_code_editor(ctx);

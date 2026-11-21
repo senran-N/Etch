@@ -152,6 +152,7 @@ void a11y_semantic(uint32_t id,A11yRole role,Str label,uint32_t states,uint32_t 
     auto* ctx=current_context();
     auto* entry=a11y_index(ctx,id);
     if(auto* b=entry ? entry->build : nullptr) {
+        if (role == A11yRole::Table) actions |= (b->node.actions_mask & 12u);
         b->node.role=role;b->node.label=ctx->frame_arena.push_str(label.chars,label.length);
         b->node.state_flags|=states;b->node.actions_mask=actions;b->node.value_num=value;b->node.min_value=lo;b->node.max_value=hi;
         for(auto* p=entry->patches;p;p=p->next)a11y_patch(b->node,p->desc);

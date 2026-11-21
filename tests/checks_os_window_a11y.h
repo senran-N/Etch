@@ -91,6 +91,14 @@ struct UiaWorkerData {
     uint32_t txt_id = 0u;
     uint32_t pwd_id = 0u;
     uint32_t col_id = 0u;
+    uint32_t ed_id = 0u;
+    uint32_t scr_id = 0u;
+    uint32_t tbl_id = 0u;
+    uint32_t layout_id = 0u;
+    uint32_t occluded_btn_id = 0u;
+    uint32_t overlay_btn_id = 0u;
+    POINT hit_screen_pt = {};
+    bool test_hit_from_point = false;
     HANDLE ev_phase1_done = nullptr;
     HANDLE ev_phase2_go = nullptr;
     bool phase1_ok = false;
@@ -118,7 +126,7 @@ inline IUIAutomationElement* find_uia_by_id(
     wchar_t expected[32] = {};
     std::swprintf(expected, 32u, L"etch_%08X", target_id);
 
-    constexpr uint32_t kMaxQueue = 128u;
+    constexpr uint32_t kMaxQueue = 512u;
     IUIAutomationElement* queue[kMaxQueue] = {};
     uint32_t head = 0u;
     uint32_t tail = 0u;
@@ -184,12 +192,17 @@ inline DWORD WINAPI uia_worker_proc(LPVOID param) noexcept {
     IUIAutomation* uia = nullptr;
     IUIAutomationElement* root = nullptr;
     IUIAutomationTreeWalker* walker = nullptr;
+    IUIAutomationTreeWalker* ctrl_walker = nullptr;
     IUIAutomationElement* e_btn = nullptr;
     IUIAutomationElement* e_chk = nullptr;
     IUIAutomationElement* e_sld = nullptr;
     IUIAutomationElement* e_txt = nullptr;
     IUIAutomationElement* e_pwd = nullptr;
     IUIAutomationElement* e_col = nullptr;
+    IUIAutomationElement* e_ed = nullptr;
+    IUIAutomationElement* e_scr = nullptr;
+    IUIAutomationElement* e_tbl = nullptr;
+    IUIAutomationElement* e_layout = nullptr;
     IUIAutomationInvokePattern* stale_invoke = nullptr;
 
     InterlockedExchange(&d->stage, 1);
@@ -243,6 +256,11 @@ inline DWORD WINAPI uia_worker_proc(LPVOID param) noexcept {
         fail_at(__LINE__);
         goto done_phase1;
     }
+    hr = uia->get_ControlViewWalker(&ctrl_walker);
+    if (FAILED(hr) || !ctrl_walker) {
+        fail_at(__LINE__);
+        goto done_phase1;
+    }
 
     InterlockedExchange(&d->stage, 5);
     e_btn = find_uia_by_id(root, walker, d->btn_id);
@@ -251,8 +269,12 @@ inline DWORD WINAPI uia_worker_proc(LPVOID param) noexcept {
     e_txt = find_uia_by_id(root, walker, d->txt_id);
     e_pwd = find_uia_by_id(root, walker, d->pwd_id);
     e_col = find_uia_by_id(root, walker, d->col_id);
+    e_ed = find_uia_by_id(root, walker, d->ed_id);
+    e_scr = find_uia_by_id(root, walker, d->scr_id);
+    e_tbl = find_uia_by_id(root, walker, d->tbl_id);
+    e_layout = find_uia_by_id(root, walker, d->layout_id);
     InterlockedExchange(&d->stage, 6);
-    if (!e_btn || !e_chk || !e_sld || !e_txt || !e_pwd || !e_col) {
+    if (!e_btn || !e_chk || !e_sld || !e_txt || !e_pwd || !e_col || !e_ed || !e_scr || !e_tbl || !e_layout) {
         fail_at(__LINE__);
         goto done_phase1;
     }
@@ -377,15 +399,261 @@ inline DWORD WINAPI uia_worker_proc(LPVOID param) noexcept {
         }
     }
 
+    // 67. ITextProvider & ITextRangeProvider on text_input (plain & password) and code_editor.
+    InterlockedExchange(&d->stage, 67);
+    {
+        IUIAutomationTextPattern* p_txt = nullptr;
+        if (FAILED(e_txt->GetCurrentPatternAs(UIA_TextPatternId, IID_IUIAutomationTextPattern, reinterpret_cast<void**>(&p_txt))) || !p_txt) {
+            fail_at(__LINE__);
+            goto done_phase1;
+        }
+        SupportedTextSelection sts = SupportedTextSelection_None;
+        IUIAutomationTextRange* doc = nullptr;
+        IUIAutomationTextRange* found = nullptr;
+        IUIAutomationTextRangeArray* sel_arr = nullptr;
+        BSTR full_bstr = nullptr;
+        BSTR short_bstr = nullptr;
+        BSTR found_bstr = nullptr;
+        BSTR sel_bstr = nullptr;
+        SAFEARRAY* rects = nullptr;
+        bool txt_pat_ok = SUCCEEDED(p_txt->get_SupportedTextSelection(&sts)) && sts == SupportedTextSelection_Single &&
+            SUCCEEDED(p_txt->get_DocumentRange(&doc)) && doc != nullptr;
+        if (txt_pat_ok) {
+            txt_pat_ok = SUCCEEDED(doc->GetText(-1, &full_bstr)) && bstr_equals_w(full_bstr, L"hello") &&
+                SUCCEEDED(doc->GetText(3, &short_bstr)) && bstr_equals_w(short_bstr, L"hel");
+        }
+        if (txt_pat_ok) {
+            txt_pat_ok = SUCCEEDED(doc->GetBoundingRectangles(&rects)) && rects != nullptr;
+            if (txt_pat_ok) {
+                LONG lb = 0, ub = -1;
+                double* vals = nullptr;
+                txt_pat_ok = SUCCEEDED(SafeArrayGetLBound(rects, 1u, &lb)) &&
+                    SUCCEEDED(SafeArrayGetUBound(rects, 1u, &ub)) && (ub - lb + 1) >= 4 &&
+                    SUCCEEDED(SafeArrayAccessData(rects, reinterpret_cast<void**>(&vals))) && vals != nullptr &&
+                    vals[2] > 0.0 && vals[3] > 0.0;
+                if (vals) SafeArrayUnaccessData(rects);
+            }
+        }
+        if (txt_pat_ok) {
+            BSTR needle = SysAllocString(L"ell");
+            txt_pat_ok = needle && SUCCEEDED(doc->FindText(needle, FALSE, FALSE, &found)) && found != nullptr &&
+                SUCCEEDED(found->GetText(-1, &found_bstr)) && bstr_equals_w(found_bstr, L"ell") &&
+                SUCCEEDED(found->Select()) &&
+                SUCCEEDED(p_txt->GetSelection(&sel_arr)) && sel_arr != nullptr;
+            if (needle) SysFreeString(needle);
+            if (txt_pat_ok) {
+                int slen = 0;
+                IUIAutomationTextRange* sel0 = nullptr;
+                txt_pat_ok = SUCCEEDED(sel_arr->get_Length(&slen)) && slen == 1 &&
+                    SUCCEEDED(sel_arr->GetElement(0, &sel0)) && sel0 != nullptr &&
+                    SUCCEEDED(sel0->GetText(-1, &sel_bstr)) && bstr_equals_w(sel_bstr, L"ell");
+                if (sel0) sel0->Release();
+            }
+        }
+        if (rects) SafeArrayDestroy(rects);
+        if (sel_bstr) SysFreeString(sel_bstr);
+        if (found_bstr) SysFreeString(found_bstr);
+        if (short_bstr) SysFreeString(short_bstr);
+        if (full_bstr) SysFreeString(full_bstr);
+        if (sel_arr) sel_arr->Release();
+        if (found) found->Release();
+        if (doc) doc->Release();
+        p_txt->Release();
+        if (!txt_pat_ok) {
+            fail_at(__LINE__);
+            goto done_phase1;
+        }
+    }
+
+    InterlockedExchange(&d->stage, 671);
+    {
+        IUIAutomationTextPattern* p_pwd_txt = nullptr;
+        if (FAILED(e_pwd->GetCurrentPatternAs(UIA_TextPatternId, IID_IUIAutomationTextPattern, reinterpret_cast<void**>(&p_pwd_txt))) || !p_pwd_txt) {
+            fail_at(__LINE__);
+            goto done_phase1;
+        }
+        IUIAutomationTextRange* pdoc = nullptr;
+        BSTR pbstr = nullptr;
+        const bool pwd_txt_ok = SUCCEEDED(p_pwd_txt->get_DocumentRange(&pdoc)) && pdoc != nullptr &&
+            SUCCEEDED(pdoc->GetText(-1, &pbstr)) && pbstr != nullptr &&
+            std::wcscmp(pbstr, L"s3cr3t") != 0 && pbstr[0] == L'\u2022' && SysStringLen(pbstr) == 6u;
+        if (pbstr) SysFreeString(pbstr);
+        if (pdoc) pdoc->Release();
+        p_pwd_txt->Release();
+        if (!pwd_txt_ok) {
+            fail_at(__LINE__);
+            goto done_phase1;
+        }
+    }
+
+    InterlockedExchange(&d->stage, 672);
+    {
+        IUIAutomationTextPattern* p_ed = nullptr;
+        if (FAILED(e_ed->GetCurrentPatternAs(UIA_TextPatternId, IID_IUIAutomationTextPattern, reinterpret_cast<void**>(&p_ed))) || !p_ed) {
+            fail_at(__LINE__);
+            goto done_phase1;
+        }
+        IUIAutomationTextRange* edoc = nullptr;
+        IUIAutomationTextRange* lrange = nullptr;
+        IUIAutomationTextRangeArray* esel = nullptr;
+        BSTR full_ed = nullptr;
+        BSTR line0 = nullptr;
+        BSTR line1 = nullptr;
+        SAFEARRAY* erect = nullptr;
+        bool ed_ok = SUCCEEDED(p_ed->get_DocumentRange(&edoc)) && edoc != nullptr &&
+            SUCCEEDED(edoc->GetText(-1, &full_ed)) && bstr_equals_w(full_ed, L"alpha beta\ngamma delta") &&
+            SUCCEEDED(edoc->GetBoundingRectangles(&erect)) && erect != nullptr &&
+            SUCCEEDED(p_ed->GetSelection(&esel)) && esel != nullptr;
+        if (ed_ok) {
+            int moved = 0;
+            ed_ok = SUCCEEDED(edoc->Clone(&lrange)) && lrange != nullptr &&
+                SUCCEEDED(lrange->MoveEndpointByRange(TextPatternRangeEndpoint_End, edoc, TextPatternRangeEndpoint_Start)) &&
+                SUCCEEDED(lrange->ExpandToEnclosingUnit(TextUnit_Line)) &&
+                SUCCEEDED(lrange->GetText(-1, &line0)) && bstr_equals_w(line0, L"alpha beta") &&
+                SUCCEEDED(lrange->Move(TextUnit_Line, 1, &moved)) && moved == 1 &&
+                SUCCEEDED(lrange->GetText(-1, &line1)) && bstr_equals_w(line1, L"gamma delta");
+        }
+        if (erect) SafeArrayDestroy(erect);
+        if (line1) SysFreeString(line1);
+        if (line0) SysFreeString(line0);
+        if (full_ed) SysFreeString(full_ed);
+        if (esel) esel->Release();
+        if (lrange) lrange->Release();
+        if (edoc) edoc->Release();
+        p_ed->Release();
+        if (!ed_ok) {
+            fail_at(__LINE__);
+            goto done_phase1;
+        }
+    }
+
+    // 68. IScrollProvider on scrollable box.
+    InterlockedExchange(&d->stage, 68);
+    {
+        IUIAutomationScrollPattern* p_scr = nullptr;
+        if (FAILED(e_scr->GetCurrentPatternAs(UIA_ScrollPatternId, IID_IUIAutomationScrollPattern, reinterpret_cast<void**>(&p_scr))) || !p_scr) {
+            fail_at(__LINE__);
+            goto done_phase1;
+        }
+        BOOL v_scr = FALSE;
+        double v_view = 100.0, v_pct0 = -1.0, v_pct1 = -1.0, v_pct2 = -1.0;
+        const bool scr_ok = SUCCEEDED(p_scr->get_CurrentVerticallyScrollable(&v_scr)) && v_scr == TRUE &&
+            SUCCEEDED(p_scr->get_CurrentVerticalViewSize(&v_view)) && v_view > 0.0 && v_view < 100.0 &&
+            SUCCEEDED(p_scr->get_CurrentVerticalScrollPercent(&v_pct0)) && std::fabs(v_pct0) < 1.0 &&
+            SUCCEEDED(p_scr->Scroll(ScrollAmount_NoAmount, ScrollAmount_SmallIncrement)) &&
+            SUCCEEDED(p_scr->get_CurrentVerticalScrollPercent(&v_pct1)) && v_pct1 > v_pct0 &&
+            SUCCEEDED(p_scr->SetScrollPercent(UIA_ScrollPatternNoScroll, 50.0)) &&
+            SUCCEEDED(p_scr->get_CurrentVerticalScrollPercent(&v_pct2)) && std::fabs(v_pct2 - 50.0) < 2.0;
+        p_scr->Release();
+        if (!scr_ok) {
+            fail_at(__LINE__);
+            goto done_phase1;
+        }
+    }
+
+    // 69. IGridProvider / ITableProvider / IGridItemProvider / ITableItemProvider on table.
+    InterlockedExchange(&d->stage, 69);
+    {
+        IUIAutomationGridPattern* p_grid = nullptr;
+        IUIAutomationTablePattern* p_table = nullptr;
+        IUIAutomationElement* e_cell = nullptr;
+        IUIAutomationElementArray* col_hdrs = nullptr;
+        IUIAutomationGridItemPattern* p_gitem = nullptr;
+        IUIAutomationTableItemPattern* p_titem = nullptr;
+        IUIAutomationElement* e_owner_grid = nullptr;
+        IUIAutomationElementArray* cell_hdrs = nullptr;
+        BSTR owner_id = nullptr;
+        wchar_t expected_tbl[32] = {};
+        std::swprintf(expected_tbl, 32u, L"etch_%08X", d->tbl_id);
+
+        int rows = 0, cols = 0, hdr_cnt = 0;
+        RowOrColumnMajor major = RowOrColumnMajor_Indeterminate;
+        int cr = -1, cc = -1, rs = 0, cs = 0, ch_cnt = 0;
+        bool tbl_ok = SUCCEEDED(e_tbl->GetCurrentPatternAs(UIA_GridPatternId, IID_IUIAutomationGridPattern, reinterpret_cast<void**>(&p_grid))) && p_grid &&
+            SUCCEEDED(e_tbl->GetCurrentPatternAs(UIA_TablePatternId, IID_IUIAutomationTablePattern, reinterpret_cast<void**>(&p_table))) && p_table &&
+            SUCCEEDED(p_grid->get_CurrentRowCount(&rows)) && rows == 3 &&
+            SUCCEEDED(p_grid->get_CurrentColumnCount(&cols)) && cols == 2 &&
+            SUCCEEDED(p_table->get_CurrentRowOrColumnMajor(&major)) && major == RowOrColumnMajor_RowMajor &&
+            SUCCEEDED(p_table->GetCurrentColumnHeaders(&col_hdrs)) && col_hdrs &&
+            SUCCEEDED(col_hdrs->get_Length(&hdr_cnt)) && hdr_cnt == 2 &&
+            SUCCEEDED(p_grid->GetItem(1, 1, &e_cell)) && e_cell &&
+            SUCCEEDED(e_cell->GetCurrentPatternAs(UIA_GridItemPatternId, IID_IUIAutomationGridItemPattern, reinterpret_cast<void**>(&p_gitem))) && p_gitem &&
+            SUCCEEDED(e_cell->GetCurrentPatternAs(UIA_TableItemPatternId, IID_IUIAutomationTableItemPattern, reinterpret_cast<void**>(&p_titem))) && p_titem &&
+            SUCCEEDED(p_gitem->get_CurrentRow(&cr)) && cr == 1 &&
+            SUCCEEDED(p_gitem->get_CurrentColumn(&cc)) && cc == 1 &&
+            SUCCEEDED(p_gitem->get_CurrentRowSpan(&rs)) && rs == 1 &&
+            SUCCEEDED(p_gitem->get_CurrentColumnSpan(&cs)) && cs == 1 &&
+            SUCCEEDED(p_gitem->get_CurrentContainingGrid(&e_owner_grid)) && e_owner_grid &&
+            SUCCEEDED(e_owner_grid->get_CurrentAutomationId(&owner_id)) && bstr_equals_w(owner_id, expected_tbl) &&
+            SUCCEEDED(p_titem->GetCurrentColumnHeaderItems(&cell_hdrs)) && cell_hdrs &&
+            SUCCEEDED(cell_hdrs->get_Length(&ch_cnt)) && ch_cnt == 1;
+
+        if (owner_id) SysFreeString(owner_id);
+        if (cell_hdrs) cell_hdrs->Release();
+        if (e_owner_grid) e_owner_grid->Release();
+        if (p_titem) p_titem->Release();
+        if (p_gitem) p_gitem->Release();
+        if (e_cell) e_cell->Release();
+        if (col_hdrs) col_hdrs->Release();
+        if (p_table) p_table->Release();
+        if (p_grid) p_grid->Release();
+        if (!tbl_ok) {
+            fail_at(__LINE__);
+            goto done_phase1;
+        }
+    }
+
+    // 70. Clean Control Tree: anonymous layout box is NOT a control/content element; labeled button IS.
+    InterlockedExchange(&d->stage, 70);
+    {
+        BOOL layout_ctrl = TRUE, layout_content = TRUE, btn_ctrl = FALSE, btn_content = FALSE;
+        IUIAutomationElement* ctrl_btn = find_uia_by_id(root, ctrl_walker, d->btn_id);
+        IUIAutomationElement* ctrl_layout = find_uia_by_id(root, ctrl_walker, d->layout_id);
+        const bool ctrl_tree_ok =
+            SUCCEEDED(e_layout->get_CurrentIsControlElement(&layout_ctrl)) && layout_ctrl == FALSE &&
+            SUCCEEDED(e_layout->get_CurrentIsContentElement(&layout_content)) && layout_content == FALSE &&
+            SUCCEEDED(e_btn->get_CurrentIsControlElement(&btn_ctrl)) && btn_ctrl == TRUE &&
+            SUCCEEDED(e_btn->get_CurrentIsContentElement(&btn_content)) && btn_content == TRUE &&
+            ctrl_btn != nullptr && ctrl_layout == nullptr;
+        if (ctrl_layout) ctrl_layout->Release();
+        if (ctrl_btn) ctrl_btn->Release();
+        if (!ctrl_tree_ok) {
+            fail_at(__LINE__);
+            goto done_phase1;
+        }
+    }
+
+    // 71. Hitbox-backed ElementFromPoint hits floating overlay strictly instead of occluded button behind it.
+    InterlockedExchange(&d->stage, 71);
+    if (d->test_hit_from_point) {
+        IUIAutomationElement* e_hit = nullptr;
+        BSTR hit_id = nullptr;
+        wchar_t expected_overlay[32] = {};
+        std::swprintf(expected_overlay, 32u, L"etch_%08X", d->overlay_btn_id);
+        const bool hit_ok = SUCCEEDED(uia->ElementFromPoint(d->hit_screen_pt, &e_hit)) && e_hit != nullptr &&
+            SUCCEEDED(e_hit->get_CurrentAutomationId(&hit_id)) && bstr_equals_w(hit_id, expected_overlay);
+        if (hit_id) SysFreeString(hit_id);
+        if (e_hit) e_hit->Release();
+        if (!hit_ok) {
+            fail_at(__LINE__);
+            goto done_phase1;
+        }
+    }
+
     d->phase1_ok = true;
 
 done_phase1:
+    if (e_layout) e_layout->Release();
+    if (e_tbl) e_tbl->Release();
+    if (e_scr) e_scr->Release();
+    if (e_ed) e_ed->Release();
     if (e_col) e_col->Release();
     if (e_pwd) e_pwd->Release();
     if (e_txt) e_txt->Release();
     if (e_sld) e_sld->Release();
     if (e_chk) e_chk->Release();
     if (e_btn) e_btn->Release();
+    if (ctrl_walker) ctrl_walker->Release();
     if (walker) walker->Release();
     if (root) root->Release();
     if (uia) uia->Release();
@@ -752,22 +1020,57 @@ inline bool verify_os_window_a11y_checks() noexcept {
     // 5. OS Accessibility Bridge verification
 #if defined(_WIN32) && defined(ETCH_ENABLE_OS_A11Y) && ETCH_ENABLE_OS_A11Y
     {
+        set_window_chrome({.enabled = false}, win);
         check(os_a11y_enabled(wctx) && os_a11y_active(wctx, win), __LINE__);
         uint32_t uia_btn_hits = 0u;
         bool uia_chk_val = false;
         float uia_sld_val = 20.0f;
         char uia_txt_buf[64] = "hello";
         char uia_pwd_buf[64] = "s3cr3t";
+        TextBuffer uia_doc = {};
+        check(init_text_buffer(&uia_doc, str_lit("alpha beta\ngamma delta")), __LINE__);
+        const TableColumnDesc tbl_cols[] = {
+            {.title = str_lit("Name"), .width = 110.0f},
+            {.title = str_lit("Role"), .width = 110.0f},
+        };
         const uint32_t btn_id = id("uia_btn");
         const uint32_t chk_id = id("uia_chk");
         const uint32_t sld_id = id("uia_sld");
         const uint32_t txt_id = id("uia_txt");
         const uint32_t pwd_id = id("uia_pwd");
         const uint32_t col_id = id("uia_col");
+        const uint32_t ed_id = id("uia_ed");
+        const uint32_t scr_id = id("uia_scr");
+        const uint32_t tbl_id = id("uia_tbl");
+        const uint32_t layout_id = id("uia_layout_box");
+        const uint32_t occluded_btn_id = id("uia_occluded_btn");
+        const uint32_t overlay_btn_id = id("uia_overlay_btn");
+        Rect overlay_rect = {};
+        bool show_overlay = false;
+        float motion_probe_val = 0.0f;
+        bool run_motion_probe = false;
 
         const auto uia_step = [&]() noexcept {
-            begin_window_frame(wctx, win, 0.0f);
-            begin_box({.id = id("uia_panel"), .axis = Axis::Col, .width = Sizing::fixed(480.0f), .height = Sizing::fixed(320.0f)});
+            begin_window_frame(wctx, win, 1.0f / 60.0f);
+            begin_box({.id = id("uia_panel"), .axis = Axis::Row, .width = Sizing::fixed(480.0f), .height = Sizing::fixed(320.0f), .gap = 8.0f});
+            // Floating overlay declared BEFORE the background button so a11y_nodes order would pick the background button,
+            // proving hitbox-backed ElementFromPoint respects z-index occlusion.
+            if (show_overlay && overlay_rect.w > 1.0f && overlay_rect.h > 1.0f) {
+                begin_box({
+                    .id = id("uia_overlay_box"),
+                    .width = Sizing::fixed(overlay_rect.w),
+                    .height = Sizing::fixed(overlay_rect.h),
+                    .background = Color::rgba8(32u, 32u, 44u, 255u),
+                    .attach_to = AttachTo::Root,
+                    .anchor_element = Anchor::TopLeft,
+                    .anchor_parent = Anchor::TopLeft,
+                    .floating_offset = {overlay_rect.x, overlay_rect.y},
+                    .z_index = 60,
+                });
+                button({.id = overlay_btn_id, .label = str_lit("Overlay"), .width = Sizing::fixed(overlay_rect.w), .height = Sizing::fixed(overlay_rect.h)});
+                end_box();
+            }
+            begin_box({.axis = Axis::Col, .width = Sizing::fixed(230.0f), .height = Sizing::fixed(320.0f), .gap = 4.0f});
             if (button({.id = btn_id, .label = str_lit("Run Action")})) ++uia_btn_hits;
             checkbox({.id = chk_id, .label = str_lit("Enable Sync"), .checked = &uia_chk_val});
             slider({.id = sld_id, .value = &uia_sld_val, .min_value = 0.0f, .max_value = 100.0f, .step = 1.0f});
@@ -776,17 +1079,83 @@ inline bool verify_os_window_a11y_checks() noexcept {
             if (begin_collapsible({.id = col_id, .title = str_lit("Details"), .default_open = false}).visible) {
                 end_collapsible();
             }
+            box({.id = layout_id, .width = Sizing::fixed(24.0f), .height = Sizing::fixed(10.0f)});
+            button({.id = occluded_btn_id, .label = str_lit("Behind"), .width = Sizing::fixed(120.0f), .height = Sizing::fixed(28.0f)});
+            end_box();
+
+            begin_box({.axis = Axis::Col, .width = Sizing::fixed(236.0f), .height = Sizing::fixed(320.0f), .gap = 4.0f});
+            code_editor({.id = ed_id, .buffer = &uia_doc, .width = Sizing::fixed(230.0f), .height = Sizing::fixed(64.0f)});
+            begin_box({.id = scr_id, .axis = Axis::Col, .width = Sizing::fixed(230.0f), .height = Sizing::fixed(72.0f), .clip_children = true, .scroll_y = true});
+            for (uint32_t si = 0u; si < 8u; ++si) {
+                box({.width = Sizing::fixed(200.0f), .height = Sizing::fixed(28.0f)});
+            }
+            end_box();
+            begin_table({
+                .id = tbl_id,
+                .columns = tbl_cols,
+                .item_count = 3u,
+                .header_height_px = 24.0f,
+                .row_height_px = 24.0f,
+                .width = Sizing::fixed(230.0f),
+                .height = Sizing::fixed(120.0f),
+                .show_scrollbar = false,
+            });
+            uint32_t row_idx = 0u;
+            while (table_next_row(&row_idx)) {
+                if (table_next_column()) text("Alice");
+                if (table_next_column()) text("Admin");
+            }
+            end_table();
+            end_box();
+            if (run_motion_probe) {
+                motion_probe_val = spring(id("uia_motion_probe"), 100.0f, 0.0f);
+            }
             end_box();
             end_window_frame(wctx);
         };
 
         uia_step();
+        overlay_rect = element_bounds(occluded_btn_id);
+        check(overlay_rect.w > 10.0f && overlay_rect.h > 10.0f, __LINE__);
+        show_overlay = true;
         check(perform_a11y_action(txt_id, A11yAction::Focus, 0.0f, {}, wctx, win), __LINE__);
         uia_step();
+        uia_step();
+        {
+            const Rect ovb = element_bounds(overlay_btn_id);
+            check(std::fabs(ovb.x - overlay_rect.x) < 1.0f && std::fabs(ovb.y - overlay_rect.y) < 1.0f, __LINE__);
+        }
 
         HWND hwnd = static_cast<HWND>(SDL_GetPointerProperty(
             SDL_GetWindowProperties(win), SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr));
         check(hwnd != nullptr, __LINE__);
+
+        // Temporarily make window hit-testable at 1/255 alpha (invisible yet not click-through) for ElementFromPoint.
+        const LONG_PTR orig_ex = hwnd ? GetWindowLongPtrW(hwnd, GWL_EXSTYLE) : 0;
+        POINT hit_pt = {};
+        bool can_hit_test = false;
+        if (hwnd) {
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, orig_ex | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED);
+            SetLayeredWindowAttributes(hwnd, 0u, 1u, LWA_ALPHA);
+            SetWindowPos(hwnd, HWND_TOPMOST, 40, 40, 0, 0, SWP_NOSIZE | SWP_SHOWWINDOW | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+            MSG m = {};
+            while (PeekMessageW(&m, nullptr, 0u, 0u, PM_REMOVE)) {
+                TranslateMessage(&m);
+                DispatchMessageW(&m);
+            }
+            const auto root_nodes = frame_a11y_nodes(wctx, win);
+            RECT cr = {};
+            GetClientRect(hwnd, &cr);
+            POINT tl = {0, 0};
+            ClientToScreen(hwnd, &tl);
+            const double log_w = (!root_nodes.empty() && root_nodes[0].bounds.w > 1.0f) ? static_cast<double>(root_nodes[0].bounds.w) : 480.0;
+            const double log_h = (!root_nodes.empty() && root_nodes[0].bounds.h > 1.0f) ? static_cast<double>(root_nodes[0].bounds.h) : 320.0;
+            const double sx = static_cast<double>(cr.right - cr.left) / log_w;
+            const double sy = static_cast<double>(cr.bottom - cr.top) / log_h;
+            hit_pt.x = tl.x + static_cast<LONG>(std::floor((overlay_rect.x + overlay_rect.w * 0.5f) * sx + 0.5));
+            hit_pt.y = tl.y + static_cast<LONG>(std::floor((overlay_rect.y + overlay_rect.h * 0.5f) * sy + 0.5));
+            can_hit_test = (WindowFromPoint(hit_pt) == hwnd);
+        }
 
         UiaWorkerData wd = {
             .hwnd = hwnd,
@@ -796,6 +1165,14 @@ inline bool verify_os_window_a11y_checks() noexcept {
             .txt_id = txt_id,
             .pwd_id = pwd_id,
             .col_id = col_id,
+            .ed_id = ed_id,
+            .scr_id = scr_id,
+            .tbl_id = tbl_id,
+            .layout_id = layout_id,
+            .occluded_btn_id = occluded_btn_id,
+            .overlay_btn_id = overlay_btn_id,
+            .hit_screen_pt = hit_pt,
+            .test_hit_from_point = can_hit_test,
             .ev_phase1_done = CreateEventW(nullptr, TRUE, FALSE, nullptr),
             .ev_phase2_go = CreateEventW(nullptr, TRUE, FALSE, nullptr),
         };
@@ -805,6 +1182,11 @@ inline bool verify_os_window_a11y_checks() noexcept {
         check(th != nullptr, __LINE__);
         if (th) {
             const bool phase1_waited = pump_until_event(wd.ev_phase1_done, 5000u);
+            if (hwnd) {
+                ShowWindow(hwnd, SW_HIDE);
+                SetWindowLongPtrW(hwnd, GWL_EXSTYLE, orig_ex);
+                SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+            }
             check(phase1_waited, __LINE__);
             if (phase1_waited) {
                 check(wd.phase1_ok, __LINE__);
@@ -819,6 +1201,29 @@ inline bool verify_os_window_a11y_checks() noexcept {
                 check(std::fabs(uia_sld_val - 75.0f) < 0.05f, __LINE__);
                 check(std::strcmp(uia_txt_buf, "updated_\xE4\xB8\xAD\xE6\x96\x87") == 0, __LINE__);
                 check(is_collapsible_open(col_id), __LINE__);
+                check(scroll_offset(scr_id).y > 40.0f, __LINE__);
+
+                // Verify live WM_THEMECHANGED / WM_SETTINGCHANGE handling on the Win32 subclass.
+                for (int si = 0; si < 4; ++si) {
+                    begin_window_frame(wctx, win, 0.0f);
+                    box({.width = Sizing::fixed(100.0f), .height = Sizing::fixed(40.0f)});
+                    end_window_frame(wctx);
+                }
+                check(!needs_window_redraw(wctx, win), __LINE__);
+                SendMessageW(hwnd, WM_THEMECHANGED, 0u, 0);
+                check(needs_window_redraw(wctx, win), __LINE__);
+                SendMessageW(hwnd, WM_SETTINGCHANGE, SPI_SETCLIENTAREAANIMATION, 0);
+                BOOL anim_enabled = TRUE;
+                if (SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0u, &anim_enabled, 0u)) {
+                    run_motion_probe = true;
+                    uia_step();
+                    run_motion_probe = false;
+                    if (anim_enabled == FALSE) {
+                        check(std::fabs(motion_probe_val - 100.0f) < 0.05f, __LINE__);
+                    } else {
+                        check(motion_probe_val < 99.0f, __LINE__);
+                    }
+                }
 
                 set_os_a11y_enabled(wctx, false);
                 check(!os_a11y_enabled(wctx) && !os_a11y_active(wctx, win), __LINE__);
@@ -847,6 +1252,7 @@ inline bool verify_os_window_a11y_checks() noexcept {
         }
         if (wd.ev_phase1_done) CloseHandle(wd.ev_phase1_done);
         if (wd.ev_phase2_go) CloseHandle(wd.ev_phase2_go);
+        free_text_buffer(&uia_doc);
     }
 #else
     {
