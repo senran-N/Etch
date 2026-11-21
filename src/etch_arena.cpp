@@ -612,6 +612,7 @@ void emit_code_editor_command(Context*, const CodeEditorExtra*, Clay_BoundingBox
 struct ClipStack {
     ClipEntry entries[kMaxClipDepth] = {};
     uint32_t  depth = 0;
+    uint32_t  overflow = 0;
 };
 
 struct CachedPipeline {
@@ -996,7 +997,7 @@ struct ShaderSurfaceSlot {
     uint64_t pending_sampled_epochs[4] = {};
     uint32_t generation = 1, seen_frame = 0, num_samplers = 0;
     float max_fps = 60;
-    bool continuous_time = false, sampler_mirror_repeat = false, enable_feedback = false, owner_bound = false, initialized = false, dirty = true, recorded = false;
+    bool continuous_time = false, sampler_mirror_repeat = false, enable_feedback = false, owner_bound = false, initialized = false, dirty = true, recorded = false, swapped_this_frame = false;
 };
 
 struct Context {
@@ -1016,7 +1017,8 @@ struct Context {
     SDL_Window* ime_active_window = nullptr;
     bool in_frame = false;
     ClipShapeGpu* clip_shapes = nullptr;
-    uint32_t clip_shape_count = 1, clip_shape_capacity = 0, render_clip_index = 0;
+    uint32_t clip_shape_count = 1, clip_shape_capacity = 0, render_clip_index = 0, render_clip_depth = 1;
+    bool clip_shape_sentinel_uploaded = false;
     SDL_GPUBuffer* clip_shape_gpu = nullptr; SDL_GPUTransferBuffer* clip_shape_transfer = nullptr;
     uint32_t clip_shape_gpu_capacity = 0, clip_shape_transfer_capacity = 0;
     BoxExtra* layout_draw_target = nullptr;

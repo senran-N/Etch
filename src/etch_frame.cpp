@@ -66,6 +66,7 @@ void end_frame(Context* ctx_arg) noexcept {
         }
         const ClipEntry& cur_clip = clip_stack.entries[clip_stack.depth - 1u];
         ctx->render_clip_index=cur_clip.indexed ? cur_clip.shape : 0;
+        ctx->render_clip_depth=clip_stack.depth + clip_stack.overflow;
         const Rect raw_box_px = {
             .x = cmd->boundingBox.x * dpi,
             .y = cmd->boundingBox.y * dpi,
@@ -94,7 +95,7 @@ void end_frame(Context* ctx_arg) noexcept {
         }
         if(ctx->active_render_layer) resolve_layer_chain(ctx,ctx->active_render_layer,dpi);
         if (cmd->commandType == CLAY_RENDER_COMMAND_TYPE_SCISSOR_END) {
-            if (ctx->active_filter_group && clip_stack.depth <= ctx->active_filter_group->ancestor_clip_depth) {
+            if (ctx->active_filter_group && clip_stack.overflow == 0u && clip_stack.depth <= ctx->active_filter_group->ancestor_clip_depth) {
                 finalize_filter_group(ctx);
             }
         } else if (cmd->commandType != CLAY_RENDER_COMMAND_TYPE_SCISSOR_START) {
@@ -103,7 +104,7 @@ void end_frame(Context* ctx_arg) noexcept {
                 finalize_filter_group(ctx);
             }
             if (cmd_blur_root && !ctx->active_filter_group) {
-                begin_filter_group(ctx, cmd_blur_root, cur_clip, clip_stack.depth);
+                begin_filter_group(ctx, cmd_blur_root, cur_clip, clip_stack.depth + clip_stack.overflow);
             }
         }
         const Rect box_px = ctx->active_ui->pixel_snap && !ctx->active_render_layer && cmd->commandType != CLAY_RENDER_COMMAND_TYPE_TEXT ? snap_pixel_rect(raw_box_px) : raw_box_px;
@@ -168,10 +169,16 @@ void end_frame(Context* ctx_arg) noexcept {
                             ClipEntry draw_clip = cur_clip;
                             const bool box_clips =
                                 extra->desc.clip_children || extra->desc.scroll_x || extra->desc.scroll_y || extra->desc.shrink_width || extra->desc.shrink_height || extra->is_canvas;
+                            const uint32_t saved_clip_depth = ctx->render_clip_depth;
                             if (box_clips) {
-                                draw_clip=make_box_clip(ctx,cur_clip,box_px,scale_corners(extra->desc.radius,dpi),extra->desc.continuous_corners,box_scroll_fade(ctx,extra,dpi));
+                                const ClipEntry& draw_base = (ctx->active_filter_group && clip_stack.overflow == 0u &&
+                                    clip_stack.depth == ctx->active_filter_group->ancestor_clip_depth)
+                                    ? clip_stack.entries[0] : cur_clip;
+                                draw_clip=make_box_clip(ctx,draw_base,box_px,scale_corners(extra->desc.radius,dpi),extra->desc.continuous_corners,box_scroll_fade(ctx,extra,dpi));
+                                ++ctx->render_clip_depth;
                             }
                             emit_draw_list_command(ctx, extra->draw_head, raw_box_px, draw_clip, dpi);
+                            ctx->render_clip_depth = saved_clip_depth;
                         }
                     }
                 }
@@ -225,19 +232,26 @@ void end_frame(Context* ctx_arg) noexcept {
                     }
                 }
                 if (clip_stack.depth < kMaxClipDepth) {
+                    const ClipEntry& clip_base = (ctx->active_filter_group && clip_stack.overflow == 0u &&
+                        clip_stack.depth == ctx->active_filter_group->ancestor_clip_depth)
+                        ? clip_stack.entries[0] : cur_clip;
                     const Vec4 fade=extra ? box_scroll_fade(ctx,extra,dpi) : Vec4{};
-                    clip_stack.entries[clip_stack.depth]=extra ? make_box_clip(ctx,cur_clip,box_px,scale_corners(extra->desc.radius,dpi),extra->desc.continuous_corners,fade)
-                        : ClipEntry{rect_intersect(cur_clip.rect,box_px),cur_clip.radius,cur_clip.shape,cur_clip.indexed};
+                    clip_stack.entries[clip_stack.depth]=extra ? make_box_clip(ctx,clip_base,box_px,scale_corners(extra->desc.radius,dpi),extra->desc.continuous_corners,fade)
+                        : ClipEntry{rect_intersect(clip_base.rect,box_px),clip_base.radius,clip_base.shape,clip_base.indexed};
                     if(extra && extra->is_canvas) {
                         ctx->active_ui->last_canvas_clip_px=clip_stack.entries[clip_stack.depth].rect;
                         ctx->active_ui->last_canvas_clip_radius_px=clip_stack.entries[clip_stack.depth].radius;
                     }
                     ++clip_stack.depth;
+                } else {
+                    ++clip_stack.overflow;
                 }
                 break;
             }
             case CLAY_RENDER_COMMAND_TYPE_SCISSOR_END: {
-                if (clip_stack.depth > 1u) {
+                if (clip_stack.overflow > 0u) {
+                    --clip_stack.overflow;
+                } else if (clip_stack.depth > 1u) {
                     --clip_stack.depth;
                 }
                 break;
@@ -309,15 +323,17 @@ void end_frame(Context* ctx_arg) noexcept {
                 }
                 if (has_segmented_border(d) && d.border_color.a > 0u &&
                     (d.border_width > 0.0f || has_border_sides(d))) {
-                    const ClipEntry& parent = any_clip && clip_stack.depth > 1u
+                    const ClipEntry& parent = any_clip && clip_stack.depth > 1u && clip_stack.overflow == 0u
                         ? clip_stack.entries[clip_stack.depth - 2u] : cur_clip;
+                    if (any_clip && ctx->render_clip_depth > 1u) --ctx->render_clip_depth;
                     emit_segmented_border(ctx, d, box_px, parent, dpi);
                 } else if (any_clip && d.border_width > 0.0f && d.border_color.a > 0u) {
                     // Clip against parent container (below our own SCISSOR_START) so border AA edge isn't halved.
-                    const ClipEntry& parent_clip = (clip_stack.depth > 1u)
+                    const ClipEntry& parent_clip = (clip_stack.depth > 1u && clip_stack.overflow == 0u)
                         ? clip_stack.entries[clip_stack.depth - 2u]
-                        : clip_stack.entries[0];
+                        : (clip_stack.overflow > 0u ? cur_clip : clip_stack.entries[0]);
                     ctx->render_clip_index=parent_clip.indexed ? parent_clip.shape : 0;
+                    if (ctx->render_clip_depth > 1u) --ctx->render_clip_depth;
                     Rect border_bounds=box_px;Corners border_corners=scale_corners(d.radius,dpi);
                     align_border_bounds(&border_bounds,&border_corners,d.border_width*dpi,d.border_align);
                     push_prim(

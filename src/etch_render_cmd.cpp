@@ -885,7 +885,7 @@ void push_prim(
         if (snap_rect && width > 0) prim.style.w = (prim.style.w & 0xFFFF0000u) | pack_f16(std::fmax(1.0f, std::round(width)));
     }
     FilterBlurGroup* fg = ctx->active_filter_group;
-    if (fg && ctx->render_clip_index == fg->ancestor_clip_index) {
+    if (fg && ctx->render_clip_depth <= fg->ancestor_clip_depth) {
         prim.style.x &= 0x3FFFu;
         prim.style.x &= ~(uint32_t(PrimFlag_RoundedClip) << 4);
         prim.clip = {0.0f, 0.0f, static_cast<float>(ctx->active_ui->viewport_w), static_cast<float>(ctx->active_ui->viewport_h)};
@@ -921,6 +921,10 @@ void push_prim(
         (max_y + cull_pad_px <= prim.clip.y) ||
         (min_y - cull_pad_px >= prim.clip.w))
     {
+        return;
+    }
+
+    if (ctx->prim_count + ctx->filter_prim_count >= kMaxPrimHardCap) {
         return;
     }
 

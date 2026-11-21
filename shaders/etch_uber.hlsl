@@ -326,7 +326,7 @@ VSOut vs_main(uint vertex_id : SV_VertexID, uint instance_id : SV_InstanceID)
     o.uv_rect      = uv_rect;
     o.grad_params  = float4(grad_dir.x, grad_dir.y, bw_soft.x, bw_soft.y);
     o.meta         = uint4(kind, flags | (g_flags & ETCH_GLOBAL_MANUAL_SRGB), tex_slot, asuint(clip_r));
-    if ((kind == ETCH_PRIM_SLUG_GLYPH || kind == ETCH_PRIM_TEXTURE) && (flags & ETCH_FLAG_ROUND_CAP) != 0u)
+    if ((kind == ETCH_PRIM_SLUG_GLYPH || kind == ETCH_PRIM_GLYPH || kind == ETCH_PRIM_TEXTURE) && (flags & ETCH_FLAG_ROUND_CAP) != 0u)
         o.grad_params = float4(asfloat(p.style.z), asfloat(p.style.w), 0.0f, 1.0f);
     if (kind == ETCH_PRIM_MESH_GRAD) o.grad_params = float4(bw_soft, 0.0f, 0.0f);
     if (kind == ETCH_PRIM_BORDER_BEAM) o.grad_params = float4(bw_soft, 0.0f, 0.0f);
@@ -593,21 +593,30 @@ float4 sample_slot(uint slot, float2 uv)
 float4 gradient_color(VSOut input, float2 norm_uv) {
     float4 fill_col = input.color0;
     uint flags = input.meta.y;
-        if ((flags & ETCH_FLAG_LINEAR_GRAD) != 0u)
-        {
-            float2 dir = input.grad_params.xy;
-            float dir_len = length(dir);
-            dir = (dir_len > 1e-4f) ? (dir / dir_len) : float2(0.0f, 1.0f);
-            float span = max(0.5f * (abs(dir.x) + abs(dir.y)), 1e-4f);
-            float t = saturate(0.5f + dot(norm_uv - 0.5f, dir) / (2.0f * span));
-            fill_col = lerp(input.color0, input.color1, t);
-        }
-        else if ((flags & ETCH_FLAG_RADIAL_GRAD) != 0u)
-        {
-            float t = saturate(length((norm_uv - 0.5f) * 2.0f));
-            fill_col = lerp(input.color0, input.color1, t);
-        }
-
+    bool has_grad = false;
+    if ((flags & ETCH_FLAG_LINEAR_GRAD) != 0u)
+    {
+        float2 dir = input.grad_params.xy;
+        float dir_len = length(dir);
+        dir = (dir_len > 1e-4f) ? (dir / dir_len) : float2(0.0f, 1.0f);
+        float span = max(0.5f * (abs(dir.x) + abs(dir.y)), 1e-4f);
+        float t = saturate(0.5f + dot(norm_uv - 0.5f, dir) / (2.0f * span));
+        fill_col = lerp(input.color0, input.color1, t);
+        has_grad = true;
+    }
+    else if ((flags & ETCH_FLAG_RADIAL_GRAD) != 0u)
+    {
+        float t = saturate(length((norm_uv - 0.5f) * 2.0f));
+        fill_col = lerp(input.color0, input.color1, t);
+        has_grad = true;
+    }
+    if (has_grad)
+    {
+        float ign = frac(52.9829189f * frac(dot(input.pixel_pos, float2(0.06711056f, 0.00583715f))));
+        float4 enc = linear_to_srgb(saturate(fill_col));
+        enc.rgb = saturate(enc.rgb + (ign - 0.5f) * (1.0f / 255.0f));
+        fill_col = float4(srgb_to_linear(enc).rgb, fill_col.a);
+    }
     return fill_col;
 }
 
@@ -650,7 +659,7 @@ float4 ps_main(VSOut input) : SV_Target0
     }
     clip_cov*=fade_cov;
     // Glyph/emoji reuse the wire cap flag for a second, horizontal text clip.
-    if ((kind == ETCH_PRIM_SLUG_GLYPH || kind == ETCH_PRIM_TEXTURE) && (flags & ETCH_FLAG_ROUND_CAP) != 0u) {
+    if ((kind == ETCH_PRIM_SLUG_GLYPH || kind == ETCH_PRIM_GLYPH || kind == ETCH_PRIM_TEXTURE) && (flags & ETCH_FLAG_ROUND_CAP) != 0u) {
         float2 text_center=input.bounds.xy+input.bounds.zw*0.5f;
         float text_x=text_center.x+dot(input.rotation,input.pixel_pos-text_center);
         clip_cov *= saturate(0.5f + min(text_x-input.grad_params.x,input.grad_params.y-text_x));
@@ -778,7 +787,7 @@ float4 ps_main(VSOut input) : SV_Target0
         const bool ssaa = min(size.x, size.y) < 42.0f;
         const uint taps = ssaa ? 4u : 1u;
         const float2 inv_sz = 1.0f / size;
-        const float2 ppu = ssaa ? (size * 4.0f) : size;
+        const float2 ppu = ssaa ? (size * 2.0f) : size;
         float cov = 0.0f;
         [loop] for (uint s = 0u; s < taps; ++s)
         {
@@ -820,7 +829,7 @@ float4 ps_main(VSOut input) : SV_Target0
         const bool ssaa = min(size.x, size.y) < 42.0f;
         const uint taps = ssaa ? 4u : 1u;
         const float2 inv_sz = 1.0f / size;
-        const float2 ppu = ssaa ? (size * 4.0f) : size;
+        const float2 ppu = ssaa ? (size * 2.0f) : size;
         float cov = 0.0f;
         [loop] for (uint s = 0u; s < taps; ++s)
         {
@@ -862,13 +871,18 @@ float4 ps_main(VSOut input) : SV_Target0
     {
         float2 backdrop_uv = saturate(input.pixel_pos * input.uv_rect.xy);
         float4 blur_lin    = sample_slot(tex_slot, backdrop_uv);
-        float4 glass_lin   = lerp(blur_lin, input.color0, input.color0.a);
+        // Porter-Duff straight tint OVER premultiplied backdrop preserves alpha on transparent windows.
+        float4 tint_pm     = float4(input.color0.rgb * input.color0.a, input.color0.a);
+        float4 glass_pm    = tint_pm + blur_lin * (1.0f - input.color0.a);
 
-        // Apply +-0.5/255 IGN dithering in sRGB space before converting back to linear.
-        float4 glass_srgb = linear_to_srgb(saturate(glass_lin));
-        float  ign        = frac(52.9829189f * frac(dot(input.pixel_pos, float2(0.06711056f, 0.00583715f))));
-        glass_srgb        = saturate(glass_srgb + (ign - 0.5f) * (1.0f / 255.0f));
-        glass_lin         = srgb_to_linear(glass_srgb);
+        // Apply +-0.5/255 IGN dithering in straight sRGB space, then re-premultiply.
+        if (glass_pm.a > 1e-4f)
+        {
+            float4 straight_srgb = linear_to_srgb(float4(saturate(glass_pm.rgb / glass_pm.a), 1.0f));
+            float  ign           = frac(52.9829189f * frac(dot(input.pixel_pos, float2(0.06711056f, 0.00583715f))));
+            straight_srgb.rgb    = saturate(straight_srgb.rgb + (ign - 0.5f) * (1.0f / 255.0f));
+            glass_pm.rgb         = srgb_to_linear(straight_srgb).rgb * glass_pm.a;
+        }
 
         float d         = sd_rounded_box(p_rel, half_size, input.radii, (flags & ETCH_FLAG_ROUND_CAP) != 0u);
         float border_w  = input.grad_params.z;
@@ -879,7 +893,7 @@ float4 ps_main(VSOut input) : SV_Target0
         float border_t  = max(outer_cov - inner_cov, 0.0f);
 
         float4 b_pm = float4(input.border_color.rgb, 1.0f) * (input.border_color.a * border_t);
-        float4 g_pm = float4(glass_lin.rgb, 1.0f) * input.uv_rect.z;
+        float4 g_pm = glass_pm * input.uv_rect.z;
         out_pm      = b_pm + g_pm * inner_cov;
     }
     else if (kind == ETCH_PRIM_LAYER_BLUR)

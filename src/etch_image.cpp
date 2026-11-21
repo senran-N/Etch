@@ -96,6 +96,40 @@ void release_atlas_sprite(FontAtlas* a, uint32_t id) noexcept {
     a->sprite_free = id & 0xFFFFFu;
     --a->sprite_live;
 }
+bool is_atlas_slot0_prim(const Prim& p) noexcept {
+    const uint32_t kind = p.style.x & 0xFu;
+    return (kind == uint32_t(PrimKind::Texture) || kind == uint32_t(PrimKind::Glyph)) &&
+           ((p.style.x >> 10) & 0xFu) == 0u;
+}
+void remap_atlas_prims_scale(Prim* prims, uint32_t count, float sx, float sy) noexcept {
+    for (uint32_t i = 0; i < count; ++i) {
+        auto& p = prims[i];
+        if (!is_atlas_slot0_prim(p)) continue;
+        p.payload.x = pack_unorm16x2(float(p.payload.x & 65535u) / 65535.0f * sx,
+                                     float(p.payload.x >> 16) / 65535.0f * sy);
+        p.payload.y = pack_unorm16x2(float(p.payload.y & 65535u) / 65535.0f * sx,
+                                     float(p.payload.y >> 16) / 65535.0f * sy);
+    }
+}
+void remap_atlas_prims_compact(Prim* prims, uint32_t count, const FontAtlas& a, const SpriteSlot* plan) noexcept {
+    for (uint32_t i = 0; i < count; ++i) {
+        auto& p = prims[i];
+        if (!is_atlas_slot0_prim(p)) continue;
+        const float u0 = float(p.payload.x & 65535u) / 65535.0f * float(a.width);
+        const float v0 = float(p.payload.x >> 16) / 65535.0f * float(a.height);
+        const float u1 = float(p.payload.y & 65535u) / 65535.0f * float(a.width);
+        const float v1 = float(p.payload.y >> 16) / 65535.0f * float(a.height);
+        const float mx = (u0 + u1) * 0.5f, my = (v0 + v1) * 0.5f;
+        for (uint32_t j = 1; j < a.sprite_used; ++j) {
+            const auto& old = a.sprites[j];
+            if (!old.live || mx < float(old.x) || mx >= float(old.x + old.alloc_w) || my < float(old.y) || my >= float(old.y + old.alloc_h)) continue;
+            const float dx = float(plan[j].x) - float(old.x), dy = float(plan[j].y) - float(old.y);
+            p.payload.x = pack_unorm16x2((u0 + dx) / float(a.width), (v0 + dy) / float(a.height));
+            p.payload.y = pack_unorm16x2((u1 + dx) / float(a.width), (v1 + dy) / float(a.height));
+            break;
+        }
+    }
+}
 bool grow_sprite_atlas(Context* ctx) noexcept {
     auto& a = ctx->atlas;
     if (a.width == 4096)
@@ -108,18 +142,9 @@ bool grow_sprite_atlas(Context* ctx) noexcept {
         std::memcpy(pixels + size_t(y) * n * 4, a.pixels + size_t(y) * a.width * 4, size_t(a.width) * 4);
     for (uint32_t y = 0; y < 8; ++y)
         std::memset(pixels + size_t(y) * n * 4, 255, 32);
-    if (ctx->prim_count) {
-        const float sx = float(a.width) / float(n), sy = float(a.height) / float(n);
-        for (uint32_t i = 0; i < ctx->prim_count; ++i) {
-            auto& p = ctx->prims[i];
-            if ((p.style.x & 0xFu) != uint32_t(PrimKind::Texture) || ((p.style.x >> 10) & 0xFu) != 0)
-                continue;
-            p.payload.x = pack_unorm16x2(float(p.payload.x & 65535u) / 65535.0f * sx,
-                                         float(p.payload.x >> 16) / 65535.0f * sy);
-            p.payload.y = pack_unorm16x2(float(p.payload.y & 65535u) / 65535.0f * sx,
-                                         float(p.payload.y >> 16) / 65535.0f * sy);
-        }
-    }
+    const float sx = float(a.width) / float(n), sy = float(a.height) / float(n);
+    remap_atlas_prims_scale(ctx->prims, ctx->prim_count, sx, sy);
+    remap_atlas_prims_scale(ctx->filter_prims, ctx->filter_prim_count, sx, sy);
     std::free(a.pixels);
     a.pixels = pixels;
     a.width = n;
@@ -146,19 +171,8 @@ bool compact_sprite_atlas(Context* ctx) noexcept {
         for(uint32_t row=0;row<h;++row) std::memcpy(pixels+(size_t(y+row)*a.width+x)*4,a.pixels+(size_t(s.y+row)*a.width+s.x)*4,size_t(w)*4);
         s.x=x;s.y=y;s.alloc_w=w;s.alloc_h=h;x+=w;shelf=shelf>h?shelf:h;
     }
-    for(uint32_t i=0;i<ctx->prim_count;++i) {
-        auto& p=ctx->prims[i];
-        if((p.style.x&15u)!=uint32_t(PrimKind::Texture) || ((p.style.x>>10)&15u)!=0)continue;
-        const float u0=float(p.payload.x&65535u)/65535*float(a.width),v0=float(p.payload.x>>16)/65535*float(a.height);
-        const float u1=float(p.payload.y&65535u)/65535*float(a.width),v1=float(p.payload.y>>16)/65535*float(a.height);
-        const float mx=(u0+u1)*.5f,my=(v0+v1)*.5f;
-        for(uint32_t j=1;j<a.sprite_used;++j) {
-            const auto& old=a.sprites[j];if(!old.live || mx<float(old.x) || mx>=float(old.x+old.alloc_w) || my<float(old.y) || my>=float(old.y+old.alloc_h))continue;
-            const float dx=float(plan[j].x)-float(old.x),dy=float(plan[j].y)-float(old.y);
-            p.payload.x=pack_unorm16x2((u0+dx)/float(a.width),(v0+dy)/float(a.height));
-            p.payload.y=pack_unorm16x2((u1+dx)/float(a.width),(v1+dy)/float(a.height));break;
-        }
-    }
+    remap_atlas_prims_compact(ctx->prims, ctx->prim_count, a, plan);
+    remap_atlas_prims_compact(ctx->filter_prims, ctx->filter_prim_count, a, plan);
     for(uint32_t row=0;row<8;++row)std::memset(pixels+size_t(row)*a.width*4,255,32);
     std::memcpy(a.sprites,plan,size_t(a.sprite_used)*sizeof(SpriteSlot));std::free(plan);std::free(a.pixels);a.pixels=pixels;
     a.shelf_x=x;a.shelf_y=y;a.shelf_h=shelf;a.dirty=true;a.dirty_y0=0;a.dirty_y1=a.height;

@@ -19,19 +19,44 @@ PerceptualColor color_to_lab(Color color) noexcept {
             1.9779984951f*l-2.4285922050f*m+.4505937099f*s,
             .0259040371f*l+.7827717662f*m-.8086757660f*s};
 }
-Color color_from_lab(PerceptualColor c, float alpha) noexcept {
+Color color_from_lab_raw(PerceptualColor c, float alpha, bool* in_gamut_out = nullptr) noexcept {
     float l=c.L+.3963377774f*c.a+.2158037573f*c.b;
     float m=c.L-.1055613458f*c.a-.0638541728f*c.b;
     float s=c.L-.0894841775f*c.a-1.2914855480f*c.b;
     l=l*l*l; m=m*m*m; s=s*s*s;
-    return Color::rgba(color_encoded(4.0767416621f*l-3.3077115913f*m+.2309699292f*s),
-        color_encoded(-1.2684380046f*l+2.6097574011f*m-.3413193965f*s),
-        color_encoded(-.0041960863f*l-.7034186147f*m+1.7076147010f*s),alpha);
+    const float r=4.0767416621f*l-3.3077115913f*m+.2309699292f*s;
+    const float g=-1.2684380046f*l+2.6097574011f*m-.3413193965f*s;
+    const float b=-.0041960863f*l-.7034186147f*m+1.7076147010f*s;
+    if (in_gamut_out) {
+        *in_gamut_out = (r >= -1e-4f && r <= 1.0001f && g >= -1e-4f && g <= 1.0001f && b >= -1e-4f && b <= 1.0001f);
+    }
+    return Color::rgba(color_encoded(r), color_encoded(g), color_encoded(b), alpha);
+}
+Color color_from_lab(PerceptualColor c, float alpha) noexcept {
+    bool in_gamut = false;
+    const Color raw = color_from_lab_raw(c, alpha, &in_gamut);
+    if (in_gamut || (c.a == 0.0f && c.b == 0.0f)) return raw;
+    float lo = 0.0f, hi = 1.0f;
+    for (int i = 0; i < 10; ++i) {
+        const float mid = 0.5f * (lo + hi);
+        bool ok = false;
+        (void)color_from_lab_raw({c.L, c.a * mid, c.b * mid}, alpha, &ok);
+        if (ok) lo = mid; else hi = mid;
+    }
+    return color_from_lab_raw({c.L, c.a * lo, c.b * lo}, alpha);
 }
 Color seed_token(Color original, float hue, float chroma) noexcept {
     const auto lab=color_to_lab(original);
     const float original_chroma=std::sqrt(lab.a*lab.a+lab.b*lab.b);
     return Color::oklch(lab.L, std::fmin(original_chroma,chroma),hue,original.a/255.f);
+}
+Color harmonize_syntax_token(Color original, float seed_hue, float chroma_scale) noexcept {
+    const auto lab = color_to_lab(original);
+    const float c = std::sqrt(lab.a * lab.a + lab.b * lab.b);
+    const float orig_hue = std::atan2(lab.b, lab.a) * 57.29577951308232f;
+    const float delta = std::fmod(seed_hue - orig_hue + 540.0f, 360.0f) - 180.0f;
+    const float syn_c = (chroma_scale <= 0.0f) ? 0.0f : std::fmin(c * std::fmin(chroma_scale, 1.35f), 0.24f);
+    return Color::oklch(lab.L, syn_c, orig_hue + delta * 0.15f, original.a / 255.0f);
 }
 Color readable_on(Color background) noexcept {
     const float y=.2126f*color_linear(background.r/255.f)+.7152f*color_linear(background.g/255.f)+.0722f*color_linear(background.b/255.f);
@@ -111,8 +136,8 @@ Theme Theme::from_seed(Color seed, bool dark_mode, float chroma_scale) noexcept 
     result.scrollbar_thumb_hover=seed_token(result.scrollbar_thumb_hover,hue,chroma);
     result.scrollbar_thumb_drag=seed_token(result.scrollbar_thumb_drag,hue,chroma);
     result.syntax_comment=seed_token(result.syntax_comment,hue,chroma);
-    result.syntax_string=seed_token(result.syntax_string,hue,chroma);
-    result.syntax_number=seed_token(result.syntax_number,hue,chroma);
+    result.syntax_string=harmonize_syntax_token(result.syntax_string,hue,chroma_scale);
+    result.syntax_number=harmonize_syntax_token(result.syntax_number,hue,chroma_scale);
     result.syntax_keyword=seed_token(result.syntax_keyword,hue,chroma);
     result.text_primary=readable_on(result.bg_canvas);
     result.on_primary=readable_on(result.accent_primary);

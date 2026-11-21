@@ -28,6 +28,17 @@ inline bool verify() noexcept {
             ok &= ct.accent.r==th.accent.r && ct.accent.g==th.accent.g && ct.accent.b==th.accent.b;
         }
     }
+    ok &= Theme::dark().grid_major.a > Theme::dark().grid_minor.a;
+    {
+        const Theme seeded = Theme::from_seed(Color::rgb_hex(0x38BDF8), true, 1.0f);
+        // Syntax tokens must retain distinct semantic hues rather than collapsing to monochrome.
+        ok &= seeded.syntax_string.g > seeded.syntax_string.r && seeded.syntax_string.g > seeded.syntax_string.b;
+        ok &= seeded.syntax_number.pack_rgba8() != seeded.syntax_string.pack_rgba8();
+        ok &= seeded.syntax_keyword.pack_rgba8() != seeded.syntax_string.pack_rgba8();
+        // Out-of-gamut Oklch green must reduce chroma smoothly without hue-skewing out of green.
+        const Color oog_green = Color::oklch(0.70f, 0.35f, 145.0f);
+        ok &= oog_green.g > oog_green.r && oog_green.g > oog_green.b;
+    }
     ok &= SpringSpec::bouncy().damping_ratio<1 && SpringSpec::gentle().response>SpringSpec::snappy().response;
     if(!ok) std::fprintf(stderr,"perceptual color regression failed\n");
     return ok;

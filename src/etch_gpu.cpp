@@ -755,9 +755,10 @@ bool record_frame_commands(
         return false;
     }
 
-    uint32_t clip_uploaded=0;
-    if(!ensure_slug_storage_pair(ctx->device,ctx->clip_shape_count,sizeof(ClipShapeGpu),&ctx->clip_shape_gpu,&ctx->clip_shape_gpu_capacity,
-        &ctx->clip_shape_transfer,&ctx->clip_shape_transfer_capacity,&clip_uploaded)) return false;
+    const bool clip_shapes_dirty = ctx->clip_shape_count > 1u || !ctx->clip_shape_sentinel_uploaded || !ctx->clip_shape_gpu;
+    uint32_t clip_uploaded = 0;
+    if (clip_shapes_dirty && !ensure_slug_storage_pair(ctx->device, ctx->clip_shape_count, sizeof(ClipShapeGpu), &ctx->clip_shape_gpu, &ctx->clip_shape_gpu_capacity,
+        &ctx->clip_shape_transfer, &ctx->clip_shape_transfer_capacity, &clip_uploaded)) return false;
     const ClipShapeGpu empty_clip={};
     uint32_t dyn_curves_uploaded = 0u;
     uint32_t dyn_bands_uploaded = 0u;
@@ -798,47 +799,59 @@ bool record_frame_commands(
             if (!ctx->atlas_transfer_buf) return false;
         }
     }
-    if (ctx->clip_shape_count || ctx->atlas.dirty || total_prims > 0u || slug_curves_pending || slug_bands_pending ||
+    if (clip_shapes_dirty || ctx->atlas.dirty || total_prims > 0u || slug_curves_pending || slug_bands_pending ||
         ctx->dyn_slug_curve_count > 0u || ctx->dyn_slug_band_count > 0u) {
         SDL_GPUCopyPass* copy_pass = SDL_BeginGPUCopyPass(cmd);
         if (!copy_pass) {
             return false;
         }
 
-        if(!upload_slug_delta(ctx->device,copy_pass,ctx->clip_shapes ? ctx->clip_shapes : &empty_clip,sizeof(ClipShapeGpu),ctx->clip_shape_count,
-            &clip_uploaded,ctx->clip_shape_gpu,ctx->clip_shape_transfer,true)) {SDL_EndGPUCopyPass(copy_pass);return false;}
+        if (clip_shapes_dirty) {
+            if(!upload_slug_delta(ctx->device,copy_pass,ctx->clip_shapes ? ctx->clip_shapes : &empty_clip,sizeof(ClipShapeGpu),ctx->clip_shape_count,
+                &clip_uploaded,ctx->clip_shape_gpu,ctx->clip_shape_transfer,true)) {SDL_EndGPUCopyPass(copy_pass);return false;}
+            ctx->clip_shape_sentinel_uploaded = true;
+        }
 
         if (atlas.dirty && atlas.dirty_y1>atlas.dirty_y0) {
             const uint32_t rows=atlas.dirty_y1-atlas.dirty_y0;
+            const bool full_upload=(atlas.dirty_y0==0u && atlas.dirty_y1==atlas.height);
             void* mapped=SDL_MapGPUTransferBuffer(ctx->device,ctx->atlas_transfer_buf,true);
             if (!mapped) { SDL_EndGPUCopyPass(copy_pass); return false; }
             std::memcpy(mapped,atlas.pixels+size_t(atlas.dirty_y0)*atlas.width*4u,size_t(atlas.width)*rows*4u);
             SDL_UnmapGPUTransferBuffer(ctx->device,ctx->atlas_transfer_buf);
             const SDL_GPUTextureTransferInfo src={.transfer_buffer=ctx->atlas_transfer_buf,.offset=0u,.pixels_per_row=atlas.width,.rows_per_layer=rows};
             const SDL_GPUTextureRegion dst={.texture=atlas.gpu_tex,.mip_level=0u,.layer=0u,.x=0u,.y=atlas.dirty_y0,.z=0u,.w=atlas.width,.h=rows,.d=1u};
-            SDL_UploadToGPUTexture(copy_pass,&src,&dst,false);
+            SDL_UploadToGPUTexture(copy_pass,&src,&dst,full_upload);
             atlas.dirty=false;atlas.dirty_y0=UINT32_MAX;atlas.dirty_y1=0;
         }
 
-        upload_slug_delta(
-            ctx->device,
-            copy_pass,
-            ctx->atlas.slug_curves,
-            static_cast<uint32_t>(sizeof(SlugCurveGpu)),
-            ctx->atlas.slug_curve_count,
-            &ctx->atlas.uploaded_slug_curves,
-            ctx->slug_curve_gpu_buf,
-            ctx->slug_curve_tbuf);
+        if (!upload_slug_delta(
+                ctx->device,
+                copy_pass,
+                ctx->atlas.slug_curves,
+                static_cast<uint32_t>(sizeof(SlugCurveGpu)),
+                ctx->atlas.slug_curve_count,
+                &ctx->atlas.uploaded_slug_curves,
+                ctx->slug_curve_gpu_buf,
+                ctx->slug_curve_tbuf))
+        {
+            SDL_EndGPUCopyPass(copy_pass);
+            return false;
+        }
 
-        upload_slug_delta(
-            ctx->device,
-            copy_pass,
-            ctx->atlas.slug_bands,
-            static_cast<uint32_t>(sizeof(SlugBandEntryGpu)),
-            ctx->atlas.slug_band_count,
-            &ctx->atlas.uploaded_slug_bands,
-            ctx->slug_band_gpu_buf,
-            ctx->slug_band_tbuf);
+        if (!upload_slug_delta(
+                ctx->device,
+                copy_pass,
+                ctx->atlas.slug_bands,
+                static_cast<uint32_t>(sizeof(SlugBandEntryGpu)),
+                ctx->atlas.slug_band_count,
+                &ctx->atlas.uploaded_slug_bands,
+                ctx->slug_band_gpu_buf,
+                ctx->slug_band_tbuf))
+        {
+            SDL_EndGPUCopyPass(copy_pass);
+            return false;
+        }
 
         if (ctx->dyn_slug_curve_count > 0u && !upload_slug_delta(ctx->device, copy_pass,
             ctx->dyn_slug_curves, static_cast<uint32_t>(sizeof(SlugCurveGpu)), ctx->dyn_slug_curve_count,
@@ -1003,8 +1016,14 @@ bool record_frame_commands(
         const uint32_t split_batch = ctx->blur_splits[s].split_batch;
         const float radius_px = ctx->blur_splits[s].blur_radius_px;
         const Rect bounds=ctx->blur_splits[s].union_bounds;
-        const float margin=std::ceil(radius_px*2+32);
-        const auto region=[&](uint32_t w,uint32_t h) noexcept -> Rect {
+        const float off_down1 = clampf_blur(1.0f + radius_px * 0.04f, 0.5f, 3.0f);
+        const float off_down2 = clampf_blur(1.0f + radius_px * 0.06f, 0.5f, 4.0f);
+        const float off_up    = clampf_blur(0.6f + radius_px * 0.03f, 0.5f, 2.5f);
+        // Shrink scissor margins monotonically so every LOADOP_DONT_CARE pass samples strictly inside prior pass's written pixels.
+        const float margin_up    = std::ceil(radius_px * 0.5f + 8.0f);
+        const float margin_down2 = margin_up + std::ceil((off_up + 2.0f) * 4.0f);
+        const float margin_down1 = margin_down2 + std::ceil((off_down2 + 2.0f) * 2.0f);
+        const auto region=[&](uint32_t w,uint32_t h,float margin) noexcept -> Rect {
             const float sx=float(w)/float(target_w),sy=float(h)/float(target_h);
             return {(bounds.x-margin)*sx,(bounds.y-margin)*sy,(bounds.w+2*margin)*sx,(bounds.h+2*margin)*sy};
         };
@@ -1027,15 +1046,11 @@ bool record_frame_commands(
             }
         }
 
-        const float off_down1 = clampf_blur(1.0f + radius_px * 0.04f, 0.5f, 3.0f);
-        const float off_down2 = clampf_blur(1.0f + radius_px * 0.06f, 0.5f, 4.0f);
-        const float off_up    = clampf_blur(0.6f + radius_px * 0.03f, 0.5f, 2.5f);
-
         if (!run_kawase_step(
                 ctx, cmd, kawase_pipe,
                 ctx->active_ui->scene_tex, ctx->active_ui->blur_ping_tex, half_w, half_h,
                 1.0f / static_cast<float>(target_w), 1.0f / static_cast<float>(target_h),
-                off_down1, 0u, region(half_w,half_h)))
+                off_down1, 0u, region(half_w, half_h, margin_down1)))
         {
             return false;
         }
@@ -1043,7 +1058,7 @@ bool record_frame_commands(
                 ctx, cmd, kawase_pipe,
                 ctx->active_ui->blur_ping_tex, ctx->active_ui->blur_pong_tex, quarter_w, quarter_h,
                 1.0f / static_cast<float>(half_w), 1.0f / static_cast<float>(half_h),
-                off_down2, 0u, region(quarter_w,quarter_h)))
+                off_down2, 0u, region(quarter_w, quarter_h, margin_down2)))
         {
             return false;
         }
@@ -1051,7 +1066,7 @@ bool record_frame_commands(
                 ctx, cmd, kawase_pipe,
                 ctx->active_ui->blur_pong_tex, ctx->active_ui->blur_ping_tex, half_w, half_h,
                 1.0f / static_cast<float>(quarter_w), 1.0f / static_cast<float>(quarter_h),
-                off_up, 1u, region(half_w,half_h)))
+                off_up, 1u, region(half_w, half_h, margin_up)))
         {
             return false;
         }

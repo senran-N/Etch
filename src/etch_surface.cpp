@@ -130,7 +130,8 @@ bool record_shader_surfaces(Context* ctx, SDL_GPUCommandBuffer* cmd) noexcept {
                 }
             } else {
                 for (uint32_t u = 0u; u < 64u; ++u) {
-                    if (active[u] && !visited[u] && ctx->shader_surfaces[u].texture == tex) {
+                    const ShaderSurfaceSlot& up = ctx->shader_surfaces[u];
+                    if (up.shader && up.texture == tex && ((!up.initialized && !up.recorded) || (active[u] && !visited[u]))) {
                         tex = nullptr;
                         need_fallback = true;
                         break;
@@ -166,18 +167,6 @@ bool record_shader_surfaces(Context* ctx, SDL_GPUCommandBuffer* cmd) noexcept {
         }
         SDL_DrawGPUPrimitives(pass, 3, 1, 0, 0);
         SDL_EndGPURenderPass(pass);
-        if (s.enable_feedback && s.prev_texture) {
-            SDL_GPUCopyPass* copy_pass = SDL_BeginGPUCopyPass(cmd);
-            if (!copy_pass) return false;
-            const SDL_GPUTextureLocation src_loc = {
-                .texture = s.texture, .mip_level = 0u, .layer = 0u, .x = 0u, .y = 0u, .z = 0u
-            };
-            const SDL_GPUTextureLocation dst_loc = {
-                .texture = s.prev_texture, .mip_level = 0u, .layer = 0u, .x = 0u, .y = 0u, .z = 0u
-            };
-            SDL_CopyGPUTextureToTexture(copy_pass, &src_loc, &dst_loc, s.eval.width, s.eval.height, 1u, false);
-            SDL_EndGPUCopyPass(copy_pass);
-        }
         s.recorded = true;
         s.pending_output_epoch = ++ctx->shader_surface_epoch;
         for (uint32_t k = 0u; k < s.num_samplers; ++k) s.pending_sampled_epochs[k] = up_epochs[k];
@@ -196,6 +185,12 @@ void complete_shader_surfaces(Context* ctx, SDL_Window* window, bool submitted) 
             SDL_ReleaseGPUTexture(ctx->device, s.retired_prev_tex);
             s.retired_prev_tex = nullptr;
         }
+        if (s.swapped_this_frame && !submitted && s.texture && s.prev_texture) {
+            SDL_GPUTexture* tmp = s.texture;
+            s.texture = s.prev_texture;
+            s.prev_texture = tmp;
+        }
+        s.swapped_this_frame = false;
         if (!s.recorded) continue;
         if (submitted) {
             s.initialized = true;
@@ -315,12 +310,22 @@ SDL_GPUTexture* eval_shader_surface(Context* ctx, ShaderSurfaceId id, const Shad
         s->texture = texture;
         s->prev_texture = prev_texture;
         s->initialized = false;
+        s->swapped_this_frame = false;
     }
     bool textures_changed = false;
+    bool has_external_surface_input = false;
     for (uint32_t i = 0u; i < s->num_samplers; ++i) {
         if (s->eval.textures[i] != desc.textures[i]) {
             textures_changed = true;
             s->sampled_epochs[i] = 0u;
+        }
+        if (desc.textures[i] && desc.textures[i] != s->texture && desc.textures[i] != s->prev_texture) {
+            for (const ShaderSurfaceSlot& other : ctx->shader_surfaces) {
+                if (&other != s && other.shader && other.texture == desc.textures[i]) {
+                    has_external_surface_input = true;
+                    break;
+                }
+            }
         }
     }
     s->dirty |= resize || textures_changed || s->eval.revision != desc.revision ||
@@ -331,6 +336,38 @@ SDL_GPUTexture* eval_shader_surface(Context* ctx, ShaderSurfaceId id, const Shad
             if (s->eval.textures[i] == old_tex) {
                 s->eval.textures[i] = s->texture;
                 s->sampled_epochs[i] = 0u;
+            }
+        }
+    }
+    if (desc.enabled && s->enable_feedback && s->initialized && s->prev_texture && !s->swapped_this_frame) {
+        bool will_render = s->dirty || has_external_surface_input;
+        if (!will_render && s->continuous_time && ctx->time_scale > 0.0f && !ctx->reduced_motion) {
+            const uint64_t now = SDL_GetPerformanceCounter();
+            const double freq = static_cast<double>(SDL_GetPerformanceFrequency());
+            if (double(now - s->last_render_tick) >= freq / s->max_fps) {
+                will_render = true;
+            }
+        }
+        if (will_render) {
+            SDL_GPUTexture* prev_front = s->texture;
+            s->texture = s->prev_texture;
+            s->prev_texture = prev_front;
+            s->swapped_this_frame = true;
+            s->dirty = true;
+            for (uint32_t i = 0u; i < s->num_samplers; ++i) {
+                if (s->eval.textures[i] == prev_front) {
+                    s->eval.textures[i] = s->texture;
+                }
+            }
+            for (ShaderSurfaceSlot& other : ctx->shader_surfaces) {
+                if (&other == s || !other.shader) continue;
+                for (uint32_t k = 0u; k < other.num_samplers; ++k) {
+                    if (other.eval.textures[k] == prev_front) {
+                        other.eval.textures[k] = s->texture;
+                        other.dirty = true;
+                        other.sampled_epochs[k] = 0u;
+                    }
+                }
             }
         }
     }

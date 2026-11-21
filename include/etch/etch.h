@@ -1069,8 +1069,8 @@ struct Theme {
     Color area_fill_bottom = Color::rgba8(56, 189, 248, 0);
     Color divider_hover = Color::rgba8(56, 189, 248, 165);
     Color divider_thumb_hover = Color::rgba8(226, 232, 240, 220);
-    Color grid_minor = Color::rgba8(148, 163, 184, 40);
-    Color grid_major = Color::rgba8(148, 163, 184, 28);
+    Color grid_minor = Color::rgba8(148, 163, 184, 18);
+    Color grid_major = Color::rgba8(148, 163, 184, 34);
     Color canvas_border = Color::rgba8(148, 163, 184, 44);
     Color marquee_fill = Color::rgba(0.28f, 0.56f, 0.96f, 0.16f);
     Color marquee_border = Color::rgba(0.38f, 0.68f, 1.00f, 0.85f);

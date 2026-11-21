@@ -355,6 +355,33 @@ inline bool verify_v022_driver(const char* driver) noexcept {
         };
         ok &= run_combo(240u, 160u, "first_frame");
         ok &= run_combo(280u, 180u, "resize");
+        // (8) FilterBlurGroup must preserve inner sharp-corner clip_children rects (not erase them).
+        {
+            begin_frame(fc, {.viewport_w = 200, .viewport_h = 120});
+            begin_box({.width = Sizing::fixed(200), .height = Sizing::fixed(120)});
+            ETCH_LAYER({.blur_px = 4.0f}) {
+                begin_box({.width = Sizing::fixed(60), .height = Sizing::fixed(120), .clip_children = true});
+                box({.width = Sizing::fixed(180), .height = Sizing::fixed(120), .background = Color::rgba8(240, 40, 40, 255)});
+                end_box();
+            }
+            end_box();
+            end_frame(fc);
+            ok &= render_headless_png(fc, 200, 120, png_path, Color::black());
+            if (SDL_Surface* img = SDL_LoadPNG(png_path)) {
+                Uint8 r_in = 0, g_in = 0, b_in = 0, a_in = 0;
+                Uint8 r_out = 0, g_out = 0, b_out = 0, a_out = 0;
+                const bool in_ok = SDL_ReadSurfacePixel(img, 30, 60, &r_in, &g_in, &b_in, &a_in) && r_in > 180;
+                const bool out_ok = SDL_ReadSurfacePixel(img, 140, 60, &r_out, &g_out, &b_out, &a_out) && r_out < 15;
+                if (!in_ok || !out_ok) {
+                    std::fprintf(stderr, "v022 [%s] blur inner clip failed: in=(%u,%u,%u) out=(%u,%u,%u)\n",
+                        driver, r_in, g_in, b_in, r_out, g_out, b_out);
+                }
+                ok &= in_ok && out_ok;
+                SDL_DestroySurface(img);
+            } else {
+                ok = false;
+            }
+        }
         destroy_context(fc);
         set_current_context(nullptr);
     } else {
