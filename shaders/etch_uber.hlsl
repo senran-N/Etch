@@ -755,8 +755,12 @@ float4 ps_main(VSOut input) : SV_Target0
         }
         if ((flags & ETCH_FLAG_STEM_DARKEN) != 0u)
         {
-            float luma = saturate(dot(glyph_col.rgb, float3(0.2126f, 0.7152f, 0.0722f)));
-            cov = lerp(cov, cov * (2.0f - cov), 0.35f * luma);
+            float lin_luma   = saturate(dot(glyph_col.rgb, float3(0.2126f, 0.7152f, 0.0722f)));
+            float srgb_luma  = pow(lin_luma, 1.0f / 2.2f);
+            float dark_boost = saturate(1.0f - 2.0f * srgb_luma) * 0.24f;
+            float light_trim = saturate(2.0f * srgb_luma - 1.0f) * 0.12f;
+            cov = lerp(cov, cov * (2.0f - cov), dark_boost);
+            cov = lerp(cov, cov * cov, light_trim);
         }
         out_pm = float4(glyph_col.rgb, 1.0f) * (glyph_col.a * cov);
     }

@@ -1946,6 +1946,8 @@ uint16_t etch_load_font_file(EtchContext* ctx, const char* path, uint16_t slot_h
 uint16_t etch_load_font_memory(EtchContext* ctx, const void* data, size_t size_bytes, uint16_t slot_hint, int32_t face_index);
 bool etch_is_font_loaded(const EtchContext* ctx, uint16_t font_id);
 bool etch_set_font_tabular_numbers(EtchContext* ctx, uint16_t font_id, bool enabled);
+void etch_set_hinted_small_text(EtchContext* ctx, bool enabled);
+bool etch_hinted_small_text(const EtchContext* ctx);
 
 typedef enum EtchStrokeCap {
     ETCH_STROKE_CAP_BUTT = 0, ETCH_STROKE_CAP_ROUND = 1, ETCH_STROKE_CAP_SQUARE = 2

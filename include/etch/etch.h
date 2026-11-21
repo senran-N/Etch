@@ -2183,6 +2183,10 @@ uint16_t load_font_memory(
 bool is_font_loaded(const Context* ctx, uint16_t font_id) noexcept;
 // Configure a loaded font outside a frame; applies to measurement and all text APIs.
 bool set_font_tabular_numbers(Context* ctx, uint16_t font_id, bool enabled) noexcept;
+// Optional platform-native hinted bitmap glyph cache for small UI text (<= 22px physical).
+// Larger sizes, rotated runs, and zoomed canvas layers remain pure-GPU Slug vector outlines.
+void set_hinted_small_text(Context* ctx, bool enabled) noexcept;
+bool hinted_small_text(const Context* ctx) noexcept;
 
 // Zero-atlas SVG path -> Slug vector icon compiler
 enum class StrokeCap : uint8_t { Butt = 0, Round = 1, Square = 2 };

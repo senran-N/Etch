@@ -222,5 +222,199 @@ EmojiBitmapEntry get_or_cache_bitmap_emoji(Context* ctx, uint16_t slot_idx, uint
         best = cache_bitmap_strike(ctx, slot_idx, glyph, best_strike, best_sbix);
     return best;
 }
+
+bool hinted_rehash(FontAtlas* a) noexcept {
+    const uint32_t cap = a->hinted_cap ? a->hinted_cap * 2u : 256u;
+    auto* table = static_cast<EmojiBitmapEntry*>(std::calloc(cap, sizeof(EmojiBitmapEntry)));
+    if (!table) return false;
+    for (uint32_t i = 0; i < a->hinted_cap; ++i) {
+        if (a->hinted_glyphs[i].key) {
+            const auto e = a->hinted_glyphs[i];
+            uint32_t j = uint32_t(hash_u64(e.key)) & (cap - 1u);
+            while (table[j].key) j = (j + 1u) & (cap - 1u);
+            table[j] = e;
+        }
+    }
+    std::free(a->hinted_glyphs);
+    a->hinted_glyphs = table;
+    a->hinted_cap = cap;
+    return true;
+}
+
+void evict_font_slot_hinted_glyphs(FontAtlas* a, uint16_t slot_idx) noexcept {
+    if (!a || !a->hinted_glyphs || !a->hinted_cap || !a->hinted_count) return;
+    const uint32_t cap = a->hinted_cap;
+    const uint32_t mask = cap - 1u;
+    uint32_t orig_empty = cap;
+    for (uint32_t i = 0; i < cap; ++i) {
+        if (!a->hinted_glyphs[i].key) { orig_empty = i; break; }
+    }
+    const uint64_t tag = uint64_t(slot_idx + 1u);
+    bool removed = false;
+    for (uint32_t i = 0; i < cap; ++i) {
+        const EmojiBitmapEntry e = a->hinted_glyphs[i];
+        if (!e.key || (e.key >> 56) != tag) continue;
+        if (e.sprite_id != kInvalidSprite) release_atlas_sprite(a, e.sprite_id);
+        a->hinted_glyphs[i] = {};
+        --a->hinted_count;
+        removed = true;
+    }
+    if (!removed || !a->hinted_count || orig_empty >= cap) return;
+    for (uint32_t step = 1u; step < cap; ++step) {
+        const uint32_t k = (orig_empty + step) & mask;
+        const EmojiBitmapEntry e = a->hinted_glyphs[k];
+        if (!e.key) continue;
+        a->hinted_glyphs[k] = {};
+        uint32_t j = uint32_t(hash_u64(e.key)) & mask;
+        while (a->hinted_glyphs[j].key) j = (j + 1u) & mask;
+        a->hinted_glyphs[j] = e;
+    }
+}
+
+#if defined(_WIN32)
+IDWriteFactory* ensure_dwrite_factory(FontAtlas* a) noexcept {
+    if (a->dwrite_factory) return static_cast<IDWriteFactory*>(a->dwrite_factory);
+    if (a->dwrite_probed) return nullptr;
+    a->dwrite_probed = true;
+    HMODULE mod = LoadLibraryW(L"dwrite.dll");
+    if (!mod) return nullptr;
+    using CreateFn = HRESULT (WINAPI *)(DWRITE_FACTORY_TYPE, REFIID, IUnknown**);
+    auto fn = reinterpret_cast<CreateFn>(GetProcAddress(mod, "DWriteCreateFactory"));
+    if (!fn) { FreeLibrary(mod); return nullptr; }
+    IUnknown* unk = nullptr;
+    if (FAILED(fn(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory), &unk)) || !unk) {
+        FreeLibrary(mod);
+        return nullptr;
+    }
+    a->dwrite_module = mod;
+    a->dwrite_factory = unk;
+    return static_cast<IDWriteFactory*>(unk);
+}
+
+IDWriteFontFace* ensure_dwrite_face(FontAtlas* a, FontSlot* slot) noexcept {
+    if (slot->dwrite_face) return static_cast<IDWriteFontFace*>(slot->dwrite_face);
+    if (slot->dwrite_probed || slot->font_file_path[0] == '\0') return nullptr;
+    slot->dwrite_probed = true;
+    IDWriteFactory* factory = ensure_dwrite_factory(a);
+    if (!factory) return nullptr;
+    wchar_t wpath[512] = {};
+    const int wlen = MultiByteToWideChar(CP_UTF8, 0, slot->font_file_path, -1, wpath, 512);
+    if (wlen <= 0) return nullptr;
+    IDWriteFontFile* file = nullptr;
+    if (FAILED(factory->CreateFontFileReference(wpath, nullptr, &file)) || !file) return nullptr;
+    BOOL supported = FALSE;
+    DWRITE_FONT_FILE_TYPE file_type = DWRITE_FONT_FILE_TYPE_UNKNOWN;
+    DWRITE_FONT_FACE_TYPE face_type = DWRITE_FONT_FACE_TYPE_UNKNOWN;
+    UINT32 num_faces = 0;
+    IDWriteFontFace* face = nullptr;
+    if (SUCCEEDED(file->Analyze(&supported, &file_type, &face_type, &num_faces)) && supported && num_faces > 0) {
+        const UINT32 fidx = (slot->face_index >= 0 && static_cast<UINT32>(slot->face_index) < num_faces)
+            ? static_cast<UINT32>(slot->face_index) : 0u;
+        IDWriteFontFile* files[1] = {file};
+        factory->CreateFontFace(face_type, 1, files, fidx, DWRITE_FONT_SIMULATIONS_NONE, &face);
+    }
+    file->Release();
+    slot->dwrite_face = face;
+    return face;
+}
+#endif
+
+EmojiBitmapEntry get_or_cache_hinted_glyph(Context* ctx, uint16_t slot_idx, uint32_t glyph_id, float phys_px) noexcept {
+#if defined(_WIN32)
+    if (!ctx || slot_idx >= kMaxFontSlots || glyph_id > 0xFFFFu || phys_px < 6.0f || phys_px > 22.0f) return {};
+    auto& a = ctx->atlas;
+    auto& s = a.slots[slot_idx];
+    if (!s.loaded || !s.has_outlines || s.font_file_path[0] == '\0') return {};
+    const uint32_t ppem_half = static_cast<uint32_t>(std::round(phys_px * 2.0f));
+    if (ppem_half < 12u || ppem_half > 48u) return {};
+    const uint64_t key = (uint64_t(slot_idx + 1u) << 56) | (uint64_t(s.generation) << 48) |
+                         (uint64_t(ppem_half) << 32) | uint64_t(glyph_id);
+    if (!a.hinted_cap || (a.hinted_count + 1u) * 4u > a.hinted_cap * 3u) {
+        if (!hinted_rehash(&a)) return {};
+    }
+    uint32_t idx = uint32_t(hash_u64(key)) & (a.hinted_cap - 1u);
+    while (a.hinted_glyphs[idx].key && a.hinted_glyphs[idx].key != key) {
+        idx = (idx + 1u) & (a.hinted_cap - 1u);
+    }
+    if (a.hinted_glyphs[idx].key) return a.hinted_glyphs[idx];
+
+    EmojiBitmapEntry entry{};
+    entry.key = key;
+    entry.ppem = ppem_half;
+    IDWriteFactory* factory = ensure_dwrite_factory(&a);
+    IDWriteFontFace* face = ensure_dwrite_face(&a, &s);
+    if (factory && face) {
+        const float em_size = (static_cast<float>(ppem_half) * 0.5f) * s.scale_1px * static_cast<float>(s.upem);
+        const UINT16 gid16 = static_cast<UINT16>(glyph_id);
+        const FLOAT adv0 = 0.0f;
+        const DWRITE_GLYPH_OFFSET off0 = {0.0f, 0.0f};
+        DWRITE_GLYPH_RUN run{};
+        run.fontFace = face;
+        run.fontEmSize = em_size;
+        run.glyphCount = 1;
+        run.glyphIndices = &gid16;
+        run.glyphAdvances = &adv0;
+        run.glyphOffsets = &off0;
+        run.isSideways = FALSE;
+        run.bidiLevel = 0;
+
+        IDWriteGlyphRunAnalysis* analysis = nullptr;
+        const HRESULT hr = factory->CreateGlyphRunAnalysis(
+            &run, 1.0f, nullptr, DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC,
+            DWRITE_MEASURING_MODE_NATURAL, 0.0f, 0.0f, &analysis);
+        if (SUCCEEDED(hr) && analysis) {
+            RECT rc{};
+            if (SUCCEEDED(analysis->GetAlphaTextureBounds(DWRITE_TEXTURE_CLEARTYPE_3x1, &rc)) &&
+                rc.right > rc.left && rc.bottom > rc.top)
+            {
+                const uint32_t w = static_cast<uint32_t>(rc.right - rc.left);
+                const uint32_t h = static_cast<uint32_t>(rc.bottom - rc.top);
+                if (w <= 128u && h <= 128u) {
+                    const size_t rgb_bytes = size_t(w) * size_t(h) * 3u;
+                    const size_t rgba_bytes = size_t(w) * size_t(h) * 4u;
+                    const size_t mark = ctx->frame_arena.mark();
+                    auto* rgb = ctx->frame_arena.alloc_uninit<uint8_t>(rgb_bytes);
+                    auto* rgba = ctx->frame_arena.alloc_uninit<uint8_t>(rgba_bytes);
+                    if (rgb && rgba && SUCCEEDED(analysis->CreateAlphaTexture(DWRITE_TEXTURE_CLEARTYPE_3x1, &rc, rgb, static_cast<UINT32>(rgb_bytes)))) {
+                        for (uint32_t p = 0u; p < w * h; ++p) {
+                            const uint32_t cov = (uint32_t(rgb[p * 3u + 0u]) + uint32_t(rgb[p * 3u + 1u]) + uint32_t(rgb[p * 3u + 2u]) + 1u) / 3u;
+                            rgba[p * 4u + 0u] = 255u;
+                            rgba[p * 4u + 1u] = 255u;
+                            rgba[p * 4u + 2u] = 255u;
+                            rgba[p * 4u + 3u] = static_cast<uint8_t>(cov);
+                        }
+                        entry.sprite_id = create_sprite_rgba(ctx, {.rgba_pixels = rgba, .width = w, .height = h, .srgb = false});
+                        entry.width_px = w;
+                        entry.height_px = h;
+                        entry.bearing_x = static_cast<float>(rc.left);
+                        entry.bearing_y_top = static_cast<float>(-rc.top);
+                        entry.has_bitmap = (entry.sprite_id != kInvalidSprite);
+                    }
+                    ctx->frame_arena.rewind(mark);
+                }
+            }
+            analysis->Release();
+        }
+    }
+    a.hinted_glyphs[idx] = entry;
+    ++a.hinted_count;
+    return entry;
+#else
+    (void)ctx; (void)slot_idx; (void)glyph_id; (void)phys_px;
+    return {};
+#endif
+}
 } // namespace
+
+void set_hinted_small_text(Context* ctx, bool enabled) noexcept {
+    if (!ctx) return;
+    if (ctx->atlas.hinted_small_text != enabled) {
+        ctx->atlas.hinted_small_text = enabled;
+        request_redraw(ctx);
+    }
+}
+
+bool hinted_small_text(const Context* ctx) noexcept {
+    return ctx ? ctx->atlas.hinted_small_text : false;
+}
 } // namespace etch

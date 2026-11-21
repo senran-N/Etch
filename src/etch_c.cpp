@@ -741,6 +741,12 @@ uint16_t etch_load_font_memory(EtchContext* ctx, const void* data, size_t size_b
 bool etch_set_font_tabular_numbers(EtchContext* ctx, uint16_t font_id, bool enabled) {
     return etch::set_font_tabular_numbers(to_ctx(ctx), font_id, enabled);
 }
+void etch_set_hinted_small_text(EtchContext* ctx, bool enabled) {
+    etch::set_hinted_small_text(to_ctx(ctx), enabled);
+}
+bool etch_hinted_small_text(const EtchContext* ctx) {
+    return etch::hinted_small_text(to_ctx(ctx));
+}
 bool etch_is_font_loaded(const EtchContext* ctx, uint16_t font_id) {
     return etch::is_font_loaded(to_ctx(ctx), font_id);
 }

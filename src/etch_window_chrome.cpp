@@ -123,6 +123,9 @@ void apply_win32_chrome(Context* ctx, ClaimedWindowSlot* slot) noexcept {
     const Color bg=active_theme(ctx).bg_canvas;
     const BOOL dark=int(bg.r)+int(bg.g)+int(bg.b)<384;
     DwmSetWindowAttribute(hwnd,DWMWA_USE_IMMERSIVE_DARK_MODE,&dark,sizeof(dark));
+    const Color border=active_theme(ctx).border_subtle;
+    const COLORREF border_ref=RGB(border.r,border.g,border.b);
+    DwmSetWindowAttribute(hwnd,static_cast<DWMWINDOWATTRIBUTE>(34),&border_ref,sizeof(border_ref));
 #else
     (void)ctx;(void)slot;
 #endif

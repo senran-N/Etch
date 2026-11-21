@@ -50,6 +50,11 @@ bool ensure_array_cap(T** ptr, uint32_t* cap, uint32_t needed) noexcept {
 }
 
 void destroy_font_slot(FontSlot* slot) noexcept {
+#if defined(_WIN32)
+    if (slot->dwrite_face) {
+        static_cast<IDWriteFontFace*>(slot->dwrite_face)->Release();
+    }
+#endif
     if (slot->hb_font) hb_font_destroy(slot->hb_font);
     if (slot->hb_face) hb_face_destroy(slot->hb_face);
     if (slot->hb_blob) hb_blob_destroy(slot->hb_blob);
@@ -66,6 +71,7 @@ void ensure_bold_loaded(FontAtlas* atlas) noexcept;
 void ensure_mono_loaded(FontAtlas* atlas) noexcept;
 void ensure_weighted_loaded(FontAtlas* atlas, uint16_t slot) noexcept;
 void evict_font_slot_emoji_bitmaps(FontAtlas* atlas, uint16_t slot_idx) noexcept;
+void evict_font_slot_hinted_glyphs(FontAtlas* atlas, uint16_t slot_idx) noexcept;
 
 uint16_t resolve_font_slot_idx(FontAtlas* atlas, uint16_t font_id) noexcept {
     if (font_id == kFontBold && !atlas->slots[kFontBold].loaded && !atlas->bold_probed)
@@ -238,6 +244,7 @@ bool init_font_slot_from_owned_bytes(
     const uint8_t prev_gen = dst->generation;
     if (prev_gen != 0u) {
         evict_font_slot_emoji_bitmaps(atlas, slot_idx);
+        evict_font_slot_hinted_glyphs(atlas, slot_idx);
     }
     destroy_font_slot(dst);
     if (prev_gen == 255u && atlas->slug_glyphs && atlas->slug_glyph_cap > 0u) {
@@ -316,13 +323,23 @@ bool try_load_font_file_into_slot(
 #else
     (void)prefer_italic;
 #endif
-    return init_font_slot_from_owned_bytes(
+    if (!init_font_slot_from_owned_bytes(
         atlas,
         slot_idx,
         raw,
         sz,
         hash_font_path(path, face_index),
-        face_index);
+        face_index))
+    {
+        return false;
+    }
+    FontSlot& loaded_slot = atlas->slots[slot_idx];
+    loaded_slot.face_index = face_index;
+    const size_t plen = std::strlen(path);
+    if (plen > 0u && plen < sizeof(loaded_slot.font_file_path)) {
+        std::memcpy(loaded_slot.font_file_path, path, plen + 1u);
+    }
+    return true;
 }
 
 bool font_has_source_hash(const FontAtlas* atlas, uint64_t source_hash) noexcept {
@@ -548,8 +565,17 @@ void font_atlas_destroy(FontAtlas* atlas) noexcept {
     for (uint16_t i = 0u; i < kMaxFontSlots; ++i) {
         destroy_font_slot(&atlas->slots[i]);
     }
+#if defined(_WIN32)
+    if (atlas->dwrite_factory) {
+        static_cast<IDWriteFactory*>(atlas->dwrite_factory)->Release();
+    }
+    if (atlas->dwrite_module) {
+        FreeLibrary(static_cast<HMODULE>(atlas->dwrite_module));
+    }
+#endif
     std::free(atlas->sprites);
     std::free(atlas->emoji_bitmaps);
+    std::free(atlas->hinted_glyphs);
     std::free(atlas->pixels);
     std::free(atlas->slug_bands);
     std::free(atlas->slug_curves);

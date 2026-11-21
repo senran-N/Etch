@@ -249,6 +249,10 @@ struct FontSlot {
     uint8_t        generation = 0;
     bool           loaded = false;
     bool tabular_numbers = false;
+    char           font_file_path[512] = {};
+    int32_t        face_index = 0;
+    void*          dwrite_face = nullptr;
+    bool           dwrite_probed = false;
 };
 
 struct VectorIconEntry {
@@ -296,6 +300,12 @@ struct FontAtlas {
     uint32_t sprite_cap = 0, sprite_used = 1, sprite_live = 0, sprite_free = 0;
     EmojiBitmapEntry* emoji_bitmaps = nullptr;
     uint32_t emoji_cap = 0, emoji_count = 0;
+    EmojiBitmapEntry* hinted_glyphs = nullptr;
+    uint32_t hinted_cap = 0, hinted_count = 0;
+    void* dwrite_factory = nullptr;
+    void* dwrite_module = nullptr;
+    bool dwrite_probed = false;
+    bool hinted_small_text = false;
 
     FontSlot          slots[kMaxFontSlots] = {};
     uint16_t          fallback_order[kMaxFontSlots] = {};

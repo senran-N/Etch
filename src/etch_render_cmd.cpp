@@ -1401,16 +1401,54 @@ void emit_slug_outline_quad(
     const ClipEntry& clip_px,
     Color tint, bool color_layer = false, const TextWipeParams* wipe = nullptr) noexcept
 {
-    const SlugGlyphEntry ge = slug_get_glyph(&ctx->atlas, slot_idx, glyph_id);
-    if (!ge.has_outline) {
-        return;
-    }
     const bool snap_glyph = ctx->active_ui->pixel_snap &&
         !(ctx->active_render_layer && ctx->active_render_layer->resolved_animating);
     if (snap_glyph) {
         baseline_y_px = std::round(baseline_y_px);
     }
     const float scale_px = ctx->atlas.slots[slot_idx].scale_1px * phys_px;
+    const bool allow_hinted = ctx->atlas.hinted_small_text && !color_layer && phys_px <= 22.0f && snap_glyph &&
+        !(ctx->active_render_layer && (std::fabs(ctx->active_render_layer->resolved_scale.x - 1.0f) > 1e-3f ||
+                                       std::fabs(ctx->active_render_layer->resolved_scale.y - 1.0f) > 1e-3f));
+    if (allow_hinted) {
+        const EmojiBitmapEntry he = get_or_cache_hinted_glyph(ctx, slot_idx, glyph_id, phys_px);
+        if (he.has_bitmap && he.sprite_id != kInvalidSprite) {
+            Vec2 uv0{}, uv1{};
+            if (resolve_sprite_uv_rect(ctx, he.sprite_id, {0.0f, 0.0f}, {1.0f, 1.0f}, &uv0, &uv1)) {
+                const float gx = std::round(pen_x_px + x_offset_em * scale_px) + he.bearing_x;
+                const float gy = std::round(baseline_y_px - y_offset_em * scale_px) - he.bearing_y_top;
+                const float gw = static_cast<float>(he.width_px);
+                const float gh = static_cast<float>(he.height_px);
+                Prim p = Prim::make_glyph(
+                    Rect{ gx, gy, gw, gh },
+                    clip_px.rect,
+                    tint,
+                    uv0,
+                    uv1,
+                    0u,
+                    clip_px.radius,
+                    PrimFlag_StemDarken);
+                if (wipe && wipe->enabled) {
+                    const float x0_rel = wipe->x0_px - gx;
+                    const float x1_rel = wipe->x1_px - gx;
+                    if (x1_rel <= -1.0f) {
+                        p.style.y = wipe->color_end.pack_rgba8();
+                    } else if (x0_rel < gw + 1.0f) {
+                        p.style.x |= static_cast<uint32_t>(PrimFlag_LinearGrad) << 4;
+                        p.style.z = wipe->color_end.pack_rgba8();
+                        p.payload.w = pack_f16x2(clamp_range(x0_rel, -32768.0f, 32768.0f),
+                                                 clamp_range(x1_rel, -32768.0f, 32768.0f));
+                    }
+                }
+                push_prim(ctx, p);
+                return;
+            }
+        }
+    }
+    const SlugGlyphEntry ge = slug_get_glyph(&ctx->atlas, slot_idx, glyph_id);
+    if (!ge.has_outline) {
+        return;
+    }
     const float box_x = pen_x_px + (x_offset_em + ge.min_x_em) * scale_px;
     const float box_y = baseline_y_px - (y_offset_em + ge.max_y_em) * scale_px;
     const float box_w = (ge.max_x_em - ge.min_x_em) * scale_px;

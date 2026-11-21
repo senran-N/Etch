@@ -67,6 +67,16 @@
 
 #include <hb.h>
 #include <hb-ot.h>
+#if defined(_WIN32)
+#    ifndef WIN32_LEAN_AND_MEAN
+#        define WIN32_LEAN_AND_MEAN
+#    endif
+#    ifndef NOMINMAX
+#        define NOMINMAX
+#    endif
+#    include <windows.h>
+#    include <dwrite.h>
+#endif
 
 #include "etch_arena.cpp"
 #include "etch_theme.cpp"
