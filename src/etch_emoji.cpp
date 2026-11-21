@@ -241,6 +241,78 @@ bool hinted_rehash(FontAtlas* a) noexcept {
     return true;
 }
 
+void remap_subpixel_prims_scale(Prim* prims, uint32_t count, float sx, float sy) noexcept {
+    for (uint32_t i = 0u; i < count; ++i) {
+        auto& p = prims[i];
+        if ((p.style.x & 0xFu) != uint32_t(PrimKind::Glyph)) continue;
+        p.payload.x = pack_unorm16x2(float(p.payload.x & 65535u) / 65535.0f * sx,
+                                     float(p.payload.x >> 16) / 65535.0f * sy);
+        p.payload.y = pack_unorm16x2(float(p.payload.y & 65535u) / 65535.0f * sx,
+                                     float(p.payload.y >> 16) / 65535.0f * sy);
+    }
+}
+
+bool ensure_subpixel_atlas(Context* ctx, uint32_t w, uint32_t h, uint32_t* out_x, uint32_t* out_y) noexcept {
+    auto& a = ctx->atlas;
+    constexpr uint32_t kSubpixelInit = 512u;
+    constexpr uint32_t kSubpixelMax = 4096u;
+    if (!a.subpixel_pixels) {
+        a.subpixel_pixels = static_cast<uint8_t*>(std::calloc(size_t(kSubpixelInit) * kSubpixelInit * 4u, 1u));
+        if (!a.subpixel_pixels) return false;
+        a.subpixel_w = kSubpixelInit;
+        a.subpixel_h = kSubpixelInit;
+        a.subpixel_shelf_x = 1u;
+        a.subpixel_shelf_y = 1u;
+        a.subpixel_shelf_h = 0u;
+        a.subpixel_dirty = true;
+        a.subpixel_dirty_y0 = 0u;
+        a.subpixel_dirty_y1 = kSubpixelInit;
+    }
+    const uint32_t pad_w = w + 1u;
+    const uint32_t pad_h = h + 1u;
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        if (a.subpixel_shelf_x + pad_w > a.subpixel_w) {
+            a.subpixel_shelf_x = 1u;
+            a.subpixel_shelf_y += a.subpixel_shelf_h + 1u;
+            a.subpixel_shelf_h = 0u;
+        }
+        if (a.subpixel_shelf_y + pad_h <= a.subpixel_h) {
+            *out_x = a.subpixel_shelf_x;
+            *out_y = a.subpixel_shelf_y;
+            a.subpixel_shelf_x += pad_w;
+            if (pad_h > a.subpixel_shelf_h) a.subpixel_shelf_h = pad_h;
+            return true;
+        }
+        const uint32_t old_w = a.subpixel_w, old_h = a.subpixel_h;
+        uint32_t next_w = old_w, next_h = old_h;
+        if (next_w <= next_h && next_w < kSubpixelMax) next_w *= 2u;
+        else if (next_h < kSubpixelMax) next_h *= 2u;
+        else if (next_w < kSubpixelMax) next_w *= 2u;
+        else return false;
+        auto* next_px = static_cast<uint8_t*>(std::calloc(size_t(next_w) * next_h * 4u, 1u));
+        if (!next_px) return false;
+        for (uint32_t row = 0u; row < old_h; ++row) {
+            std::memcpy(next_px + size_t(row) * next_w * 4u,
+                        a.subpixel_pixels + size_t(row) * old_w * 4u,
+                        size_t(old_w) * 4u);
+        }
+        std::free(a.subpixel_pixels);
+        a.subpixel_pixels = next_px;
+        a.subpixel_w = next_w;
+        a.subpixel_h = next_h;
+        a.subpixel_dirty = true;
+        a.subpixel_dirty_y0 = 0u;
+        a.subpixel_dirty_y1 = next_h;
+        const float sx = float(old_w) / float(next_w);
+        const float sy = float(old_h) / float(next_h);
+        remap_subpixel_prims_scale(ctx->prims, ctx->prim_count, sx, sy);
+        if (ctx->gpu_prims && ctx->gpu_prims != ctx->prims)
+            remap_subpixel_prims_scale(ctx->gpu_prims, ctx->prim_count, sx, sy);
+        remap_subpixel_prims_scale(ctx->filter_prims, ctx->filter_prim_count, sx, sy);
+    }
+    return false;
+}
+
 void evict_font_slot_hinted_glyphs(FontAtlas* a, uint16_t slot_idx) noexcept {
     if (!a || !a->hinted_glyphs || !a->hinted_cap || !a->hinted_count) return;
     const uint32_t cap = a->hinted_cap;
@@ -254,7 +326,6 @@ void evict_font_slot_hinted_glyphs(FontAtlas* a, uint16_t slot_idx) noexcept {
     for (uint32_t i = 0; i < cap; ++i) {
         const EmojiBitmapEntry e = a->hinted_glyphs[i];
         if (!e.key || (e.key >> 56) != tag) continue;
-        if (e.sprite_id != kInvalidSprite) release_atlas_sprite(a, e.sprite_id);
         a->hinted_glyphs[i] = {};
         --a->hinted_count;
         removed = true;
@@ -319,16 +390,17 @@ IDWriteFontFace* ensure_dwrite_face(FontAtlas* a, FontSlot* slot) noexcept {
 }
 #endif
 
-EmojiBitmapEntry get_or_cache_hinted_glyph(Context* ctx, uint16_t slot_idx, uint32_t glyph_id, float phys_px) noexcept {
+EmojiBitmapEntry get_or_cache_hinted_glyph(Context* ctx, uint16_t slot_idx, uint32_t glyph_id, float phys_px, uint8_t x_phase = 0u) noexcept {
 #if defined(_WIN32)
-    if (!ctx || slot_idx >= kMaxFontSlots || glyph_id > 0xFFFFu || phys_px < 6.0f || phys_px > 22.0f) return {};
+    if (!ctx || slot_idx >= kMaxFontSlots || glyph_id > 0xFFFFu || phys_px < 6.0f || phys_px > 24.5f) return {};
     auto& a = ctx->atlas;
     auto& s = a.slots[slot_idx];
     if (!s.loaded || !s.has_outlines || s.font_file_path[0] == '\0') return {};
     const uint32_t ppem_half = static_cast<uint32_t>(std::round(phys_px * 2.0f));
-    if (ppem_half < 12u || ppem_half > 48u) return {};
+    if (ppem_half < 12u || ppem_half > 50u) return {};
+    const uint32_t phase2 = uint32_t(x_phase & 3u);
     const uint64_t key = (uint64_t(slot_idx + 1u) << 56) | (uint64_t(s.generation) << 48) |
-                         (uint64_t(ppem_half) << 32) | uint64_t(glyph_id);
+                         (uint64_t(ppem_half) << 34) | (uint64_t(phase2) << 32) | uint64_t(glyph_id);
     if (!a.hinted_cap || (a.hinted_count + 1u) * 4u > a.hinted_cap * 3u) {
         if (!hinted_rehash(&a)) return {};
     }
@@ -358,10 +430,11 @@ EmojiBitmapEntry get_or_cache_hinted_glyph(Context* ctx, uint16_t slot_idx, uint
         run.isSideways = FALSE;
         run.bidiLevel = 0;
 
+        const FLOAT origin_x = static_cast<FLOAT>(phase2) * 0.25f;
         IDWriteGlyphRunAnalysis* analysis = nullptr;
         const HRESULT hr = factory->CreateGlyphRunAnalysis(
             &run, 1.0f, nullptr, DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC,
-            DWRITE_MEASURING_MODE_NATURAL, 0.0f, 0.0f, &analysis);
+            DWRITE_MEASURING_MODE_NATURAL, origin_x, 0.0f, &analysis);
         if (SUCCEEDED(hr) && analysis) {
             RECT rc{};
             if (SUCCEEDED(analysis->GetAlphaTextureBounds(DWRITE_TEXTURE_CLEARTYPE_3x1, &rc)) &&
@@ -371,24 +444,36 @@ EmojiBitmapEntry get_or_cache_hinted_glyph(Context* ctx, uint16_t slot_idx, uint
                 const uint32_t h = static_cast<uint32_t>(rc.bottom - rc.top);
                 if (w <= 128u && h <= 128u) {
                     const size_t rgb_bytes = size_t(w) * size_t(h) * 3u;
-                    const size_t rgba_bytes = size_t(w) * size_t(h) * 4u;
                     const size_t mark = ctx->frame_arena.mark();
                     auto* rgb = ctx->frame_arena.alloc_uninit<uint8_t>(rgb_bytes);
-                    auto* rgba = ctx->frame_arena.alloc_uninit<uint8_t>(rgba_bytes);
-                    if (rgb && rgba && SUCCEEDED(analysis->CreateAlphaTexture(DWRITE_TEXTURE_CLEARTYPE_3x1, &rc, rgb, static_cast<UINT32>(rgb_bytes)))) {
-                        for (uint32_t p = 0u; p < w * h; ++p) {
-                            const uint32_t cov = (uint32_t(rgb[p * 3u + 0u]) + uint32_t(rgb[p * 3u + 1u]) + uint32_t(rgb[p * 3u + 2u]) + 1u) / 3u;
-                            rgba[p * 4u + 0u] = 255u;
-                            rgba[p * 4u + 1u] = 255u;
-                            rgba[p * 4u + 2u] = 255u;
-                            rgba[p * 4u + 3u] = static_cast<uint8_t>(cov);
+                    uint32_t tx = 0u, ty = 0u;
+                    if (rgb &&
+                        SUCCEEDED(analysis->CreateAlphaTexture(DWRITE_TEXTURE_CLEARTYPE_3x1, &rc, rgb, static_cast<UINT32>(rgb_bytes))) &&
+                        ensure_subpixel_atlas(ctx, w, h, &tx, &ty))
+                    {
+                        for (uint32_t row = 0u; row < h; ++row) {
+                            const uint8_t* src_row = rgb + size_t(row) * w * 3u;
+                            uint8_t* dst_row = a.subpixel_pixels + (size_t(ty + row) * a.subpixel_w + tx) * 4u;
+                            for (uint32_t col = 0u; col < w; ++col) {
+                                const uint8_t cr = src_row[col * 3u + 0u];
+                                const uint8_t cg = src_row[col * 3u + 1u];
+                                const uint8_t cb = src_row[col * 3u + 2u];
+                                dst_row[col * 4u + 0u] = cr;
+                                dst_row[col * 4u + 1u] = cg;
+                                dst_row[col * 4u + 2u] = cb;
+                                dst_row[col * 4u + 3u] = static_cast<uint8_t>((uint32_t(cr) + uint32_t(cg) + uint32_t(cb) + 1u) / 3u);
+                            }
                         }
-                        entry.sprite_id = create_sprite_rgba(ctx, {.rgba_pixels = rgba, .width = w, .height = h, .srgb = false});
+                        a.subpixel_dirty = true;
+                        if (ty < a.subpixel_dirty_y0) a.subpixel_dirty_y0 = ty;
+                        if (ty + h > a.subpixel_dirty_y1) a.subpixel_dirty_y1 = ty + h;
+                        entry.tile_x = tx;
+                        entry.tile_y = ty;
                         entry.width_px = w;
                         entry.height_px = h;
                         entry.bearing_x = static_cast<float>(rc.left);
                         entry.bearing_y_top = static_cast<float>(-rc.top);
-                        entry.has_bitmap = (entry.sprite_id != kInvalidSprite);
+                        entry.has_bitmap = true;
                     }
                     ctx->frame_arena.rewind(mark);
                 }
@@ -400,7 +485,7 @@ EmojiBitmapEntry get_or_cache_hinted_glyph(Context* ctx, uint16_t slot_idx, uint
     ++a.hinted_count;
     return entry;
 #else
-    (void)ctx; (void)slot_idx; (void)glyph_id; (void)phys_px;
+    (void)ctx; (void)slot_idx; (void)glyph_id; (void)phys_px; (void)x_phase;
     return {};
 #endif
 }

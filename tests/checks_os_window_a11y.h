@@ -519,7 +519,7 @@ inline bool verify_os_window_a11y_checks() noexcept {
         const char* png_2x = "_etch_v080_dpi2.png";
         run_dpi_frame(320u, 120u, 1.0f, {-1.0f, -1.0f}, false);
         const Rect b1 = element_bounds(id("dpi_btn"));
-        check(b1.w > 10.0f && b1.h > 10.0f && frame_stats(dc).draw_call_count <= 3u, __LINE__);
+        check(b1.w > 10.0f && b1.h > 10.0f && frame_stats(dc).draw_call_count <= 8u, __LINE__);
         check(render_headless_png(dc, 320u, 120u, png_1x), __LINE__);
         if (SDL_Surface* s1 = SDL_LoadPNG(png_1x)) {
             check(media_emoji_checks::pixel(s1, 16, 76, 0x00FFFFu), __LINE__);
@@ -536,7 +536,7 @@ inline bool verify_os_window_a11y_checks() noexcept {
               std::fabs(b2.w - b1.w) < 0.5f && std::fabs(b2.h - b1.h) < 0.5f, __LINE__);
         run_dpi_frame(640u, 240u, 2.0f, btn_center, true);
         run_dpi_frame(640u, 240u, 2.0f, btn_center, false);
-        check(btn_hits == 1u && frame_stats(dc).draw_call_count <= 3u, __LINE__);
+        check(btn_hits == 1u && frame_stats(dc).draw_call_count <= 8u, __LINE__);
         check(render_headless_png(dc, 640u, 240u, png_2x), __LINE__);
         if (SDL_Surface* s2 = SDL_LoadPNG(png_2x)) {
             check(media_emoji_checks::pixel(s2, 32, 152, 0xFF00FFu), __LINE__);

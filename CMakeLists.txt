@@ -81,7 +81,7 @@ if (ETCH_COMPILE_SHADERS AND ETCH_DXC_EXE)
         RESULT_VARIABLE _etch_spv_probe_res
         OUTPUT_QUIET ERROR_QUIET)
     file(REMOVE "${CMAKE_CURRENT_BINARY_DIR}/_etch_spv_probe.spv")
-    foreach(shader etch_uber etch_kawase)
+    foreach(shader etch_uber etch_quad etch_subpixel etch_kawase)
         set(_etch_hlsl "${CMAKE_CURRENT_SOURCE_DIR}/shaders/${shader}.hlsl")
         foreach(stage vs ps)
             set(_etch_base "${ETCH_SHADER_OUT_DIR}/${shader}_${stage}")
@@ -229,7 +229,7 @@ set(_etch_common_dependencies
     "${CMAKE_CURRENT_SOURCE_DIR}/include/etch/etch_c.h"
     ${_etch_engine_dependencies} ${ETCH_GENERATED_SHADER_HEADERS})
 set_source_files_properties(src/etch_unity.cpp PROPERTIES OBJECT_DEPENDS "${_etch_common_dependencies}")
-set_source_files_properties(examples/sandbox.cpp examples/etch_studio.cpp tests/etch_tests.cpp
+set_source_files_properties(examples/sandbox.cpp examples/etch_studio.cpp examples/etch_showcase.cpp tests/etch_tests.cpp
     PROPERTIES OBJECT_DEPENDS "${_etch_common_dependencies};${_etch_check_dependencies}")
 
 if (ETCH_BUILD_EXAMPLES)

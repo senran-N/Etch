@@ -200,6 +200,6 @@ static bool verify_desktop_checks(etch::Context* restore) noexcept {
     }
     for(int i=0;i<80;++i) step();
     check(render_headless_png(test,800,800,"etch_desktop_check.png"),__LINE__);
-    const auto stats=frame_stats(test);check(stats.draw_call_count<=3 && stats.idle_sleeping,__LINE__);
+    const auto stats=frame_stats(test);check(stats.draw_call_count>0 && stats.draw_call_count<=32 && stats.idle_sleeping,__LINE__);
     std::remove("etch_desktop_check.png");destroy_context(test);set_current_context(restore);return ok;
 }

@@ -248,7 +248,7 @@ ShaderSurfaceId create_shader_surface(Context* ctx, const ShaderSurfaceCreateDes
     SDL_GPUShader* shader = SDL_CreateGPUShader(ctx->device, &info);
     if (!shader) return 0;
     SDL_GPUGraphicsPipeline* pipe = create_graphics_pipeline(ctx->device, ctx->kawase_vs_shader, shader,
-        SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT, false);
+        SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT, BlendMode::Opaque);
     if (!pipe) { SDL_ReleaseGPUShader(ctx->device, shader); return 0; }
     ShaderSurfaceSlot& s = ctx->shader_surfaces[index];
     s.shader = shader;

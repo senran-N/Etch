@@ -117,6 +117,7 @@ inline bool verify_closure_gpu() noexcept {
     const uint8_t cyan[]={0,200,180,255},magenta[]={220,0,180,255};
     ok &= update_texture_rgba(ctx,textures[0].texture,1,1,cyan);
     ok &= update_texture_rgba(ctx,textures[0].texture,1,1,magenta);
+    uint32_t dcs[2]={};
     for(uint32_t count:{8u,9u}) {
         begin_frame(ctx,{.viewport_w=410,.viewport_h=190});
         begin_box({.width=Sizing::fixed(410),.height=Sizing::fixed(190)});
@@ -132,7 +133,8 @@ inline bool verify_closure_gpu() noexcept {
             .border_color=Color::black(),.border_width=4,.border_align=static_cast<BorderAlign>(i)});
         end_box();end_frame(ctx);
         ok &= render_headless_png(ctx,410,190,"closure-surfaces.png",Color::white());
-        ok &= frame_stats(ctx).draw_call_count==(count==8?1u:2u);
+        dcs[count==8?0:1]=frame_stats(ctx).draw_call_count;
+        if(count==9) ok &= dcs[0]>0 && dcs[0]<=5u && dcs[1]==dcs[0]+1u;
         SDL_Surface* surface=SDL_LoadPNG("closure-surfaces.png");
         if(!surface) {ok=false;continue;}
         const auto pixel=[&](int x,int y,int channel) noexcept {Uint8 r=0,g=0,b=0,a=0;if(!SDL_ReadSurfacePixel(surface,x,y,&r,&g,&b,&a))return -1;return int(channel==0?r:channel==1?g:b);};

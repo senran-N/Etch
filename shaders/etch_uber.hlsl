@@ -24,6 +24,7 @@
 #define ETCH_FLAG_STEM_DARKEN   (1u << 4)
 #define ETCH_FLAG_ROUND_CAP     (1u << 5)
 
+#define ETCH_GLOBAL_USE_DEPTH   (1u << 30)
 #define ETCH_GLOBAL_MANUAL_SRGB (1u << 31)
 
 // Strictly 64 bytes matching etch::Prim in src/etch.h (zero float3 members).
@@ -43,6 +44,11 @@ struct Prim
 [[vk::binding(0, 0)]]
 #endif
 StructuredBuffer<Prim> g_prims : register(t0, space0);
+
+#ifdef __spirv__
+[[vk::binding(1, 0)]]
+#endif
+StructuredBuffer<uint> g_prim_depths : register(t1, space0);
 
 #ifdef __spirv__
 [[vk::binding(0, 1)]]
@@ -308,10 +314,13 @@ VSOut vs_main(uint vertex_id : SV_VertexID, uint instance_id : SV_InstanceID)
     }
 
     VSOut o;
+    float z = ((g_flags & ETCH_GLOBAL_USE_DEPTH) != 0u)
+        ? (1.0f - float(g_prim_depths[prim_base + instance_id] + 1u) * (1.0f / 8388608.0f))
+        : 0.0f;
     o.position = float4(
         px.x * g_inv_viewport_size.x * 2.0f - 1.0f,
         1.0f - px.y * g_inv_viewport_size.y * 2.0f,
-        0.0f,
+        z,
         1.0f
     );
     o.rotation = float2(c, sn);
@@ -736,7 +745,7 @@ float4 ps_main(VSOut input) : SV_Target0
 
         float4 b_pm = float4(input.border_color.rgb, 1.0f) * (input.border_color.a * border_t);
         float4 f_pm = float4(fill_col.rgb, 1.0f) * fill_col.a;
-        out_pm      = b_pm + f_pm * inner_cov;
+        out_pm      = b_pm + f_pm * (inner_cov + border_t * (1.0f - input.border_color.a));
     }
     else if (kind == ETCH_PRIM_SHADOW)
     {
@@ -865,7 +874,7 @@ float4 ps_main(VSOut input) : SV_Target0
             float ta = texel.a * input.color0.a;
             tex_pm = float4(texel.rgb * input.color0.rgb * ta, ta);
         }
-        out_pm = b_pm + tex_pm * inner_cov;
+        out_pm = b_pm + tex_pm * (inner_cov + border_t * (1.0f - input.border_color.a));
     }
     else if (kind == ETCH_PRIM_BLUR_GLASS)
     {
@@ -894,7 +903,7 @@ float4 ps_main(VSOut input) : SV_Target0
 
         float4 b_pm = float4(input.border_color.rgb, 1.0f) * (input.border_color.a * border_t);
         float4 g_pm = glass_pm * input.uv_rect.z;
-        out_pm      = b_pm + g_pm * inner_cov;
+        out_pm      = b_pm + g_pm * (inner_cov + border_t * (1.0f - input.border_color.a));
     }
     else if (kind == ETCH_PRIM_LAYER_BLUR)
     {

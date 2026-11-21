@@ -79,14 +79,14 @@ inline bool verify_workbench_checks() noexcept {
         begin_frame(ctx,{.viewport_w=500,.viewport_h=200,.pixel_snap=false});
         begin_box({.width=Sizing::fixed(exact_width+.01f),.height=Sizing::fixed(30),.clip_children=true});
         text(phrase,{.font_size_px=14,.wrap=false,.ellipsis=pass==1});end_box();end_frame(ctx);
-        for (const auto& p:frame_prims(ctx)) if ((p.style.x&15u)==uint32_t(PrimKind::SlugGlyph)) { if(pass)++elided_glyphs;else++full_glyphs; }
+        for (const auto& p:frame_prims(ctx)) if ((p.style.x&15u)==uint32_t(PrimKind::SlugGlyph) || (p.style.x&15u)==uint32_t(PrimKind::Glyph)) { if(pass)++elided_glyphs;else++full_glyphs; }
     }
     check(full_glyphs>10 && full_glyphs==elided_glyphs,__LINE__);
     begin_frame(ctx,{.viewport_w=500,.viewport_h=200});
     begin_box({.width=Sizing::fixed(80),.height=Sizing::fixed(30),.clip_children=true});
     text(phrase,{.wrap=false,.ellipsis=true});end_box();end_frame(ctx);
     float right=0;
-    for (const auto& p:frame_prims(ctx)) if ((p.style.x&15u)==uint32_t(PrimKind::SlugGlyph)) right=std::fmax(right,p.bounds.x+p.bounds.z);
+    for (const auto& p:frame_prims(ctx)) if ((p.style.x&15u)==uint32_t(PrimKind::SlugGlyph) || (p.style.x&15u)==uint32_t(PrimKind::Glyph)) right=std::fmax(right,p.bounds.x+p.bounds.z);
     check(right<81,__LINE__);
 
     begin_frame(ctx,{.viewport_w=400,.viewport_h=300});
@@ -104,7 +104,7 @@ inline bool verify_workbench_checks() noexcept {
         bool foreground=false;float first=1000,last=0;
         for (const auto& p:frame_prims(ctx)) {
             if ((p.style.x&15u)==uint32_t(PrimKind::Rect) && p.bounds.z==160) bg[pass]=p.style.y;
-            if ((p.style.x&15u)==uint32_t(PrimKind::SlugGlyph)) { foreground |= p.style.y==custom.on_primary.pack_rgba8();first=std::fmin(first,p.bounds.x);last=std::fmax(last,p.bounds.x+p.bounds.z); }
+            if ((p.style.x&15u)==uint32_t(PrimKind::SlugGlyph) || (p.style.x&15u)==uint32_t(PrimKind::Glyph)) { foreground |= p.style.y==custom.on_primary.pack_rgba8();first=std::fmin(first,p.bounds.x);last=std::fmax(last,p.bounds.x+p.bounds.z); }
         }
         check(foreground && std::fabs((first+last)*.5f-80)<3,__LINE__);
     }
@@ -160,7 +160,7 @@ inline bool verify_workbench_checks() noexcept {
     const auto multi=[&](float wheel) noexcept {
         begin_frame(ctx,{.viewport_w=400,.viewport_h=200,.pointer_pos={20,20},.scroll_delta={0,wheel}});
         text_input({.id=id("multiline"),.buffer=lines,.capacity=sizeof(lines),.width=Sizing::fixed(200),.height=Sizing::fixed(60),.multiline=true});end_frame(ctx);
-        float first=1000;for(const auto& p:frame_prims(ctx)) if((p.style.x&15u)==uint32_t(PrimKind::SlugGlyph))first=std::fmin(first,p.bounds.y);return first;
+        float first=1000;for(const auto& p:frame_prims(ctx)) if((p.style.x&15u)==uint32_t(PrimKind::SlugGlyph) || (p.style.x&15u)==uint32_t(PrimKind::Glyph))first=std::fmin(first,p.bounds.y);return first;
     };
     multi(0);const float y0=multi(0),y1=multi(-1);check(y1<y0,__LINE__);
     // A split uses the same available-space formula on first layout and after resize.

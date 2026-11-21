@@ -1307,6 +1307,11 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
     ctx->filter_group_count = 0u;
     ctx->active_filter_group = nullptr;
     ctx->layer_has_bg_prims = true;
+    ctx->blur_dirty_valid = false;
+    ctx->blur_dirty_grid[0] = ctx->blur_dirty_grid[1] = ctx->blur_dirty_grid[2] = ctx->blur_dirty_grid[3] = 0ULL;
+    ctx->gpu_batch_count = 0u;
+    ctx->gpu_blur_split_count = 0u;
+    ctx->gpu_use_early_z = false;
     ctx->active_ui->split_depth = 0u;
     ctx->active_ui->canvas_depth = 0u;
     ctx->active_ui->last_canvas_clip_px = {};

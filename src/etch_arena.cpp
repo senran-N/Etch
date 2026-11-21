@@ -275,6 +275,7 @@ struct SpriteSlot {
 struct EmojiBitmapEntry {
     uint64_t key = 0;
     uint32_t sprite_id = kInvalidSprite, ppem = 0, width_px = 0, height_px = 0;
+    uint32_t tile_x = 0, tile_y = 0;
     float bearing_x = 0, bearing_y_top = 0;
     bool has_bitmap = false;
 };
@@ -304,6 +305,13 @@ struct FontAtlas {
     uint32_t emoji_cap = 0, emoji_count = 0;
     EmojiBitmapEntry* hinted_glyphs = nullptr;
     uint32_t hinted_cap = 0, hinted_count = 0;
+    // Dedicated linear R8G8B8A8_UNORM atlas for 3-channel LCD ClearType RGB subpixel coverage.
+    uint8_t* subpixel_pixels = nullptr;
+    SDL_GPUTexture* subpixel_gpu_tex = nullptr;
+    uint32_t subpixel_w = 0, subpixel_h = 0, subpixel_gpu_w = 0, subpixel_gpu_h = 0;
+    uint32_t subpixel_dirty_y0 = UINT32_MAX, subpixel_dirty_y1 = 0;
+    uint32_t subpixel_shelf_x = 0, subpixel_shelf_y = 2, subpixel_shelf_h = 0;
+    bool subpixel_dirty = false;
     void* dwrite_factory = nullptr;
     void* dwrite_module = nullptr;
     bool dwrite_probed = false;
@@ -325,11 +333,22 @@ struct FontAtlas {
     hb_buffer_t*      hb_buf = nullptr;
 };
 
+enum class GpuPipelineKind : uint8_t {
+    Uber = 0,
+    QuadOpaque = 1,
+    QuadAlpha = 2,
+    SubpixelText = 3,
+    UberPunch = 4,
+    UberAdditive = 5,
+};
+
 struct DrawBatch {
     uint32_t        first_prim = 0;
     uint32_t        prim_count = 0;
     SDL_GPUTexture* ext_textures[8] = {}; // Slots 1..8; slot 0 is always FontAtlas::gpu_tex
     uint32_t        ext_count = 0;
+    uint32_t        blend_rgba8 = 0; // Packed sRGB RGBA8 text color for SubpixelText CONSTANT_COLOR
+    GpuPipelineKind pipeline = GpuPipelineKind::Uber;
     bool is_punch_hole = false;
     bool is_additive = false;
 };
@@ -609,6 +628,7 @@ void clear_ime_composition(Context*) noexcept;
 struct ScrollbarGeom;
 ScrollbarGeom compute_vscrollbar_geom(const WidgetState*) noexcept;
 void emit_code_editor_command(Context*, const CodeEditorExtra*, Clay_BoundingBox, const ClipEntry&, float) noexcept;
+void optimize_render_batches(Context*) noexcept;
 
 struct ClipStack {
     ClipEntry entries[kMaxClipDepth] = {};
@@ -623,6 +643,7 @@ struct CachedPipeline {
 
 struct BlurSplit {
     uint32_t split_batch = 0; // First batch in this glass layer (prior batches render into scene before blur)
+    uint32_t split_prim = 0;  // First logical prim in this glass layer
     float    blur_radius_px = 0.0f;
     Rect     union_bounds = {};
 };
@@ -687,6 +708,11 @@ struct TextUndoSlot {
 inline SDL_GPUTexture* blur_tex_sentinel() noexcept {
     static uint8_t s_blur_tex_tag = 0;
     return reinterpret_cast<SDL_GPUTexture*>(&s_blur_tex_tag);
+}
+
+inline SDL_GPUTexture* subpixel_tex_sentinel() noexcept {
+    static uint8_t s_subpixel_tex_tag = 0;
+    return reinterpret_cast<SDL_GPUTexture*>(&s_subpixel_tex_tag);
 }
 
 inline constexpr uint32_t kMaxTreeDepth = 32u;
@@ -977,6 +1003,10 @@ struct WindowUiState {
     uint32_t         drag_label_len = 0;
     char             drag_label[kMaxDragLabelBytes] = {};
 
+    // Transient Early-Z depth target for main render pass.
+    SDL_GPUTexture*      depth_tex = nullptr;
+    uint32_t             depth_w = 0, depth_h = 0;
+    SDL_GPUTextureFormat depth_fmt = SDL_GPU_TEXTUREFORMAT_INVALID;
 };
 
 struct ClaimedWindowSlot {
@@ -1091,6 +1121,21 @@ struct Context {
     uint32_t      filter_group_count = 0;
     FilterBlurGroup* active_filter_group = nullptr;
     bool          layer_has_bg_prims = false;
+    uint64_t      blur_dirty_grid[4] = {};
+    bool          blur_dirty_valid = false;
+
+    // Optimized spatially-reordered GPU submission buffers (keeps ctx->prims in logical emission order).
+    Prim*         gpu_prims = nullptr;
+    uint32_t*     gpu_prim_depths = nullptr;
+    uint32_t      gpu_prim_cap = 0;
+    DrawBatch*    gpu_batches = nullptr;
+    uint32_t      gpu_batch_cap = 0;
+    uint32_t      gpu_batch_count = 0;
+    BlurSplit*    gpu_blur_splits = nullptr;
+    uint32_t      gpu_blur_split_cap = 0;
+    uint32_t      gpu_blur_split_count = 0;
+    bool          gpu_use_early_z = false;
+    bool          supports_d32_depth = true;
 
     // GPU objects
     char gpu_driver[32] = {};
@@ -1106,18 +1151,37 @@ struct Context {
     bool                     headless = false;
     SDL_GPUShader*           vs_shader = nullptr;
     SDL_GPUShader*           ps_shader = nullptr;
+    SDL_GPUShader*           quad_vs_shader = nullptr;
+    SDL_GPUShader*           quad_ps_shader = nullptr;
+    SDL_GPUShader*           subpixel_vs_shader = nullptr;
+    SDL_GPUShader*           subpixel_ps_shader = nullptr;
     SDL_GPUShader*           kawase_vs_shader = nullptr;
     SDL_GPUShader*           kawase_ps_shader = nullptr;
     SDL_GPUSampler*          linear_sampler = nullptr;
+    SDL_GPUSampler*          nearest_sampler = nullptr;
     SDL_GPUSampler*          mirror_linear_sampler = nullptr;
     SDL_GPUTexture*          surface_fallback_tex = nullptr;
     uint64_t                 shader_surface_epoch = 0;
     CachedPipeline           pipelines[kMaxCachedPipelines] = {};
     uint32_t                 pipeline_count = 0;
+    CachedPipeline           uber_depth_pipelines[kMaxCachedPipelines] = {};
+    uint32_t                 uber_depth_pipeline_count = 0;
+    CachedPipeline           quad_opaque_pipelines[kMaxCachedPipelines] = {};
+    uint32_t                 quad_opaque_pipeline_count = 0;
+    CachedPipeline           quad_alpha_pipelines[kMaxCachedPipelines] = {};
+    uint32_t                 quad_alpha_pipeline_count = 0;
+    CachedPipeline           quad_alpha_depth_pipelines[kMaxCachedPipelines] = {};
+    uint32_t                 quad_alpha_depth_pipeline_count = 0;
+    CachedPipeline           subpixel_pipelines[kMaxCachedPipelines] = {};
+    uint32_t                 subpixel_pipeline_count = 0;
+    CachedPipeline           subpixel_depth_pipelines[kMaxCachedPipelines] = {};
+    uint32_t                 subpixel_depth_pipeline_count = 0;
     CachedPipeline punch_pipelines[kMaxCachedPipelines] = {};
     uint32_t punch_pipeline_count = 0;
     CachedPipeline additive_pipelines[kMaxCachedPipelines] = {};
     uint32_t additive_pipeline_count = 0;
+    CachedPipeline additive_depth_pipelines[kMaxCachedPipelines] = {};
+    uint32_t additive_depth_pipeline_count = 0;
     SDL_GPUGraphicsPipeline* kawase_pipe = nullptr;
     SDL_GPUGraphicsPipeline* filter_kawase_pipe = nullptr;
     SDL_GPUGraphicsPipeline* bloom_pipe = nullptr;
@@ -1127,7 +1191,13 @@ struct Context {
     uint32_t prim_tbuf_cap = 0;
     SDL_GPUBuffer*           prim_gpu_buf = nullptr;
     SDL_GPUTransferBuffer*   prim_transfer_buf = nullptr;
+    SDL_GPUBuffer*           prim_depth_gpu_buf = nullptr;
+    SDL_GPUTransferBuffer*   prim_depth_transfer_buf = nullptr;
+    uint32_t                 prim_depth_gpu_cap = 0;
+    uint32_t                 prim_depth_tbuf_cap = 0;
     SDL_GPUTransferBuffer*   atlas_transfer_buf = nullptr;
+    SDL_GPUTransferBuffer*   subpixel_transfer_buf = nullptr;
+    uint32_t                 subpixel_tbuf_size = 0;
     SDL_GPUCommandBuffer*    texture_upload_cmd = nullptr;
     SDL_GPUTransferBuffer*   texture_upload_buf = nullptr; uint32_t texture_upload_cap = 0;
     uint32_t atlas_tbuf_size = 0;

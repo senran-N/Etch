@@ -915,12 +915,13 @@ void end_frame(Context* ctx_arg) noexcept {
     ctx->active_render_layer=nullptr;
     ctx->active_ui->current_layer=nullptr;
     ctx->active_ui->box_build_stack=nullptr;
+    optimize_render_batches(ctx);
     ctx->in_frame = false;
     ctx->stats.sprite_count = ctx->atlas.sprite_live;
     ctx->stats.sprite_atlas_size = ctx->atlas.width;
     ctx->stats.prim_count = ctx->prim_count;
     ctx->stats.prim_capacity = ctx->max_prims;
-    ctx->stats.draw_call_count = ctx->batch_count;
+    ctx->stats.draw_call_count = ctx->gpu_batch_count;
     ctx->stats.blur_pass_count = app_blur_count;
     ctx->stats.slug_glyph_count = ctx->atlas.slug_glyph_count;
     ctx->stats.slug_curve_count = ctx->atlas.slug_curve_count;

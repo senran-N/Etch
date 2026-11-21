@@ -95,8 +95,11 @@ inline bool verify_motion_checks() noexcept {
     }
     end_frame(c);
     uint32_t glyphs=0;
-    for(const auto& p:frame_prims(c)) if((p.style.x&15u)==uint32_t(PrimKind::SlugGlyph)) {
-        ++glyphs;ok &= p.clip.x>=250 && p.bounds.x>=250;
+    for(const auto& p:frame_prims(c)) {
+        const uint32_t k = p.style.x & 15u;
+        if(k==uint32_t(PrimKind::SlugGlyph) || k==uint32_t(PrimKind::Glyph)) {
+            ++glyphs;ok &= p.clip.x>=250 && p.bounds.x>=250;
+        }
     }
     ok &= glyphs>0;
 

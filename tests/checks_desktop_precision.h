@@ -54,7 +54,7 @@ inline bool verify_desktop_precision() noexcept {
     draw_text({.text=str_lit("Long label é אבג 👩‍🔬"),.pos={100,4},.align_x=AlignX::Right,.max_width_px=40,.ellipsis=true});
     end_box();end_frame(ctx);
     bool glyph=false;
-    for (const auto& p:frame_prims(ctx)) if ((p.style.x&15u)==uint32_t(PrimKind::SlugGlyph)) {
+    for (const auto& p:frame_prims(ctx)) if ((p.style.x&15u)==uint32_t(PrimKind::SlugGlyph) || (p.style.x&15u)==uint32_t(PrimKind::Glyph)) {
         glyph=true;check((p.style.x & (uint32_t(PrimFlag_RoundedClip)<<4)) != 0,__LINE__);check((p.style.x & (uint32_t(PrimFlag_TextClip)<<4)) != 0 && std::bit_cast<float>(p.style.z)==60 && std::bit_cast<float>(p.style.w)==100,__LINE__);
     }
     check(glyph,__LINE__);
@@ -67,7 +67,7 @@ inline bool verify_desktop_precision() noexcept {
             draw_text({.text=str_lit("Latin אבג العربية tail"),.pos={240,0},.align_x=align,.max_width_px=pass?40.0f:0.0f});
             end_box();end_frame(ctx);
             uint32_t index=0;
-            for (const auto& p:frame_prims(ctx)) if ((p.style.x&15u)==uint32_t(PrimKind::SlugGlyph)) {
+            for (const auto& p:frame_prims(ctx)) if ((p.style.x&15u)==uint32_t(PrimKind::SlugGlyph) || (p.style.x&15u)==uint32_t(PrimKind::Glyph)) {
                 if (pass==0 && index<128) full[index]=p.bounds;
                 if (pass==1) {
                     check(index<count && p.bounds.x==full[index].x && p.bounds.y==full[index].y,__LINE__);
@@ -110,7 +110,7 @@ inline bool verify_desktop_precision() noexcept {
     end_table();end_frame(ctx);
     check(table_column_width(table_id,0)==120,__LINE__);
     bool header=false;
-    for (const auto& p:frame_prims(ctx)) if ((p.style.x&15u)==uint32_t(PrimKind::SlugGlyph)) {
+    for (const auto& p:frame_prims(ctx)) if ((p.style.x&15u)==uint32_t(PrimKind::SlugGlyph) || (p.style.x&15u)==uint32_t(PrimKind::Glyph)) {
         header=true;check(p.bounds.x+p.bounds.z<100,__LINE__);
     }
     check(header,__LINE__);
@@ -127,6 +127,7 @@ inline bool verify_border_coverage() noexcept {
     begin_frame(ctx,{.viewport_w=180,.viewport_h=160});
     begin_box({.width=Sizing::fixed(180),.height=Sizing::fixed(160)});
     draw_rect({.rect={10,10,60,40},.fill=Color::white(),.border_color=Color::rgba8(255,0,0,128),.border_width=4,.softness=2});
+    draw_rect({.rect={80,10,60,40},.fill=Color::white(),.border_color=Color::rgba8(255,0,0,255),.border_width=4,.softness=2});
     draw_ring({.center={100,100},.radius=30,.thickness=16,.start_angle_rad=.785398163f,.sweep_angle_rad=1.570796327f,.round_caps=false});
     draw_ring({.center={50.5f,115.5f},.radius=18,.thickness=8,.start_angle_rad=0,.sweep_angle_rad=6.265732f,.round_caps=false});
     end_box();end_frame(ctx);
@@ -135,7 +136,9 @@ inline bool verify_border_coverage() noexcept {
     SDL_Surface* surface=ok?SDL_LoadPNG(output):nullptr;
     if (surface) {
         Uint8 r=0,g=0,b=0,a=0;
-        ok=SDL_ReadSurfacePixel(surface,11,30,&r,&g,&b,&a) && r>100 && g<8 && b<8;
+        // Translucent border blends cleanly over opaque fill (no hole-punching); opaque border outer AA has zero white halo.
+        ok=SDL_ReadSurfacePixel(surface,11,30,&r,&g,&b,&a) && r>240 && g>140 && g<210 && b>140 && b<210;
+        ok &= SDL_ReadSurfacePixel(surface,80,30,&r,&g,&b,&a) && r>100 && g<8 && b<8;
         ok &= SDL_ReadSurfacePixel(surface,121,121,&r,&g,&b,&a) && r>150 && r<225;
         ok &= SDL_ReadSurfacePixel(surface,32,115,&r,&g,&b,&a) && r>250;
         SDL_DestroySurface(surface);

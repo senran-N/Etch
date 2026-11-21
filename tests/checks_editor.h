@@ -174,7 +174,7 @@ static bool verify_editor_checks(etch::Context* restore) noexcept {
     SyntaxToken tokens[32];const uint32_t count=tokenize_cpp_hlsl(0,str_lit("float4 x = 1.0; // comment"),tokens,32,nullptr);check(count==3 && tokens[0].byte_start==0 && tokens[0].byte_end==6 && tokens[2].byte_start==16,__LINE__);
     step(0,0,{-1,-1},false,1,true);check(text_buffer_byte_length(&b)==22,__LINE__);
     clear_text_selection(eid);request_focus(0);for(uint32_t i=0;i<120;++i)step();
-    const auto stats=frame_stats(test);check(stats.draw_call_count<=3 && stats.idle_sleeping,__LINE__);
+    const auto stats=frame_stats(test);check(stats.draw_call_count>0 && stats.draw_call_count<=24 && stats.idle_sleeping,__LINE__);
 
     // v0.23.0: ghost_text Tab acceptance without losing focus, code_editor line_decorator + gutter click,
     // sticky-bottom VirtualList, and headless clipboard image probe.

@@ -82,7 +82,7 @@ inline bool verify_visual_quality_cpu() noexcept {
         end_table();end_frame(ctx);
         for (const auto& p:frame_prims(ctx)) {
             if ((p.style.x&15u)==uint32_t(PrimKind::BezierWire)) ++lines[pass];
-            if ((p.style.x&15u)==uint32_t(PrimKind::SlugGlyph)) height[pass]=std::fmax(height[pass],p.bounds.w);
+            if ((p.style.x&15u)==uint32_t(PrimKind::SlugGlyph) || (p.style.x&15u)==uint32_t(PrimKind::Glyph)) height[pass]=std::fmax(height[pass],p.bounds.w);
         }
     }
     check(lines[0]==lines[1]+1 && height[1]>height[0]*1.4f,__LINE__);
@@ -95,6 +95,8 @@ inline bool verify_visual_quality_gpu() noexcept {
     using namespace etch;
     Context* ctx=create_context({.headless=true});
     if (!ctx) return false;
+    // Compare identical Slug runs with and without the public primitive darkening flag.
+    set_hinted_small_text(ctx,false);
     begin_frame(ctx,{.viewport_w=460,.viewport_h=240});
     begin_box({.width=Sizing::fixed(460),.height=Sizing::fixed(240),.padding=Padding::all(10),.gap=20});
     for (bool continuous : {false,true}) {
@@ -111,9 +113,9 @@ inline bool verify_visual_quality_gpu() noexcept {
     draw_text({.text=str_lit("Small dark text 0123456789"),.pos={10,115},.size=13,.color=Color::rgba8(0,0,0,255)});
     draw_text({.text=str_lit("Small dark text 0123456789"),.pos={10,145},.size=13,.color=Color::rgba8(0,0,0,255)});
     end_box();end_frame(ctx);
-    // Compare identical Slug runs with and without the public primitive darkening flag.
     for (const auto& p:frame_prims(ctx)) if ((p.style.x&15u)==uint32_t(PrimKind::SlugGlyph) && p.bounds.y>140)
         const_cast<Prim&>(p).style.x &= ~(uint32_t(PrimFlag_StemDarken)<<4);
+    rebuild_gpu_batches_for_test(ctx);
     const char* output="quality-surfaces.png";
     bool ok=render_headless_png(ctx,460,240,output,Color::white());
     SDL_Surface* surface=ok?SDL_LoadPNG(output):nullptr;

@@ -662,6 +662,11 @@ bool font_atlas_init(FontAtlas* atlas, const char* preferred_font_path) noexcept
     // Solid white 16x16 fallback texture on sampler slot 0.
     std::memset(atlas->pixels, 255, size_t(kAtlasSize) * kAtlasSize * 4u);
     atlas->dirty = true;
+#if defined(_WIN32)
+    // Enable Hybrid LCD Subpixel Small Text by default (<=24px axis-aligned text uses ClearType RGB atlas;
+    // large/scaled/rotated text & SVG vectors continue using Slug GPU Beziers).
+    atlas->hinted_small_text = true;
+#endif
 
     if (!preferred_font_path || !preferred_font_path[0] ||
         !try_load_font_file_into_slot(atlas, kFontSans, preferred_font_path)) {
@@ -701,6 +706,7 @@ void font_atlas_destroy(FontAtlas* atlas) noexcept {
     std::free(atlas->sprites);
     std::free(atlas->emoji_bitmaps);
     std::free(atlas->hinted_glyphs);
+    std::free(atlas->subpixel_pixels);
     std::free(atlas->pixels);
     std::free(atlas->slug_bands);
     std::free(atlas->slug_curves);

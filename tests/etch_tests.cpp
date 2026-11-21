@@ -23,6 +23,7 @@
 #include "checks_os_window_a11y.h"
 #include "checks_v021.h"
 #include "checks_v022.h"
+#include "checks_phase1_gpu.h"
 #include "etch_uber_vs_msl.h"
 #include "etch_uber_ps_msl.h"
 #include "etch_kawase_vs_msl.h"
@@ -498,7 +499,8 @@ static bool v019_regression() noexcept {
     Vec4 glyph_bounds[256]{};
     uint32_t glyph_count = 0;
     for (const Prim& p : frame_prims(ctx)) {
-        if ((p.style.x & 15) == uint32_t(PrimKind::SlugGlyph) && glyph_count < 256)
+        const auto kind = static_cast<PrimKind>(p.style.x & 15);
+        if ((kind == PrimKind::SlugGlyph || kind == PrimKind::Glyph) && glyph_count < 256)
             glyph_bounds[glyph_count++] = p.bounds;
     }
     scene({8,101});
@@ -513,7 +515,7 @@ static bool v019_regression() noexcept {
     bool wrapped_rich = false;
     for (const Prim& p : frame_prims(ctx)) {
         const auto kind = static_cast<PrimKind>(p.style.x & 15);
-        if (kind == PrimKind::SlugGlyph) {
+        if (kind == PrimKind::SlugGlyph || kind == PrimKind::Glyph) {
             check(glyph_index < glyph_count && std::memcmp(&p.bounds, &glyph_bounds[glyph_index], sizeof(Vec4)) == 0, __LINE__);
             ++glyph_index;
             if (p.bounds.y >= 92 && p.bounds.y < 148) {
@@ -537,7 +539,7 @@ static bool v019_regression() noexcept {
         const char* file = "etch-v019-pixels.png";
         const bool rendered = render_headless_png(ctx, 360, 230, file, Color::white());
         SDL_Surface* pixels = rendered ? SDL_LoadPNG(file) : nullptr;
-        check(pixels && frame_stats(ctx).draw_call_count == 1u, __LINE__);
+        check(pixels && frame_stats(ctx).draw_call_count > 0u && frame_stats(ctx).draw_call_count <= 16u, __LINE__);
         if (pixels) {
             const auto pixel = [&](int x, int y, Color expected) noexcept {
                 Uint8 r = 0, g = 0, b = 0, a = 0;
@@ -591,7 +593,7 @@ static bool v019_regression() noexcept {
 }
 
 static bool gpu_suite() noexcept {
-    const bool media_ok=v019_regression() && verify_v021_gpu() && verify_v022_gpu() && verify_workbench_materials_gpu() && verify_shader_surface_gpu() && verify_texture_regions_gpu() && verify_mesh_gpu() && verify_punch_gpu() && verify_beam_fade_gpu() && verify_media_emoji_checks() && verify_sprite_recycling_gpu() && verify_border_coverage() && verify_visual_quality_gpu() && verify_closure_gpu();
+    const bool media_ok=v019_regression() && verify_v021_gpu() && verify_v022_gpu() && verify_phase1_gpu() && verify_workbench_materials_gpu() && verify_shader_surface_gpu() && verify_texture_regions_gpu() && verify_mesh_gpu() && verify_punch_gpu() && verify_beam_fade_gpu() && verify_media_emoji_checks() && verify_sprite_recycling_gpu() && verify_border_coverage() && verify_visual_quality_gpu() && verify_closure_gpu();
     const bool v070_ok=verify_theme_wrap_checks();
     static_assert(sizeof(Prim)==64);
     bool ok=source_ok(g_etch_uber_vs_msl,sizeof(g_etch_uber_vs_msl),"vertex vs_main_out vs_main(") && source_ok(g_etch_uber_ps_msl,sizeof(g_etch_uber_ps_msl),"fragment ps_main_out ps_main(") && source_ok(g_etch_kawase_vs_msl,sizeof(g_etch_kawase_vs_msl),"vertex vs_main_out vs_main(") && source_ok(g_etch_kawase_ps_msl,sizeof(g_etch_kawase_ps_msl),"fragment ps_main_out ps_main(");
@@ -610,7 +612,7 @@ static bool gpu_suite() noexcept {
     Context* c=create_context({.headless=true});if(!c)return false;
     ok &= gpu_device(c)!=nullptr;
     for(uint32_t i=0;i<4;++i){begin_frame(c,{.viewport_w=320,.viewport_h=200});button({.id=id("gpu"),.label=str_lit("GPU")});end_frame(c);}
-    ok &= frame_stats(c).idle_sleeping && render_headless_png(c,320,200,"etch_ctest_gpu.png") && frame_stats(c).draw_call_count<=3;
+    ok &= frame_stats(c).idle_sleeping && render_headless_png(c,320,200,"etch_ctest_gpu.png") && frame_stats(c).draw_call_count>0 && frame_stats(c).draw_call_count<=8;
     ok &= media_ok && v070_ok;
     std::remove("etch_ctest_gpu.png");destroy_context(c);set_current_context(nullptr);return ok;
 }
@@ -627,6 +629,7 @@ int main(int argc,char** argv) {
     if(argc==2 && std::strcmp(argv[1],"--suite=texture_regions")==0) return verify_texture_regions_gpu() ? 0 : 1;
     if(argc==2 && std::strcmp(argv[1],"--suite=motion_layers_presence")==0) return verify_motion_checks() ? 0 : 1;
     if(argc==2 && std::strcmp(argv[1],"--suite=closure_gpu")==0) return verify_closure_gpu() ? 0 : 1;
+    if(argc==2 && std::strcmp(argv[1],"--suite=phase1_gpu")==0) return verify_phase1_gpu() ? 0 : 1;
     const char* names[]={"arena_and_elasticity","unicode_bidi_grapheme","layout_clay_flex_grid","fenwick_virtual_list_1m","widgets_and_dockspace","text_buffer_and_code_editor","a11y_semantic_tree","headless_gpu_invariants"};
     const char* selected=argc==2 && std::strncmp(argv[1],"--suite=",8)==0?argv[1]+8:nullptr;
     if(argc>1 && !selected) { return 2; } bool found=false,ok=true;

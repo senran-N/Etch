@@ -875,6 +875,7 @@ void push_prim(
             prim.payload.z=scale_pair(prim.payload.z);prim.payload.w=scale_pair(prim.payload.w);
             if(kind==PrimKind::Rect || kind==PrimKind::BlurGlass || kind==PrimKind::RotatedRect) prim.style.w=(prim.style.w&0xFFFF0000u) | pack_f16(unpack_f16_cpu(uint16_t(prim.style.w))*k);
         }
+        cull_pad_px *= std::fmax(scale.x, scale.y);
 
     }
     // Raster-only snapping preserves logical layout and text positioning.
@@ -969,10 +970,31 @@ void push_prim(
     }
 
     const uint32_t pkind = prim.style.x & 0xFu;
-    if (pkind != static_cast<uint32_t>(PrimKind::Shadow) &&
-        pkind != static_cast<uint32_t>(PrimKind::BlurGlass))
-    {
-        ctx->layer_has_bg_prims = true;
+    if (pkind != static_cast<uint32_t>(PrimKind::Shadow)) {
+        if (pkind != static_cast<uint32_t>(PrimKind::BlurGlass)) {
+            ctx->layer_has_bg_prims = true;
+        }
+        if (ctx->blur_split_count > 0u) {
+            const float vw = static_cast<float>(ctx->active_ui->viewport_w > 0u ? ctx->active_ui->viewport_w : 1u);
+            const float vh = static_cast<float>(ctx->active_ui->viewport_h > 0u ? ctx->active_ui->viewport_h : 1u);
+            const float dx0 = std::fmax(min_x, prim.clip.x);
+            const float dy0 = std::fmax(min_y, prim.clip.y);
+            const float dx1 = std::fmin(max_x, prim.clip.z);
+            const float dy1 = std::fmin(max_y, prim.clip.w);
+            if (dx1 > dx0 && dy1 > dy0) {
+                const uint32_t cx0 = static_cast<uint32_t>(clamp_range(std::floor(dx0 * 16.0f / vw), 0.0f, 15.0f));
+                const uint32_t cy0 = static_cast<uint32_t>(clamp_range(std::floor(dy0 * 16.0f / vh), 0.0f, 15.0f));
+                const uint32_t cx1 = static_cast<uint32_t>(clamp_range(std::floor((dx1 - 1e-3f) * 16.0f / vw), 0.0f, 15.0f));
+                const uint32_t cy1 = static_cast<uint32_t>(clamp_range(std::floor((dy1 - 1e-3f) * 16.0f / vh), 0.0f, 15.0f));
+                for (uint32_t ty = cy0; ty <= cy1; ++ty) {
+                    for (uint32_t tx = cx0; tx <= cx1; ++tx) {
+                        const uint32_t bit = ty * 16u + tx;
+                        ctx->blur_dirty_grid[bit >> 6] |= (1ULL << (bit & 63u));
+                    }
+                }
+                ctx->blur_dirty_valid = true;
+            }
+        }
     }
 }
 
@@ -1087,27 +1109,66 @@ inline Corners scale_corners(Corners c, float dpi) noexcept {
 
 bool begin_blur_layer(Context* ctx, Rect box_px, float radius_px) noexcept {
     if (ctx->active_filter_group) return false;
-    if (!ctx->layer_has_bg_prims && ctx->blur_split_count > 0u) {
+    if (ctx->blur_split_count > 0u) {
         BlurSplit& cur = ctx->blur_splits[ctx->blur_split_count - 1u];
-        const bool overlaps =
-            box_px.x < (cur.union_bounds.x + cur.union_bounds.w) &&
-            (box_px.x + box_px.w) > cur.union_bounds.x &&
-            box_px.y < (cur.union_bounds.y + cur.union_bounds.h) &&
-            (box_px.y + box_px.h) > cur.union_bounds.y;
-        if (!overlaps) {
-            const float x0 = (box_px.x < cur.union_bounds.x) ? box_px.x : cur.union_bounds.x;
-            const float y0 = (box_px.y < cur.union_bounds.y) ? box_px.y : cur.union_bounds.y;
-            const float rx1 = box_px.x + box_px.w;
-            const float cx1 = cur.union_bounds.x + cur.union_bounds.w;
-            const float by1 = box_px.y + box_px.h;
-            const float cy1 = cur.union_bounds.y + cur.union_bounds.h;
-            const float x1 = (rx1 > cx1) ? rx1 : cx1;
-            const float y1 = (by1 > cy1) ? by1 : cy1;
-            cur.union_bounds = Rect{ x0, y0, x1 - x0, y1 - y0 };
-            if (radius_px > cur.blur_radius_px) {
-                cur.blur_radius_px = radius_px;
+        const float max_r = std::fmax(radius_px, cur.blur_radius_px);
+        const bool radius_compatible = std::fabs(radius_px - cur.blur_radius_px) <= std::fmax(2.0f, 0.25f * max_r);
+        if (radius_compatible) {
+            bool dirty_overlap = false;
+            if (ctx->blur_dirty_valid) {
+                const float vw = static_cast<float>(ctx->active_ui->viewport_w > 0u ? ctx->active_ui->viewport_w : 1u);
+                const float vh = static_cast<float>(ctx->active_ui->viewport_h > 0u ? ctx->active_ui->viewport_h : 1u);
+                const uint32_t cx0 = static_cast<uint32_t>(clamp_range(std::floor(box_px.x * 16.0f / vw), 0.0f, 15.0f));
+                const uint32_t cy0 = static_cast<uint32_t>(clamp_range(std::floor(box_px.y * 16.0f / vh), 0.0f, 15.0f));
+                const uint32_t cx1 = static_cast<uint32_t>(clamp_range(std::floor((box_px.x + box_px.w - 1e-3f) * 16.0f / vw), 0.0f, 15.0f));
+                const uint32_t cy1 = static_cast<uint32_t>(clamp_range(std::floor((box_px.y + box_px.h - 1e-3f) * 16.0f / vh), 0.0f, 15.0f));
+                bool tile_hit = false;
+                for (uint32_t ty = cy0; ty <= cy1 && !tile_hit; ++ty) {
+                    for (uint32_t tx = cx0; tx <= cx1; ++tx) {
+                        const uint32_t bit = ty * 16u + tx;
+                        if ((ctx->blur_dirty_grid[bit >> 6] & (1ULL << (bit & 63u))) != 0ULL) {
+                            tile_hit = true;
+                            break;
+                        }
+                    }
+                }
+                if (tile_hit) {
+                    const float bx0 = box_px.x, by0 = box_px.y;
+                    const float bx1 = box_px.x + box_px.w, by1 = box_px.y + box_px.h;
+                    const uint32_t count = ctx->prim_count - cur.split_prim;
+                    if (count > 2048u) {
+                        dirty_overlap = true;
+                    } else {
+                        for (uint32_t pi = cur.split_prim; pi < ctx->prim_count; ++pi) {
+                            const Prim& p = ctx->prims[pi];
+                            if ((p.style.x & 0xFu) == static_cast<uint32_t>(PrimKind::Shadow)) continue;
+                            const float px0 = std::fmax(p.bounds.x, p.clip.x);
+                            const float py0 = std::fmax(p.bounds.y, p.clip.y);
+                            const float px1 = std::fmin(p.bounds.x + p.bounds.z, p.clip.z);
+                            const float py1 = std::fmin(p.bounds.y + p.bounds.w, p.clip.w);
+                            if (px1 > bx0 && px0 < bx1 && py1 > by0 && py0 < by1) {
+                                dirty_overlap = true;
+                                break;
+                            }
+                        }
+                    }
+                }
             }
-            return true;
+            if (!dirty_overlap) {
+                const float x0 = (box_px.x < cur.union_bounds.x) ? box_px.x : cur.union_bounds.x;
+                const float y0 = (box_px.y < cur.union_bounds.y) ? box_px.y : cur.union_bounds.y;
+                const float rx1 = box_px.x + box_px.w;
+                const float cx1 = cur.union_bounds.x + cur.union_bounds.w;
+                const float by1 = box_px.y + box_px.h;
+                const float cy1 = cur.union_bounds.y + cur.union_bounds.h;
+                const float x1 = (rx1 > cx1) ? rx1 : cx1;
+                const float y1 = (by1 > cy1) ? by1 : cy1;
+                cur.union_bounds = Rect{ x0, y0, x1 - x0, y1 - y0 };
+                if (radius_px > cur.blur_radius_px) {
+                    cur.blur_radius_px = radius_px;
+                }
+                return true;
+            }
         }
     }
     if (ctx->blur_split_count == ctx->blur_split_cap) {
@@ -1131,10 +1192,13 @@ bool begin_blur_layer(Context* ctx, Rect box_px, float radius_px) noexcept {
     const uint32_t split_batch = (ctx->batch_count > 0u) ? (ctx->batch_count - 1u) : 0u;
     ctx->blur_splits[ctx->blur_split_count++] = BlurSplit{
         .split_batch = split_batch,
+        .split_prim = ctx->prim_count,
         .blur_radius_px = radius_px,
         .union_bounds = box_px,
     };
     ctx->layer_has_bg_prims = false;
+    ctx->blur_dirty_valid = false;
+    ctx->blur_dirty_grid[0] = ctx->blur_dirty_grid[1] = ctx->blur_dirty_grid[2] = ctx->blur_dirty_grid[3] = 0ULL;
     return true;
 }
 
@@ -1446,42 +1510,51 @@ void emit_slug_outline_quad(
         baseline_y_px = std::round(baseline_y_px);
     }
     const float scale_px = ctx->atlas.slots[slot_idx].scale_1px * phys_px;
-    const bool allow_hinted = ctx->atlas.hinted_small_text && !color_layer && phys_px <= 18.5f && snap_glyph &&
+    const bool allow_hinted = ctx->atlas.hinted_small_text && !color_layer && phys_px <= 24.0f && snap_glyph &&
         !(ctx->active_render_layer && (std::fabs(ctx->active_render_layer->resolved_scale.x - 1.0f) > 1e-3f ||
                                        std::fabs(ctx->active_render_layer->resolved_scale.y - 1.0f) > 1e-3f));
     if (allow_hinted) {
-        const EmojiBitmapEntry he = get_or_cache_hinted_glyph(ctx, slot_idx, glyph_id, phys_px);
-        if (he.has_bitmap && he.sprite_id != kInvalidSprite) {
-            Vec2 uv0{}, uv1{};
-            if (resolve_sprite_uv_rect(ctx, he.sprite_id, {0.0f, 0.0f}, {1.0f, 1.0f}, &uv0, &uv1)) {
-                const float gx = std::round(pen_x_px + x_offset_em * scale_px) + he.bearing_x;
-                const float gy = std::round(baseline_y_px - y_offset_em * scale_px) - he.bearing_y_top;
-                const float gw = static_cast<float>(he.width_px);
-                const float gh = static_cast<float>(he.height_px);
-                Prim p = Prim::make_glyph(
-                    Rect{ gx, gy, gw, gh },
-                    clip_px.rect,
-                    tint,
-                    uv0,
-                    uv1,
-                    0u,
-                    clip_px.radius,
-                    PrimFlag_StemDarken);
-                if (wipe && wipe->enabled) {
-                    const float x0_rel = wipe->x0_px - gx;
-                    const float x1_rel = wipe->x1_px - gx;
-                    if (x1_rel <= -1.0f) {
-                        p.style.y = wipe->color_end.pack_rgba8();
-                    } else if (x0_rel < gw + 1.0f) {
-                        p.style.x |= static_cast<uint32_t>(PrimFlag_LinearGrad) << 4;
-                        p.style.z = wipe->color_end.pack_rgba8();
-                        p.payload.w = pack_f16x2(clamp_range(x0_rel, -32768.0f, 32768.0f),
-                                                 clamp_range(x1_rel, -32768.0f, 32768.0f));
-                    }
+        const float raw_x = pen_x_px + x_offset_em * scale_px;
+        const float qx = std::round(raw_x * 4.0f);
+        const float floor_x = std::floor(qx * 0.25f);
+        const uint8_t x_phase = static_cast<uint8_t>(static_cast<int32_t>(qx) - static_cast<int32_t>(floor_x) * 4) & 3u;
+        const EmojiBitmapEntry he = get_or_cache_hinted_glyph(ctx, slot_idx, glyph_id, phys_px, x_phase);
+        if (he.has_bitmap && he.width_px > 0u && he.height_px > 0u && ctx->atlas.subpixel_w > 0u && ctx->atlas.subpixel_h > 0u) {
+            const float inv_aw = 1.0f / static_cast<float>(ctx->atlas.subpixel_w);
+            const float inv_ah = 1.0f / static_cast<float>(ctx->atlas.subpixel_h);
+            const Vec2 uv0 = { static_cast<float>(he.tile_x) * inv_aw, static_cast<float>(he.tile_y) * inv_ah };
+            const Vec2 uv1 = { static_cast<float>(he.tile_x + he.width_px) * inv_aw, static_cast<float>(he.tile_y + he.height_px) * inv_ah };
+            const float gx = floor_x + he.bearing_x;
+            const float gy = std::round(baseline_y_px - y_offset_em * scale_px) - he.bearing_y_top;
+            const float gw = static_cast<float>(he.width_px);
+            const float gh = static_cast<float>(he.height_px);
+            Prim p = Prim::make_glyph(
+                Rect{ gx, gy, gw, gh },
+                clip_px.rect,
+                tint,
+                uv0,
+                uv1,
+                0u,
+                clip_px.radius,
+                PrimFlag_StemDarken);
+            bool has_wipe_grad = false;
+            if (wipe && wipe->enabled) {
+                const float x0_rel = wipe->x0_px - gx;
+                const float x1_rel = wipe->x1_px - gx;
+                if (x1_rel <= -1.0f) {
+                    p.style.y = wipe->color_end.pack_rgba8();
+                } else if (x0_rel < gw + 1.0f) {
+                    p.style.x |= static_cast<uint32_t>(PrimFlag_LinearGrad) << 4;
+                    p.style.z = wipe->color_end.pack_rgba8();
+                    p.payload.w = pack_f16x2(clamp_range(x0_rel, -32768.0f, 32768.0f),
+                                             clamp_range(x1_rel, -32768.0f, 32768.0f));
+                    has_wipe_grad = true;
                 }
-                push_prim(ctx, p);
-                return;
             }
+            const bool is_additive = ctx->active_render_layer && ctx->active_render_layer->resolved_plus_lighter;
+            const bool use_uber_glyph = (ctx->active_filter_group != nullptr) || has_wipe_grad || is_additive;
+            push_prim(ctx, p, use_uber_glyph ? subpixel_tex_sentinel() : nullptr);
+            return;
         }
     }
     const SlugGlyphEntry ge = slug_get_glyph(&ctx->atlas, slot_idx, glyph_id);

@@ -98,7 +98,7 @@ void release_atlas_sprite(FontAtlas* a, uint32_t id) noexcept {
 }
 bool is_atlas_slot0_prim(const Prim& p) noexcept {
     const uint32_t kind = p.style.x & 0xFu;
-    return (kind == uint32_t(PrimKind::Texture) || kind == uint32_t(PrimKind::Glyph)) &&
+    return kind == uint32_t(PrimKind::Texture) &&
            ((p.style.x >> 10) & 0xFu) == 0u;
 }
 void remap_atlas_prims_scale(Prim* prims, uint32_t count, float sx, float sy) noexcept {
@@ -144,6 +144,8 @@ bool grow_sprite_atlas(Context* ctx) noexcept {
         std::memset(pixels + size_t(y) * n * 4, 255, 32);
     const float sx = float(a.width) / float(n), sy = float(a.height) / float(n);
     remap_atlas_prims_scale(ctx->prims, ctx->prim_count, sx, sy);
+    if (ctx->gpu_prims && ctx->gpu_prims != ctx->prims)
+        remap_atlas_prims_scale(ctx->gpu_prims, ctx->prim_count, sx, sy);
     remap_atlas_prims_scale(ctx->filter_prims, ctx->filter_prim_count, sx, sy);
     std::free(a.pixels);
     a.pixels = pixels;
@@ -172,6 +174,8 @@ bool compact_sprite_atlas(Context* ctx) noexcept {
         s.x=x;s.y=y;s.alloc_w=w;s.alloc_h=h;x+=w;shelf=shelf>h?shelf:h;
     }
     remap_atlas_prims_compact(ctx->prims, ctx->prim_count, a, plan);
+    if (ctx->gpu_prims && ctx->gpu_prims != ctx->prims)
+        remap_atlas_prims_compact(ctx->gpu_prims, ctx->prim_count, a, plan);
     remap_atlas_prims_compact(ctx->filter_prims, ctx->filter_prim_count, a, plan);
     for(uint32_t row=0;row<8;++row)std::memset(pixels+size_t(row)*a.width*4,255,32);
     std::memcpy(a.sprites,plan,size_t(a.sprite_used)*sizeof(SpriteSlot));std::free(plan);std::free(a.pixels);a.pixels=pixels;
@@ -338,23 +342,29 @@ bool update_sprite_rgba(Context* ctx, uint32_t id, uint32_t w, uint32_t h, const
             if (t > 1.0f) t = 1.0f;
             return (n + t * new_dim) / dim;
         };
-        for (uint32_t i = 0; i < ctx->prim_count; ++i) {
-            auto& p = ctx->prims[i];
-            if ((p.style.x & 0xFu) != uint32_t(PrimKind::Texture) || ((p.style.x >> 10) & 0xFu) != 0)
-                continue;
-            const float u0 = float(p.payload.x & 65535u) / 65535.0f;
-            const float v0 = float(p.payload.x >> 16) / 65535.0f;
-            const float u1 = float(p.payload.y & 65535u) / 65535.0f;
-            const float v1 = float(p.payload.y >> 16) / 65535.0f;
-            const float mx = 0.5f * (u0 + u1) * aw, my = 0.5f * (v0 + v1) * ah;
-            if (mx < float(old.x) || mx >= float(old.x + old.alloc_w) ||
-                my < float(old.y) || my >= float(old.y + old.alloc_h))
-                continue;
-            p.payload.x = pack_unorm16x2(remap(u0, ox, ow, nx, nw, aw),
-                                         remap(v0, oy, oh, ny, nh, ah));
-            p.payload.y = pack_unorm16x2(remap(u1, ox, ow, nx, nw, aw),
-                                         remap(v1, oy, oh, ny, nh, ah));
-        }
+        const auto remap_list = [&](Prim* list, uint32_t count) noexcept {
+            for (uint32_t i = 0; i < count; ++i) {
+                auto& p = list[i];
+                if ((p.style.x & 0xFu) != uint32_t(PrimKind::Texture) || ((p.style.x >> 10) & 0xFu) != 0)
+                    continue;
+                const float u0 = float(p.payload.x & 65535u) / 65535.0f;
+                const float v0 = float(p.payload.x >> 16) / 65535.0f;
+                const float u1 = float(p.payload.y & 65535u) / 65535.0f;
+                const float v1 = float(p.payload.y >> 16) / 65535.0f;
+                const float mx = 0.5f * (u0 + u1) * aw, my = 0.5f * (v0 + v1) * ah;
+                if (mx < float(old.x) || mx >= float(old.x + old.alloc_w) ||
+                    my < float(old.y) || my >= float(old.y + old.alloc_h))
+                    continue;
+                p.payload.x = pack_unorm16x2(remap(u0, ox, ow, nx, nw, aw),
+                                             remap(v0, oy, oh, ny, nh, ah));
+                p.payload.y = pack_unorm16x2(remap(u1, ox, ow, nx, nw, aw),
+                                             remap(v1, oy, oh, ny, nh, ah));
+            }
+        };
+        remap_list(ctx->prims, ctx->prim_count);
+        if (ctx->gpu_prims && ctx->gpu_prims != ctx->prims)
+            remap_list(ctx->gpu_prims, ctx->prim_count);
+        remap_list(ctx->filter_prims, ctx->filter_prim_count);
     }
     return true;
 }

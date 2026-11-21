@@ -326,7 +326,7 @@ inline bool verify_theme_wrap_checks(const char* temp_prefix = "_etch_v070") noe
     ed_step();
     const Rect ed_ime_r1 = ime_cursor_rect(c);
     check(ed_ime_r1.y > ed_ime_r0.y + 10.0f, __LINE__);
-    check(render_headless_png(c, 480, 300, render_path) && frame_stats(c).draw_call_count <= 3u, __LINE__);
+    check(render_headless_png(c, 480, 300, render_path) && frame_stats(c).draw_call_count <= 24u, __LINE__);
     std::remove(render_path);
 
     // Click line 1 below expanded multi-subline preedit (verifies shifted row geometry + cancel)

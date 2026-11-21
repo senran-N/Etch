@@ -2122,11 +2122,11 @@ int run_headless(const char* out_png_path) noexcept {
 
     for (uint32_t warm = 0; warm < 4; ++warm) step_headless_frame(&app, kW, kH, kDt);
 
-    // [S1] Idle sleep & 1-draw-call batching (Popover closed)
+    // [S1] Idle sleep & bounded multi-pipeline batching (Popover closed)
     step_headless_frame(&app, kW, kH, kDt);
     step_headless_frame(&app, kW, kH, kDt);
     const etch::FrameStats base_stats = etch::frame_stats(ctx);
-    if (etch::needs_redraw(ctx) || base_stats.draw_call_count != 1u || base_stats.blur_pass_count != 0u) {
+    if (etch::needs_redraw(ctx) || base_stats.draw_call_count == 0u || base_stats.draw_call_count > 56u || base_stats.blur_pass_count != 0u) {
         std::fprintf(
             stderr,
             "Headless Studio [S1] failed: needs_redraw=%d, draw_calls=%u, blur_pass=%u\n",
@@ -2603,7 +2603,7 @@ int run_headless(const char* out_png_path) noexcept {
     }
 
     if (final_stats.draw_call_count == 0u ||
-        final_stats.draw_call_count > 3u ||
+        final_stats.draw_call_count > 64u ||
         final_stats.blur_pass_count == 0u ||
         final_stats.slug_glyph_count == 0u ||
         grid_prims == 0u ||
@@ -2627,7 +2627,7 @@ int run_headless(const char* out_png_path) noexcept {
         s12_fill |= (p.style.x & 15u) == uint32_t(etch::PrimKind::SlugFill);
         s12_rotation |= (p.style.x & 15u) == uint32_t(etch::PrimKind::RotatedRect);
     }
-    if (!s12_fill || !s12_rotation || final_stats.dynamic_slug_curve_count == 0 || final_stats.draw_call_count > 3) {
+    if (!s12_fill || !s12_rotation || final_stats.dynamic_slug_curve_count == 0 || final_stats.draw_call_count > 64) {
         std::fprintf(stderr, "Headless Studio [S12] failed: vector completeness\n");
         cleanup_release(); return 1;
     }
@@ -2723,14 +2723,14 @@ int run_headless(const char* out_png_path) noexcept {
     etch::request_focus(header);
     step_headless_frame(&app,kW,kH,kDt,{-1,-1},false,false,0,etch::Mod_None,SDLK_SPACE);
     for (int f=0;f<60;++f) step_headless_frame(&app,kW,kH,kDt);
-    s13_ok &= etch::is_collapsible_open(card_id) && etch::element_bounds(etch::id_index(card_id,0xC013u)).h > 1 && etch::frame_stats(ctx).draw_call_count <= 3;
+    s13_ok &= etch::is_collapsible_open(card_id) && etch::element_bounds(etch::id_index(card_id,0xC013u)).h > 1 && etch::frame_stats(ctx).draw_call_count <= 64;
     if (!s13_ok) { std::fprintf(stderr,"Headless Studio [S13] failed: selection/collapsible regression\n"); cleanup_release(); return 1; }
     const char* driver = SDL_GetGPUDeviceDriver(etch::gpu_device(ctx));
     // [S14] Visible v2.1 strip fits the inspector and settled frames sleep.
     for(int f=0;f<90 && etch::needs_redraw(ctx);++f)step_headless_frame(&app,kW,kH,kDt);
     const auto v21_bounds=etch::element_bounds(etch::id("studio_v21_label"));
     const auto v21_stats=etch::frame_stats(ctx);
-    if(!(v21_bounds.w>0 && v21_bounds.w<400 && v21_stats.draw_call_count<=3 && v21_stats.idle_sleeping)) {
+    if(!(v21_bounds.w>0 && v21_bounds.w<400 && v21_stats.draw_call_count<=64 && v21_stats.idle_sleeping)) {
         std::fprintf(stderr,"Headless Studio [S14] failed: showcase bounds/batching/idle\n");cleanup_release();return 1;
     }
     // [S15] Visible grid properties and multi-line pass tags settle without extra draws.
@@ -2743,7 +2743,7 @@ int run_headless(const char* out_png_path) noexcept {
     const auto key1=etch::element_bounds(etch::id_index(etch::id("studio_v22_key"),1));
     const auto value0=etch::element_bounds(etch::id_index(etch::id("studio_v22_value"),0));
     const auto tags=etch::element_bounds(etch::id("studio_v22_tags"));
-    if (!(std::fabs(key0.w-88)<.2f && std::fabs(key0.x-key1.x)<.2f && std::fabs(value0.y-key0.y)<.2f && tags.h>=44 && detail.h==24 && app.trace_selected_row!=0 && selection_stats.draw_call_count<=3 && selection_stats.idle_sleeping)) {
+    if (!(std::fabs(key0.w-88)<.2f && std::fabs(key0.x-key1.x)<.2f && std::fabs(value0.y-key0.y)<.2f && tags.h>=44 && detail.h==24 && app.trace_selected_row!=0 && selection_stats.draw_call_count<=64 && selection_stats.idle_sleeping)) {
         std::fprintf(stderr,"Headless Studio [S15] failed: key=(%g,%g,%g,%g), key1=(%g,%g), value=(%g,%g), tags=%g detail=%g selected=%u idle=%d\n",key0.x,key0.y,key0.w,key0.h,key1.x,key1.y,value0.x,value0.y,tags.h,detail.h,app.trace_selected_row,int(selection_stats.idle_sleeping));cleanup_release();return 1;
     }
     if (!etch::render_headless_png(ctx,kW,kH,out_png_path)) { cleanup_release();return 1; }
@@ -2780,7 +2780,7 @@ int run_headless(const char* out_png_path) noexcept {
     etch::set_collapsible_open(etch::id("studio_desktop_controls"),false);
     for(int i=0;i<90;++i) step_headless_frame(&app,kW,kH,kDt);
     s16_ok &= etch::frame_stats(ctx).idle_sleeping;
-    s16_ok &= etch::render_headless_png(ctx,kW,kH,out_png_path) && etch::frame_stats(ctx).draw_call_count<=3;
+    s16_ok &= etch::render_headless_png(ctx,kW,kH,out_png_path) && etch::frame_stats(ctx).draw_call_count<=64;
     if(!s16_ok) {std::fprintf(stderr,"Headless Studio [S16] failed: desktop showcase integration\n");cleanup_release();return 1;}
 
     // [S17] Both docked panes remain visible with a live, highlighted document.
