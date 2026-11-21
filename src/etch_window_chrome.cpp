@@ -10,6 +10,7 @@ namespace {
 #if defined(_WIN32)
 constexpr const wchar_t* kChromeSlotProperty=L"Etch.ChromeSlot";
 constexpr LONG_PTR kNativeFrameStyle=WS_CAPTION | WS_THICKFRAME | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX;
+constexpr LONG_PTR kNativeFrameMask=kNativeFrameStyle | WS_POPUP;
 void chrome_mouse_event(ClaimedWindowSlot* slot, UINT msg, POINT point) noexcept {
     SDL_Event event={};
     const Uint32 window_id=SDL_GetWindowID(slot->window);
@@ -31,7 +32,7 @@ LRESULT CALLBACK chrome_window_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM l
     if(slot->native_frame_applied && msg==WM_ERASEBKGND) {
         return 1;
     }
-    if(slot->native_frame_applied && msg==WM_NCCALCSIZE && wparam) {
+    if(slot->native_frame_applied && msg==WM_NCCALCSIZE && wparam && !IsIconic(hwnd)) {
         if(IsZoomed(hwnd)) {
             auto* params=reinterpret_cast<NCCALCSIZE_PARAMS*>(lparam);
             MONITORINFO monitor={};monitor.cbSize=sizeof(monitor);
@@ -106,10 +107,10 @@ void apply_win32_chrome(Context* ctx, ClaimedWindowSlot* slot) noexcept {
     const bool native=slot->ui.chrome_desc.enabled && (flags&SDL_WINDOW_BORDERLESS)!=0 && (flags&SDL_WINDOW_FULLSCREEN)==0;
     if(native!=slot->native_frame_applied) {
         if(native) {
-            slot->native_chrome_style=uintptr_t(GetWindowLongPtrW(hwnd,GWL_STYLE)&kNativeFrameStyle);slot->native_frame_applied=true;
-            SetWindowLongPtrW(hwnd,GWL_STYLE,GetWindowLongPtrW(hwnd,GWL_STYLE) | kNativeFrameStyle);
+            slot->native_chrome_style=uintptr_t(GetWindowLongPtrW(hwnd,GWL_STYLE)&kNativeFrameMask);slot->native_frame_applied=true;
+            SetWindowLongPtrW(hwnd,GWL_STYLE,(GetWindowLongPtrW(hwnd,GWL_STYLE) & ~WS_POPUP) | kNativeFrameStyle);
         } else {
-            slot->native_frame_applied=false;SetWindowLongPtrW(hwnd,GWL_STYLE,(GetWindowLongPtrW(hwnd,GWL_STYLE)&~kNativeFrameStyle)|LONG_PTR(slot->native_chrome_style));
+            slot->native_frame_applied=false;SetWindowLongPtrW(hwnd,GWL_STYLE,(GetWindowLongPtrW(hwnd,GWL_STYLE)&~kNativeFrameMask)|LONG_PTR(slot->native_chrome_style));
             const MARGINS margins={};DwmExtendFrameIntoClientArea(hwnd,&margins);
         }
         SetWindowPos(hwnd,nullptr,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOZORDER|SWP_NOACTIVATE|SWP_FRAMECHANGED);
@@ -136,7 +137,7 @@ void detach_win32_chrome(ClaimedWindowSlot* slot) noexcept {
     HWND hwnd=static_cast<HWND>(SDL_GetPointerProperty(SDL_GetWindowProperties(slot->window),SDL_PROP_WINDOW_WIN32_HWND_POINTER,nullptr));
     if (hwnd) {
         if(slot->native_frame_applied) {
-            slot->native_frame_applied=false;SetWindowLongPtrW(hwnd,GWL_STYLE,(GetWindowLongPtrW(hwnd,GWL_STYLE)&~kNativeFrameStyle)|LONG_PTR(slot->native_chrome_style));
+            slot->native_frame_applied=false;SetWindowLongPtrW(hwnd,GWL_STYLE,(GetWindowLongPtrW(hwnd,GWL_STYLE)&~kNativeFrameMask)|LONG_PTR(slot->native_chrome_style));
             const MARGINS margins={};DwmExtendFrameIntoClientArea(hwnd,&margins);
             SetWindowPos(hwnd,nullptr,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOZORDER|SWP_NOACTIVATE|SWP_FRAMECHANGED);
         }

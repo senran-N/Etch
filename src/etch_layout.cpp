@@ -735,7 +735,9 @@ bool needs_redraw(const Context* ctx) noexcept {
     for (uint32_t i = 0; i < ctx->claimed_window_cap; ++i) {
         if (!ctx->claimed_windows[i]) continue;
         const ClaimedWindowSlot& slot = *ctx->claimed_windows[i];
-        if (slot.window && (slot.ui.redraw_budget || slot.ui.active_anim_count)) return true;
+        if (!slot.window) continue;
+        if ((SDL_GetWindowFlags(slot.window) & SDL_WINDOW_MINIMIZED) != 0u) continue;
+        if (slot.ui.redraw_budget || slot.ui.active_anim_count) return true;
     }
     return shader_surface_timeout(ctx, nullptr, true, -1) == 0;
 }

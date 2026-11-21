@@ -5,16 +5,31 @@ constexpr const char* kDesktopScale = "etch.desktop.coordinate_scale";
 constexpr const char* kDesktopMinW = "etch.desktop.minimum_width";
 constexpr const char* kDesktopMinH = "etch.desktop.minimum_height";
 float desktop_coordinate_scale(SDL_Window* window) noexcept {
-    return SDL_GetWindowDisplayScale(window) / SDL_GetWindowPixelDensity(window);
+    if (!window) return 1.0f;
+    const float display_scale = SDL_GetWindowDisplayScale(window);
+    const float safe_display = (std::isfinite(display_scale) && display_scale > 0.05f) ? display_scale : 1.0f;
+    if ((SDL_GetWindowFlags(window) & SDL_WINDOW_MINIMIZED) != 0u) {
+        return safe_display;
+    }
+    const float density = SDL_GetWindowPixelDensity(window);
+    if (!std::isfinite(density) || density <= 0.25f) {
+        return safe_display;
+    }
+    const float ratio = safe_display / density;
+    return (std::isfinite(ratio) && ratio >= 0.25f && ratio <= 8.0f) ? ratio : safe_display;
 }
 void sync_desktop_window(SDL_Window* window) noexcept {
+    if (!window) return;
+    const SDL_WindowFlags flags = SDL_GetWindowFlags(window);
+    // Never recompute coordinate scale or minimum size while minimized:
+    // Win32 iconic windows report tiny/zero client rects that corrupt pixel density.
+    if ((flags & SDL_WINDOW_MINIMIZED) != 0u) return;
     const SDL_PropertiesID props = SDL_GetWindowProperties(window);
     const float old_scale = SDL_GetFloatProperty(props, kDesktopScale, 0);
     if (old_scale == 0) return;
     const float scale = desktop_coordinate_scale(window);
     if (std::fabs(scale - old_scale) < 0.0001f) return;
     SDL_SetFloatProperty(props, kDesktopScale, scale);
-    const SDL_WindowFlags flags = SDL_GetWindowFlags(window);
     int w = 0, h = 0, min_w = 0, min_h = 0;
     SDL_GetWindowSize(window, &w, &h);
     SDL_GetWindowMinimumSize(window, &min_w, &min_h);
@@ -22,7 +37,7 @@ void sync_desktop_window(SDL_Window* window) noexcept {
     const float logical_min_h=SDL_GetFloatProperty(props,kDesktopMinH,-1);
     SDL_SetWindowMinimumSize(window,static_cast<int>(logical_min_w>=0 ? std::ceil(logical_min_w*scale) : std::round(min_w*scale/old_scale)),
         static_cast<int>(logical_min_h>=0 ? std::ceil(logical_min_h*scale) : std::round(min_h*scale/old_scale)));
-    if ((flags & (SDL_WINDOW_FULLSCREEN | SDL_WINDOW_MAXIMIZED | SDL_WINDOW_MINIMIZED)) != 0) return;
+    if ((flags & (SDL_WINDOW_FULLSCREEN | SDL_WINDOW_MAXIMIZED)) != 0) return;
 #if defined(SDL_PLATFORM_WINDOWS)
     // SDL 3.4+ accepts the OS-suggested DPI-scaled rectangle for resizable windows.
     // Applying our ratio again would double-scale the client area.

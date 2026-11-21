@@ -1407,7 +1407,7 @@ void emit_slug_outline_quad(
         baseline_y_px = std::round(baseline_y_px);
     }
     const float scale_px = ctx->atlas.slots[slot_idx].scale_1px * phys_px;
-    const bool allow_hinted = ctx->atlas.hinted_small_text && !color_layer && phys_px <= 22.0f && snap_glyph &&
+    const bool allow_hinted = ctx->atlas.hinted_small_text && !color_layer && phys_px <= 18.5f && snap_glyph &&
         !(ctx->active_render_layer && (std::fabs(ctx->active_render_layer->resolved_scale.x - 1.0f) > 1e-3f ||
                                        std::fabs(ctx->active_render_layer->resolved_scale.y - 1.0f) > 1e-3f));
     if (allow_hinted) {
