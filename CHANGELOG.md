@@ -4,6 +4,30 @@ All notable changes to Etch are documented here. This file follows
 [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html).
 
+## [0.25.0] - 2026-11-22
+
+- Replace the monolithic GPU ubershader path with specialized lightweight pipelines
+  (`etch_quad.hlsl`, `etch_subpixel.hlsl`, `etch_uber.hlsl`), hardware 3-channel
+  ClearType RGB subpixel text (`CONSTANT_COLOR` + `ONE_MINUS_SRC_COLOR` with a 4x
+  X-phase linear RGBA atlas), Early-Z `D32_FLOAT` depth rejection, 32x32 spatial
+  non-overlapping batch coalescing, 16x16 `BlurGlass` backdrop sharing, and exact
+  disjoint-area Porter-Duff `over(border, fill)` compositing.
+- Replace `third_party/clay.h` with an owned Orthodox C++20 2-pass Flexbox, 2D Grid,
+  and Anchor layout engine (`src/etch_layout_engine.cpp`), dirty-subtree
+  `Prim + Hitbox + A11y` replay caching (`begin_cached_subtree` /
+  `end_cached_subtree` / `invalidate_cached_subtree` with `GlyphAtlas::uv_epoch`
+  invalidation), and an inverse-transformed true-occlusion hitbox tree
+  (`HitboxBehavior`, `topmost_hovered_id`, `clicked_without_drag`).
+- Upgrade the pure C99 ABI (`include/etch/etch_c.h`) with `ETCH_ABI_VERSION`,
+  `ETCH_API` export macros, `etch_abi_version()`, and versioned `uint32_t struct_size`
+  fields on public descriptors with zero-copy binary-layout verification, plus optional
+  modular multi-TU compilation (`ETCH_UNITY_BUILD=OFF`).
+- Upgrade Windows UIA accessibility (`src/etch_a11y_os.cpp`) with COM POD
+  `ITextProvider`/`ITextRangeProvider`, `IScrollProvider`,
+  `IGridProvider`/`ITableProvider`/`IGridItemProvider`/`ITableItemProvider`, live UIA
+  structure/property/live-region events, hitbox-backed hit testing, and clean control
+  tree filtering alongside cross-platform A11y bridges.
+
 ## [0.24.0] - 2026-11-20
 
 - Add cross-platform asynchronous native OS folder and file dialogs (`FileDialogFilter`,
