@@ -102,6 +102,7 @@ static bool test_abi_and_arena(void) {
     const size_t mark = etch_arena_mark(&a);
     EtchStr s = etch_arena_push_str(&a, "hello", 5u);
     bool ok = (p0 != NULL) && s.chars != NULL && s.length == 5u && strncmp(s.chars, "hello", 5u) == 0;
+    ok = ok && etch_arena_push_str(&a, NULL, 1u).chars == NULL;
     etch_arena_rewind(&a, mark);
     ok = ok && (etch_arena_mark(&a) == mark);
     etch_arena_reset(&a);

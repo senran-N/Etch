@@ -176,7 +176,12 @@ inline etch::Corners to_cpp(EtchCorners c) noexcept { return {c.tl, c.tr, c.br, 
 inline EtchCorners from_cpp(etch::Corners c) noexcept { return {c.tl, c.tr, c.br, c.bl}; }
 inline etch::Padding to_cpp(EtchPadding p) noexcept { return {p.left, p.right, p.top, p.bottom}; }
 inline EtchPadding from_cpp(etch::Padding p) noexcept { return {p.left, p.right, p.top, p.bottom}; }
-inline etch::Str to_cpp(EtchStr s) noexcept { return {s.chars, s.length, s.is_static}; }
+inline etch::Str to_cpp(EtchStr s) noexcept {
+    if (!s.chars && s.length != 0u) {
+        return {};
+    }
+    return {s.chars, s.length, s.is_static};
+}
 inline EtchStr from_cpp(etch::Str s) noexcept { return {s.chars, s.length, s.is_static}; }
 inline etch::Sizing to_cpp(EtchSizing s) noexcept { return {static_cast<etch::SizingKind>(s.kind), s.value, s.min, s.max}; }
 inline EtchSizing from_cpp(etch::Sizing s) noexcept { return {static_cast<EtchSizingKind>(s.kind), s.value, s.min, s.max}; }
