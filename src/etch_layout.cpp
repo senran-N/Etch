@@ -1087,8 +1087,16 @@ static void process_window_event(Context* ctx, const SDL_Event& event) noexcept 
 }
 
 static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
-    if (!ctx || ctx->in_frame || !ctx->active_ui->clay_ctx) {
+    if (!ctx || ctx->in_frame || !ctx->active_ui) {
         return;
+    }
+    if (!ctx->active_ui->clay_ctx) {
+        const float dpi = (desc.dpi_scale > 0.0f) ? desc.dpi_scale : 1.0f;
+        const float init_w = desc.viewport_w ? (static_cast<float>(desc.viewport_w) / dpi) : 1280.0f;
+        const float init_h = desc.viewport_h ? (static_cast<float>(desc.viewport_h) / dpi) : 720.0f;
+        if (!ensure_window_ui_clay(ctx, ctx->active_ui, init_w, init_h)) {
+            return;
+        }
     }
     Clay_SetCurrentContext(ctx->active_ui->clay_ctx);
     set_current_context(ctx);

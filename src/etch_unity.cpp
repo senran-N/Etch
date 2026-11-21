@@ -76,6 +76,11 @@
 #    endif
 #    include <windows.h>
 #    include <dwrite.h>
+#else
+#    include <fcntl.h>
+#    include <sys/mman.h>
+#    include <sys/stat.h>
+#    include <unistd.h>
 #endif
 
 #include "etch_arena.cpp"

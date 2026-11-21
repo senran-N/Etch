@@ -214,6 +214,7 @@ struct FontSlot {
     stbtt_fontinfo font_info = {};
     uint8_t*       font_file_data = nullptr;
     size_t         font_file_size = 0;
+    bool           font_file_mapped = false;
     int32_t        font_ascent = 0;
     int32_t        font_descent = 0;
     int32_t        font_line_gap = 0;
@@ -316,6 +317,7 @@ struct FontAtlas {
     bool              mono_probed = false;
     uint8_t weighted_probed = 0;
     bool              fallbacks_probed = false;
+    bool              emoji_fallback_probed = false;
 
     VectorIconEntry   icons[kMaxVectorIcons] = {};
 

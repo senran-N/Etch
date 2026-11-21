@@ -49,6 +49,94 @@ bool ensure_array_cap(T** ptr, uint32_t* cap, uint32_t needed) noexcept {
     return true;
 }
 
+void release_font_bytes(void* data, size_t size, bool mapped) noexcept {
+    if (!data) return;
+    if (mapped) {
+#if defined(_WIN32)
+        (void)size;
+        UnmapViewOfFile(data);
+#else
+        if (size > 0u) munmap(data, size);
+#endif
+    } else {
+        SDL_free(data);
+    }
+}
+
+void* map_or_load_font_file(const char* path, size_t* out_size, bool* out_mapped) noexcept {
+    *out_size = 0u;
+    *out_mapped = false;
+    if (!path || !path[0]) return nullptr;
+#if defined(_WIN32)
+    wchar_t wpath[1024];
+    const int wlen = MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath, static_cast<int>(sizeof(wpath) / sizeof(wpath[0])));
+    if (wlen > 0) {
+        HANDLE fh = CreateFileW(
+            wpath,
+            GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_DELETE,
+            nullptr,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            nullptr);
+        if (fh != INVALID_HANDLE_VALUE) {
+            LARGE_INTEGER li = {};
+            if (!GetFileSizeEx(fh, &li) || li.QuadPart < 16 || li.QuadPart > 0x7FFFFFFFLL) {
+                CloseHandle(fh);
+                return nullptr;
+            }
+            HANDLE mh = CreateFileMappingW(fh, nullptr, PAGE_READONLY, 0u, 0u, nullptr);
+            if (mh) {
+                void* view = MapViewOfFile(mh, FILE_MAP_READ, 0u, 0u, 0u);
+                CloseHandle(mh);
+                if (view) {
+                    CloseHandle(fh);
+                    *out_size = static_cast<size_t>(li.QuadPart);
+                    *out_mapped = true;
+                    return view;
+                }
+            }
+            CloseHandle(fh);
+        } else {
+            const DWORD err = GetLastError();
+            if (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND) {
+                return nullptr;
+            }
+        }
+    }
+#else
+    const int fd = open(path, O_RDONLY);
+    if (fd >= 0) {
+        struct stat st = {};
+        if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode)) {
+            if (st.st_size < 16 || st.st_size > 0x7FFFFFFF) {
+                close(fd);
+                return nullptr;
+            }
+            const size_t sz = static_cast<size_t>(st.st_size);
+            void* view = mmap(nullptr, sz, PROT_READ, MAP_PRIVATE, fd, 0);
+            close(fd);
+            if (view && view != MAP_FAILED) {
+                *out_size = sz;
+                *out_mapped = true;
+                return view;
+            }
+        } else {
+            close(fd);
+        }
+    }
+#endif
+    size_t sz = 0u;
+    void* raw = SDL_LoadFile(path, &sz);
+    if (!raw || sz < 16u || sz > 0x7FFFFFFFu) {
+        if (raw) SDL_free(raw);
+        return nullptr;
+    }
+    *out_size = sz;
+    *out_mapped = false;
+    return raw;
+}
+
 void destroy_font_slot(FontSlot* slot) noexcept {
 #if defined(_WIN32)
     if (slot->dwrite_face) {
@@ -63,7 +151,7 @@ void destroy_font_slot(FontSlot* slot) noexcept {
     if (slot->cbdt_blob) hb_blob_destroy(slot->cbdt_blob);
     if (slot->colr_blob) hb_blob_destroy(slot->colr_blob);
     if (slot->cpal_blob) hb_blob_destroy(slot->cpal_blob);
-    if (slot->font_file_data) SDL_free(slot->font_file_data);
+    release_font_bytes(slot->font_file_data, slot->font_file_size, slot->font_file_mapped);
     *slot = {};
 }
 
@@ -175,7 +263,8 @@ bool init_font_slot_from_owned_bytes(
     void* raw,
     size_t sz,
     uint64_t source_hash,
-    int32_t face_index) noexcept
+    int32_t face_index,
+    bool is_mapped = false) noexcept
 {
     const unsigned char* bytes = static_cast<const unsigned char*>(raw);
     stbtt_fontinfo new_info = {};
@@ -192,7 +281,7 @@ bool init_font_slot_from_owned_bytes(
         if (font) hb_font_destroy(font);
         if (face) hb_face_destroy(face);
         if (blob) hb_blob_destroy(blob);
-        SDL_free(raw);
+        release_font_bytes(raw, sz, is_mapped);
         return false;
     }
 
@@ -202,6 +291,7 @@ bool init_font_slot_from_owned_bytes(
     FontSlot next = {};
     next.font_file_data = static_cast<uint8_t*>(raw);
     next.font_file_size = sz;
+    next.font_file_mapped = is_mapped;
     next.hb_blob=blob;next.hb_face=face;next.hb_font=font;
     next.upem=upem;next.num_glyphs=hb_face_get_glyph_count(face);
     init_color_tables(&next);
@@ -283,11 +373,9 @@ bool try_load_font_file_into_slot(
     int32_t face_index = 0, bool prefer_italic = false) noexcept
 {
     size_t sz = 0;
-    void* raw = SDL_LoadFile(path, &sz);
-    if (!raw || sz < 16u || sz > 0x7FFFFFFFu) {
-        if (raw) {
-            SDL_free(raw);
-        }
+    bool is_mapped = false;
+    void* raw = map_or_load_font_file(path, &sz, &is_mapped);
+    if (!raw) {
         return false;
     }
 #if defined(__APPLE__)
@@ -316,7 +404,7 @@ bool try_load_font_file_into_slot(
         }
         hb_blob_destroy(blob);
         if (face_index < 0) {
-            SDL_free(raw);
+            release_font_bytes(raw, sz, is_mapped);
             return false;
         }
     }
@@ -329,7 +417,8 @@ bool try_load_font_file_into_slot(
         raw,
         sz,
         hash_font_path(path, face_index),
-        face_index))
+        face_index,
+        is_mapped))
     {
         return false;
     }
@@ -493,15 +582,12 @@ void ensure_system_fallbacks_loaded(FontAtlas* atlas) noexcept {
     const char* system_fallbacks[] = {
 #if defined(_WIN32)
         "msyh.ttc",
-        "seguiemj.ttf",
         "seguisym.ttf",
 #elif defined(__APPLE__)
         "PingFang.ttc",
-        "Apple Color Emoji.ttc",
         "Apple Symbols.ttf",
 #else
         "NotoSansCJK-Regular.ttc",
-        "NotoColorEmoji.ttf",
         "NotoSansSymbols-Regular.ttf",
 #endif
     };
@@ -511,6 +597,31 @@ void ensure_system_fallbacks_loaded(FontAtlas* atlas) noexcept {
             break;
         }
         try_load_system_font(atlas, free_slot, path);
+    }
+
+    rebuild_fallback_order(atlas);
+}
+
+void ensure_emoji_fallback_loaded(FontAtlas* atlas) noexcept {
+    if (atlas->emoji_fallback_probed) return;
+    atlas->emoji_fallback_probed = true;
+    const char* emoji_fallbacks[] = {
+#if defined(_WIN32)
+        "seguiemj.ttf",
+#elif defined(__APPLE__)
+        "Apple Color Emoji.ttc",
+#else
+        "NotoColorEmoji.ttf",
+#endif
+    };
+    for (const char* path : emoji_fallbacks) {
+        const uint16_t free_slot = resolve_target_font_slot(atlas, kInvalidFont);
+        if (free_slot == kInvalidFont) {
+            break;
+        }
+        if (try_load_system_font(atlas, free_slot, path)) {
+            break;
+        }
     }
 
     rebuild_fallback_order(atlas);
@@ -946,7 +1057,7 @@ bool wants_emoji(const char* utf8, uint32_t len) noexcept {
     return emoji;
 }
 uint16_t pick_fallback_slot_for_cluster(
-    const FontAtlas* atlas,
+    FontAtlas* atlas,
     uint16_t primary_slot,
     const char* utf8,
     uint32_t len) noexcept
@@ -964,38 +1075,51 @@ uint16_t pick_fallback_slot_for_cluster(
     }
     bool emoji = false, text_presentation = false;
     for (uint32_t i=0;i<cp_count;++i) { const uint32_t cp=cps[i]; if(cp==0xFE0E)text_presentation=true; if(cp==0xFE0F||cp==0x20E3||cp>=0x1F000||(cp>=0x2600&&cp<=0x27BF))emoji=true; }
-    if (emoji && !text_presentation) for (uint32_t fi=0;fi<atlas->fallback_count;++fi) {
-        const uint16_t idx=atlas->fallback_order[fi]; const auto& slot=atlas->slots[idx];
-        if(!slot.has_color_emoji)continue;
-        bool covers=true; hb_codepoint_t glyph=0;
-        for(uint32_t i=0;i<cp_count;++i) if(cps[i]!=0xFE0F&&cps[i]!=0x200D&&!hb_font_get_nominal_glyph(slot.hb_font,cps[i],&glyph)){covers=false;break;}
-        if(covers)return idx;
+    if (emoji && !text_presentation) {
+        if (!atlas->emoji_fallback_probed) ensure_emoji_fallback_loaded(atlas);
+        for (uint32_t fi=0;fi<atlas->fallback_count;++fi) {
+            const uint16_t idx=atlas->fallback_order[fi]; const auto& slot=atlas->slots[idx];
+            if(!slot.has_color_emoji)continue;
+            bool covers=true; hb_codepoint_t glyph=0;
+            for(uint32_t i=0;i<cp_count;++i) if(cps[i]!=0xFE0F&&cps[i]!=0x200D&&!hb_font_get_nominal_glyph(slot.hb_font,cps[i],&glyph)){covers=false;break;}
+            if(covers)return idx;
+        }
     }
     hb_codepoint_t dummy = 0u;
-    for (uint32_t fi = 0u; fi < atlas->fallback_count; ++fi) {
-        const uint16_t s = atlas->fallback_order[fi];
-        if (s == primary_slot || !atlas->slots[s].loaded) {
-            continue;
-        }
-        bool covers_all = true;
-        for (uint32_t ci = 0u; ci < cp_count; ++ci) {
-            if (!hb_font_get_nominal_glyph(atlas->slots[s].hb_font, cps[ci], &dummy)) {
-                covers_all = false;
-                break;
+    auto search_loaded_fallbacks = [&]() noexcept -> uint16_t {
+        for (uint32_t fi = 0u; fi < atlas->fallback_count; ++fi) {
+            const uint16_t s = atlas->fallback_order[fi];
+            if (s == primary_slot || !atlas->slots[s].loaded) {
+                continue;
+            }
+            bool covers_all = true;
+            for (uint32_t ci = 0u; ci < cp_count; ++ci) {
+                if (!hb_font_get_nominal_glyph(atlas->slots[s].hb_font, cps[ci], &dummy)) {
+                    covers_all = false;
+                    break;
+                }
+            }
+            if (covers_all) {
+                return s;
             }
         }
-        if (covers_all) {
-            return s;
+        for (uint32_t fi = 0u; fi < atlas->fallback_count; ++fi) {
+            const uint16_t s = atlas->fallback_order[fi];
+            if (s == primary_slot || !atlas->slots[s].loaded) {
+                continue;
+            }
+            if (hb_font_get_nominal_glyph(atlas->slots[s].hb_font, cps[0], &dummy)) {
+                return s;
+            }
         }
-    }
-    for (uint32_t fi = 0u; fi < atlas->fallback_count; ++fi) {
-        const uint16_t s = atlas->fallback_order[fi];
-        if (s == primary_slot || !atlas->slots[s].loaded) {
-            continue;
-        }
-        if (hb_font_get_nominal_glyph(atlas->slots[s].hb_font, cps[0], &dummy)) {
-            return s;
-        }
+        return kInvalidFont;
+    };
+    const uint16_t found = search_loaded_fallbacks();
+    if (found != kInvalidFont) return found;
+    if (!atlas->emoji_fallback_probed) {
+        ensure_emoji_fallback_loaded(atlas);
+        const uint16_t found_emoji = search_loaded_fallbacks();
+        if (found_emoji != kInvalidFont) return found_emoji;
     }
     return primary_slot;
 }
@@ -1073,8 +1197,13 @@ std::span<const ShapedGlyph> shape_directional_run(
         }
     }
 
-    has_missing = has_missing || (!primary.has_color_emoji && wants_emoji(utf8 + item_start, item_end - item_start));
+    const bool run_wants_emoji = !primary.has_color_emoji && wants_emoji(utf8 + item_start, item_end - item_start);
+    has_missing = has_missing || run_wants_emoji;
+    if (run_wants_emoji && !ctx->atlas.emoji_fallback_probed) ensure_emoji_fallback_loaded(&ctx->atlas);
     if (has_missing && !ctx->atlas.fallbacks_probed) ensure_system_fallbacks_loaded(&ctx->atlas);
+    if (has_missing && ctx->atlas.fallback_count <= 1u && !ctx->atlas.emoji_fallback_probed) {
+        ensure_emoji_fallback_loaded(&ctx->atlas);
+    }
     if (!has_missing || ctx->atlas.fallback_count <= 1u) {
         ShapedGlyph* out = ctx->frame_arena.alloc_uninit<ShapedGlyph>(count);
         if (!out) {

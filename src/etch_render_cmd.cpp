@@ -617,6 +617,38 @@ void etch_clay_error_handler(Clay_ErrorData error) noexcept {
         error.errorText.chars ? error.errorText.chars : "");
 }
 
+bool ensure_window_ui_clay(Context* ctx, WindowUiState* ui, float logical_w, float logical_h) noexcept {
+    if (!ctx || !ui) return false;
+    if (ui->clay_ctx) return true;
+    if (!ui->states.entries && !state_map_init(&ui->states, kDefaultStateCapacity)) {
+        return false;
+    }
+    Clay_Context* saved_clay = Clay_GetCurrentContext();
+    Clay_SetCurrentContext(nullptr);
+    Clay_SetMaxElementCount(static_cast<int32_t>(ctx->max_layout_elements));
+    Clay_SetMaxMeasureTextCacheWordCount(static_cast<int32_t>(ctx->max_layout_elements * 4u));
+    const uint32_t clay_min = Clay_MinMemorySize();
+    ui->clay_mem = std::malloc(clay_min);
+    if (!ui->clay_mem) {
+        Clay_SetCurrentContext(saved_clay);
+        return false;
+    }
+    const float w = (logical_w > 0.0f) ? logical_w : 1280.0f;
+    const float h = (logical_h > 0.0f) ? logical_h : 720.0f;
+    ui->clay_ctx = Clay_Initialize(
+        Clay_CreateArenaWithCapacityAndMemory(clay_min, ui->clay_mem),
+        Clay_Dimensions{ w, h },
+        Clay_ErrorHandler{ etch_clay_error_handler, ctx });
+    if (ui->clay_ctx) Clay_SetMeasureTextFunction(etch_measure_text, ctx);
+    Clay_SetCurrentContext(saved_clay);
+    if (!ui->clay_ctx) {
+        std::free(ui->clay_mem);
+        ui->clay_mem = nullptr;
+        return false;
+    }
+    return true;
+}
+
 // Preserve subpixel primitives when rounding would collapse either dimension.
 // For thin hairlines/dividers (<= 2.5px), snap thickness independently so 1px borders stay uniform across fractional DPI.
 Rect snap_pixel_rect(Rect r) noexcept {

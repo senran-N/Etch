@@ -654,22 +654,16 @@ bool claim_window_swapchain(Context* ctx, SDL_Window* win) noexcept {
     const float init_dpi = SDL_GetWindowDisplayScale(win);
     ui.dpi_scale = (init_dpi > 0.0f) ? init_dpi : 1.0f;
     ui.applied_dpi_scale = ui.dpi_scale;
-    if (!state_map_init(&ui.states, kDefaultStateCapacity)) { std::free(allocated); return false; }
-    Clay_Context* saved_clay = Clay_GetCurrentContext();
-    Clay_SetCurrentContext(nullptr);
-    Clay_SetMaxElementCount(static_cast<int32_t>(ctx->max_layout_elements));
-    Clay_SetMaxMeasureTextCacheWordCount(static_cast<int32_t>(ctx->max_layout_elements * 4u));
-    const uint32_t size = Clay_MinMemorySize();
-    ui.clay_mem = std::malloc(size);
-    if (!ui.clay_mem) { Clay_SetCurrentContext(saved_clay); state_map_destroy(&ui.states); std::free(allocated); return false; }
-    Clay_Context* prev_clay = saved_clay;
-    ui.clay_ctx = Clay_Initialize(Clay_CreateArenaWithCapacityAndMemory(size, ui.clay_mem),
-        Clay_Dimensions{static_cast<float>(ui.viewport_w) / ui.dpi_scale, static_cast<float>(ui.viewport_h) / ui.dpi_scale},
-        Clay_ErrorHandler{etch_clay_error_handler, ctx});
-    if (ui.clay_ctx) Clay_SetMeasureTextFunction(etch_measure_text, ctx);
-    Clay_SetCurrentContext(prev_clay);
-    if (!ui.clay_ctx) {
-        std::free(ui.clay_mem); state_map_destroy(&ui.states); ui = WindowUiState{}; std::free(allocated); return false;
+    if (!ensure_window_ui_clay(
+            ctx,
+            &ui,
+            static_cast<float>(ui.viewport_w) / ui.dpi_scale,
+            static_cast<float>(ui.viewport_h) / ui.dpi_scale))
+    {
+        state_map_destroy(&ui.states);
+        ui = WindowUiState{};
+        std::free(allocated);
+        return false;
     }
     if (!SDL_ClaimWindowForGPUDevice(ctx->device, win)) {
         std::free(ui.clay_mem); state_map_destroy(&ui.states); ui = WindowUiState{}; std::free(allocated); return false;
@@ -1535,11 +1529,6 @@ Context* create_context(const ContextDesc& desc) noexcept {
         return nullptr;
     }
 
-    if (!state_map_init(&ctx->active_ui->states, kDefaultStateCapacity)) {
-        destroy_context(ctx);
-        return nullptr;
-    }
-
     ctx->prims = static_cast<Prim*>(std::calloc(ctx->max_prims, sizeof(Prim)));
     if (!ctx->prims) {
         destroy_context(ctx);
@@ -1554,29 +1543,13 @@ Context* create_context(const ContextDesc& desc) noexcept {
     // font_atlas_init clears the atlas, including its scratch pointer.
     ctx->atlas.scratch = &ctx->frame_arena;
 
-    // Initialize Clay layout arena cleanly.
-    Clay_Context* saved_clay = Clay_GetCurrentContext();
-    Clay_SetCurrentContext(nullptr);
-    Clay_SetMaxElementCount(static_cast<int32_t>(ctx->max_layout_elements));
-    Clay_SetMaxMeasureTextCacheWordCount(static_cast<int32_t>(ctx->max_layout_elements * 4u));
-    const uint32_t clay_min = Clay_MinMemorySize();
-    ctx->active_ui->clay_mem = std::malloc(clay_min);
-    if (!ctx->active_ui->clay_mem) {
-        Clay_SetCurrentContext(saved_clay);
-        destroy_context(ctx);
-        return nullptr;
-    }
-    const Clay_Arena clay_arena = Clay_CreateArenaWithCapacityAndMemory(clay_min, ctx->active_ui->clay_mem);
-    Clay_Context* prev_clay = saved_clay;
-    ctx->active_ui->clay_ctx = Clay_Initialize(
-        clay_arena,
-        Clay_Dimensions{ 1280.0f, 720.0f },
-        Clay_ErrorHandler{ etch_clay_error_handler, ctx });
-    if (ctx->active_ui->clay_ctx) Clay_SetMeasureTextFunction(etch_measure_text, ctx);
-    Clay_SetCurrentContext(prev_clay);
-    if (!ctx->active_ui->clay_ctx) {
-        destroy_context(ctx);
-        return nullptr;
+    // Only allocate the headless Clay arena eagerly for headless contexts; windowed contexts
+    // own per-window arenas via claim_window_swapchain() and initialize headless_ui lazily if ever needed.
+    if (desc.window == nullptr && desc.headless) {
+        if (!ensure_window_ui_clay(ctx, &ctx->headless_ui, 1280.0f, 720.0f)) {
+            destroy_context(ctx);
+            return nullptr;
+        }
     }
 
     if (desc.window != nullptr || !desc.headless) {
