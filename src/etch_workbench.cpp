@@ -132,7 +132,7 @@ bool begin_sheet(const SheetDesc& d) noexcept {
     if(!ws->sheet_initialized) {ws->sheet_snap=d.snap_count-1;ws->sheet_initialized=true;}
     if(d.snap_index) ws->sheet_snap=*d.snap_index<d.snap_count ? *d.snap_index : d.snap_count-1;
     if(ws->sheet_snap>=d.snap_count) ws->sheet_snap=d.snap_count-1;
-    if(open_val && d.open_state && d.dismiss_on_escape && key_pressed(SDLK_ESCAPE,false)) {
+    if(open_val && d.open_state && d.dismiss_on_escape && ui.popup_count==0u && ui.modal_count==0u && !ui.frame_escape_consumed_by_ime && consume_key_pressed(SDLK_ESCAPE,false)) {
         *d.open_state=false;open_val=false;request_redraw(ctx);
     }
     if(open_val && d.open_state && d.dismiss_on_backdrop && clicked(scrim_id)) {
@@ -192,6 +192,9 @@ bool begin_sheet(const SheetDesc& d) noexcept {
         .clip_children=true,
         .attach_to=AttachTo::Root,.anchor_parent=Anchor::TopLeft,.floating_offset=offset,.z_index=d.z_index,
         .backdrop_blur=d.backdrop_blur,.continuous_corners=(inset>0.f || top_inset>0.f)});
+    const bool focus_scoped = (d.dismiss_on_backdrop || d.backdrop_color.a > 0u) && ui.sheet_depth < 16u;
+    if (ui.sheet_depth < 16u) ui.sheet_focus_scoped[ui.sheet_depth++] = focus_scoped;
+    if (focus_scoped) begin_focus_scope(d.id, false);
     if(d.show_handle) {
         begin_box({.id=handle,.width=bottom ? Sizing::grow() : Sizing::fixed(24),
             .height=bottom ? Sizing::fixed(24) : Sizing::grow(),.align_x=AlignX::Center,.align_y=AlignY::Center,
@@ -205,5 +208,10 @@ bool begin_sheet(const SheetDesc& d) noexcept {
     }
     return true;
 }
-void end_sheet() noexcept {end_box();}
+void end_sheet() noexcept {
+    if (Context* ctx = current_context(); ctx && ctx->in_frame && ctx->active_ui->sheet_depth > 0u) {
+        if (ctx->active_ui->sheet_focus_scoped[--ctx->active_ui->sheet_depth]) end_focus_scope();
+    }
+    end_box();
+}
 } // namespace etch

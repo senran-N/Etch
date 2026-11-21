@@ -10,6 +10,8 @@ void end_frame(Context* ctx_arg) noexcept {
     }
     ctx->theme_depth = 0u;
     ctx->theme_overflow = 0u;
+    ctx->active_ui->id_stack_depth = 0u;
+    ctx->active_ui->id_stack_overflow = 0u;
     Clay_SetCurrentContext(ctx->active_ui->clay_ctx);
 
     while (ctx->active_ui->collapsible_depth) end_collapsible();
@@ -39,6 +41,8 @@ void end_frame(Context* ctx_arg) noexcept {
     }
     bool corrected_heights = false;
     for (auto* rec = ctx->active_ui->active_vlists; rec; rec = rec->next) {
+        // Lock variable row heights while actively dragging this list's vertical scrollbar thumb to prevent thumb jitter.
+        if (ctx->active_ui->active_id == id_index(rec->list_id, kScrollbarYTag)) continue;
         auto* cache = find_vlist(ctx->active_ui,rec->list_id);
         auto* entry = Clay__GetHashMapItem(make_clay_id(rec->list_id).id);
         if (!cache || entry == &Clay_LayoutElementHashMapItem_DEFAULT) continue;
@@ -875,6 +879,19 @@ void end_frame(Context* ctx_arg) noexcept {
     ctx->active_ui->frame_drop_count = 0;
     ctx->active_ui->frame_text_drop_count = 0;
     ctx->active_ui->has_delivered_drop_pos = false;
+    if (ctx->active_ui->states.count > 128u &&
+        (ctx->active_ui->states.count * 4u >= ctx->active_ui->states.capacity * 3u ||
+         (ctx->active_ui->frame_index & 127u) == 0u))
+    {
+        state_map_prune(
+            &ctx->active_ui->states,
+            ctx->active_ui->frame_index,
+            ctx->active_ui->focus_id,
+            ctx->active_ui->active_id,
+            ctx->active_ui->right_active_id,
+            ctx->active_ui->ime_focused_id,
+            true);
+    }
     if (ctx->active_ui->tooltip_frame_winner != ctx->active_ui->tooltip_prev_winner &&
         ctx->active_ui->tooltip_frame_winner != 0u &&
         ctx->active_ui->redraw_budget == 0u)

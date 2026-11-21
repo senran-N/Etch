@@ -301,6 +301,15 @@ static bool test_layout_widgets_and_a11y(EtchContext* ctx) {
     etch_end_box();
     etch_end_frame(ctx);
 
+    etch_push_id(10u);
+    const uint32_t sid_a = etch_scoped_id_str(ETCH_STR_LIT("item"));
+    etch_pop_id();
+    etch_push_id(20u);
+    const uint32_t sid_b = etch_scoped_id_str(ETCH_STR_LIT("item"));
+    etch_pop_id();
+    ok = ok && (sid_a != 0u) && (sid_b != 0u) && (sid_a != sid_b);
+    ok = ok && !etch_consume_key_pressed(0u, false) && !etch_consume_shortcut(0u, 0u, false);
+
     return ok && chk_toggled && checked;
 }
 

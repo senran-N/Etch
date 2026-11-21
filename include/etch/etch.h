@@ -314,14 +314,14 @@ constexpr uint32_t pack_unorm16x2(float u, float v) noexcept {
 // Compile-time FNV-1a 32-bit semantic ID for cross-frame state lookup.
 constexpr uint32_t id(const char* label, uint32_t seed = 0x811C9DC5u) noexcept {
     if (!label) {
-        return seed;
+        return seed ? seed : 1u;
     }
     uint32_t hash = seed;
     for (size_t i = 0; label[i] != '\0'; ++i) {
         hash ^= static_cast<uint8_t>(label[i]);
         hash *= 0x01000193u;
     }
-    return hash;
+    return hash ? hash : 1u;
 }
 
 constexpr uint32_t id_index(uint32_t base_id, uint32_t index) noexcept {
@@ -330,8 +330,14 @@ constexpr uint32_t id_index(uint32_t base_id, uint32_t index) noexcept {
         hash ^= (index >> shift) & 0xFFu;
         hash *= 0x01000193u;
     }
-    return hash;
+    return hash ? hash : 1u;
 }
+
+void push_id(uint32_t scope_id) noexcept;
+void push_id(Str label) noexcept;
+void pop_id() noexcept;
+uint32_t scoped_id(uint32_t local_id) noexcept;
+uint32_t scoped_id(Str label) noexcept;
 
 // ============================================================================
 // Frame Linear Allocator (O(1) Reset, Zero Heap Churn on Hot Path)
@@ -2340,7 +2346,7 @@ struct SheetDesc {
     uint32_t* snap_index = nullptr; // Optional caller-owned selection; updated after a drag.
     Color background = Color::theme_auto();
     SpringSpec motion = SpringSpec::fluid();
-    int16_t z_index = 16000;
+    int16_t z_index = 160;
     bool* open_state = nullptr;       // Optional writable open flag updated on backdrop/Escape/snap-0 dismissal.
     bool dismiss_on_backdrop = false;
     bool dismiss_on_escape = false;
@@ -2484,7 +2490,9 @@ bool screen_to_element_local(uint32_t element_id, Vec2 screen_pos, Vec2* out_loc
 // Pro desktop input, shortcuts, popover dismissal & file drops
 uint16_t key_mods() noexcept;
 bool key_pressed(uint32_t keycode, bool include_repeat = false) noexcept;
+bool consume_key_pressed(uint32_t keycode, bool include_repeat = false) noexcept;
 bool shortcut(uint16_t required_mods, uint32_t keycode, bool allow_when_typing = false) noexcept;
+bool consume_shortcut(uint16_t required_mods, uint32_t keycode, bool allow_when_typing = false) noexcept;
 
 Vec2 pointer_pos() noexcept;
 Vec2 pointer_delta() noexcept;

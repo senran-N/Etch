@@ -159,6 +159,7 @@ struct WidgetState {
     Vec2     drag_grab = {};
     bool     is_text_span = false;
     bool     span_hovered = false;
+    float    vscrollbar_right_edge_x = 0.0f;
 };
 
 struct StateMap {
@@ -658,6 +659,7 @@ struct KeyEventEntry {
     uint32_t key = 0;
     uint16_t mods = 0;
     bool     repeat = false;
+    bool     consumed = false;
 };
 
 struct TextUndoRecord {
@@ -702,7 +704,7 @@ struct DockSpaceSlot {
     uint32_t id = 0; uint32_t root = 0; uint32_t split_seq = 0;
     DockNode* nodes = nullptr; uint32_t node_cap = 0; DockTabSlot* tabs = nullptr; uint32_t tab_cap = 0;
 };
-struct DockTraverseEntry { uint32_t node_idx = 0; uint8_t phase = 0; };
+struct DockTraverseEntry { uint32_t node_idx = 0; uint8_t phase = 0; bool split_pushed = false; };
 struct DockCursor {
     DockSpaceSlot* space = nullptr; DockSpaceDesc desc = {};
     DockTraverseEntry* stack = nullptr; uint32_t traverse_cap = 0; uint32_t depth = 0;
@@ -732,6 +734,7 @@ struct VarVirtualListCache {
     double* fenwick = nullptr;
     double total_stride_sum = 0;
     uint32_t last_anchor_row = 0;
+    float measured_width = 0.0f;
     bool dirty = false;
     bool uncapped_heights = false;
     VirtualItemHeightFn measure_fn = nullptr;
@@ -767,6 +770,9 @@ struct WindowUiState {
     uint32_t drag_edit_pending_id = 0;
     char drag_edit_pending_buf[64] = {};
     uint32_t modal_depth = 0;
+    uint32_t prev_top_modal_id = 0; uint32_t top_modal_id = 0;
+    uint32_t id_stack[32] = {}; uint32_t id_stack_depth = 0; uint32_t id_stack_overflow = 0;
+    uint8_t sheet_depth = 0; bool sheet_focus_scoped[16] = {};
     DesktopPopup popups[16] = {}; uint32_t popup_count = 0; uint32_t popup_depth = 0; uint32_t popup_build_ids[16] = {};
     TabBarDesc tab_bars[8] = {}; uint32_t tab_bar_depth = 0;
     uint32_t menu_bar_id = 0; uint32_t menu_owner = 0; uint32_t menu_open_id = 0;
@@ -824,6 +830,10 @@ struct WindowUiState {
     bool       event_pointer_down = false;
     bool       event_right_down = false;
     bool       event_middle_down = false;
+    bool       event_left_pressed_edge = false;
+    bool       event_left_released_edge = false;
+    bool       event_right_pressed_edge = false;
+    bool       event_right_released_edge = false;
     Vec2       event_scroll_delta = {};
     Vec2       frame_scroll_delta = {};
     bool       prev_pointer_down = false;
@@ -1352,6 +1362,72 @@ WidgetState* state_map_find(StateMap* map, uint32_t key) noexcept {
     }
 }
 
+bool state_is_persistent(const WidgetState& ws) noexcept {
+    return ws.is_scroll_x || ws.is_scroll_y || ws.is_virtual_list ||
+           ws.split_initialized || ws.tree_initialized || ws.collapsible_initialized ||
+           ws.edit_initialized || ws.table_initialized || ws.column_override ||
+           ws.canvas_initialized || ws.sheet_initialized || ws.spring_initialized ||
+           ws.presence_initialized || ws.terminal_initialized;
+}
+
+bool state_map_prune(
+    StateMap* map,
+    uint32_t frame_index,
+    uint32_t keep_a,
+    uint32_t keep_b,
+    uint32_t keep_c,
+    uint32_t keep_d,
+    bool allow_shrink) noexcept
+{
+    if (!map || !map->entries || map->capacity == 0u || frame_index < 120u) {
+        return false;
+    }
+    const uint32_t cutoff = frame_index - 120u;
+    uint32_t live = 0u;
+    uint32_t evictable = 0u;
+    for (uint32_t i = 0u; i < map->capacity; ++i) {
+        const WidgetState& ws = map->entries[i];
+        if (ws.key == 0u) continue;
+        const bool keep = ws.last_seen_frame > cutoff || state_is_persistent(ws) ||
+            ws.pressed_down || ws.key == keep_a || ws.key == keep_b || ws.key == keep_c || ws.key == keep_d;
+        if (keep) ++live; else ++evictable;
+    }
+    if (evictable == 0u || (evictable * 4u < map->count && !allow_shrink)) {
+        return false;
+    }
+    uint32_t new_cap = map->capacity;
+    if (allow_shrink) {
+        while (new_cap > kDefaultStateCapacity && live * 8u < new_cap) {
+            new_cap >>= 1u;
+        }
+    }
+    if ((live + 1u) * 4u >= new_cap * 3u) {
+        new_cap <<= 1u;
+    }
+    WidgetState* next = static_cast<WidgetState*>(std::calloc(new_cap, sizeof(WidgetState)));
+    if (!next) {
+        return false;
+    }
+    const uint32_t mask = new_cap - 1u;
+    uint32_t written = 0u;
+    for (uint32_t i = 0u; i < map->capacity; ++i) {
+        const WidgetState& ws = map->entries[i];
+        if (ws.key == 0u) continue;
+        const bool keep = ws.last_seen_frame > cutoff || state_is_persistent(ws) ||
+            ws.pressed_down || ws.key == keep_a || ws.key == keep_b || ws.key == keep_c || ws.key == keep_d;
+        if (!keep) continue;
+        uint32_t idx = hash_u32(ws.key) & mask;
+        while (next[idx].key != 0u) idx = (idx + 1u) & mask;
+        next[idx] = ws;
+        ++written;
+    }
+    std::free(map->entries);
+    map->entries = next;
+    map->capacity = new_cap;
+    map->count = written;
+    return true;
+}
+
 WidgetState* state_map_get_or_insert(StateMap* map, uint32_t key, uint32_t frame_index) noexcept {
     if (!map || key == 0u) {
         return nullptr;
@@ -1360,8 +1436,12 @@ WidgetState* state_map_get_or_insert(StateMap* map, uint32_t key, uint32_t frame
         return nullptr;
     }
     if ((map->count + 1u) * 4u >= map->capacity * 3u) {
-        if (!state_map_rehash(map, map->capacity * 2u)) {
-            return nullptr;
+        if (!state_map_prune(map, frame_index, 0u, 0u, 0u, 0u, false) ||
+            (map->count + 1u) * 4u >= map->capacity * 3u)
+        {
+            if (!state_map_rehash(map, map->capacity * 2u)) {
+                return nullptr;
+            }
         }
     }
     const uint32_t mask = map->capacity - 1u;

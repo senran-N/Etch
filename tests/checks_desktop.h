@@ -162,6 +162,42 @@ static bool verify_desktop_checks(etch::Context* restore) noexcept {
     leaf=dock_find_pane_leaf(dock,p1);lr=element_bounds(id_index(dock,0xD200+leaf));drag(p2,{lr.x+lr.w*.5f,lr.y+lr.h*.5f});check(dock_find_pane_leaf(dock,p2)==dock_find_pane_leaf(dock,p1),__LINE__);
     const Rect tr=element_bounds(id_index(p1,0xD300));drag(p2,{tr.x+2,tr.y+tr.h*.5f});check(element_bounds(id_index(p2,0xD300)).x<element_bounds(id_index(p1,0xD300)).x,__LINE__);
     click(id_index(p2,0xD301));step();check(!dock_is_pane_open(dock,p2),__LINE__);
+    // E3 checks: scoped IDs, intra-frame fast click, consuming Escape on stacked modals, and z-index hierarchy.
+    {
+        check(SheetDesc{}.z_index < ModalDesc{}.z_index && ModalDesc{}.z_index < PopupDesc{}.z_index && PopupDesc{}.z_index < TooltipDesc{}.z_index, __LINE__);
+        push_id(id("row_a")); const uint32_t sa = scoped_id(id("del")); pop_id();
+        push_id(id("row_b")); const uint32_t sb = scoped_id(id("del")); pop_id();
+        check(sa != 0u && sb != 0u && sa != sb && sa != id("del"), __LINE__);
+
+        // Intra-frame fast press+release via SDL events must trigger clicked().
+        const Vec2 bp = center(id_index(id("desktop_test"), 100));
+        const int before_hits = hits;
+        SDL_Event dn = {}, up = {};
+        dn.type = SDL_EVENT_MOUSE_BUTTON_DOWN; dn.button.button = SDL_BUTTON_LEFT; dn.button.down = true; dn.button.clicks = 1; dn.button.x = bp.x; dn.button.y = bp.y;
+        up.type = SDL_EVENT_MOUSE_BUTTON_UP;   up.button.button = SDL_BUTTON_LEFT; up.button.down = false; up.button.clicks = 1; up.button.x = bp.x; up.button.y = bp.y;
+        process_event(test, dn); process_event(test, up);
+        step(Vec2{NAN, NAN});
+        check(hits == before_hits + 1, __LINE__);
+
+        // Stacked modals: single Escape must dismiss ONLY the topmost modal.
+        bool m1 = true, m2 = true;
+        auto step_modals = [&](uint32_t k = 0) noexcept {
+            begin_frame(test, {.viewport_w = 800, .viewport_h = 800, .dt_seconds = 1.f/60, .key_pressed_code = k});
+            begin_box({.width = Sizing::fixed(800), .height = Sizing::fixed(800)});
+            if (begin_modal({.id = id("stack_m1"), .open = &m1, .title = str_lit("Outer")})) {
+                if (begin_modal({.id = id("stack_m2"), .open = &m2, .title = str_lit("Inner")})) {
+                    end_modal();
+                }
+                end_modal();
+            }
+            end_box(); end_frame(test);
+        };
+        step_modals(); step_modals();
+        step_modals(SDLK_ESCAPE);
+        check(m1 && !m2, __LINE__);
+        step_modals(SDLK_ESCAPE);
+        check(!m1 && !m2, __LINE__);
+    }
     for(int i=0;i<80;++i) step();
     check(render_headless_png(test,800,800,"etch_desktop_check.png"),__LINE__);
     const auto stats=frame_stats(test);check(stats.draw_call_count<=3 && stats.idle_sleeping,__LINE__);

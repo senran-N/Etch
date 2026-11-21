@@ -553,6 +553,13 @@ VirtualListSlice begin_virtual_list_with_c_measure(const VirtualListDesc& desc, 
 
     auto* cache = (desc.variable_height || desc.measure_height_fn || c_measure_fn) ? prepare_vlist(ctx->active_ui,desc,item_h,gap_px,c_measure_fn) : nullptr;
     if (!desc.variable_height && !desc.measure_height_fn && !c_measure_fn) { auto* stale = find_vlist(ctx->active_ui,desc.id); if (stale) free_vlist(stale); }
+    if (cache && ws->last_box_logical.w > 1.0f) {
+        if (cache->measured_width > 1.0f && std::fabs(cache->measured_width - ws->last_box_logical.w) > 0.5f) {
+            if (!cache->measure_fn && !cache->c_measure_fn) reset_vlist_heights(cache);
+            else { cache->dirty = true; remeasure_vlist_dirty_chunks(cache); }
+        }
+        cache->measured_width = ws->last_box_logical.w;
+    }
 
     ws->is_user_element = true;
     ws->is_scroll_x = false;
@@ -1042,14 +1049,14 @@ void canvas_wire(const CanvasWireDesc& desc) noexcept {
 
     Clay__OpenElement();
     Clay_ElementDeclaration decl = {};
-    decl.layout.sizing.width = CLAY_SIZING_FIXED(0.0f);
-    decl.layout.sizing.height = CLAY_SIZING_FIXED(0.0f);
+    decl.layout.sizing.width = CLAY_SIZING_PERCENT(1.0f);
+    decl.layout.sizing.height = CLAY_SIZING_PERCENT(1.0f);
     decl.custom.customData = extra;
     decl.userData = extra;
     decl.floating.attachTo = CLAY_ATTACH_TO_PARENT;
     decl.floating.attachPoints = Clay_FloatingAttachPoints{
-        .element = CLAY_ATTACH_POINT_CENTER_CENTER,
-        .parent = CLAY_ATTACH_POINT_CENTER_CENTER,
+        .element = CLAY_ATTACH_POINT_LEFT_TOP,
+        .parent = CLAY_ATTACH_POINT_LEFT_TOP,
     };
     decl.floating.zIndex = desc.z_index;
     decl.floating.pointerCaptureMode = CLAY_POINTER_CAPTURE_MODE_PASSTHROUGH;
@@ -1422,11 +1429,21 @@ uint32_t next_dock_pane() noexcept {
         auto& e = c.stack[c.depth - 1]; auto& n = s->nodes[e.node_idx - 1];
         if (n.first) {
             if (e.phase == 0) {
+                const uint32_t prev_splits = ctx->active_ui->split_depth;
                 begin_split({ .id = n.split_id, .axis = n.axis, .default_ratio = split_ratio(n.split_id),
                     .min_first_px = n.min_first, .min_second_px = n.min_second, .divider_size_px = d.divider_size_px });
-                e.phase = 1; c.stack[c.depth++] = {n.first, 0};
-            } else if (e.phase == 1) { split_second(); e.phase = 2; c.stack[c.depth++] = {n.second, 0}; }
-            else { end_split(); --c.depth; }
+                e.split_pushed = (ctx->active_ui->split_depth > prev_splits);
+                if (!e.split_pushed) {
+                    begin_box({ .axis = n.axis, .width = Sizing::grow(), .height = Sizing::grow() });
+                }
+                e.phase = 1; c.stack[c.depth++] = {n.first, 0, false};
+            } else if (e.phase == 1) {
+                if (e.split_pushed) split_second();
+                e.phase = 2; c.stack[c.depth++] = {n.second, 0, false};
+            } else {
+                if (e.split_pushed) end_split(); else end_box();
+                --c.depth;
+            }
             continue;
         }
         const uint32_t leaf = e.node_idx; --c.depth; n.active = dock_visible(s, leaf); if (!n.active) continue;
@@ -1551,8 +1568,11 @@ void paint_table_header(Rect bounds, void* data) noexcept {
     const auto& p=*static_cast<const TableHeaderPaint*>(data);
     Context* ctx=current_context();
     auto* meta=table_metadata(ctx,p.table_id);
+    if (!meta || p.column >= kMaxTableColumns) return;
     meta->widths[p.column]=bounds.w;
-    state_map_find(&ctx->active_ui->states,meta->column_ids[p.column])->column_width=bounds.w;
+    if (WidgetState* cws = state_map_find(&ctx->active_ui->states, meta->column_ids[p.column])) {
+        cws->column_width = bounds.w;
+    }
     if (p.lines) draw_line({.from={bounds.w-1,0},.to={bounds.w-1,bounds.h},.color=p.border});
     if (p.sorted) {
         const float x=bounds.w-14,y=bounds.h*.5f,dir=p.descending?3.0f:-3.0f;
@@ -1690,7 +1710,9 @@ TableResult begin_table(const TableDesc& desc_in) noexcept {
     for (uint32_t c = 0; c < t.count; ++c) {
         const auto& col = t.columns[c]; const uint32_t cid = table_col_id(desc, c), hid = id_index(cid, 0x7601u), rid = id_index(cid, 0x7600u);
         auto* cw = state_map_find(&ctx->active_ui->states, cid); cw->column_width = t.col_widths[c];
-        if (col.sortable && clicked(hid) && !resizing) {
+        const bool header_kbd = focused(hid) && ctx->active_ui->ime_comp_len == 0u &&
+            (consume_key_pressed(SDLK_RETURN) || consume_key_pressed(SDLK_KP_ENTER) || consume_key_pressed(SDLK_SPACE));
+        if (col.sortable && (clicked(hid) || header_kbd) && !resizing) {
             result.sort_descending = result.sort_column == c ? !result.sort_descending : true;
             result.sort_column = c; result.sort_changed = true;
         }
@@ -1720,6 +1742,10 @@ TableResult begin_table(const TableDesc& desc_in) noexcept {
     Clay__GetOpenLayoutElement()->config.layout.shrinkHeight = true;
     // Rows own the horizontal insets, including the scrollbar gutter. Keep the list's vertical padding.
     ws=state_map_find(&ctx->active_ui->states,desc.id);
+    const WidgetState* outer_ws = desc.horizontal_scroll ? state_map_find(&ctx->active_ui->states, outer_id) : nullptr;
+    ws->vscrollbar_right_edge_x = (outer_ws && outer_ws->last_box_logical.w > 1.0f)
+        ? (outer_ws->last_box_logical.x + outer_ws->last_box_logical.w)
+        : 0.0f;
     ws->is_focusable=desc.keyboard_navigation;
     if(desc.keyboard_navigation && reserve_focus(ctx->active_ui)) ctx->active_ui->focus_order[ctx->active_ui->focus_count++]=desc.id;
     a11y_semantic(desc.id,A11yRole::Table,{},0,desc.keyboard_navigation ? 1u : 0u);

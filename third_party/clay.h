@@ -2372,6 +2372,7 @@ void Clay__ConfigureOpenElementPtr(const Clay_ElementDeclaration *declaration) {
                 scrollOffset = mapping;
                 scrollOffset->layoutElement = openLayoutElement;
                 scrollOffset->openThisFrame = true;
+                break;
             }
         }
         if (!scrollOffset) {
@@ -4565,6 +4566,7 @@ void Clay_UpdateScrollContainers(bool enableDragScrolling, Clay_Vector2 scrollDe
         Clay__ScrollContainerDataInternal *scrollData = Clay__ScrollContainerDataInternalArray_Get(&context->scrollContainerDatas, i);
         if (!scrollData->openThisFrame) {
             Clay__ScrollContainerDataInternalArray_RemoveSwapback(&context->scrollContainerDatas, i);
+            i--;
             continue;
         }
         scrollData->openThisFrame = false;
@@ -4572,6 +4574,7 @@ void Clay_UpdateScrollContainers(bool enableDragScrolling, Clay_Vector2 scrollDe
         // Element isn't rendered this frame but scroll offset has been retained
         if (!hashMapItem) {
             Clay__ScrollContainerDataInternalArray_RemoveSwapback(&context->scrollContainerDatas, i);
+            i--;
             continue;
         }
 

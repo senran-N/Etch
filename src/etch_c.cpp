@@ -1481,10 +1481,20 @@ bool etch_screen_to_element_local(uint32_t element_id, EtchVec2 screen_pos, Etch
 }
 EtchRect etch_element_bounds(uint32_t element_id) { return from_cpp(etch::element_bounds(element_id)); }
 
+void etch_push_id(uint32_t scope_id) { etch::push_id(scope_id); }
+void etch_push_id_str(EtchStr label) { etch::push_id(to_cpp(label)); }
+void etch_pop_id(void) { etch::pop_id(); }
+uint32_t etch_scoped_id(uint32_t local_id) { return etch::scoped_id(local_id); }
+uint32_t etch_scoped_id_str(EtchStr label) { return etch::scoped_id(to_cpp(label)); }
+
 uint16_t etch_key_mods(void) { return etch::key_mods(); }
 bool etch_key_pressed(uint32_t keycode, bool include_repeat) { return etch::key_pressed(keycode, include_repeat); }
+bool etch_consume_key_pressed(uint32_t keycode, bool include_repeat) { return etch::consume_key_pressed(keycode, include_repeat); }
 bool etch_shortcut(uint16_t required_mods, uint32_t keycode, bool allow_when_typing) {
     return etch::shortcut(required_mods, keycode, allow_when_typing);
+}
+bool etch_consume_shortcut(uint16_t required_mods, uint32_t keycode, bool allow_when_typing) {
+    return etch::consume_shortcut(required_mods, keycode, allow_when_typing);
 }
 
 EtchVec2 etch_pointer_pos(void) { return from_cpp(etch::pointer_pos()); }

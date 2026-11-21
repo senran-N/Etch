@@ -286,7 +286,7 @@ bool is_popup_open(uint32_t id) noexcept {
     for(uint32_t i=0;i<ui.popup_count;++i) { if(ui.popups[i].id==id) return true; } return false;
 }
 bool begin_popup(const PopupDesc& d) noexcept {
-    if(!desktop_frame(d.id) || !is_popup_open(d.id)) return false;
+    if(!desktop_frame(d.id) || !is_popup_open(d.id) || current_context()->active_ui->popup_depth >= 16u) return false;
     if(a11y_take(d.id,A11yAction::Dismiss)){close_popup(d.id);return false;}
     auto& ui=*current_context()->active_ui; DesktopPopup pop={};
     for(uint32_t i=0;i<ui.popup_count;++i) if(ui.popups[i].id==d.id) pop=ui.popups[i];
@@ -349,7 +349,12 @@ bool menu_item(const MenuItemDesc& d) noexcept {
     begin_box({.width=Sizing::grow()});end_box();
     desktop_label(d.shortcut_hint,12,kFontSans,thm.text_muted);end_box();
     if(d.separator_after) menu_separator();
-    if(hit) close_popup();
+    if(hit) {
+        auto& ui=*current_context()->active_ui;
+        if(ui.menu_open_id) close_popup(ui.menu_open_id);
+        else if(ui.popup_depth) close_popup(ui.popup_build_ids[ui.popup_depth-1u]);
+        else close_popup();
+    }
     return hit;
 }
 void menu_separator() noexcept {begin_box({.width=Sizing::grow(),.height=Sizing::fixed(1),.background=active_theme(current_context()).border_control});end_box();}
@@ -399,7 +404,7 @@ bool combo_box(const ComboBoxDesc& d) noexcept {
                 reveal=sel!=previous;
             }
             sel=sel<0 ? 0 : sel>=int(d.items.size()) ? int(d.items.size())-1 : sel;index=sel;
-            if(!just_opened && combo_owns_focus && !ime_active && (key_pressed(SDLK_RETURN) || key_pressed(SDLK_KP_ENTER))) {
+            if(!just_opened && combo_owns_focus && !ime_active && (consume_key_pressed(SDLK_RETURN) || consume_key_pressed(SDLK_KP_ENTER))) {
                 *d.selected_index=sel;changed=true;close_popup(pop);
             }
             break;
@@ -420,11 +425,12 @@ bool combo_box(const ComboBoxDesc& d) noexcept {
         for(uint32_t i=0;i<ui.popup_count;++i) if(ui.popups[i].id==pop) opened=ui.popups[i].opened_frame==ui.frame_index;
         if(begin_popup({.id=pop,.trigger_id=d.id,.height=Sizing::fixed(height),.attach_to_trigger=true,.match_trigger_width=true,.scroll_y=false})) {
             if((opened || reveal) && index>=0) {
-                auto* ws=state_map_get_or_insert(&current_context()->active_ui->states,list,ui.frame_index);
-                ws->viewport_dim.y=height-12;ws->vlist_stride=28;
-                const double top=double(index)*28,bottom=top+26;
-                if(opened || top<ws->vscroll_pos_y || bottom>ws->vscroll_pos_y+height-12)
-                    virtual_list_scroll_to_row(list,uint32_t(index),28,top<ws->vscroll_pos_y ? AlignY::Top : AlignY::Bottom);
+                if(auto* ws=state_map_get_or_insert(&current_context()->active_ui->states,list,ui.frame_index)) {
+                    ws->viewport_dim.y=height-12;ws->vlist_stride=28;
+                    const double top=double(index)*28,bottom=top+26;
+                    if(opened || top<ws->vscroll_pos_y || bottom>ws->vscroll_pos_y+height-12)
+                        virtual_list_scroll_to_row(list,uint32_t(index),28,top<ws->vscroll_pos_y ? AlignY::Top : AlignY::Bottom);
+                }
             }
             const VirtualListSlice slice=begin_virtual_list({.id=list,.item_count=uint32_t(d.items.size()),.item_height_px=26,.row_gap_px=2,
                 .width=Sizing::grow(),.height=Sizing::fixed(height-12),.background=Color::transparent()});
@@ -484,13 +490,21 @@ bool begin_modal(const ModalDesc& d) noexcept {
     auto& ui=*current_context()->active_ui;const uint32_t backdrop=id_index(d.id,0x2306);
     bool over_popup = false;
     for (uint32_t i=0;i<ui.popup_count;++i) over_popup |= element_bounds(ui.popups[i].id).contains(pointer_pos());
-    if((ui.popup_count==0 && d.dismiss_on_escape && !ui.frame_escape_consumed_by_ime && key_pressed(SDLK_ESCAPE)) || (!over_popup && d.dismiss_on_backdrop && ui.left_pressed_this_frame && element_bounds(backdrop).contains(pointer_pos()) && !element_bounds(d.id).contains(pointer_pos()))) {*d.open=false;request_redraw(current_context());return false;}
+    const bool is_top = (ui.prev_top_modal_id == 0u || ui.prev_top_modal_id == d.id);
+    const bool esc_dismiss = is_top && ui.popup_count==0 && d.dismiss_on_escape && !ui.frame_escape_consumed_by_ime && consume_key_pressed(SDLK_ESCAPE);
+    const bool backdrop_dismiss = is_top && !over_popup && d.dismiss_on_backdrop && ui.left_pressed_this_frame && element_bounds(backdrop).contains(pointer_pos()) && !element_bounds(d.id).contains(pointer_pos());
+    if(esc_dismiss || backdrop_dismiss) {
+        if(backdrop_dismiss) ui.left_pressed_this_frame=false;
+        *d.open=false;request_redraw(current_context());return false;
+    }
     if(a11y_take(d.id,A11yAction::Dismiss)){*d.open=false;return false;}
+    ui.top_modal_id=d.id;
+    const int16_t z = static_cast<int16_t>(d.z_index + static_cast<int16_t>(ui.modal_depth * 4u));
     const float dpi = ui.dpi_scale > 0.0f ? ui.dpi_scale : 1.0f;
-    begin_box({.id=backdrop,.width=Sizing::fixed(float(ui.viewport_w)/dpi),.height=Sizing::fixed(float(ui.viewport_h)/dpi),.background=resolve_theme_color(d.backdrop_color,thm.backdrop),.attach_to=AttachTo::Root,.anchor_parent=Anchor::TopLeft,.z_index=d.z_index});
+    begin_box({.id=backdrop,.width=Sizing::fixed(float(ui.viewport_w)/dpi),.height=Sizing::fixed(float(ui.viewport_h)/dpi),.background=resolve_theme_color(d.backdrop_color,thm.backdrop),.attach_to=AttachTo::Root,.anchor_parent=Anchor::TopLeft,.z_index=z});
     begin_focus_scope(d.id,true);
     begin_box({.id=d.id,.axis=Axis::Col,.width=Sizing::fixed(d.width_px),.height=d.height,.padding=Padding::all(18),.gap=12,.background=resolve_theme_color(d.background,thm.bg_popup),.border_color=resolve_theme_color(d.border_color,thm.border_control),.border_width=1,.radius=resolve_theme_corners(d.radius,Corners::all(thm.radius_panel_px)),
-        .attach_to=AttachTo::Parent,.anchor_element=Anchor::Center,.anchor_parent=Anchor::Center,.z_index=int16_t(d.z_index+1),.clamp_to_viewport=true});
+        .attach_to=AttachTo::Parent,.anchor_element=Anchor::Center,.anchor_parent=Anchor::Center,.z_index=static_cast<int16_t>(z+1),.clamp_to_viewport=true});
     a11y_semantic(d.id,A11yRole::Dialog,d.title,A11yState_Modal,64u);
     desktop_label(d.title,16,kFontBold);++ui.modal_depth;return true;
 }

@@ -276,11 +276,14 @@ ScrollbarGeom compute_vscrollbar_geom(const WidgetState* ws) noexcept {
     if (r_d < 0.0) r_d = 0.0;
     if (r_d > 1.0) r_d = 1.0;
     const float ratio = static_cast<float>(r_d);
-    const float thumb_x = b.x + b.w - kSbMargin - kSbThumbWidth;
+    const float right_edge = (ws->vscrollbar_right_edge_x > b.x + kSbHitWidth + 4.0f && ws->vscrollbar_right_edge_x < b.x + b.w)
+        ? ws->vscrollbar_right_edge_x
+        : (b.x + b.w);
+    const float thumb_x = right_edge - kSbMargin - kSbThumbWidth;
     const float track_y = b.y + kSbMargin;
 
     g.visible = true;
-    g.hit_track = Rect{ b.x + b.w - kSbMargin - kSbHitWidth, track_y, kSbHitWidth + kSbMargin, track_h };
+    g.hit_track = Rect{ right_edge - kSbMargin - kSbHitWidth, track_y, kSbHitWidth + kSbMargin, track_h };
     g.track = Rect{ thumb_x, track_y, kSbThumbWidth, track_h };
     g.thumb = Rect{ thumb_x, track_y + travel * ratio, kSbThumbWidth, thumb_h };
     g.travel_h = travel;

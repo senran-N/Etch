@@ -440,13 +440,13 @@ static ETCH_C_INLINE EtchStr etch_str_n(const char* s, uint32_t len, bool is_sta
 static ETCH_C_INLINE uint32_t etch_id_seed(const char* label, uint32_t seed) {
     uint32_t hash = seed;
     if (!label) {
-        return hash;
+        return hash ? hash : 1u;
     }
     for (size_t i = 0u; label[i] != '\0'; ++i) {
         hash ^= (uint8_t)label[i];
         hash *= 0x01000193u;
     }
-    return hash;
+    return hash ? hash : 1u;
 }
 
 static ETCH_C_INLINE uint32_t etch_id(const char* label) {
@@ -459,7 +459,7 @@ static ETCH_C_INLINE uint32_t etch_id_index(uint32_t base_id, uint32_t index) {
         hash ^= (index >> shift) & 0xFFu;
         hash *= 0x01000193u;
     }
-    return hash;
+    return hash ? hash : 1u;
 }
 
 static ETCH_C_INLINE EtchVec2 etch_vec2(float x, float y) {
@@ -2201,9 +2201,17 @@ bool etch_element_geometry(uint32_t element_id, EtchElementGeometry* out_geometr
 bool etch_screen_to_element_local(uint32_t element_id, EtchVec2 screen_pos, EtchVec2* out_local);
 
 
+void etch_push_id(uint32_t scope_id);
+void etch_push_id_str(EtchStr label);
+void etch_pop_id(void);
+uint32_t etch_scoped_id(uint32_t local_id);
+uint32_t etch_scoped_id_str(EtchStr label);
+
 uint16_t etch_key_mods(void);
 bool etch_key_pressed(uint32_t keycode, bool include_repeat);
+bool etch_consume_key_pressed(uint32_t keycode, bool include_repeat);
 bool etch_shortcut(uint16_t required_mods, uint32_t keycode, bool allow_when_typing);
+bool etch_consume_shortcut(uint16_t required_mods, uint32_t keycode, bool allow_when_typing);
 
 EtchVec2 etch_pointer_pos(void);
 EtchVec2 etch_pointer_delta(void);

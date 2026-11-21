@@ -855,9 +855,12 @@ static void process_window_event(Context* ctx, const SDL_Event& event) noexcept 
             if (event.button.button == SDL_BUTTON_LEFT) {
                 ctx->active_ui->event_pointer_pos = window_to_logical_pos_for(
                     ctx, SDL_GetWindowFromID(event.button.windowID), event.button.x, event.button.y);
-                ctx->active_ui->event_pointer_down = (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN);
+                const bool down = (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN);
+                ctx->active_ui->event_pointer_down = down;
+                if (down) ctx->active_ui->event_left_pressed_edge = true;
+                else ctx->active_ui->event_left_released_edge = true;
                 ctx->active_ui->has_event_pointer = true;
-                if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
+                if (down) {
                     ctx->active_ui->last_mouse_clicks = (event.button.clicks > 0u) ? event.button.clicks : 1u;
                     ctx->active_ui->caret_blink_on = true;
                     ctx->active_ui->caret_blink_cycles = 0u;
@@ -874,7 +877,10 @@ static void process_window_event(Context* ctx, const SDL_Event& event) noexcept 
                 ctx->active_ui->event_pointer_pos = window_to_logical_pos_for(
                     ctx, SDL_GetWindowFromID(event.button.windowID), event.button.x, event.button.y);
                 ctx->active_ui->has_event_pointer = true;
-                ctx->active_ui->event_right_down = (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN);
+                const bool rdown = (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN);
+                ctx->active_ui->event_right_down = rdown;
+                if (rdown) ctx->active_ui->event_right_pressed_edge = true;
+                else ctx->active_ui->event_right_released_edge = true;
                 request_redraw(ctx);
             }
             break;
@@ -1313,6 +1319,11 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
     ctx->active_ui->tooltip_prev_winner = ctx->active_ui->tooltip_frame_winner;
     ctx->active_ui->tooltip_frame_winner = 0u;
     ctx->active_ui->tooltip_frame_rank = 0u;
+    ctx->active_ui->prev_top_modal_id = ctx->active_ui->top_modal_id;
+    ctx->active_ui->top_modal_id = 0u;
+    ctx->active_ui->id_stack_depth = 0u;
+    ctx->active_ui->id_stack_overflow = 0u;
+    ctx->active_ui->sheet_depth = 0u;
     ctx->active_ui->drag_drop_pending = false;
     ctx->active_ui->drag_accepted_this_frame = false;
     if (ctx->active_ui->marquee_finished_canvas_id != 0u) {
@@ -1358,16 +1369,20 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
         ctx->active_ui->pointer_delta = Vec2{ 0.0f, 0.0f };
     }
 
+    const bool had_left_press = ctx->active_ui->event_left_pressed_edge;
+    const bool had_left_release = ctx->active_ui->event_left_released_edge;
+    ctx->active_ui->event_left_pressed_edge = false;
+    ctx->active_ui->event_left_released_edge = false;
     const bool pointer_down = desc.pointer_down || ctx->active_ui->event_pointer_down;
-    const bool pressed_this_frame = pointer_down && !ctx->active_ui->prev_pointer_down;
-    const bool released_this_frame = !pointer_down && ctx->active_ui->prev_pointer_down;
+    const bool pressed_this_frame = (pointer_down && !ctx->active_ui->prev_pointer_down) || (!ctx->active_ui->prev_pointer_down && had_left_press);
+    const bool released_this_frame = (!pointer_down && ctx->active_ui->prev_pointer_down) || (had_left_press && had_left_release && !pointer_down);
     ctx->active_ui->prev_pointer_down = pointer_down;
     ctx->active_ui->left_pressed_this_frame = pressed_this_frame;
     if (pressed_this_frame) ctx->active_ui->keyboard_focus_active = false;
     if (pressed_this_frame) {
         if (desc.pointer_clicks > 0u) {
             ctx->active_ui->last_mouse_clicks = desc.pointer_clicks;
-        } else if (!ctx->active_ui->event_pointer_down) {
+        } else if (!ctx->active_ui->event_pointer_down && !had_left_press) {
             ctx->active_ui->last_mouse_clicks = 1u;
         }
     }
@@ -1376,9 +1391,13 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
     const bool middle_pressed_this_frame = middle_down && !ctx->active_ui->prev_pan_button_down;
     ctx->active_ui->prev_pan_button_down = middle_down;
 
+    const bool had_right_press = ctx->active_ui->event_right_pressed_edge;
+    const bool had_right_release = ctx->active_ui->event_right_released_edge;
+    ctx->active_ui->event_right_pressed_edge = false;
+    ctx->active_ui->event_right_released_edge = false;
     const bool right_down = desc.right_pointer_down || ctx->active_ui->event_right_down;
-    const bool right_pressed_this_frame = right_down && !ctx->active_ui->prev_right_down;
-    const bool right_released_this_frame = !right_down && ctx->active_ui->prev_right_down;
+    const bool right_pressed_this_frame = (right_down && !ctx->active_ui->prev_right_down) || (!ctx->active_ui->prev_right_down && had_right_press);
+    const bool right_released_this_frame = (!right_down && ctx->active_ui->prev_right_down) || (had_right_press && had_right_release && !right_down);
     ctx->active_ui->prev_right_down = right_down;
     ctx->active_ui->right_pressed_this_frame = right_pressed_this_frame;
     if (right_pressed_this_frame || middle_pressed_this_frame) ctx->active_ui->keyboard_focus_active = false;
@@ -4086,6 +4105,55 @@ Rect element_bounds(uint32_t element_id) noexcept {
     };
 }
 
+void push_id(uint32_t scope_id) noexcept {
+    Context* ctx = current_context();
+    if (!ctx || !ctx->active_ui) return;
+    auto& ui = *ctx->active_ui;
+    const uint32_t seed = ui.id_stack_depth > 0u ? ui.id_stack[ui.id_stack_depth - 1u] : 0x811C9DC5u;
+    const uint32_t mixed = id_index(seed, scope_id);
+    if (ui.id_stack_depth < 32u) {
+        ui.id_stack[ui.id_stack_depth++] = mixed;
+    } else {
+        ++ui.id_stack_overflow;
+    }
+}
+
+void push_id(Str label) noexcept {
+    uint32_t h = 0x811C9DC5u;
+    if (label.chars && label.length > 0u) {
+        h = fnv1a_32_step(h, label.chars, label.length);
+    }
+    push_id(h ? h : 1u);
+}
+
+void pop_id() noexcept {
+    Context* ctx = current_context();
+    if (!ctx || !ctx->active_ui) return;
+    auto& ui = *ctx->active_ui;
+    if (ui.id_stack_overflow > 0u) {
+        --ui.id_stack_overflow;
+    } else if (ui.id_stack_depth > 0u) {
+        --ui.id_stack_depth;
+    }
+}
+
+uint32_t scoped_id(uint32_t local_id) noexcept {
+    const Context* ctx = current_context();
+    const uint32_t base = local_id ? local_id : 1u;
+    if (!ctx || !ctx->active_ui || ctx->active_ui->id_stack_depth == 0u) {
+        return base;
+    }
+    return id_index(ctx->active_ui->id_stack[ctx->active_ui->id_stack_depth - 1u], base);
+}
+
+uint32_t scoped_id(Str label) noexcept {
+    uint32_t h = 0x811C9DC5u;
+    if (label.chars && label.length > 0u) {
+        h = fnv1a_32_step(h, label.chars, label.length);
+    }
+    return scoped_id(h ? h : 1u);
+}
+
 uint16_t key_mods() noexcept {
     const Context* ctx = current_context();
     return ctx ? ctx->active_ui->frame_key_mods : uint16_t(Mod_None);
@@ -4098,7 +4166,22 @@ bool key_pressed(uint32_t keycode, bool include_repeat) noexcept {
     }
     for (uint32_t i = 0u; i < ctx->active_ui->frame_key_count; ++i) {
         const KeyEventEntry& ev = ctx->active_ui->frame_keys[i];
-        if (ev.key == keycode && (include_repeat || !ev.repeat)) {
+        if (!ev.consumed && ev.key == keycode && (include_repeat || !ev.repeat)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool consume_key_pressed(uint32_t keycode, bool include_repeat) noexcept {
+    Context* ctx = current_context();
+    if (!ctx || keycode == 0u) {
+        return false;
+    }
+    for (uint32_t i = 0u; i < ctx->active_ui->frame_key_count; ++i) {
+        KeyEventEntry& ev = ctx->active_ui->frame_keys[i];
+        if (!ev.consumed && ev.key == keycode && (include_repeat || !ev.repeat)) {
+            ev.consumed = true;
             return true;
         }
     }
@@ -4125,7 +4208,35 @@ bool shortcut(uint16_t required_mods, uint32_t keycode, bool allow_when_typing) 
     constexpr uint16_t kModMask = static_cast<uint16_t>(Mod_Shift | Mod_Ctrl | Mod_Alt | Mod_Super);
     for (uint32_t i = 0u; i < ctx->active_ui->frame_key_count; ++i) {
         const KeyEventEntry& ev = ctx->active_ui->frame_keys[i];
-        if (!ev.repeat && ev.key == keycode && (ev.mods & kModMask) == required_mods) {
+        if (!ev.consumed && !ev.repeat && ev.key == keycode && (ev.mods & kModMask) == required_mods) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool consume_shortcut(uint16_t required_mods, uint32_t keycode, bool allow_when_typing) noexcept {
+    Context* ctx = current_context();
+    if (!ctx || keycode == 0u) {
+        return false;
+    }
+    if (ctx->active_ui->modal_scope && !focus_scope_contains(*ctx->active_ui, ctx->active_ui->modal_scope)) return false;
+    if (!allow_when_typing) {
+        if (ctx->active_ui->ime_comp_len > 0u) {
+            return false;
+        }
+        if (ctx->active_ui->focus_id != 0u) {
+            const WidgetState* fws = state_map_find(&ctx->active_ui->states, ctx->active_ui->focus_id);
+            if (fws && fws->is_text_input_writable && (fws->last_seen_frame + 1u >= ctx->active_ui->frame_index)) {
+                return false;
+            }
+        }
+    }
+    constexpr uint16_t kModMask = static_cast<uint16_t>(Mod_Shift | Mod_Ctrl | Mod_Alt | Mod_Super);
+    for (uint32_t i = 0u; i < ctx->active_ui->frame_key_count; ++i) {
+        KeyEventEntry& ev = ctx->active_ui->frame_keys[i];
+        if (!ev.consumed && !ev.repeat && ev.key == keycode && (ev.mods & kModMask) == required_mods) {
+            ev.consumed = true;
             return true;
         }
     }
@@ -4193,7 +4304,7 @@ bool should_close_popover(uint32_t popover_id, uint32_t trigger_id) noexcept {
     if (!seen_prev_frame) {
         return false;
     }
-    if (!ctx->active_ui->frame_escape_consumed_by_ime && key_pressed(SDLK_ESCAPE, false)) {
+    if (!ctx->active_ui->frame_escape_consumed_by_ime && consume_key_pressed(SDLK_ESCAPE, false)) {
         return true;
     }
     if (!ctx->active_ui->left_pressed_this_frame && !ctx->active_ui->right_pressed_this_frame) {
