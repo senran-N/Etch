@@ -501,6 +501,91 @@ void vlist_set_row_height_direct(VarVirtualListCache* c, uint32_t row, float h) 
     c->chunks[row / kVarListChunkSize][row % kVarListChunkSize] = clamped;
     fenwick_add(c, row / kVarListChunkSize, double(clamped) - double(old));
 }
+bool editor_vlist_splice(VarVirtualListCache* c, uint32_t edit_line, uint32_t old_span, uint32_t new_span) noexcept {
+    if (!c || !c->chunks || !c->fenwick || old_span == 0u || new_span == 0u || edit_line + old_span > c->item_count) {
+        return false;
+    }
+    const uint32_t old_count = c->item_count;
+    const uint32_t new_count = old_count - old_span + new_span;
+    if (new_count == 0u) return false;
+    const uint32_t old_chunk_count = c->chunk_count;
+    const uint32_t new_chunk_count = new_count / kVarListChunkSize + (new_count % kVarListChunkSize != 0u ? 1u : 0u);
+    const uint32_t edit_chunk = edit_line / kVarListChunkSize;
+    const int64_t delta = static_cast<int64_t>(new_span) - static_cast<int64_t>(old_span);
+
+    auto** new_chunks = static_cast<float**>(std::calloc(new_chunk_count ? new_chunk_count : 1u, sizeof(float*)));
+    auto* new_fenwick = static_cast<double*>(std::calloc(size_t(new_chunk_count) + 1u, sizeof(double)));
+    if (!new_chunks || !new_fenwick) {
+        std::free(new_chunks);
+        std::free(new_fenwick);
+        return false;
+    }
+    const auto measure_one = [&](uint32_t row) noexcept -> float {
+        float h = c->measure_fn
+            ? c->measure_fn(row, c->measure_user_data)
+            : (c->c_measure_fn ? c->c_measure_fn(row, c->measure_user_data) : c->default_height);
+        return std::isfinite(h) ? (c->uncapped_heights ? std::fmax(h, 1.0f) : clamp_range(h, 1.0f, 16384.0f)) : c->default_height;
+    };
+    for (uint32_t ch = 0u; ch < edit_chunk && ch < new_chunk_count; ++ch) {
+        new_chunks[ch] = c->chunks[ch];
+    }
+    const uint32_t edit_end_new = edit_line + new_span;
+    for (uint32_t ch = edit_chunk; ch < new_chunk_count; ++ch) {
+        const uint32_t row_start = ch * kVarListChunkSize;
+        const uint32_t row_end = std::min(new_count, row_start + kVarListChunkSize);
+        const bool overlaps_edit = (row_start < edit_end_new) && (row_end > edit_line);
+        const bool had_chunk = (ch < old_chunk_count) && (c->chunks[ch] != nullptr);
+        if (!overlaps_edit && !had_chunk) {
+            continue;
+        }
+        auto* heights = static_cast<float*>(std::malloc(kVarListChunkSize * sizeof(float)));
+        if (!heights) {
+            for (uint32_t j = edit_chunk; j < ch; ++j) std::free(new_chunks[j]);
+            std::free(new_chunks);
+            std::free(new_fenwick);
+            return false;
+        }
+        for (uint32_t row = row_start; row < row_end; ++row) {
+            float h = c->default_height;
+            if (row < edit_line) {
+                const uint32_t oc = row / kVarListChunkSize;
+                h = (oc < old_chunk_count && c->chunks[oc]) ? c->chunks[oc][row % kVarListChunkSize] : measure_one(row);
+            } else if (row < edit_end_new) {
+                h = measure_one(row);
+            } else {
+                const uint32_t old_row = static_cast<uint32_t>(static_cast<int64_t>(row) - delta);
+                const uint32_t oc = old_row / kVarListChunkSize;
+                h = (oc < old_chunk_count && c->chunks[oc]) ? c->chunks[oc][old_row % kVarListChunkSize] : measure_one(row);
+            }
+            heights[row - row_start] = h;
+        }
+        new_chunks[ch] = heights;
+    }
+    for (uint32_t ch = edit_chunk; ch < old_chunk_count; ++ch) {
+        std::free(c->chunks[ch]);
+    }
+    std::free(c->chunks);
+    std::free(c->fenwick);
+    c->chunks = new_chunks;
+    c->fenwick = new_fenwick;
+    c->item_count = new_count;
+    c->chunk_count = new_chunk_count;
+    c->total_stride_sum = 0.0;
+    for (uint32_t ch = 0u; ch < new_chunk_count; ++ch) {
+        const uint32_t row_start = ch * kVarListChunkSize;
+        const uint32_t row_end = std::min(new_count, row_start + kVarListChunkSize);
+        double sum = 0.0;
+        if (new_chunks[ch]) {
+            for (uint32_t i = 0u; i < row_end - row_start; ++i) {
+                sum += double(new_chunks[ch][i]) + c->gap_px;
+            }
+        } else {
+            sum = double(row_end - row_start) * (double(c->default_height) + c->gap_px);
+        }
+        fenwick_add(c, ch, sum);
+    }
+    return true;
+}
 
 void virtual_list_set_item_height(uint32_t id, uint32_t row, float height) noexcept {
     Context* ctx = current_context(); if (!ctx || !id || !std::isfinite(height) || height < 1) return;

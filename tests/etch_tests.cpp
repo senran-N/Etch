@@ -57,6 +57,117 @@ static bool unicode_suite() noexcept {
     begin_frame(c,{.viewport_w=400,.viewport_h=200,.key_pressed_code=SDLK_DELETE});text_input({.id=tid,.buffer=data,.capacity=64});end_frame(c);
     ok &= data[0]==' ' && static_cast<unsigned char>(data[1])==0xD7;
     TextBuffer b={};ok &= init_text_buffer(&b,str_cstr(data));ok &= text_buffer_line_count(&b)==1;free_text_buffer(&b);
+
+    // E4: GB11 double-ZWJ break, O(1) backward grapheme parity, CJK punctuation word stops,
+    // CJK+Kinsoku Clay wrapping, CJK Ext B non-emoji routing, and undo cursor continuity.
+    {
+        const uint32_t g_id = id("e4_grapheme");
+        char buf[64] = "\xF0\x9F\x91\xA8\xE2\x80\x8D\xE2\x80\x8D\xF0\x9F\x91\xA8"; // Man + ZWJ + ZWJ + Man (14B)
+        const auto ti_step = [&](uint32_t key = 0u, uint16_t mods = 0u, float dt = 0.05f, const char* insert = nullptr) noexcept -> TextInputResult {
+            if (insert) {
+                SDL_Event ev = {};
+                ev.type = SDL_EVENT_TEXT_INPUT;
+                ev.text.text = insert;
+                process_event(c, ev);
+            }
+            begin_frame(c, {.viewport_w = 400, .viewport_h = 200, .dt_seconds = dt, .key_mods = mods, .key_pressed_code = key});
+            const TextInputResult r = text_input({.id = g_id, .buffer = buf, .capacity = sizeof(buf), .width = Sizing::fixed(300)});
+            end_frame(c);
+            return r;
+        };
+        const auto ucheck = [&](bool cond, int line) noexcept {
+            if (!cond) {
+                ok = false;
+                std::fprintf(stderr, "unicode_suite failed at line %d\n", line);
+            }
+        };
+        ti_step(); request_focus(g_id); set_text_selection(g_id, 0u, 0u); ti_step();
+        ucheck(ti_step(SDLK_RIGHT).cursor_byte == 10u, __LINE__);
+        ucheck(ti_step(SDLK_RIGHT).cursor_byte == 14u, __LINE__);
+        ucheck(ti_step(SDLK_LEFT).cursor_byte == 10u, __LINE__);
+        ucheck(ti_step(SDLK_LEFT).cursor_byte == 0u, __LINE__);
+
+        // Valid single-ZWJ stays one grapheme.
+        std::strcpy(buf, "\xF0\x9F\x91\xA8\xE2\x80\x8D\xF0\x9F\x91\xA8"); // 11B
+        set_text_selection(g_id, 0u, 0u); ti_step();
+        ucheck(ti_step(SDLK_RIGHT).cursor_byte == 11u, __LINE__);
+        ucheck(ti_step(SDLK_LEFT).cursor_byte == 0u, __LINE__);
+
+        // Regional indicator pair parity forward & backward.
+        std::strcpy(buf, "ab\xF0\x9F\x87\xBA\xF0\x9F\x87\xB8\xF0\x9F\x87\xBA\xF0\x9F\x87\xB8z"); // 19B
+        set_text_selection(g_id, 0u, 0u); ti_step();
+        ucheck(ti_step(SDLK_RIGHT).cursor_byte == 1u, __LINE__);
+        ucheck(ti_step(SDLK_RIGHT).cursor_byte == 2u, __LINE__);
+        ucheck(ti_step(SDLK_RIGHT).cursor_byte == 10u, __LINE__);
+        ucheck(ti_step(SDLK_RIGHT).cursor_byte == 18u, __LINE__);
+        ucheck(ti_step(SDLK_RIGHT).cursor_byte == 19u, __LINE__);
+        ucheck(ti_step(SDLK_LEFT).cursor_byte == 18u, __LINE__);
+        ucheck(ti_step(SDLK_LEFT).cursor_byte == 10u, __LINE__);
+        ucheck(ti_step(SDLK_LEFT).cursor_byte == 2u, __LINE__);
+        ucheck(ti_step(SDLK_LEFT).cursor_byte == 1u, __LINE__);
+        ucheck(ti_step(SDLK_LEFT).cursor_byte == 0u, __LINE__);
+
+        // CJK punctuation stops Ctrl+Right word movement.
+        std::strcpy(buf, "\xE4\xB8\xAD\xE6\x96\x87\xEF\xBC\x8C\xE6\xB5\x8B\xE8\xAF\x95"); // "中文，测试" (15B)
+        set_text_selection(g_id, 0u, 0u); ti_step();
+        ucheck(ti_step(SDLK_RIGHT, Mod_Ctrl).cursor_byte == 6u, __LINE__);
+        ucheck(ti_step(SDLK_RIGHT, Mod_Ctrl).cursor_byte == 9u, __LINE__);
+        ucheck(ti_step(SDLK_RIGHT, Mod_Ctrl).cursor_byte == 15u, __LINE__);
+
+        // Undo continuity: cursor jump breaks insert coalescing; Backspace and Delete never coalesce.
+        const uint32_t u_id = id("e4_undo_cont");
+        char ubuf[64] = "cd";
+        const auto u_step = [&](uint32_t key = 0u, uint16_t mods = 0u, const char* insert = nullptr) noexcept -> TextInputResult {
+            if (insert) {
+                SDL_Event ev = {};
+                ev.type = SDL_EVENT_TEXT_INPUT;
+                ev.text.text = insert;
+                process_event(c, ev);
+            }
+            begin_frame(c, {.viewport_w = 400, .viewport_h = 200, .dt_seconds = 0.05f, .key_mods = mods, .key_pressed_code = key});
+            const TextInputResult r = text_input({.id = u_id, .buffer = ubuf, .capacity = sizeof(ubuf), .width = Sizing::fixed(300)});
+            end_frame(c);
+            return r;
+        };
+        u_step(); request_focus(u_id); set_text_selection(u_id, 2u, 2u); u_step();
+        u_step(0u, 0u, "e");
+        u_step(0u, 0u, "f");
+        ucheck(std::strcmp(ubuf, "cdef") == 0, __LINE__);
+        u_step(SDLK_HOME);
+        u_step(0u, 0u, "a");
+        ucheck(std::strcmp(ubuf, "acdef") == 0, __LINE__);
+        u_step(SDLK_Z, Mod_Ctrl);
+        ucheck(std::strcmp(ubuf, "cdef") == 0, __LINE__);
+        u_step(SDLK_Z, Mod_Ctrl);
+        ucheck(std::strcmp(ubuf, "cd") == 0, __LINE__);
+
+        // Separate Backspace (group 2) and Delete (group 3).
+        set_text_selection(u_id, 1u, 1u); u_step();
+        u_step(SDLK_BACKSPACE); // "d", cursor 0
+        ucheck(std::strcmp(ubuf, "d") == 0, __LINE__);
+        u_step(SDLK_DELETE); // "", cursor 0
+        ucheck(std::strcmp(ubuf, "") == 0, __LINE__);
+        u_step(SDLK_Z, Mod_Ctrl);
+        ucheck(std::strcmp(ubuf, "d") == 0, __LINE__);
+        u_step(SDLK_Z, Mod_Ctrl);
+        ucheck(std::strcmp(ubuf, "cd") == 0, __LINE__);
+
+        // Clay CJK + Kinsoku line wrapping wraps unspaced Chinese paragraph into multiple lines.
+        const uint32_t cjk_box = id("e4_cjk_wrap");
+        begin_frame(c, {.viewport_w = 400, .viewport_h = 400});
+        begin_box({.id = cjk_box, .axis = Axis::Col, .width = Sizing::fixed(110.0f), .height = Sizing::fit()});
+        text(str_lit("\xE4\xB8\xAD\xE6\x96\x87\xE6\xAE\xB5\xE8\x90\xBD\xE8\x87\xAA\xE5\x8A\xA8\xE6\x8D\xA2\xE8\xA1\x8C\xEF\xBC\x8C\xE7\xA1\xAE\xE4\xBF\x9D\xE6\xA0\x87\xE7\x82\xB9\xE4\xB8\x8D\xE5\x9C\xA8\xE8\xA1\x8C\xE9\xA6\x96\xE3\x80\x82"),
+             {.font_size_px = 16.0f, .wrap = true, .line_height_px = 22.0f});
+        end_box();
+        // CJK Extension B (U+20000) must not route to color emoji texture quads.
+        text(str_lit("\xF0\xA0\x80\x80"), {.font_size_px = 16.0f});
+        end_frame(c);
+        const Rect cjk_bounds = element_bounds(cjk_box);
+        ucheck(cjk_bounds.w <= 112.0f && cjk_bounds.h >= 44.0f, __LINE__);
+        for (const Prim& p : frame_prims(c)) {
+            ucheck((p.style.x & 0xFu) != static_cast<uint32_t>(PrimKind::Texture), __LINE__);
+        }
+    }
     destroy_context(c);set_current_context(nullptr);return ok;
 }
 static bool v020_regression() noexcept {

@@ -1687,6 +1687,13 @@ void destroy_context(Context* ctx) noexcept {
     }
 
     font_atlas_destroy(&ctx->atlas);
+    for (uint32_t bi = 0u; bi < 2u; ++bi) {
+        std::free(ctx->shape_cache.banks[bi].entries);
+        std::free(ctx->shape_cache.banks[bi].glyphs);
+        std::free(ctx->shape_cache.banks[bi].text);
+        ctx->shape_cache.banks[bi] = {};
+    }
+    ctx->shape_cache.initialized = false;
     shutdown_dialog_queue(ctx);
     std::free(ctx->clipboard_fallback);
     ctx->clipboard_fallback = nullptr;

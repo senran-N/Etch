@@ -1765,6 +1765,7 @@ Clay__MeasureTextCacheItem *Clay__MeasureTextCached(Clay_String *text, Clay_Text
             }
             return &Clay__MeasureTextCacheItem_DEFAULT;
         }
+        unsigned char ub = (unsigned char)text->chars[end];
         char current = text->chars[end];
         if (current == ' ' || current == '\n') {
             int32_t length = end - start;
@@ -1798,6 +1799,66 @@ Clay__MeasureTextCacheItem *Clay__MeasureTextCached(Clay_String *text, Clay_Text
                 lineWidth = 0;
             }
             start = end + 1;
+            end++;
+            continue;
+        }
+        // Etch: UTF-8 CJK + Kinsoku line-break tokenization when wrapping by words.
+        if (config->wrapMode == CLAY_TEXT_WRAP_WORDS && ub >= 0xE0u) {
+            int32_t cpLen = 1;
+            uint32_t cp = ub;
+            if ((ub & 0xF0u) == 0xE0u && end + 2 < text->length) {
+                cpLen = 3;
+                cp = ((uint32_t)(ub & 0x0Fu) << 12) | ((uint32_t)((unsigned char)text->chars[end + 1] & 0x3Fu) << 6) | (uint32_t)((unsigned char)text->chars[end + 2] & 0x3Fu);
+            } else if ((ub & 0xF8u) == 0xF0u && end + 3 < text->length) {
+                cpLen = 4;
+                cp = ((uint32_t)(ub & 0x07u) << 18) | ((uint32_t)((unsigned char)text->chars[end + 1] & 0x3Fu) << 12) | ((uint32_t)((unsigned char)text->chars[end + 2] & 0x3Fu) << 6) | (uint32_t)((unsigned char)text->chars[end + 3] & 0x3Fu);
+            }
+            bool isCjk = (cp >= 0x2E80u && cp <= 0x9FFFu) || (cp >= 0xAC00u && cp <= 0xD7AFu) || (cp >= 0xF900u && cp <= 0xFAFFu) || (cp >= 0xFF01u && cp <= 0xFF60u) || (cp >= 0x20000u && cp <= 0x3FFFFu);
+            bool noEnd = (cp == 0xFF08u || cp == 0x300Au || cp == 0x300Cu || cp == 0x300Eu || cp == 0x3010u || cp == 0x3008u || cp == 0x3014u || cp == 0x2018u || cp == 0x201Cu);
+            bool noStart = (cp == 0xFF0Cu || cp == 0x3002u || cp == 0x3001u || cp == 0xFF1Bu || cp == 0xFF1Au || cp == 0xFF01u || cp == 0xFF1Fu || cp == 0xFF09u || cp == 0x300Bu || cp == 0x300Du || cp == 0x300Fu || cp == 0x3011u || cp == 0x3009u || cp == 0x3015u || cp == 0x2019u || cp == 0x201Du);
+            if (isCjk) {
+                // Flush preceding Latin/non-Kinsoku-opener run before a non-closing CJK character.
+                if (end > start && !noStart) {
+                    bool prevWasOpener = false;
+                    if (end - start == 3 && ((unsigned char)text->chars[start] & 0xF0u) == 0xE0u) {
+                        uint32_t pcp = ((uint32_t)((unsigned char)text->chars[start] & 0x0Fu) << 12) | ((uint32_t)((unsigned char)text->chars[start + 1] & 0x3Fu) << 6) | (uint32_t)((unsigned char)text->chars[start + 2] & 0x3Fu);
+                        prevWasOpener = (pcp == 0xFF08u || pcp == 0x300Au || pcp == 0x300Cu || pcp == 0x300Eu || pcp == 0x3010u || pcp == 0x3008u || pcp == 0x3014u || pcp == 0x2018u || pcp == 0x201Cu);
+                    }
+                    if (!prevWasOpener) {
+                        Clay_Dimensions dimensions = Clay__MeasureText(CLAY__INIT(Clay_StringSlice) {.length = end - start, .chars = &text->chars[start], .baseChars = text->chars}, config, context->measureTextUserData);
+                        measuredHeight = CLAY__MAX(measuredHeight, dimensions.height);
+                        measured->minWidth = CLAY__MAX(dimensions.width, measured->minWidth);
+                        previousWord = Clay__AddMeasuredWord(CLAY__INIT(Clay__MeasuredWord) { .startOffset = start, .length = end - start, .width = dimensions.width, .next = -1 }, previousWord);
+                        lineWidth += dimensions.width;
+                        start = end;
+                    }
+                }
+                end += cpLen;
+                // Keep opening brackets attached to the next character, and keep trailing closing punctuation attached to this character.
+                if (!noEnd) {
+                    bool nextIsNoStart = false;
+                    if (end < text->length) {
+                        unsigned char nb = (unsigned char)text->chars[end];
+                        if (nb == ',' || nb == '.' || nb == '!' || nb == '?' || nb == ';' || nb == ':' || nb == ')' || nb == ']' || nb == '}') {
+                            nextIsNoStart = true;
+                        } else if ((nb & 0xF0u) == 0xE0u && end + 2 < text->length) {
+                            uint32_t ncp = ((uint32_t)(nb & 0x0Fu) << 12) | ((uint32_t)((unsigned char)text->chars[end + 1] & 0x3Fu) << 6) | (uint32_t)((unsigned char)text->chars[end + 2] & 0x3Fu);
+                            nextIsNoStart = (ncp == 0xFF0Cu || ncp == 0x3002u || ncp == 0x3001u || ncp == 0xFF1Bu || ncp == 0xFF1Au || ncp == 0xFF01u || ncp == 0xFF1Fu || ncp == 0xFF09u || ncp == 0x300Bu || ncp == 0x300Du || ncp == 0x300Fu || ncp == 0x3011u || ncp == 0x3009u || ncp == 0x3015u || ncp == 0x2019u || ncp == 0x201Du);
+                        }
+                    }
+                    if (!nextIsNoStart && end > start) {
+                        Clay_Dimensions dimensions = Clay__MeasureText(CLAY__INIT(Clay_StringSlice) {.length = end - start, .chars = &text->chars[start], .baseChars = text->chars}, config, context->measureTextUserData);
+                        measuredHeight = CLAY__MAX(measuredHeight, dimensions.height);
+                        measured->minWidth = CLAY__MAX(dimensions.width, measured->minWidth);
+                        previousWord = Clay__AddMeasuredWord(CLAY__INIT(Clay__MeasuredWord) { .startOffset = start, .length = end - start, .width = dimensions.width, .next = -1 }, previousWord);
+                        lineWidth += dimensions.width;
+                        start = end;
+                    }
+                }
+                continue;
+            }
+            end += cpLen;
+            continue;
         }
         end++;
     }

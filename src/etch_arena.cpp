@@ -1041,6 +1041,36 @@ struct Context {
     Arena         frame_arena = {};
     FontAtlas     atlas = {};
 
+    struct ShapeCacheEntry {
+        uint64_t hash = 0;
+        uint32_t text_off = 0;
+        uint32_t text_len = 0;
+        uint32_t glyph_off = 0;
+        uint32_t glyph_count = 0;
+        uint32_t font_revision = 0;
+        uint16_t font_slot = 0;
+        uint8_t  is_rtl = 0;
+        uint8_t  used = 0;
+    };
+    struct ShapeCacheBank {
+        ShapeCacheEntry* entries = nullptr;
+        ShapedGlyph*     glyphs = nullptr;
+        char*            text = nullptr;
+        uint32_t         entry_count = 0;
+        uint32_t         glyph_used = 0;
+        uint32_t         text_used = 0;
+    };
+    struct ShapeCache {
+        static constexpr uint32_t kEntryCap = 2048u;
+        static constexpr uint32_t kGlyphCap = 32768u;
+        static constexpr uint32_t kTextCap  = 131072u;
+        ShapeCacheBank banks[2] = {};
+        uint32_t       active_bank = 0;
+        uint32_t       font_revision = 0;
+        bool           initialized = false;
+    };
+    ShapeCache    shape_cache = {};
+
     Prim*         prims = nullptr;
     uint32_t      max_prims = 0;
     uint32_t      prim_count = 0;

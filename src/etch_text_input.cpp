@@ -25,14 +25,33 @@ uint32_t utf8_next_grapheme(const char* s, uint32_t len, uint32_t pos) noexcept 
             ((prev==10||prev==12)&&(cur==10||cur==11))||((prev==11||prev==13)&&cur==11)||
             cur==4||cur==5||cur==8||prev==7||(prev==5&&zwj_pict&&ep)||(prev==6&&cur==6&&(ri&1u))));
         if(!join)break;
-        if(cur==5)zwj_pict=pict;else if(cur!=4)pict=ep;
+        if(cur==5){zwj_pict=pict;pict=false;}else if(cur!=4){pict=ep;zwj_pict=false;}
         ri=cur==6?ri+1:0;prev=cur;end=utf8_next_boundary(s,len,end);
     }
     return end;
 }
 uint32_t utf8_prev_grapheme(const char* s, uint32_t len, uint32_t pos) noexcept {
-    uint32_t cur = 0;
-    while (cur < pos) { const uint32_t next = utf8_next_grapheme(s, len, cur); if (next >= pos) return cur; cur = next; }
+    if (!s || len == 0u || pos == 0u) return 0u;
+    if (pos > len) pos = len;
+    uint32_t anchor = utf8_prev_boundary(s, len, pos);
+    while (anchor > 0u) {
+        const uint32_t cp = utf8_decode_at(s, len, anchor);
+        if (grapheme_property(cp, kGraphemeRanges, ETCH_COUNTOF(kGraphemeRanges)) == 0u &&
+            grapheme_property(cp, kPictographicRanges, ETCH_COUNTOF(kPictographicRanges)) == 0u)
+        {
+            const uint32_t prev = utf8_prev_boundary(s, len, anchor);
+            if (grapheme_property(utf8_decode_at(s, len, prev), kGraphemeRanges, ETCH_COUNTOF(kGraphemeRanges)) != 7u) {
+                break;
+            }
+        }
+        anchor = utf8_prev_boundary(s, len, anchor);
+    }
+    uint32_t cur = anchor;
+    while (cur < pos) {
+        const uint32_t next = utf8_next_grapheme(s, len, cur);
+        if (next >= pos) return cur;
+        cur = next;
+    }
     return cur;
 }
 
@@ -51,11 +70,21 @@ uint32_t utf8_codepoint_to_byte_offset(const char* s, uint32_t len, int32_t cp_c
 }
 
 uint8_t utf8_char_class(uint32_t cp) noexcept {
-    if (cp == ' ' || cp == '\t' || cp == '\n' || cp == '\r') {
+    if (cp == ' ' || cp == '\t' || cp == '\n' || cp == '\r' || cp == 0x00A0u || cp == 0x3000u) {
         return 0u;
     }
     if ((cp >= 'a' && cp <= 'z') || (cp >= 'A' && cp <= 'Z') || (cp >= '0' && cp <= '9') || cp == '_') {
         return 1u;
+    }
+    if ((cp >= 0x2000u && cp <= 0x206Fu) || (cp >= 0x3001u && cp <= 0x303Fu) ||
+        (cp >= 0xFF01u && cp <= 0xFF0Fu) || (cp >= 0xFF1Au && cp <= 0xFF20u) ||
+        (cp >= 0xFF3Bu && cp <= 0xFF40u) || (cp >= 0xFF5Bu && cp <= 0xFF65u)) {
+        return 3u;
+    }
+    if ((cp >= 0x3040u && cp <= 0x30FFu) || (cp >= 0x3400u && cp <= 0x4DBFu) ||
+        (cp >= 0x4E00u && cp <= 0x9FFFu) || (cp >= 0xAC00u && cp <= 0xD7AFu) ||
+        (cp >= 0xF900u && cp <= 0xFAFFu) || (cp >= 0x20000u && cp <= 0x3FFFFu)) {
+        return 4u;
     }
     if (cp >= 0x80u) {
         return 2u;
@@ -364,7 +393,24 @@ constexpr bool is_wrap_ideograph(uint32_t cp) noexcept {
            (cp >= 0x4E00u && cp <= 0x9FFFu) ||
            (cp >= 0xAC00u && cp <= 0xD7AFu) ||
            (cp >= 0xF900u && cp <= 0xFAFFu) ||
-           (cp >= 0xFF00u && cp <= 0xFFEFu);
+           (cp >= 0xFF00u && cp <= 0xFFEFu) ||
+           (cp >= 0x20000u && cp <= 0x3FFFFu);
+}
+
+constexpr bool is_kinsoku_no_start(uint32_t cp) noexcept {
+    return cp == 0x3001u || cp == 0x3002u || cp == 0x3009u || cp == 0x300Bu ||
+           cp == 0x300Du || cp == 0x300Fu || cp == 0x3011u || cp == 0x3015u ||
+           cp == 0x3017u || cp == 0x3019u || cp == 0x301Bu || cp == 0x30FCu ||
+           cp == 0x2019u || cp == 0x201Du || cp == 0x2026u || cp == 0xFF01u ||
+           cp == 0xFF09u || cp == 0xFF0Cu || cp == 0xFF0Eu || cp == 0xFF1Au ||
+           cp == 0xFF1Bu || cp == 0xFF1Fu || cp == 0xFF3Du || cp == 0xFF5Du;
+}
+
+constexpr bool is_kinsoku_no_end(uint32_t cp) noexcept {
+    return cp == 0x3008u || cp == 0x300Au || cp == 0x300Cu || cp == 0x300Eu ||
+           cp == 0x3010u || cp == 0x3014u || cp == 0x3016u || cp == 0x3018u ||
+           cp == 0x301Au || cp == 0x2018u || cp == 0x201Cu || cp == 0xFF08u ||
+           cp == 0xFF3Bu || cp == 0xFF5Bu;
 }
 
 inline float text_input_wrap_width(const TextInputDesc& desc, const TextInnerGeom& geom) noexcept {
@@ -477,7 +523,12 @@ void for_each_wrapped_subline(
                 }
                 pen_x += g_adv;
                 prev_was_ws = is_ws;
-                if (is_ws || cp == '-' || cp == '/' || cp == '\\' || is_wrap_ideograph(cp)) {
+                const uint32_t next_cp = (g_end < len) ? utf8_decode_at(s, len, g_end) : 0u;
+                const bool next_no_start = (g_end < len) && is_kinsoku_no_start(next_cp);
+                const bool next_ideo = (g_end < len) && is_wrap_ideograph(next_cp) && !next_no_start;
+                if (!is_kinsoku_no_end(cp) && !next_no_start &&
+                    (is_ws || cp == '-' || cp == '/' || cp == '\\' || is_wrap_ideograph(cp) || next_ideo))
+                {
                     last_break_off = g_end;
                     last_break_w = pen_x;
                 }
@@ -593,7 +644,12 @@ void for_each_wrapped_subline(
                 }
                 pen_x += g_adv;
                 prev_was_ws = is_ws;
-                if (is_ws || cp == '-' || cp == '/' || cp == '\\' || is_wrap_ideograph(cp)) {
+                const uint32_t next_cp = (g_end < len) ? utf8_decode_at(s, len, g_end) : 0u;
+                const bool next_no_start = (g_end < len) && is_kinsoku_no_start(next_cp);
+                const bool next_ideo = (g_end < len) && is_wrap_ideograph(next_cp) && !next_no_start;
+                if (!is_kinsoku_no_end(cp) && !next_no_start &&
+                    (is_ws || cp == '-' || cp == '/' || cp == '\\' || is_wrap_ideograph(cp) || next_ideo))
+                {
                     last_break_off = g_end;
                     last_break_w = pen_x;
                 }
@@ -1470,6 +1526,89 @@ void emit_utf8_glyph_run(
     }
 }
 
+void emit_selection_bands(
+    Context* ctx,
+    uint16_t font_id,
+    const char* seg,
+    uint32_t seg_len,
+    uint32_t sel_a,
+    uint32_t sel_b,
+    float base_px,
+    float letter_spacing,
+    bool mask_bullets,
+    bool spacing_between_glyphs_only,
+    uint32_t tab_width,
+    float origin_x,
+    float y_px,
+    float h_px,
+    float scroll_x,
+    float dpi,
+    const Rect& clip_rect,
+    Color color,
+    float radius_px,
+    float nl_extra_logical) noexcept
+{
+    if (sel_b <= sel_a && nl_extra_logical <= 0.0f) return;
+    const auto emit_band = [&](float left, float right) noexcept {
+        if (right <= left) return;
+        const Rect sel_px = {
+            (origin_x + left - scroll_x) * dpi,
+            y_px,
+            (right - left) * dpi,
+            h_px,
+        };
+        push_prim(ctx, Prim::make_rect(sel_px, clip_rect, color, Corners::all(radius_px), {}, 0.0f, 1.0f, 0.0f));
+    };
+    struct SelBandState {
+        const decltype(emit_band)& emit;
+        const char* text;
+        uint32_t first;
+        uint32_t last;
+        float left = 0.0f;
+        float right = 0.0f;
+    };
+    SelBandState st{ emit_band, seg ? seg : "", sel_a, sel_b };
+    float total_w = 0.0f;
+    if (seg && seg_len > 0u) {
+        measure_line_segment_x(
+            ctx, font_id, seg, seg_len, 0u, 0u,
+            base_px, letter_spacing, mask_bullets, spacing_between_glyphs_only,
+            nullptr, nullptr, &total_w, tab_width,
+            (sel_b > sel_a)
+                ? [](void* data, uint32_t a, uint32_t b, float pen, float advance, bool rtl) noexcept {
+                      auto& visual = *static_cast<SelBandState*>(data);
+                      if (visual.first >= b || visual.last <= a || advance <= 0.0f) return;
+                      float left = pen;
+                      float right = pen + advance;
+                      if (visual.first > a || visual.last < b) {
+                          const uint32_t cps = count_utf8_cps(visual.text + a, b - a);
+                          const float count = static_cast<float>(cps > 0u ? cps : 1u);
+                          const float f0 = static_cast<float>(count_utf8_cps(visual.text + a, std::max(visual.first, a) - a)) / count;
+                          const float f1 = static_cast<float>(count_utf8_cps(visual.text + a, std::min(visual.last, b) - a)) / count;
+                          left = pen + advance * (rtl ? 1.0f - f1 : f0);
+                          right = pen + advance * (rtl ? 1.0f - f0 : f1);
+                      }
+                      if (left > visual.right + 0.001f || visual.left == visual.right) {
+                          visual.emit(visual.left, visual.right);
+                          visual.left = left;
+                      }
+                      visual.right = right;
+                  }
+                : nullptr,
+            &st);
+    }
+    if (nl_extra_logical > 0.0f) {
+        if (st.left < st.right && std::fabs(st.right - total_w) <= 0.01f) {
+            st.right = total_w + nl_extra_logical;
+        } else {
+            emit_band(st.left, st.right);
+            st.left = total_w;
+            st.right = total_w + nl_extra_logical;
+        }
+    }
+    emit_band(st.left, st.right);
+}
+
 void emit_text_input_command(
     Context* ctx,
     const TextInputExtra* ti,
@@ -1596,7 +1735,7 @@ void emit_text_input_command(
             pill(run.left, run.right);
         }
     };
-    const bool draw_selection = sel_max > sel_min && desc.selection_color.a > 0u;
+    const bool draw_selection = !composing && sel_max > sel_min && desc.selection_color.a > 0u;
     if (draw_selection || (!composing && !highlights.empty())) {
         const Color sel_col = is_focused
             ? desc.selection_color
@@ -1619,23 +1758,12 @@ void emit_text_input_command(
                 const bool spans_nl = desc.multiline && sel_max > le && sel_min <= le;
                 if (!composing && !highlights.empty()) emit_highlights(ls, le, 0.0f, line_y);
                 if (draw_selection && (he > hs || spans_nl)) {
-                    float x0 = 0.0f;
-                    float x1 = 0.0f;
-                    measure_line_segment_x(
-                        ctx, desc.font_id, s + ls, line_len, hs - ls, he - ls,
-                        base_px, desc.letter_spacing, desc.password, false, &x0, &x1, nullptr);
-                    float sx0 = (x0 < x1) ? x0 : x1;
-                    float sx1 = (x0 < x1) ? x1 : x0;
-                    if (spans_nl) {
-                        sx1 += 6.0f;
-                    }
-                    const Rect sel_px = {
-                        (geom.origin_x + sx0 - scroll_x) * dpi,
-                        (geom.origin_y + line_y - scroll_y - 1.0f) * dpi,
-                        ((sx1 > sx0) ? (sx1 - sx0) : 2.0f) * dpi,
-                        (geom.line_h + 2.0f) * dpi,
-                    };
-                    push_prim(ctx, Prim::make_rect(sel_px, inner_clip.rect, sel_col, Corners::all(2.0f * dpi), {}, 0.0f, 1.0f, 0.0f));
+                    emit_selection_bands(
+                        ctx, desc.font_id, s + ls, line_len, hs - ls, (he > ls) ? (he - ls) : 0u,
+                        base_px, desc.letter_spacing, desc.password, false, 4u,
+                        geom.origin_x, (geom.origin_y + line_y - scroll_y - 1.0f) * dpi,
+                        (geom.line_h + 2.0f) * dpi, scroll_x, dpi,
+                        inner_clip.rect, sel_col, 2.0f * dpi, spans_nl ? 6.0f : 0.0f);
                 }
                 line_y += geom.line_adv;
             } else {
@@ -1649,24 +1777,13 @@ void emit_text_input_command(
                         const bool spans_nl = is_last && desc.multiline && sel_max > le && sel_min <= le;
                         if (!composing && !highlights.empty()) emit_highlights(sub_abs_s, sub_abs_e, 0.0f, line_y);
                         if (draw_selection && (he > hs || spans_nl)) {
-                            float x0 = 0.0f;
-                            float x1 = 0.0f;
-                            measure_line_segment_x(
+                            emit_selection_bands(
                                 ctx, desc.font_id, s + sub_abs_s, sub.end - sub.start,
                                 hs - sub_abs_s, (he > sub_abs_s) ? (he - sub_abs_s) : 0u,
-                                base_px, desc.letter_spacing, desc.password, false, &x0, &x1, nullptr);
-                            float sx0 = (x0 < x1) ? x0 : x1;
-                            float sx1 = (x0 < x1) ? x1 : x0;
-                            if (spans_nl) {
-                                sx1 += 6.0f;
-                            }
-                            const Rect sel_px = {
-                                (geom.origin_x + sx0 - scroll_x) * dpi,
-                                (geom.origin_y + line_y - scroll_y - 1.0f) * dpi,
-                                ((sx1 > sx0) ? (sx1 - sx0) : 2.0f) * dpi,
-                                (geom.line_h + 2.0f) * dpi,
-                            };
-                            push_prim(ctx, Prim::make_rect(sel_px, inner_clip.rect, sel_col, Corners::all(2.0f * dpi), {}, 0.0f, 1.0f, 0.0f));
+                                base_px, desc.letter_spacing, desc.password, false, 4u,
+                                geom.origin_x, (geom.origin_y + line_y - scroll_y - 1.0f) * dpi,
+                                (geom.line_h + 2.0f) * dpi, scroll_x, dpi,
+                                inner_clip.rect, sel_col, 2.0f * dpi, spans_nl ? 6.0f : 0.0f);
                         }
                         line_y += geom.line_adv;
                         return true;
@@ -2128,7 +2245,17 @@ void undo_push_snapshot(
     if (op_group != 0u && op_group == slot->last_op_group &&
         slot->count >= 2u && dt > 0.0f && dt <= 0.30f)
     {
-        undo_pop_tail(slot);
+        const TextUndoRecord& prev = slot->entries[(slot->head + slot->count - 1u) % slot->entries_cap];
+        const bool continuous =
+            (op_group == 1u && prev.cursor == prev.anchor && cursor == anchor &&
+             len > prev.length && cursor == prev.cursor + (len - prev.length)) ||
+            (op_group == 2u && prev.cursor == prev.anchor && cursor == anchor &&
+             len < prev.length && cursor + (prev.length - len) == prev.cursor) ||
+            (op_group == 3u && prev.cursor == prev.anchor && cursor == anchor &&
+             len < prev.length && cursor == prev.cursor);
+        if (continuous) {
+            undo_pop_tail(slot);
+        }
     }
     if (slot->count == slot->entries_cap && slot->entries_cap < 512u) {
         const uint32_t cap = slot->entries_cap * 2u;

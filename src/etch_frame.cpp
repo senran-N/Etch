@@ -474,13 +474,24 @@ void end_frame(Context* ctx_arg) noexcept {
             }
 
             const float wscale = logical_to_window_scale(ctx);
-            const SDL_Rect ime_rect = {
-                static_cast<int>(std::floor(ctx->active_ui->ime_cursor_logical.x * wscale + 0.5f)),
-                static_cast<int>(std::floor(ctx->active_ui->ime_cursor_logical.y * wscale + 0.5f)),
-                static_cast<int>(std::floor(ctx->active_ui->ime_cursor_logical.w * wscale + 0.5f)),
-                static_cast<int>(std::floor(ctx->active_ui->ime_cursor_logical.h * wscale + 0.5f)),
-            };
-            const int ime_cursor = static_cast<int>(ctx->active_ui->ime_cursor_offset_win);
+            int win_w = static_cast<int>(std::floor(
+                static_cast<float>(ctx->active_ui->viewport_w) / ctx->active_ui->dpi_scale * wscale + 0.5f));
+            int win_h = static_cast<int>(std::floor(
+                static_cast<float>(ctx->active_ui->viewport_h) / ctx->active_ui->dpi_scale * wscale + 0.5f));
+            if (win_w < 1) win_w = 1;
+            if (win_h < 1) win_h = 1;
+            int ix = static_cast<int>(std::floor(ctx->active_ui->ime_cursor_logical.x * wscale + 0.5f));
+            int iy = static_cast<int>(std::floor(ctx->active_ui->ime_cursor_logical.y * wscale + 0.5f));
+            int iw = static_cast<int>(std::floor(ctx->active_ui->ime_cursor_logical.w * wscale + 0.5f));
+            int ih = static_cast<int>(std::floor(ctx->active_ui->ime_cursor_logical.h * wscale + 0.5f));
+            if (iw > win_w) iw = win_w;
+            if (ih > win_h) ih = win_h;
+            if (ix < 0) ix = 0; else if (ix + iw > win_w) ix = (win_w > iw) ? (win_w - iw) : 0;
+            if (iy < 0) iy = 0; else if (iy + ih > win_h) iy = (win_h > ih) ? (win_h - ih) : 0;
+            const SDL_Rect ime_rect = { ix, iy, iw, ih };
+            int ime_cursor = static_cast<int>(ctx->active_ui->ime_cursor_offset_win);
+            if (ime_cursor < 0) ime_cursor = 0;
+            else if (iw > 0 && ime_cursor > iw) ime_cursor = iw;
             if (ime_rect.w > 0 && ime_rect.h > 0 &&
                 (ime_rect.x != ctx->active_ui->applied_ime_rect.x ||
                  ime_rect.y != ctx->active_ui->applied_ime_rect.y ||

@@ -154,9 +154,27 @@ bool tb_replace_impl(TextBuffer* b,uint32_t a,uint32_t z,Str s,bool normalize_cr
     if(edit){
         edit->after_cursor=tb_clamp(b,ac);edit->after_anchor=tb_clamp(b,aa);
         std::memcpy(b->undo_blob+b->undo_blob_used,b->data+a,n);b->undo_blob_used+=n;
-        if(b->undo_count>1 && group==1 && z==a && is_single_nonbreak_utf8_codepoint({b->data+a,n}) && utf8_char_class(utf8_decode_at(b->data+a,n,0))!=0){
+        if(b->undo_count>1){
             auto& prev=b->undo_ops[b->undo_count-2];
-            if(prev.group==1 && !prev.removed && prev.start+prev.inserted==a && time>=prev.timestamp && time-prev.timestamp<0.75){prev.inserted+=n;prev.after_cursor=edit->after_cursor;prev.after_anchor=edit->after_anchor;prev.timestamp=time;--b->undo_count;}
+            if(group==1 && z==a && is_single_nonbreak_utf8_codepoint({b->data+a,n}) && utf8_char_class(utf8_decode_at(b->data+a,n,0))!=0){
+                if(prev.group==1 && !prev.removed && prev.start+prev.inserted==a && time>=prev.timestamp && time-prev.timestamp<0.75){
+                    prev.inserted+=n;prev.after_cursor=edit->after_cursor;prev.after_anchor=edit->after_anchor;prev.timestamp=time;--b->undo_count;
+                }
+            } else if(group==3 && n==0 && edit->removed>0 && prev.group==3 && !prev.inserted &&
+                      prev.start==a && edit->blob==prev.blob+prev.removed &&
+                      time>=prev.timestamp && time-prev.timestamp<0.75 &&
+                      std::memchr(b->undo_blob+edit->blob,'\n',edit->removed)==nullptr){
+                prev.removed+=edit->removed;prev.after_cursor=edit->after_cursor;prev.after_anchor=edit->after_anchor;prev.timestamp=time;--b->undo_count;
+            } else if(group==2 && n==0 && edit->removed>0 && edit->removed<=64u && prev.group==2 && !prev.inserted &&
+                      a+edit->removed==prev.start && edit->blob==prev.blob+prev.removed &&
+                      time>=prev.timestamp && time-prev.timestamp<0.75 &&
+                      std::memchr(b->undo_blob+edit->blob,'\n',edit->removed)==nullptr){
+                char tmp[64];
+                std::memcpy(tmp,b->undo_blob+edit->blob,edit->removed);
+                std::memmove(b->undo_blob+prev.blob+edit->removed,b->undo_blob+prev.blob,prev.removed);
+                std::memcpy(b->undo_blob+prev.blob,tmp,edit->removed);
+                prev.start=a;prev.removed+=edit->removed;prev.after_cursor=edit->after_cursor;prev.after_anchor=edit->after_anchor;prev.timestamp=time;--b->undo_count;
+            }
         }
         b->undo_cursor=b->undo_count;
     }
@@ -697,7 +715,9 @@ CodeEditorResult code_editor(const CodeEditorDesc& input) noexcept {
     }
 
     bool force_wrap_reset = false;
-    uint32_t edited_line = UINT32_MAX;
+    uint32_t splice_line = UINT32_MAX;
+    uint32_t splice_old_span = 0u;
+    uint32_t splice_new_span = 0u;
     bool replaced_by_a11y = false;
     PendingA11yAction command = {};
     while (!d.read_only && a11y_take(d.id, A11yAction::SetValue, &command)) {
@@ -718,24 +738,13 @@ CodeEditorResult code_editor(const CodeEditorDesc& input) noexcept {
     }
 
     const auto replace = [&](uint32_t lo, uint32_t hi, Str ins, uint32_t nc, uint32_t na, uint8_t group = 0u) noexcept {
-        bool single_candidate = false;
-        uint32_t line_cand = 0u;
+        uint32_t l_lo = 0u;
+        uint32_t l_hi = 0u;
+        uint32_t pre_rep_lines = 0u;
         if (wrap_w > 0.0f && !force_wrap_reset) {
-            bool has_nl = false;
-            for (uint32_t k = 0u; k < ins.length; ++k) {
-                if (ins.chars[k] == '\n' || ins.chars[k] == '\r') {
-                    has_nl = true;
-                    break;
-                }
-            }
-            if (!has_nl) {
-                const uint32_t l_lo = text_buffer_line_col(b, lo).line;
-                const uint32_t l_hi = text_buffer_line_col(b, hi).line;
-                if (l_lo == l_hi) {
-                    single_candidate = true;
-                    line_cand = l_lo;
-                }
-            }
+            l_lo = text_buffer_line_col(b, lo).line;
+            l_hi = text_buffer_line_col(b, hi).line;
+            pre_rep_lines = tb_lines(b);
         }
         if (text_buffer_replace(b, lo, hi, ins, true, c, a, nc, na, group, ui.elapsed_seconds)) {
             c = nc;
@@ -744,12 +753,22 @@ CodeEditorResult code_editor(const CodeEditorDesc& input) noexcept {
             ws->editor_reveal = true;
             ws->edit_preferred_x = -1.0f;
             ws->edit_wrap_affinity = false;
-            if (!single_candidate) {
-                force_wrap_reset = true;
-            } else if (edited_line == UINT32_MAX) {
-                edited_line = line_cand;
-            } else if (edited_line != line_cand) {
-                force_wrap_reset = true;
+            if (wrap_w > 0.0f && !force_wrap_reset) {
+                const uint32_t post_rep_lines = tb_lines(b);
+                const uint32_t old_span = (l_hi - l_lo) + 1u;
+                const uint32_t new_span = (post_rep_lines + old_span >= pre_rep_lines)
+                    ? (post_rep_lines + old_span - pre_rep_lines)
+                    : 1u;
+                if (old_span <= 16u && new_span <= 16u && splice_line == UINT32_MAX) {
+                    splice_line = l_lo;
+                    splice_old_span = old_span;
+                    splice_new_span = new_span;
+                } else if (splice_line == l_lo && old_span == 1u && new_span == 1u &&
+                           splice_old_span == 1u && splice_new_span == 1u) {
+                    // Repeated single-line edit in the same frame keeps single-row update.
+                } else {
+                    force_wrap_reset = true;
+                }
             }
         }
     };
@@ -841,11 +860,13 @@ CodeEditorResult code_editor(const CodeEditorDesc& input) noexcept {
                 }
                 if (op.key == SDLK_BACKSPACE || op.key == SDLK_DELETE) {
                     if (!d.read_only) {
-                        if (lo == hi) {
+                        const bool collapsed = (lo == hi);
+                        if (collapsed) {
                             lo = c < next ? c : next;
                             hi = c > next ? c : next;
                         }
-                        replace(lo, hi, {}, lo, lo);
+                        const uint8_t del_group = (!collapsed || word) ? 0u : (op.key == SDLK_BACKSPACE ? 2u : 3u);
+                        replace(lo, hi, {}, lo, lo, del_group);
                     }
                     continue;
                 }
@@ -972,12 +993,21 @@ CodeEditorResult code_editor(const CodeEditorDesc& input) noexcept {
     const bool composing = focus && !d.read_only && ui.ime_comp_len > 0u;
     const uint32_t post_lines = tb_lines(b);
     if (wrap_w > 0.0f) {
-        if (post_lines != pre_lines || !vc) {
+        if (!vc || force_wrap_reset) {
             vc = editor_vlist_prepare(&ui, d.id, post_lines, stride, editor_measure_row_height, &mctx);
-        } else if (force_wrap_reset) {
-            editor_vlist_reset(vc);
-        } else if (edited_line < post_lines) {
-            vlist_set_row_height_direct(vc, edited_line, editor_measure_row_height(edited_line, &mctx));
+            if (vc && force_wrap_reset && post_lines == pre_lines) {
+                editor_vlist_reset(vc);
+            }
+        } else if (post_lines != pre_lines) {
+            if (splice_line == UINT32_MAX ||
+                !editor_vlist_splice(vc, splice_line, splice_old_span, splice_new_span))
+            {
+                vc = editor_vlist_prepare(&ui, d.id, post_lines, stride, editor_measure_row_height, &mctx);
+            }
+        } else if (splice_line != UINT32_MAX) {
+            for (uint32_t row = splice_line; row < splice_line + splice_new_span && row < post_lines; ++row) {
+                vlist_set_row_height_direct(vc, row, editor_measure_row_height(row, &mctx));
+            }
         }
         ws->edit_wrap_version = b->version;
         ws->edit_wrap_lines = post_lines;
@@ -1185,6 +1215,122 @@ CodeEditorResult code_editor(const CodeEditorDesc& input) noexcept {
 }
 
 namespace {
+void emit_editor_colored_run(
+    Context* ctx,
+    const CodeEditorDesc& d,
+    const char* s,
+    uint32_t len,
+    uint32_t token_base_off,
+    const SyntaxToken* tokens,
+    uint32_t token_count,
+    float ox,
+    float sy,
+    float scroll_x,
+    float asc,
+    float stride,
+    const ClipEntry& clip,
+    float dpi,
+    float* io_pen_x) noexcept
+{
+    if (!ctx || !ctx->atlas.font_valid || !s || len == 0u || !io_pen_x) return;
+    const uint16_t primary_slot = resolve_font_slot_idx(&ctx->atlas, d.font_id);
+    if (primary_slot == kInvalidFont) return;
+    const uint32_t slice_end = token_base_off + len;
+    bool same_font = true;
+    bool tokens_sorted = true;
+    uint32_t prev_end = 0u;
+    for (uint32_t t = 0u; t < token_count; ++t) {
+        const auto& tok = tokens[t];
+        if (tok.byte_start < prev_end || tok.byte_end < tok.byte_start) {
+            tokens_sorted = false;
+        }
+        prev_end = tok.byte_end;
+        if (tok.byte_end <= token_base_off || tok.byte_start >= slice_end) continue;
+        if (tok.font_id != d.font_id && resolve_font_slot_idx(&ctx->atlas, tok.font_id) != primary_slot) {
+            same_font = false;
+        }
+    }
+    if (same_font) {
+        const FontSlot& primary = ctx->atlas.slots[primary_slot];
+        const float base_px = d.font_size_px;
+        const float phys_px = base_px * dpi;
+        const float base_y_px = sy * dpi + asc;
+        const auto lookup_color = [&](uint32_t abs_byte) noexcept -> Color {
+            if (token_count == 0u) return d.text_color;
+            if (tokens_sorted) {
+                uint32_t lo = 0u, hi = token_count;
+                while (lo < hi) {
+                    const uint32_t mid = lo + ((hi - lo) >> 1u);
+                    if (tokens[mid].byte_end <= abs_byte) lo = mid + 1u;
+                    else hi = mid;
+                }
+                if (lo < token_count && abs_byte >= tokens[lo].byte_start && abs_byte < tokens[lo].byte_end) {
+                    return resolve_theme_color(tokens[lo].color, d.text_color);
+                }
+                return d.text_color;
+            }
+            for (uint32_t t = 0u; t < token_count; ++t) {
+                if (abs_byte >= tokens[t].byte_start && abs_byte < tokens[t].byte_end) {
+                    return resolve_theme_color(tokens[t].color, d.text_color);
+                }
+            }
+            return d.text_color;
+        };
+        uint32_t pos = 0u;
+        while (pos < len) {
+            if (s[pos] == '\t') {
+                *io_pen_x += static_cast<float>(d.tab_width) * primary.space_advance_em * base_px;
+                ++pos;
+                continue;
+            }
+            uint32_t run_end = pos;
+            while (run_end < len && s[run_end] != '\t') {
+                ++run_end;
+            }
+            const size_t mk = ctx->frame_arena.mark();
+            const std::span<const ShapedGlyph> glyphs = shape_utf8_run(ctx, primary_slot, s + pos, run_end - pos);
+            for (const ShapedGlyph& g : glyphs) {
+                const float pen_x_px = (ox + *io_pen_x - scroll_x) * dpi;
+                emit_slug_glyph_quad(
+                    ctx, g.font_slot, g.glyph_id, phys_px,
+                    pen_x_px, base_y_px, g.x_offset_em, g.y_offset_em,
+                    clip, lookup_color(token_base_off + pos + g.cluster));
+                *io_pen_x += g.x_advance_1px * base_px;
+            }
+            ctx->frame_arena.rewind(mk);
+            pos = run_end;
+        }
+        return;
+    }
+    uint32_t pos = token_base_off;
+    float py = 0.0f;
+    for (uint32_t t = 0u; t < token_count; ++t) {
+        const auto& tok = tokens[t];
+        if (tok.byte_end <= pos || tok.byte_end <= tok.byte_start) continue;
+        if (tok.byte_start >= slice_end) break;
+        const uint32_t ca_raw = (tok.byte_start > pos) ? tok.byte_start : pos;
+        const uint32_t cz_raw = (tok.byte_end < slice_end) ? tok.byte_end : slice_end;
+        const uint32_t ca = token_base_off + utf8_clamp_boundary(s, len, ca_raw - token_base_off);
+        const uint32_t cz = token_base_off + utf8_clamp_boundary(s, len, cz_raw - token_base_off);
+        if (ca > pos) {
+            emit_utf8_glyph_run(ctx, d.font_id, s + (pos - token_base_off), ca - pos,
+                d.font_size_px, 0.0f, asc, stride, d.text_color,
+                ox, sy, scroll_x, 0.0f, clip, dpi, false, false, io_pen_x, &py, d.tab_width);
+        }
+        if (cz > ca) {
+            emit_utf8_glyph_run(ctx, tok.font_id, s + (ca - token_base_off), cz - ca,
+                d.font_size_px, 0.0f, asc, stride, resolve_theme_color(tok.color, d.text_color),
+                ox, sy, scroll_x, 0.0f, clip, dpi, false, false, io_pen_x, &py, d.tab_width);
+        }
+        pos = (cz > pos) ? cz : pos;
+    }
+    if (pos < slice_end) {
+        emit_utf8_glyph_run(ctx, d.font_id, s + (pos - token_base_off), slice_end - pos,
+            d.font_size_px, 0.0f, asc, stride, d.text_color,
+            ox, sy, scroll_x, 0.0f, clip, dpi, false, false, io_pen_x, &py, d.tab_width);
+    }
+}
+
 void emit_editor_token_slice(
     Context* ctx,
     const CodeEditorDesc& d,
@@ -1202,32 +1348,13 @@ void emit_editor_token_slice(
     const ClipEntry& clip,
     float dpi) noexcept
 {
+    (void)orig_str;
     if (slice_orig_end <= slice_orig_start || !sub_str.chars) return;
-    const auto emit_seg = [&](uint32_t orig_a, uint32_t orig_z, Color color, uint16_t font) noexcept {
-        if (orig_z <= orig_a) return;
-        const uint32_t local_a = sub_local_off + (orig_a - slice_orig_start);
-        const float px_x = ox + editor_x(ctx, d, sub_str, local_a);
-        float px = 0.0f, py = 0.0f;
-        emit_utf8_glyph_run(
-            ctx, font, sub_str.chars + local_a, orig_z - orig_a,
-            d.font_size_px, 0.0f, asc, stride, color,
-            px_x, sy, 0.0f, 0.0f, clip, dpi, false, false, &px, &py, d.tab_width);
-    };
-    uint32_t pos = slice_orig_start;
-    const uint32_t clamp_lim = orig_str.length < slice_orig_end ? orig_str.length : slice_orig_end;
-    for (uint32_t t = 0u; t < token_count; ++t) {
-        const auto& tok = tokens[t];
-        const uint32_t a = utf8_clamp_boundary(orig_str.chars, clamp_lim, tok.byte_start);
-        const uint32_t z = utf8_clamp_boundary(orig_str.chars, clamp_lim, tok.byte_end);
-        if (z <= pos) continue;
-        if (a >= slice_orig_end) break;
-        const uint32_t ca = (a > pos) ? a : pos;
-        const uint32_t cz = (z < slice_orig_end) ? z : slice_orig_end;
-        if (ca > pos) emit_seg(pos, ca, d.text_color, d.font_id);
-        emit_seg(ca, cz, resolve_theme_color(tok.color, d.text_color), tok.font_id);
-        pos = cz;
-    }
-    if (pos < slice_orig_end) emit_seg(pos, slice_orig_end, d.text_color, d.font_id);
+    float pen_x = (sub_local_off > 0u) ? editor_x(ctx, d, sub_str, sub_local_off) : 0.0f;
+    emit_editor_colored_run(
+        ctx, d, sub_str.chars + sub_local_off, slice_orig_end - slice_orig_start,
+        slice_orig_start, tokens, token_count,
+        ox, sy, 0.0f, asc, stride, clip, dpi, &pen_x);
 }
 } // namespace
 
@@ -1319,32 +1446,35 @@ void emit_code_editor_command(Context* ctx, const CodeEditorExtra* e, Clay_Bound
         const uint32_t caret = preedit && e->cursor >= l.start && e->cursor <= l.start + length ? e->cursor - l.start : length;
 
         if (e->wrap_w <= 0.0f) {
-            if (hi > l.start && lo <= l.start + length) {
+            if (!preedit && hi > l.start && lo <= l.start + length) {
                 const uint32_t a = lo > l.start ? lo - l.start : 0u;
                 const uint32_t z = hi < l.start + length ? hi - l.start : length;
-                const float x = editor_x(ctx, d, l.text, a);
-                const float end_x = editor_x(ctx, d, l.text, z);
-                push_prim(ctx, Prim::make_rect({ (ox + x - e->scroll_x) * dpi, y * dpi, (end_x - x + (hi > l.start + length ? d.font_size_px * 0.6f : 0.0f)) * dpi, e->stride * dpi }, clip.rect, d.selection_color));
+                const bool spans_nl = hi > l.start + length;
+                emit_selection_bands(
+                    ctx, d.font_id, l.text.chars, length, a, z,
+                    d.font_size_px, 0.0f, false, true, d.tab_width,
+                    ox, y * dpi, e->stride * dpi, e->scroll_x, dpi,
+                    clip.rect, d.selection_color, 0.0f, spans_nl ? d.font_size_px * 0.6f : 0.0f);
             }
             const float preedit_width = preedit ? editor_x(ctx, d, e->composition, e->composition.length) : 0.0f;
-            const auto segment = [&](uint32_t a, uint32_t z, Color color, uint16_t font) noexcept {
-                if (preedit && a < caret && z > caret) {
-                    glyph({ l.text.chars + a, caret - a }, color, font, ox + editor_x(ctx, d, l.text, a) - e->scroll_x, y, clip);
-                    a = caret;
+            float line_pen_x = 0.0f;
+            if (!preedit) {
+                emit_editor_colored_run(
+                    ctx, d, l.text.chars, length, 0u, tokens, count,
+                    ox, y, e->scroll_x, asc, e->stride, clip, dpi, &line_pen_x);
+            } else {
+                if (caret > 0u) {
+                    emit_editor_colored_run(
+                        ctx, d, l.text.chars, caret, 0u, tokens, count,
+                        ox, y, e->scroll_x, asc, e->stride, clip, dpi, &line_pen_x);
                 }
-                glyph({ l.text.chars + a, z - a }, color, font, ox + editor_x(ctx, d, l.text, a) - e->scroll_x + (preedit && a >= caret ? preedit_width : 0.0f), y, clip);
-            };
-            uint32_t pos = 0u;
-            for (uint32_t t = 0u; t < count; ++t) {
-                const auto& token = tokens[t];
-                const uint32_t a = utf8_clamp_boundary(l.text.chars, length, token.byte_start);
-                const uint32_t z = utf8_clamp_boundary(l.text.chars, length, token.byte_end);
-                if (a < pos || z < a) continue;
-                if (a > pos) segment(pos, a, d.text_color, d.font_id);
-                segment(a, z, resolve_theme_color(token.color, d.text_color), token.font_id);
-                pos = z;
+                line_pen_x += preedit_width;
+                if (caret < length) {
+                    emit_editor_colored_run(
+                        ctx, d, l.text.chars + caret, length - caret, caret, tokens, count,
+                        ox, y, e->scroll_x, asc, e->stride, clip, dpi, &line_pen_x);
+                }
             }
-            if (pos < length) segment(pos, length, d.text_color, d.font_id);
             if (e->focused && l.index == e->active_line) {
                 const uint32_t col = e->cursor - l.start;
                 const float x = ox + editor_x(ctx, d, l.text, col) - e->scroll_x;
@@ -1387,7 +1517,7 @@ void emit_code_editor_command(Context* ctx, const CodeEditorExtra* e, Clay_Bound
             SyntaxToken local_prefix[256],local_suffix[256];
             SyntaxToken* orig_prefix_tokens=count>256 ? ctx->frame_arena.alloc<SyntaxToken>(count) : local_prefix;
             SyntaxToken* orig_suffix_tokens=count>256 ? ctx->frame_arena.alloc<SyntaxToken>(count) : local_suffix;
-            if(!orig_prefix_tokens || !orig_suffix_tokens) return;
+            if(!orig_prefix_tokens || !orig_suffix_tokens) { ctx->frame_arena.rewind(sp_mark); continue; }
             for (uint32_t t = 0u; t < count; ++t) {
                 orig_prefix_tokens[t] = tokens[t];
                 orig_suffix_tokens[t] = tokens[t];
@@ -1422,17 +1552,17 @@ void emit_code_editor_command(Context* ctx, const CodeEditorExtra* e, Clay_Bound
                     const Str sub_str = { draw_str.chars ? draw_str.chars + sub.start : "", sub.end - sub.start };
                     const bool is_last = (sub.end >= draw_str.length);
 
-                    if (has_sel) {
+                    if (has_sel && !preedit) {
                         const uint32_t hs = spl_sel_a > sub.start ? spl_sel_a : sub.start;
                         const uint32_t he = spl_sel_z < sub.end ? spl_sel_z : sub.end;
                         const bool sub_nl = is_last && spans_nl;
                         if (he > hs || sub_nl) {
-                            const float sx0 = editor_x(ctx, d, sub_str, hs - sub.start);
-                            float sx1 = editor_x(ctx, d, sub_str, (he > sub.start) ? (he - sub.start) : 0u);
-                            if (sub_nl) sx1 += d.font_size_px * 0.6f;
-                            if (sx1 > sx0) {
-                                push_prim(ctx, Prim::make_rect({ (ox + sx0) * dpi, sy * dpi, (sx1 - sx0) * dpi, e->stride * dpi }, clip.rect, d.selection_color));
-                            }
+                            emit_selection_bands(
+                                ctx, d.font_id, sub_str.chars, sub_str.length,
+                                hs - sub.start, (he > sub.start) ? (he - sub.start) : 0u,
+                                d.font_size_px, 0.0f, false, true, d.tab_width,
+                                ox, sy * dpi, e->stride * dpi, 0.0f, dpi,
+                                clip.rect, d.selection_color, 0.0f, sub_nl ? d.font_size_px * 0.6f : 0.0f);
                         }
                     }
 

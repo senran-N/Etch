@@ -7,16 +7,142 @@ uint8_t bidi_class(uint32_t cp) noexcept {
     while (lo < hi) { const uint32_t m = (lo + hi) / 2; if (cp > kBidiRanges[m].last) lo = m + 1; else hi = m; }
     return kBidiRanges[lo].cls;
 }
-struct BidiItem { uint32_t byte, cp; hb_script_t script; uint8_t cls, level; };
+struct BidiItem { uint32_t byte, cp; hb_script_t script; uint8_t cls, orig_cls, level; };
 struct BidiRun { uint32_t first, end; hb_script_t script; uint8_t level; };
+struct BidiBracketPair { uint32_t open, close; };
 const BidiBracket* bidi_bracket(uint32_t cp) noexcept {
     uint32_t lo = 0, hi = ETCH_COUNTOF(kBidiBrackets);
     while (lo < hi) { const uint32_t m = (lo + hi) / 2; if (kBidiBrackets[m].cp < cp) lo = m + 1; else hi = m; }
     return lo < ETCH_COUNTOF(kBidiBrackets) && kBidiBrackets[lo].cp == cp ? &kBidiBrackets[lo] : nullptr;
 }
-std::span<const ShapedGlyph> shape_utf8_run(Context* ctx, uint16_t font_id, const char* utf8, uint32_t byte_len, bool* out_is_rtl = nullptr) noexcept {
-    if (out_is_rtl) *out_is_rtl = false;
-    if (!byte_len || !ctx->atlas.font_valid) return {};
+
+bool shape_cache_ensure(Context* ctx) noexcept {
+    auto& sc = ctx->shape_cache;
+    if (sc.initialized) return true;
+    for (uint32_t i = 0u; i < 2u; ++i) {
+        sc.banks[i].entries = static_cast<Context::ShapeCacheEntry*>(std::calloc(Context::ShapeCache::kEntryCap, sizeof(Context::ShapeCacheEntry)));
+        sc.banks[i].glyphs = static_cast<ShapedGlyph*>(std::malloc(Context::ShapeCache::kGlyphCap * sizeof(ShapedGlyph)));
+        sc.banks[i].text = static_cast<char*>(std::malloc(Context::ShapeCache::kTextCap));
+        if (!sc.banks[i].entries || !sc.banks[i].glyphs || !sc.banks[i].text) {
+            for (uint32_t j = 0u; j <= i; ++j) {
+                std::free(sc.banks[j].entries);
+                std::free(sc.banks[j].glyphs);
+                std::free(sc.banks[j].text);
+                sc.banks[j] = {};
+            }
+            return false;
+        }
+    }
+    sc.active_bank = 0u;
+    sc.font_revision = ctx->atlas.font_revision;
+    sc.initialized = true;
+    return true;
+}
+
+void shape_cache_clear_bank(Context::ShapeCacheBank& b) noexcept {
+    if (b.entries && b.entry_count > 0u) {
+        std::memset(b.entries, 0, Context::ShapeCache::kEntryCap * sizeof(Context::ShapeCacheEntry));
+    }
+    b.entry_count = 0u;
+    b.glyph_used = 0u;
+    b.text_used = 0u;
+}
+
+void shape_cache_begin_frame(Context* ctx) noexcept {
+    auto& sc = ctx->shape_cache;
+    if (!sc.initialized) return;
+    if (sc.font_revision != ctx->atlas.font_revision) {
+        shape_cache_clear_bank(sc.banks[0]);
+        shape_cache_clear_bank(sc.banks[1]);
+        sc.font_revision = ctx->atlas.font_revision;
+        return;
+    }
+    const auto& cur = sc.banks[sc.active_bank];
+    if (cur.entry_count >= (Context::ShapeCache::kEntryCap * 3u) / 4u ||
+        cur.glyph_used >= (Context::ShapeCache::kGlyphCap * 3u) / 4u ||
+        cur.text_used >= (Context::ShapeCache::kTextCap * 3u) / 4u)
+    {
+        sc.active_bank ^= 1u;
+        shape_cache_clear_bank(sc.banks[sc.active_bank]);
+    }
+}
+
+bool shape_cache_find_in_bank(
+    const Context::ShapeCacheBank& b,
+    uint64_t hash,
+    uint16_t slot,
+    uint32_t font_rev,
+    const char* utf8,
+    uint32_t byte_len,
+    std::span<const ShapedGlyph>* out_span,
+    bool* out_rtl) noexcept
+{
+    if (!b.entries || b.entry_count == 0u) return false;
+    constexpr uint32_t mask = Context::ShapeCache::kEntryCap - 1u;
+    uint32_t idx = static_cast<uint32_t>(hash) & mask;
+    for (uint32_t probe = 0u; probe < 16u; ++probe) {
+        const auto& e = b.entries[idx];
+        if (!e.used) return false;
+        if (e.hash == hash && e.font_slot == slot && e.font_revision == font_rev &&
+            e.text_len == byte_len && std::memcmp(b.text + e.text_off, utf8, byte_len) == 0)
+        {
+            *out_span = std::span<const ShapedGlyph>(b.glyphs + e.glyph_off, e.glyph_count);
+            if (out_rtl) *out_rtl = e.is_rtl != 0u;
+            return true;
+        }
+        idx = (idx + 1u) & mask;
+    }
+    return false;
+}
+
+std::span<const ShapedGlyph> shape_cache_insert(
+    Context::ShapeCacheBank& b,
+    uint64_t hash,
+    uint16_t slot,
+    uint32_t font_rev,
+    const char* utf8,
+    uint32_t byte_len,
+    std::span<const ShapedGlyph> glyphs,
+    bool is_rtl) noexcept
+{
+    const uint32_t gcount = static_cast<uint32_t>(glyphs.size());
+    if (!b.entries || b.entry_count >= (Context::ShapeCache::kEntryCap * 7u) / 8u ||
+        b.glyph_used + gcount > Context::ShapeCache::kGlyphCap ||
+        b.text_used + byte_len > Context::ShapeCache::kTextCap)
+    {
+        return glyphs;
+    }
+    constexpr uint32_t mask = Context::ShapeCache::kEntryCap - 1u;
+    uint32_t idx = static_cast<uint32_t>(hash) & mask;
+    for (uint32_t probe = 0u; probe < 16u; ++probe) {
+        auto& e = b.entries[idx];
+        if (!e.used) {
+            const uint32_t toff = b.text_used;
+            const uint32_t goff = b.glyph_used;
+            std::memcpy(b.text + toff, utf8, byte_len);
+            if (gcount > 0u) std::memcpy(b.glyphs + goff, glyphs.data(), size_t(gcount) * sizeof(ShapedGlyph));
+            b.text_used += byte_len;
+            b.glyph_used += gcount;
+            e = Context::ShapeCacheEntry{
+                .hash = hash,
+                .text_off = toff,
+                .text_len = byte_len,
+                .glyph_off = goff,
+                .glyph_count = gcount,
+                .font_revision = font_rev,
+                .font_slot = slot,
+                .is_rtl = static_cast<uint8_t>(is_rtl),
+                .used = 1u,
+            };
+            ++b.entry_count;
+            return std::span<const ShapedGlyph>(b.glyphs + goff, gcount);
+        }
+        idx = (idx + 1u) & mask;
+    }
+    return glyphs;
+}
+
+std::span<const ShapedGlyph> shape_utf8_run_uncached(Context* ctx, uint16_t font_id, const char* utf8, uint32_t byte_len, bool* out_is_rtl) noexcept {
     bool ascii = true;
     for (uint32_t i = 0; i < byte_len; ++i) if (static_cast<uint8_t>(utf8[i]) >= 128u) { ascii = false; break; }
     if (ascii) return shape_directional_run(ctx, font_id, utf8, byte_len, out_is_rtl, HB_DIRECTION_LTR, HB_SCRIPT_LATIN);
@@ -26,7 +152,8 @@ std::span<const ShapedGlyph> shape_utf8_run(Context* ctx, uint16_t font_id, cons
     const char* p = utf8; uint32_t n = 0;
     while (p < utf8 + byte_len) {
         const uint32_t off = static_cast<uint32_t>(p - utf8), cp = next_utf8_codepoint(p, utf8 + byte_len);
-        items[n++] = {off, cp, hb_unicode_script(hb_unicode_funcs_get_default(), cp), bidi_class(cp), 0};
+        const uint8_t cls = bidi_class(cp);
+        items[n++] = {off, cp, hb_unicode_script(hb_unicode_funcs_get_default(), cp), cls, cls, 0};
     }
     uint8_t base = 0;
     for (uint32_t i = 0; i < n; ++i) {
@@ -55,7 +182,7 @@ std::span<const ShapedGlyph> shape_utf8_run(Context* ctx, uint16_t font_id, cons
             it.level = stack[depth - 1].level; it.cls = BiBN;
         } else if (stack[depth - 1].override_cls != BiON) it.cls = stack[depth - 1].override_cls;
     }
-    // W1-W7, N1-N2 and I1-I2 within embedding level runs.
+    // W1-W7, N0-N2 and I1-I2 within embedding level runs.
     for (uint32_t start = 0; start < n;) {
         uint32_t end = start + 1; while (end < n && items[end].level == items[start].level) ++end;
         const uint8_t embedding = (items[start].level & 1u) ? BiR : BiL;
@@ -88,8 +215,9 @@ std::span<const ShapedGlyph> shape_utf8_run(Context* ctx, uint16_t font_id, cons
             if (c == BiL || c == BiR) strong = c;
             else if (c == BiEN && strong == BiL) c = BiL;
         }
-        // N0: paired brackets take the enclosed strong direction when appropriate.
+        // N0 / BD16: collect bracket pairs and resolve in ascending order of opening bracket position.
         uint32_t bracket_stack[63] = {}; uint32_t bracket_depth = 0;
+        BidiBracketPair pairs[64] = {}; uint32_t pair_count = 0;
         for (uint32_t i = start; i < end; ++i) {
             if (items[i].cls != BiON) continue;
             const auto* bracket = bidi_bracket(items[i].cp);
@@ -103,8 +231,18 @@ std::span<const ShapedGlyph> shape_utf8_run(Context* ctx, uint16_t font_id, cons
             while (match && items[bracket_stack[match - 1]].cp != bracket->pair) --match;
             if (!match) continue;
             const uint32_t open = bracket_stack[match - 1]; bracket_depth = match - 1;
+            if (pair_count < 64u) pairs[pair_count++] = {open, i};
+        }
+        for (uint32_t a = 1u; a < pair_count; ++a) {
+            const BidiBracketPair key = pairs[a];
+            uint32_t b = a;
+            while (b > 0u && pairs[b - 1u].open > key.open) { pairs[b] = pairs[b - 1u]; --b; }
+            pairs[b] = key;
+        }
+        for (uint32_t pi = 0u; pi < pair_count; ++pi) {
+            const uint32_t open = pairs[pi].open, close = pairs[pi].close;
             bool same = false, opposite = false;
-            for (uint32_t k = open + 1; k < i; ++k) {
+            for (uint32_t k = open + 1; k < close; ++k) {
                 uint8_t c = items[k].cls; if (c == BiEN || c == BiAN) c = BiR;
                 same |= c == embedding; opposite |= c == (embedding == BiL ? BiR : BiL);
             }
@@ -116,9 +254,9 @@ std::span<const ShapedGlyph> shape_utf8_run(Context* ctx, uint16_t font_id, cons
                     if (c == BiL || c == BiR) { resolved = c; break; }
                 }
             }
-            items[open].cls = resolved; items[i].cls = resolved;
-            for (uint32_t k = open + 1; k < end && bidi_class(items[k].cp) == BiNSM; ++k) items[k].cls = resolved;
-            for (uint32_t k = i + 1; k < end && bidi_class(items[k].cp) == BiNSM; ++k) items[k].cls = resolved;
+            items[open].cls = resolved; items[close].cls = resolved;
+            for (uint32_t k = open + 1; k < end && items[k].orig_cls == BiNSM; ++k) items[k].cls = resolved;
+            for (uint32_t k = close + 1; k < end && items[k].orig_cls == BiNSM; ++k) items[k].cls = resolved;
         }
         for (uint32_t i = start; i < end;) {
             if (items[i].cls == BiL || items[i].cls == BiR || items[i].cls == BiEN || items[i].cls == BiAN) { ++i; continue; }
@@ -136,6 +274,22 @@ std::span<const ShapedGlyph> shape_utf8_run(Context* ctx, uint16_t font_id, cons
             else { if (it.cls == BiR) ++it.level; else if (it.cls == BiEN || it.cls == BiAN) it.level += 2; }
         }
         start = end;
+    }
+    // UAX#9 Rule L1: reset level of separators and preceding/trailing whitespace & formatting to paragraph base level.
+    auto is_l1_resettable = [](uint8_t oc) noexcept -> bool {
+        return oc == BiWS || oc == BiFSI || oc == BiLRI || oc == BiRLI || oc == BiPDI ||
+               oc == BiLRE || oc == BiRLE || oc == BiLRO || oc == BiRLO || oc == BiPDF || oc == BiBN;
+    };
+    for (uint32_t i = 0; i < n; ++i) {
+        if (items[i].orig_cls == BiB || items[i].orig_cls == BiS) {
+            items[i].level = base;
+            for (uint32_t k = i; k > 0u && is_l1_resettable(items[k - 1u].orig_cls); --k) {
+                items[k - 1u].level = base;
+            }
+        }
+    }
+    for (uint32_t k = n; k > 0u && is_l1_resettable(items[k - 1u].orig_cls); --k) {
+        items[k - 1u].level = base;
     }
     hb_script_t inherited = HB_SCRIPT_LATIN;
     for (uint32_t i = 0; i < n; ++i) if (items[i].script != HB_SCRIPT_COMMON && items[i].script != HB_SCRIPT_INHERITED && items[i].script != HB_SCRIPT_UNKNOWN) { inherited = items[i].script; break; }
@@ -188,4 +342,41 @@ std::span<const ShapedGlyph> shape_utf8_run(Context* ctx, uint16_t font_id, cons
         out[k++] = g;
     }
     return {out, count};
+}
+
+std::span<const ShapedGlyph> shape_utf8_run(Context* ctx, uint16_t font_id, const char* utf8, uint32_t byte_len, bool* out_is_rtl = nullptr) noexcept {
+    if (out_is_rtl) *out_is_rtl = false;
+    if (!byte_len || !ctx->atlas.font_valid) return {};
+    if (byte_len <= 1024u && shape_cache_ensure(ctx)) {
+        const uint16_t slot = resolve_font_slot_idx(&ctx->atlas, font_id);
+        const uint32_t font_rev = ctx->atlas.font_revision;
+        const uint64_t h = fnv1a_64(utf8, byte_len) ^ (uint64_t(slot) * 0x9E3779B97F4A7C15ULL) ^ (uint64_t(font_rev) * 0xBF58476D1CE4E5B9ULL);
+        auto& cur = ctx->shape_cache.banks[ctx->shape_cache.active_bank];
+        auto& prev = ctx->shape_cache.banks[ctx->shape_cache.active_bank ^ 1u];
+        std::span<const ShapedGlyph> hit = {};
+        bool hit_rtl = false;
+        if (shape_cache_find_in_bank(cur, h, slot, font_rev, utf8, byte_len, &hit, &hit_rtl)) {
+            if (out_is_rtl) *out_is_rtl = hit_rtl;
+            return hit;
+        }
+        if (shape_cache_find_in_bank(prev, h, slot, font_rev, utf8, byte_len, &hit, &hit_rtl)) {
+            if (out_is_rtl) *out_is_rtl = hit_rtl;
+            return shape_cache_insert(cur, h, slot, font_rev, utf8, byte_len, hit, hit_rtl);
+        }
+        const size_t arena_mark = ctx->frame_arena.mark();
+        bool shaped_rtl = false;
+        const std::span<const ShapedGlyph> shaped = shape_utf8_run_uncached(ctx, font_id, utf8, byte_len, &shaped_rtl);
+        if (out_is_rtl) *out_is_rtl = shaped_rtl;
+        // Re-check font_revision in case fallback fonts were lazily loaded during shaping.
+        const uint32_t post_rev = ctx->atlas.font_revision;
+        if (post_rev == font_rev && !shaped.empty()) {
+            const std::span<const ShapedGlyph> cached = shape_cache_insert(cur, h, slot, post_rev, utf8, byte_len, shaped, shaped_rtl);
+            if (cached.data() != shaped.data()) {
+                ctx->frame_arena.rewind(arena_mark);
+            }
+            return cached;
+        }
+        return shaped;
+    }
+    return shape_utf8_run_uncached(ctx, font_id, utf8, byte_len, out_is_rtl);
 }

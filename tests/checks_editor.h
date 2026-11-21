@@ -255,5 +255,64 @@ static bool verify_editor_checks(etch::Context* restore) noexcept {
         check(img.bytes == nullptr && img.size_bytes == 0u, __LINE__);
     }
 
+    // E4: CodeEditor RTL selection positive-width bands, Backspace vs Delete undo groups,
+    // and wrapped-editor incremental Fenwick splice on Enter/Backspace.
+    {
+        TextBuffer rtl_buf = {};
+        check(init_text_buffer(&rtl_buf, str_lit("\xD7\xA9\xD7\x9C\xD7\x95\xD7\x9D \xD7\xA2\xD7\x95\xD7\x9C\xD7\x9D")), __LINE__);
+        const uint32_t rtl_ed = id("e4_rtl_editor");
+        const Color sel_col = Color::rgba8(90, 140, 230, 160);
+        const uint32_t sel_packed = sel_col.pack_rgba8();
+        code_editor_set_cursor(rtl_ed, 0u, 4u);
+        begin_frame(test, {.viewport_w = 600, .viewport_h = 200});
+        code_editor({.id = rtl_ed, .buffer = &rtl_buf, .width = Sizing::fixed(500), .height = Sizing::fixed(160), .selection_color = sel_col});
+        end_frame(test);
+        bool saw_sel = false;
+        for (const Prim& p : frame_prims(test)) {
+            if ((p.style.x & 0xFu) == static_cast<uint32_t>(PrimKind::Rect) && p.style.y == sel_packed) {
+                saw_sel = true;
+                check(p.bounds.z > 0.0f && p.bounds.w > 0.0f, __LINE__);
+            }
+        }
+        check(saw_sel, __LINE__);
+        free_text_buffer(&rtl_buf);
+
+        // TextBuffer Backspace (group 2) and Delete (group 3) coalesce within group, not across groups.
+        TextBuffer ub = {};
+        check(init_text_buffer(&ub, str_lit("abcdef")), __LINE__);
+        check(text_buffer_replace(&ub, 2, 3, {}, true, 3, 3, 2, 2, 2, 1.0), __LINE__); // BS 'c' -> "abdef"
+        check(text_buffer_replace(&ub, 1, 2, {}, true, 2, 2, 1, 1, 2, 1.1), __LINE__); // BS 'b' -> "adef" (coalesced)
+        check(text_buffer_replace(&ub, 1, 2, {}, true, 1, 1, 1, 1, 3, 1.2), __LINE__); // DEL 'd' -> "aef" (new group)
+        check(text_buffer_replace(&ub, 1, 2, {}, true, 1, 1, 1, 1, 3, 1.3), __LINE__); // DEL 'e' -> "af" (coalesced)
+        uint32_t uc = 0u, ua = 0u;
+        check(text_buffer_undo(&ub, &uc, &ua) && text_buffer_byte_length(&ub) == 4u && uc == 1u, __LINE__); // restores "adef"
+        check(text_buffer_undo(&ub, &uc, &ua) && text_buffer_byte_length(&ub) == 6u && uc == 3u, __LINE__); // restores "abcdef"
+        free_text_buffer(&ub);
+
+        // Wrapped CodeEditor incremental Fenwick splice on Enter + Backspace preserves heights.
+        TextBuffer wb = {};
+        check(init_text_buffer(&wb), __LINE__);
+        char wseed[80];
+        for (uint32_t i = 0u; i < 400u; ++i) {
+            const int n = std::snprintf(wseed, sizeof(wseed), "line_%03u_0123456789_abcdefghijklmnopqrstuvwxyz_extra%s", i, i + 1u < 400u ? "\n" : "");
+            check(text_buffer_replace(&wb, text_buffer_byte_length(&wb), text_buffer_byte_length(&wb), {wseed, static_cast<uint32_t>(n)}, false), __LINE__);
+        }
+        const uint32_t wed = id("e4_wrap_splice");
+        CodeEditorResult wres = {};
+        const auto wstep = [&](uint32_t key = 0u) noexcept {
+            begin_frame(test, {.viewport_w = 400, .viewport_h = 260, .key_pressed_code = key});
+            wres = code_editor({.id = wed, .buffer = &wb, .width = Sizing::fixed(300), .height = Sizing::fixed(240), .word_wrap = true});
+            end_frame(test);
+        };
+        wstep(); request_focus(wed);
+        const uint32_t l5 = text_buffer_line_start(&wb, 5u) + 10u;
+        code_editor_set_cursor(wed, l5, l5); wstep();
+        wstep(SDLK_RETURN);
+        check(text_buffer_line_count(&wb) == 401u && wres.cursor_line == 6u, __LINE__);
+        wstep(SDLK_BACKSPACE);
+        check(text_buffer_line_count(&wb) == 400u && wres.cursor_line == 5u, __LINE__);
+        free_text_buffer(&wb);
+    }
+
     destroy_context(test);set_current_context(restore);free_text_buffer(&b);return ok;
 }

@@ -370,7 +370,7 @@ bool try_load_font_file_into_slot(
     FontAtlas* atlas,
     uint16_t slot_idx,
     const char* path,
-    int32_t face_index = 0, bool prefer_italic = false) noexcept
+    int32_t face_index = 0, bool prefer_italic = false, uint16_t target_weight = 400u) noexcept
 {
     size_t sz = 0;
     bool is_mapped = false;
@@ -378,12 +378,12 @@ bool try_load_font_file_into_slot(
     if (!raw) {
         return false;
     }
-#if defined(__APPLE__)
-    if (prefer_italic && std::memcmp(raw, "ttcf", 4) == 0) {
+    if (face_index == 0 && (prefer_italic || target_weight != 400u) && sz >= 4u && std::memcmp(raw, "ttcf", 4) == 0) {
         hb_blob_t* blob = hb_blob_create(static_cast<const char*>(raw), static_cast<unsigned int>(sz),
                                           HB_MEMORY_MODE_READONLY, nullptr, nullptr);
         const unsigned int faces = hb_face_count(blob);
-        face_index = -1;
+        int32_t best_idx = -1;
+        int32_t best_score = 0x7FFFFFFF;
         for (unsigned int i = 0; i < faces; ++i) {
             hb_face_t* face = hb_face_create(blob, i);
             hb_blob_t* head = hb_face_reference_table(face, HB_TAG('h','e','a','d'));
@@ -394,23 +394,28 @@ bool try_load_font_file_into_slot(
             // head.macStyle bit 1 and OS/2.fsSelection bits 0 and 9 identify italic/oblique.
             const bool italic = (head_len >= 46u && (ot_u16(head_data + 44u) & 2u)) ||
                                 (os2_len >= 64u && (ot_u16(os2_data + 62u) & 0x201u));
-            const bool regular_weight = os2_len >= 6u && ot_u16(os2_data + 4u) == 400u;
+            const uint16_t weight = (os2_len >= 6u) ? ot_u16(os2_data + 4u)
+                : ((head_len >= 46u && (ot_u16(head_data + 44u) & 1u)) ? 700u : 400u);
             hb_blob_destroy(os2);
             hb_blob_destroy(head);
             hb_face_destroy(face);
-            if (!italic) continue;
-            if (face_index < 0 || regular_weight) face_index = static_cast<int32_t>(i);
-            if (regular_weight) break;
+            if (prefer_italic && !italic) continue;
+            if (!prefer_italic && italic) continue;
+            const int32_t diff = std::abs(static_cast<int32_t>(weight) - static_cast<int32_t>(target_weight));
+            if (diff < best_score) {
+                best_score = diff;
+                best_idx = static_cast<int32_t>(i);
+                if (diff == 0) break;
+            }
         }
         hb_blob_destroy(blob);
-        if (face_index < 0) {
+        if (best_idx >= 0) {
+            face_index = best_idx;
+        } else if (prefer_italic) {
             release_font_bytes(raw, sz, is_mapped);
             return false;
         }
     }
-#else
-    (void)prefer_italic;
-#endif
     if (!init_font_slot_from_owned_bytes(
         atlas,
         slot_idx,
@@ -448,7 +453,9 @@ bool try_load_system_font(FontAtlas* atlas, uint16_t slot_idx, const char* filen
         const int n = std::snprintf(buf, sizeof(buf), "%s/%s%s", root, directory, filename);
         if (n < 0 || static_cast<size_t>(n) >= sizeof(buf)) return false;
         if (slot_idx >= 3u && slot_idx < kFontMedium && font_has_source_hash(atlas, hash_font_path(buf, 0))) return true;
-        return try_load_font_file_into_slot(atlas, slot_idx, buf, 0, slot_idx == kFontItalic);
+        const uint16_t target_w = slot_idx == kFontBold ? 700u
+            : (slot_idx == kFontSemiBold ? 600u : (slot_idx == kFontMedium ? 500u : 400u));
+        return try_load_font_file_into_slot(atlas, slot_idx, buf, 0, slot_idx == kFontItalic, target_w);
     };
 #if defined(_WIN32)
     if (probe(SDL_getenv("SystemRoot"), "Fonts/")) return true;
@@ -509,9 +516,16 @@ void ensure_weighted_loaded(FontAtlas* atlas, uint16_t slot) noexcept {
         "Inter-Medium.ttf", "Roboto-Medium.ttf", "NotoSans-Medium.ttf",
 #if defined(_WIN32)
         "seguisb.ttf",
+#elif defined(__APPLE__)
+        "HelveticaNeue.ttc", "PingFang.ttc",
 #endif
     };
-    const char* semibold[] = {"seguisb.ttf", "Inter-SemiBold.ttf", "NotoSans-SemiBold.ttf"};
+    const char* semibold[] = {
+        "seguisb.ttf", "Inter-SemiBold.ttf", "NotoSans-SemiBold.ttf",
+#if defined(__APPLE__)
+        "HelveticaNeue.ttc", "PingFang.ttc",
+#endif
+    };
     const char* italic[] = {
 #if defined(_WIN32)
         "segoeuii.ttf", "Inter-Italic.ttf", "ariali.ttf",
@@ -1053,7 +1067,11 @@ SlugGlyphEntry slug_get_glyph(FontAtlas* atlas, uint16_t slot_idx, uint32_t glyp
 
 bool wants_emoji(const char* utf8, uint32_t len) noexcept {
     const char* p=utf8;const char* end=utf8+len;bool emoji=false;
-    while(p<end) {const uint32_t cp=next_utf8_codepoint(p,end);if(cp==0xFE0E)return false;if(cp==0xFE0F||cp==0x20E3||cp>=0x1F000||(cp>=0x2600&&cp<=0x27BF))emoji=true;}
+    while(p<end) {
+        const uint32_t cp=next_utf8_codepoint(p,end);
+        if(cp==0xFE0E)return false;
+        if(cp==0xFE0F||cp==0x20E3||(cp>=0x1F000u&&cp<=0x1FAFFu)||(cp>=0x2600u&&cp<=0x27BFu))emoji=true;
+    }
     return emoji;
 }
 uint16_t pick_fallback_slot_for_cluster(

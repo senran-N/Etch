@@ -1295,6 +1295,7 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
     ctx->active_ui->active_vlists = nullptr;
     ctx->active_ui->active_vlist_count = 0;
     ++ctx->arena_epoch;
+    shape_cache_begin_frame(ctx);
     ctx->clip_shape_count=1;ctx->render_clip_index=0;
     ctx->dyn_slug_curve_count = 0;
     ctx->dyn_slug_band_count = 0;
@@ -3514,6 +3515,9 @@ static TextInputResult text_input_impl(const TextInputDesc& desc_in, const void*
     if (is_focused) {
         if (undo_slot && undo_slot->count > 0u) {
             TextUndoRecord& cur_rec = undo_slot->entries[(undo_slot->head + undo_slot->cur) % undo_slot->entries_cap];
+            if (cur_rec.cursor != cursor || cur_rec.anchor != anchor) {
+                undo_slot->last_op_group = 0u;
+            }
             cur_rec.cursor = cursor;
             cur_rec.anchor = anchor;
         }
@@ -3764,7 +3768,7 @@ static TextInputResult text_input_impl(const TextInputDesc& desc_in, const void*
                             if (del_to > cursor) {
                                 cursor = erase_text_range(buf, &len, cursor, del_to);
                                 anchor = cursor;
-                                record_edit(word_mod ? 0u : 2u);
+                                record_edit(word_mod ? 0u : 3u);
                             }
                         }
                         if (ws) {
