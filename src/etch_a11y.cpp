@@ -88,14 +88,14 @@ void a11y_finish_actions(Context* ctx,bool snapshot_updated) noexcept {
     }
     ui.frame_a11y_action_count=0;
 }
-void a11y_commit(Context* ctx) noexcept {
+bool a11y_commit_snapshot(Context* ctx) noexcept {
     auto& ui=*ctx->active_ui;
-    auto* tails=ctx->frame_arena.alloc<uint32_t>(ctx->a11y_count);if(!tails){a11y_finish_actions(ctx,false);return;}
+    auto* tails=ctx->frame_arena.alloc<uint32_t>(ctx->a11y_count);if(!tails){return false;}
     size_t bytes=size_t(ctx->a11y_count)*sizeof(A11yNode);
     for(auto* b=ctx->a11y_first;b;b=b->next)bytes+=size_t(b->node.label.length)+b->node.value_text.length+2;
     if(bytes>ui.a11y_arena.capacity) {
         size_t capacity=ui.a11y_arena.capacity?ui.a11y_arena.capacity:65536;while(capacity<bytes)capacity*=2;
-        Arena next=arena_create(capacity);if(!next.base){a11y_finish_actions(ctx,false);return;}arena_destroy(&ui.a11y_arena);ui.a11y_arena=next;
+        Arena next=arena_create(capacity);if(!next.base){return false;}arena_destroy(&ui.a11y_arena);ui.a11y_arena=next;
     }
     ui.a11y_arena.reset();ui.a11y_nodes=ui.a11y_arena.alloc<A11yNode>(ctx->a11y_count);ui.a11y_node_count=ctx->a11y_count;
     for(uint32_t i=0;i<ctx->a11y_count;++i)tails[i]=0xFFFFFFFFu;
@@ -120,8 +120,7 @@ void a11y_commit(Context* ctx) noexcept {
             n.state_flags=(n.state_flags|p->desc.add_states)&~(p->desc.clear_states&~A11yState_Password);
     }
     ctx->stats.a11y_node_count=ui.a11y_node_count;
-    os_a11y_notify_commit(ctx);
-    a11y_finish_actions(ctx,true);
+    return true;
 }
 bool a11y_take_any(uint32_t id,uint32_t mask,PendingA11yAction* out) noexcept {
     if(!id || !mask)return false;

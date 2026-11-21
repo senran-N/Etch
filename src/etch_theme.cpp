@@ -300,7 +300,15 @@ void set_theme(const Theme& t, Context* ctx) noexcept {
     }
     if (!theme_equals(target->base_theme, t)) {
         target->base_theme = t;
-        request_redraw(target);
+        if (target->headless || target->claimed_window_count == 0u) {
+            target->headless_ui.redraw_budget = 2u;
+        }
+        for (uint32_t i = 0; i < target->claimed_window_cap; ++i) {
+            if (ClaimedWindowSlot* slot = target->claimed_windows[i]) {
+                slot->ui.redraw_budget = 2u;
+                apply_platform_window_chrome(target, slot);
+            }
+        }
     }
 }
 

@@ -28,8 +28,11 @@ static bool verify_desktop_checks(etch::Context* restore) noexcept {
             if(begin_menu({.id=id_index(id("desktop_test"),301),.label=str_lit("File")})) {menu_hit|=menu_item({.id=id_index(id("desktop_test"),303),.label=str_lit("Open")});end_menu();}
             if(begin_menu({.id=id_index(id("desktop_test"),302),.label=str_lit("View")})) {menu_hit|=menu_item({.id=id_index(id("desktop_test"),304),.label=str_lit("Grid")});end_menu();}end_menu_bar();
         }
+        begin_box({.id=id_index(id("desktop_test"),99),.width=Sizing::fit(),.height=Sizing::fit()});
         hits+=button({.id=id_index(id("desktop_test"),100),.label=str_lit("Action"),.disabled=disabled}) ? 1:0;
         set_tooltip(id_index(id("desktop_test"),100),{.text=str_lit("Action hint"),.delay_seconds=.05f});
+        end_box();
+        set_tooltip(id_index(id("desktop_test"),99),{.text=str_lit("Outer hint"),.delay_seconds=.05f});
         checkbox({.id=id_index(id("desktop_test"),101),.label=str_lit("Check"),.checked=&checked});
         toggle_switch({.id=id_index(id("desktop_test"),104),.label=str_lit("Toggle"),.value=&toggled});
         progress_bar({.id=id_index(id("desktop_test"),105),.fraction=.6f,.overlay_text=str_lit("60%"),.height=Sizing::fixed(18)});
@@ -146,7 +149,8 @@ static bool verify_desktop_checks(etch::Context* restore) noexcept {
     const Rect backdrop=element_bounds(id_index(id_index(id("desktop_test"),114),0x2306));
     check(std::fabs(backdrop.w-400)<.01f && std::fabs(backdrop.h-400)<.01f,__LINE__);
     step({},false,SDLK_ESCAPE);check(!modal,__LINE__);
-    step();const Vec2 tip=center(id_index(id("desktop_test"),100));for(int i=0;i<50;++i)step(tip);check(element_bounds(id_index(id_index(id("desktop_test"),100),0x2305)).w>0 && frame_stats(test).idle_sleeping,__LINE__);
+    step();const Vec2 tip=center(id_index(id("desktop_test"),100));for(int i=0;i<50;++i)step(tip);
+    check(element_bounds(id_index(id_index(id("desktop_test"),100),0x2305)).w>0 && element_bounds(id_index(id_index(id("desktop_test"),99),0x2305)).w<=0 && frame_stats(test).idle_sleeping,__LINE__);
     // Real pointer payloads exercise split/merge, pruning and same-leaf reordering.
     const auto drag=[&](uint32_t pane,Vec2 to) noexcept {
         Vec2 from=center(id_index(pane,0xD300));step(from,true);step({from.x+8,from.y+8},true);step(to,true);step(to,false);step();step();

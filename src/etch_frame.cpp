@@ -859,9 +859,15 @@ void end_frame(Context* ctx_arg) noexcept {
     ctx->active_ui->frame_drop_count = 0;
     ctx->active_ui->frame_text_drop_count = 0;
     ctx->active_ui->has_delivered_drop_pos = false;
+    if (ctx->active_ui->tooltip_frame_winner != ctx->active_ui->tooltip_prev_winner &&
+        ctx->active_ui->tooltip_frame_winner != 0u &&
+        ctx->active_ui->redraw_budget == 0u)
+    {
+        ctx->active_ui->redraw_budget = 1u;
+    }
     // A window-only context consumes global invalidations through its primary pass.
     if (!ctx->headless && ctx->active_window == ctx->window) ctx->headless_ui.redraw_budget = 0;
-    a11y_commit(ctx);
+    const bool a11y_ok = a11y_commit_snapshot(ctx);
     ctx->active_render_layer=nullptr;
     ctx->active_ui->current_layer=nullptr;
     ctx->active_ui->box_build_stack=nullptr;
@@ -881,6 +887,8 @@ void end_frame(Context* ctx_arg) noexcept {
     ctx->stats.active_animations = ctx->active_ui->active_anim_count;
     ctx->stats.idle_sleeping = idle_now;
     ctx->stats.ime_cursor_offset_win = ctx->active_ui->ime_cursor_offset_win;
+    if (a11y_ok) os_a11y_notify_commit(ctx);
+    a11y_finish_actions(ctx, a11y_ok);
 }
 
 bool frame_in_progress(const Context* ctx) noexcept { return ctx && ctx->in_frame; }
@@ -900,7 +908,7 @@ void request_window_redraw(Context* ctx, SDL_Window* window) noexcept {
 void process_event(Context* ctx, const SDL_Event& event) noexcept {
     if (!ctx) return;
     if (event.type == SDL_EVENT_SYSTEM_THEME_CHANGED || event.type == ctx->wake_event_type) {
-        ctx->headless_ui.redraw_budget = 2;
+        if (ctx->headless || ctx->claimed_window_count == 0u) ctx->headless_ui.redraw_budget = 2;
         for (uint32_t i = 0; i < ctx->claimed_window_cap; ++i)
             if (ctx->claimed_windows[i]) ctx->claimed_windows[i]->ui.redraw_budget = 2;
         return;
@@ -921,6 +929,10 @@ void process_event(Context* ctx, const SDL_Event& event) noexcept {
     }
     SDL_Window* window = id ? SDL_GetWindowFromID(id) : ctx->window;
     if (id && !window) return;
+    if (event.type == SDL_EVENT_WINDOW_DESTROYED && !ctx->in_frame) {
+        if (window) release_window(ctx, window);
+        return;
+    }
     WindowUiState* ui = window_ui(ctx, window);
     if (!ui) return;
     WindowUiState* saved = ctx->active_ui;

@@ -770,6 +770,8 @@ struct WindowUiState {
     TabBarDesc tab_bars[8] = {}; uint32_t tab_bar_depth = 0;
     uint32_t menu_bar_id = 0; uint32_t menu_owner = 0; uint32_t menu_open_id = 0;
     uint32_t tooltip_target = 0; float tooltip_start = 0;
+    uint32_t tooltip_prev_winner = 0; uint32_t tooltip_frame_winner = 0; uint32_t tooltip_frame_rank = 0;
+    uint64_t tooltip_start_tick = 0; uint64_t tooltip_wake_tick = 0;
 
     VarVirtualListCache* vlists = nullptr;
     uint32_t vlist_cap = 0, vlist_count = 0;
@@ -970,7 +972,7 @@ struct ClaimedWindowSlot {
     SDL_Window* window = nullptr;
     bool hit_test_attached = false;
     bool macos_chrome_applied = false;
-    void* native_chrome_proc = nullptr;
+    bool chrome_subclass_attached = false;
     uintptr_t native_chrome_style = 0; bool native_frame_applied = false;
     Context* chrome_context = nullptr;
     bool native_max_press = false, native_max_hover = false;
@@ -1472,7 +1474,8 @@ FrameStats frame_stats(const Context* ctx) noexcept {
 
 namespace etch { namespace {
 void a11y_begin(Context* ctx) noexcept;
-void a11y_commit(Context* ctx) noexcept;
+bool a11y_commit_snapshot(Context* ctx) noexcept;
+void a11y_finish_actions(Context* ctx, bool snapshot_updated) noexcept;
 A11yIndexEntry* a11y_index(Context* ctx, uint32_t id, bool insert = false) noexcept;
 A11yBuild* a11y_emit(Context* ctx, uint32_t id, A11yRole role, Str label = {}, Str value = {}, uint32_t states = 0, uint32_t actions = 0) noexcept;
 void a11y_semantic(uint32_t id, A11yRole role, Str label = {}, uint32_t states = 0, uint32_t actions = 0, float value = 0, float lo = 0, float hi = 0) noexcept;

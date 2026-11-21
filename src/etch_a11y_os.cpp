@@ -117,7 +117,18 @@ bool sync_window_metrics_from_os(WindowUiState* ui, SDL_Window* window) noexcept
 
 bool SDLCALL etch_sdl_event_watch(void* userdata, SDL_Event* event) noexcept {
     Context* ctx = static_cast<Context*>(userdata);
-    if (!ctx || !event || !SDL_IsMainThread() || !ctx->refresh_fn || ctx->in_frame || ctx->in_refresh_callback) {
+    if (!ctx || !event || !SDL_IsMainThread()) {
+        return true;
+    }
+    if (event->type == SDL_EVENT_WINDOW_DESTROYED && !ctx->in_frame && !ctx->in_refresh_callback) {
+        if (SDL_Window* win = SDL_GetWindowFromID(event->window.windowID)) {
+            if (find_claimed_slot(ctx, win)) {
+                release_window(ctx, win);
+            }
+        }
+        return true;
+    }
+    if (!ctx->refresh_fn || ctx->in_frame || ctx->in_refresh_callback) {
         return true;
     }
     SDL_WindowID win_id = 0u;
@@ -170,7 +181,7 @@ void sync_window_event_watch(Context* ctx) noexcept {
     if (!ctx) {
         return;
     }
-    const bool want = !ctx->headless && ctx->refresh_fn != nullptr;
+    const bool want = !ctx->headless && (ctx->refresh_fn != nullptr || ctx->claimed_window_count > 0u);
     if (want && !ctx->event_watch_attached) {
         if (SDL_WasInit(SDL_INIT_EVENTS) || SDL_WasInit(SDL_INIT_VIDEO)) {
             if (SDL_AddEventWatch(etch_sdl_event_watch, ctx)) {
@@ -251,7 +262,7 @@ constexpr GUID kIidUiaToggle = {0x56d00bd0u, 0xc4f4u, 0x433cu, {0xa8u, 0x36u, 0x
 constexpr GUID kIidUiaExpandCollapse = {0xd847d3a5u, 0xcab0u, 0x4a98u, {0x8cu, 0x32u, 0xecu, 0xb4u, 0x5cu, 0x59u, 0xadu, 0x24u}};
 constexpr GUID kIidUiaSelectionItem = {0x2acad808u, 0xb2d4u, 0x452du, {0xa4u, 0x07u, 0x91u, 0xffu, 0x1au, 0xd1u, 0x67u, 0xb2u}};
 
-constexpr wchar_t kUiaSlotPropName[] = L"EtchOsA11ySlot";
+constexpr UINT_PTR kUiaSubclassId = 0x45544131u;
 constexpr HRESULT kUiaElemNotAvail = static_cast<HRESULT>(UIA_E_ELEMENTNOTAVAILABLE);
 
 struct UiaDispatchCall;
@@ -330,7 +341,7 @@ struct WinUiaSlot {
     SDL_Window* window;
     HWND hwnd;
     DWORD owner_tid;
-    WNDPROC orig_wndproc;
+    bool subclass_attached;
     WinUiaNode* root;
     WinUiaNode** nodes;
     uint32_t node_count;
@@ -668,7 +679,7 @@ HRESULT STDMETHODCALLTYPE uia_get_pattern_provider(IRawElementProviderSimple* Th
     WinUiaNode* n = uia_owner(This);
     return uia_run_on_owner(n, [&]() noexcept -> HRESULT {
         const A11yNode* an = uia_live_node(n);
-        if (!an) return uia_is_detached(n) ? kUiaElemNotAvail : S_OK;
+        if (!an) return (uia_is_detached(n) || !n->is_root) ? kUiaElemNotAvail : S_OK;
         void* iface = nullptr;
         if (patternId == UIA_InvokePatternId && uia_supports_invoke(an)) {
             iface = &n->invoke;
@@ -697,7 +708,7 @@ HRESULT STDMETHODCALLTYPE uia_get_property_value(IRawElementProviderSimple* This
     WinUiaNode* n = uia_owner(This);
     return uia_run_on_owner(n, [&]() noexcept -> HRESULT {
         const A11yNode* an = uia_live_node(n);
-        if (!an) return uia_is_detached(n) ? kUiaElemNotAvail : S_OK;
+        if (!an) return (uia_is_detached(n) || !n->is_root) ? kUiaElemNotAvail : S_OK;
 
         switch (propertyId) {
             case UIA_ControlTypePropertyId:
@@ -839,7 +850,7 @@ HRESULT STDMETHODCALLTYPE uia_navigate(IRawElementProviderFragment* This, enum N
     return uia_run_on_owner(n, [&]() noexcept -> HRESULT {
         uint32_t idx = 0u;
         const A11yNode* an = uia_live_node(n, &idx);
-        if (!an) return uia_is_detached(n) ? kUiaElemNotAvail : S_OK;
+        if (!an) return (uia_is_detached(n) || !n->is_root) ? kUiaElemNotAvail : S_OK;
         const auto span = frame_a11y_nodes(n->slot->ctx, n->slot->window);
         const uint32_t count = static_cast<uint32_t>(span.size());
 
@@ -914,7 +925,7 @@ HRESULT STDMETHODCALLTYPE uia_get_bounding_rect(IRawElementProviderFragment* Thi
     WinUiaNode* n = uia_owner(This);
     return uia_run_on_owner(n, [&]() noexcept -> HRESULT {
         const A11yNode* an = uia_live_node(n);
-        if (!an) return uia_is_detached(n) ? kUiaElemNotAvail : S_OK;
+        if (!an) return (uia_is_detached(n) || !n->is_root) ? kUiaElemNotAvail : S_OK;
         double sx = 1.0, sy = 1.0;
         uia_compute_client_scale(n->slot, &sx, &sy);
         POINT tl = {0, 0};
@@ -1376,8 +1387,8 @@ WinUiaNode* uia_get_or_create_node(WinUiaSlot* slot, uint32_t elem_id, bool is_r
     return n;
 }
 
-LRESULT CALLBACK etch_uia_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) noexcept {
-    WinUiaSlot* slot = reinterpret_cast<WinUiaSlot*>(GetPropW(hwnd, kUiaSlotPropName));
+LRESULT CALLBACK etch_uia_subclass_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData) noexcept {
+    WinUiaSlot* slot = reinterpret_cast<WinUiaSlot*>(dwRefData);
     if (g_win_uia.dispatch_msg != 0u && msg == g_win_uia.dispatch_msg) {
         AcquireSRWLockExclusive(&g_win_uia.dispatch_lock);
         UiaDispatchCall* call = nullptr;
@@ -1426,9 +1437,11 @@ LRESULT CALLBACK etch_uia_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
     if ((msg == WM_DESTROY || msg == WM_NCDESTROY) && g_win_uia.ok && g_win_uia.return_raw) {
         g_win_uia.return_raw(hwnd, 0u, 0, nullptr);
     }
-    return (slot && slot->orig_wndproc)
-        ? CallWindowProcW(slot->orig_wndproc, hwnd, msg, wParam, lParam)
-        : DefWindowProcW(hwnd, msg, wParam, lParam);
+    if (msg == WM_NCDESTROY) {
+        if (slot) slot->subclass_attached = false;
+        RemoveWindowSubclass(hwnd, etch_uia_subclass_proc, uIdSubclass);
+    }
+    return DefSubclassProc(hwnd, msg, wParam, lParam);
 }
 
 #endif // defined(_WIN32) && ETCH_ENABLE_OS_A11Y
@@ -1453,9 +1466,19 @@ void os_a11y_attach_window(Context* ctx, ClaimedWindowSlot* slot) noexcept {
     uia->owner_tid = GetWindowThreadProcessId(hwnd, nullptr);
     const uint32_t rid = id_index(id("etch_a11y_window"), SDL_GetWindowID(slot->window));
     uia_get_or_create_node(uia, rid, true);
-    SetPropW(hwnd, kUiaSlotPropName, reinterpret_cast<HANDLE>(uia));
-    const LONG_PTR prev = SetWindowLongPtrW(hwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(etch_uia_wndproc));
-    uia->orig_wndproc = reinterpret_cast<WNDPROC>(prev);
+    if (!SetWindowSubclass(hwnd, etch_uia_subclass_proc, kUiaSubclassId, reinterpret_cast<DWORD_PTR>(uia))) {
+        for (uint32_t i = 0u; i < uia->node_count; ++i) {
+            if (uia->nodes[i]) {
+                InterlockedExchange(&uia->nodes[i]->detached, 1L);
+                uia->nodes[i]->slot = nullptr;
+                uia_release(uia->nodes[i]);
+            }
+        }
+        std::free(uia->nodes);
+        std::free(uia);
+        return;
+    }
+    uia->subclass_attached = true;
     slot->os_a11y = uia;
 #else
     (void)ctx;
@@ -1478,11 +1501,9 @@ void os_a11y_detach_window(Context* ctx, ClaimedWindowSlot* slot) noexcept {
         n->slot = nullptr;
     }
     if (uia->hwnd && IsWindow(uia->hwnd)) {
-        if (reinterpret_cast<WNDPROC>(GetWindowLongPtrW(uia->hwnd, GWLP_WNDPROC)) == etch_uia_wndproc && uia->orig_wndproc) {
-            SetWindowLongPtrW(uia->hwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(uia->orig_wndproc));
-        }
-        if (GetPropW(uia->hwnd, kUiaSlotPropName) == reinterpret_cast<HANDLE>(uia)) {
-            RemovePropW(uia->hwnd, kUiaSlotPropName);
+        if (uia->subclass_attached) {
+            RemoveWindowSubclass(uia->hwnd, etch_uia_subclass_proc, kUiaSubclassId);
+            uia->subclass_attached = false;
         }
         if (g_win_uia.ok && g_win_uia.return_raw) {
             g_win_uia.return_raw(uia->hwnd, 0u, 0, nullptr);
@@ -1516,8 +1537,8 @@ void os_a11y_notify_commit(Context* ctx) noexcept {
         WinUiaNode* n = uia->nodes[i];
         bool alive = n && n->is_root;
         if (n && !n->is_root) {
-            const auto* entry=a11y_index(ctx,n->element_id);
-            alive=entry && entry->build;
+            const auto* entry = a11y_index(ctx, n->element_id);
+            alive = entry && entry->build;
         }
         if (alive) {
             uia->nodes[write++] = n;
@@ -1548,7 +1569,7 @@ void os_a11y_notify_commit(Context* ctx) noexcept {
 
     if (ui.focus_id != ui.prev_a11y_focus_id) {
         slot->ui.prev_a11y_focus_id = ui.focus_id;
-        if (ui.focus_id != 0u && can_raise) {
+        if (ui.focus_id != 0u && can_raise && find_a11y_node(ui.focus_id, ctx, slot->window) != nullptr) {
             WinUiaNode* fn = uia_get_or_create_node(uia, ui.focus_id, false);
             if (fn) {
                 g_win_uia.raise_event(reinterpret_cast<IRawElementProviderSimple*>(&fn->simple), UIA_AutomationFocusChangedEventId);

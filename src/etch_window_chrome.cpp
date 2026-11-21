@@ -2,15 +2,18 @@
 #if defined(_WIN32)
 #include <cwchar>
 #include <windows.h>
+#include <commctrl.h>
 #include <dwmapi.h>
+#include <shellapi.h>
 #endif
 
 namespace etch {
 namespace {
 #if defined(_WIN32)
-constexpr const wchar_t* kChromeSlotProperty=L"Etch.ChromeSlot";
-constexpr LONG_PTR kNativeFrameStyle=WS_CAPTION | WS_THICKFRAME | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX;
-constexpr LONG_PTR kNativeFrameMask=kNativeFrameStyle | WS_POPUP;
+constexpr UINT_PTR kChromeSubclassId = 0x45544348u;
+constexpr LONG_PTR kNativeFrameFixedStyle = WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
+constexpr LONG_PTR kNativeFrameStyle = kNativeFrameFixedStyle | WS_THICKFRAME | WS_MAXIMIZEBOX;
+constexpr LONG_PTR kNativeFrameMask = kNativeFrameStyle | WS_POPUP;
 void chrome_mouse_event(ClaimedWindowSlot* slot, UINT msg, POINT point) noexcept {
     SDL_Event event={};
     const Uint32 window_id=SDL_GetWindowID(slot->window);
@@ -26,125 +29,165 @@ void chrome_mouse_event(ClaimedWindowSlot* slot, UINT msg, POINT point) noexcept
     }
     SDL_PushEvent(&event);
 }
-LRESULT CALLBACK chrome_window_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) noexcept {
-    auto* slot=reinterpret_cast<ClaimedWindowSlot*>(GetPropW(hwnd,kChromeSlotProperty));
-    const WNDPROC original=reinterpret_cast<WNDPROC>(slot->native_chrome_proc);
-    if(slot->native_frame_applied && msg==WM_ERASEBKGND) {
+bool uses_system_backdrop(WindowBackdrop backdrop) noexcept {
+    return backdrop == WindowBackdrop::SystemMica || backdrop == WindowBackdrop::SystemAcrylic;
+}
+void apply_win32_dwm_margins(HWND hwnd, const ClaimedWindowSlot* slot) noexcept {
+    if (uses_system_backdrop(slot->ui.chrome_desc.backdrop)) {
+        const MARGINS sheet = {-1, -1, -1, -1};
+        DwmExtendFrameIntoClientArea(hwnd, &sheet);
+    } else if (slot->native_frame_applied) {
+        const MARGINS thin = {1, 1, 1, 1};
+        DwmExtendFrameIntoClientArea(hwnd, &thin);
+    } else {
+        const MARGINS none = {0, 0, 0, 0};
+        DwmExtendFrameIntoClientArea(hwnd, &none);
+    }
+}
+LRESULT CALLBACK chrome_subclass_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData) noexcept {
+    auto* slot = reinterpret_cast<ClaimedWindowSlot*>(dwRefData);
+    if (!slot || !slot->window) {
+        if (msg == WM_NCDESTROY) RemoveWindowSubclass(hwnd, chrome_subclass_proc, uIdSubclass);
+        return DefSubclassProc(hwnd, msg, wparam, lparam);
+    }
+    if (slot->native_frame_applied && msg == WM_ERASEBKGND) {
         return 1;
     }
-    if(slot->native_frame_applied && msg==WM_NCCALCSIZE && wparam && !IsIconic(hwnd)) {
-        if(IsZoomed(hwnd)) {
-            auto* params=reinterpret_cast<NCCALCSIZE_PARAMS*>(lparam);
-            MONITORINFO monitor={};monitor.cbSize=sizeof(monitor);
-            if(GetMonitorInfoW(MonitorFromRect(&params->rgrc[0],MONITOR_DEFAULTTONEAREST),&monitor)) params->rgrc[0]=monitor.rcWork;
+    if (slot->native_frame_applied && msg == WM_NCCALCSIZE && wparam && !IsIconic(hwnd)) {
+        if (IsZoomed(hwnd)) {
+            auto* params = reinterpret_cast<NCCALCSIZE_PARAMS*>(lparam);
+            HMONITOR mon = MonitorFromRect(&params->rgrc[0], MONITOR_DEFAULTTONEAREST);
+            MONITORINFO monitor = {};
+            monitor.cbSize = sizeof(monitor);
+            if (GetMonitorInfoW(mon, &monitor)) {
+                RECT rc = monitor.rcWork;
+                // Preserve 1px clearance on auto-hide taskbar edge so the taskbar can wake on hover.
+                APPBARDATA abd = {};
+                abd.cbSize = sizeof(abd);
+                if ((SHAppBarMessage(ABM_GETSTATE, &abd) & ABS_AUTOHIDE) != 0 &&
+                    SHAppBarMessage(ABM_GETTASKBARPOS, &abd) != 0 &&
+                    MonitorFromRect(&abd.rc, MONITOR_DEFAULTTONEAREST) == mon)
+                {
+                    if (abd.uEdge == ABE_BOTTOM && rc.bottom == monitor.rcMonitor.bottom) rc.bottom -= 1;
+                    else if (abd.uEdge == ABE_TOP && rc.top == monitor.rcMonitor.top) rc.top += 1;
+                    else if (abd.uEdge == ABE_LEFT && rc.left == monitor.rcMonitor.left) rc.left += 1;
+                    else if (abd.uEdge == ABE_RIGHT && rc.right == monitor.rcMonitor.right) rc.right -= 1;
+                }
+                params->rgrc[0] = rc;
+            }
         }
         return 0;
     }
-    if(slot->native_frame_applied && (msg==WM_ACTIVATE || msg==WM_DWMCOMPOSITIONCHANGED)) {
-        const MARGINS margins={1,1,1,1};DwmExtendFrameIntoClientArea(hwnd,&margins);
+    if ((slot->native_frame_applied || uses_system_backdrop(slot->ui.chrome_desc.backdrop)) &&
+        (msg == WM_ACTIVATE || msg == WM_DWMCOMPOSITIONCHANGED))
+    {
+        apply_win32_dwm_margins(hwnd, slot);
     }
-    if (msg==WM_NCHITTEST) {
-        POINT point={static_cast<short>(LOWORD(lparam)),static_cast<short>(HIWORD(lparam))};
-        ScreenToClient(hwnd,&point);
-        const float scale=SDL_GetWindowPixelDensity(slot->window)/slot->ui.dpi_scale;
-        if (evaluate_window_hit(slot->chrome_context,{point.x*scale,point.y*scale},slot->window)==WindowHit::Maximize) return HTMAXBUTTON;
+    if (msg == WM_NCHITTEST) {
+        POINT point = {static_cast<short>(LOWORD(lparam)), static_cast<short>(HIWORD(lparam))};
+        ScreenToClient(hwnd, &point);
+        const float scale = SDL_GetWindowPixelDensity(slot->window) / slot->ui.dpi_scale;
+        if (evaluate_window_hit(slot->chrome_context, {point.x * scale, point.y * scale}, slot->window) == WindowHit::Maximize) return HTMAXBUTTON;
     }
-    POINT max_point={static_cast<short>(LOWORD(lparam)),static_cast<short>(HIWORD(lparam))};
-    bool over_custom_max=false;
-    if((msg==WM_NCMOUSEMOVE || msg==WM_NCLBUTTONDOWN || msg==WM_NCLBUTTONDBLCLK) && wparam==HTMAXBUTTON && slot->ui.chrome_desc.enabled) {
-        ScreenToClient(hwnd,&max_point);
-        const float scale=SDL_GetWindowPixelDensity(slot->window)/slot->ui.dpi_scale;
-        over_custom_max=evaluate_window_hit(slot->chrome_context,{max_point.x*scale,max_point.y*scale},slot->window)==WindowHit::Maximize;
+    POINT max_point = {static_cast<short>(LOWORD(lparam)), static_cast<short>(HIWORD(lparam))};
+    bool over_custom_max = false;
+    if ((msg == WM_NCMOUSEMOVE || msg == WM_NCLBUTTONDOWN || msg == WM_NCLBUTTONDBLCLK) && wparam == HTMAXBUTTON && slot->ui.chrome_desc.enabled) {
+        ScreenToClient(hwnd, &max_point);
+        const float scale = SDL_GetWindowPixelDensity(slot->window) / slot->ui.dpi_scale;
+        over_custom_max = evaluate_window_hit(slot->chrome_context, {max_point.x * scale, max_point.y * scale}, slot->window) == WindowHit::Maximize;
     }
-    if (msg==WM_NCMOUSEMOVE && (over_custom_max || slot->native_max_hover)) {
-        POINT point={static_cast<short>(LOWORD(lparam)),static_cast<short>(HIWORD(lparam))};
-        ScreenToClient(hwnd,&point);chrome_mouse_event(slot,msg,point);
-        slot->native_max_hover=over_custom_max;
-        TRACKMOUSEEVENT track={sizeof(TRACKMOUSEEVENT),TME_LEAVE|TME_NONCLIENT,hwnd,0};
+    if (msg == WM_NCMOUSEMOVE && (over_custom_max || slot->native_max_hover)) {
+        POINT point = {static_cast<short>(LOWORD(lparam)), static_cast<short>(HIWORD(lparam))};
+        ScreenToClient(hwnd, &point); chrome_mouse_event(slot, msg, point);
+        slot->native_max_hover = over_custom_max;
+        TRACKMOUSEEVENT track = {sizeof(TRACKMOUSEEVENT), TME_LEAVE | TME_NONCLIENT, hwnd, 0};
         TrackMouseEvent(&track);
-        return DefWindowProcW(hwnd,msg,wparam,lparam);
+        return DefSubclassProc(hwnd, msg, wparam, lparam);
     }
-    if (msg==WM_NCMOUSELEAVE && slot->native_max_hover) {
-        slot->native_max_hover=false;chrome_mouse_event(slot,msg,{-1,-1});
+    if (msg == WM_NCMOUSELEAVE && slot->native_max_hover) {
+        slot->native_max_hover = false; chrome_mouse_event(slot, msg, {-1, -1});
     }
-    if ((msg==WM_NCLBUTTONDOWN || msg==WM_NCLBUTTONDBLCLK) && over_custom_max) {
-        POINT point={static_cast<short>(LOWORD(lparam)),static_cast<short>(HIWORD(lparam))};
-        ScreenToClient(hwnd,&point);slot->native_max_press=true;
-        SetCapture(hwnd);chrome_mouse_event(slot,msg,point);return 0;
+    if ((msg == WM_NCLBUTTONDOWN || msg == WM_NCLBUTTONDBLCLK) && over_custom_max) {
+        POINT point = {static_cast<short>(LOWORD(lparam)), static_cast<short>(HIWORD(lparam))};
+        ScreenToClient(hwnd, &point); slot->native_max_press = true;
+        SetCapture(hwnd); chrome_mouse_event(slot, msg, point); return 0;
     }
-    if ((msg==WM_LBUTTONUP || msg==WM_NCLBUTTONUP) && slot->native_max_press) {
-        POINT point={static_cast<short>(LOWORD(lparam)),static_cast<short>(HIWORD(lparam))};
-        if (msg==WM_NCLBUTTONUP) ScreenToClient(hwnd,&point);
-        slot->native_max_press=false;ReleaseCapture();chrome_mouse_event(slot,msg,point);return 0;
+    if ((msg == WM_LBUTTONUP || msg == WM_NCLBUTTONUP) && slot->native_max_press) {
+        POINT point = {static_cast<short>(LOWORD(lparam)), static_cast<short>(HIWORD(lparam))};
+        if (msg == WM_NCLBUTTONUP) ScreenToClient(hwnd, &point);
+        slot->native_max_press = false; ReleaseCapture(); chrome_mouse_event(slot, msg, point); return 0;
     }
-    if (msg==WM_CAPTURECHANGED && slot->native_max_press) {
-        slot->native_max_press=false;slot->ui.event_pointer_down=false;
-        slot->ui.prev_pointer_down=false;slot->ui.active_id=0;slot->ui.redraw_budget=2;
+    if (msg == WM_CAPTURECHANGED && slot->native_max_press) {
+        slot->native_max_press = false; slot->ui.event_pointer_down = false;
+        slot->ui.prev_pointer_down = false; slot->ui.active_id = 0; slot->ui.redraw_budget = 2;
     }
-    if (msg==WM_NCDESTROY) {
-        RemovePropW(hwnd,kChromeSlotProperty);slot->native_chrome_proc=nullptr;
+    if (msg == WM_NCDESTROY) {
+        slot->chrome_subclass_attached = false;
+        RemoveWindowSubclass(hwnd, chrome_subclass_proc, uIdSubclass);
     }
-    return CallWindowProcW(original,hwnd,msg,wparam,lparam);
+    return DefSubclassProc(hwnd, msg, wparam, lparam);
 }
 
 #endif
 
 void apply_win32_chrome(Context* ctx, ClaimedWindowSlot* slot) noexcept {
 #if defined(_WIN32)
-    HWND hwnd=static_cast<HWND>(SDL_GetPointerProperty(SDL_GetWindowProperties(slot->window),SDL_PROP_WINDOW_WIN32_HWND_POINTER,nullptr));
+    HWND hwnd = static_cast<HWND>(SDL_GetPointerProperty(SDL_GetWindowProperties(slot->window), SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr));
     if (!hwnd) return;
-    if (!slot->native_chrome_proc) {
-        slot->chrome_context=ctx;
-        if (!SetPropW(hwnd,kChromeSlotProperty,reinterpret_cast<HANDLE>(slot))) return;
-        slot->native_chrome_proc=reinterpret_cast<void*>(SetWindowLongPtrW(hwnd,GWLP_WNDPROC,reinterpret_cast<LONG_PTR>(chrome_window_proc)));
-        if (!slot->native_chrome_proc) { RemovePropW(hwnd,kChromeSlotProperty);return; }
+    slot->chrome_context = ctx;
+    if (!slot->chrome_subclass_attached) {
+        if (!SetWindowSubclass(hwnd, chrome_subclass_proc, kChromeSubclassId, reinterpret_cast<DWORD_PTR>(slot))) return;
+        slot->chrome_subclass_attached = true;
     }
-    const WindowBackdrop backdrop=slot->ui.chrome_desc.backdrop;
-    const DWM_SYSTEMBACKDROP_TYPE material=backdrop==WindowBackdrop::SystemMica ? DWMSBT_MAINWINDOW :
-        backdrop==WindowBackdrop::SystemAcrylic ? DWMSBT_TRANSIENTWINDOW : DWMSBT_NONE;
-    DwmSetWindowAttribute(hwnd,DWMWA_SYSTEMBACKDROP_TYPE,&material,sizeof(material));
-    const SDL_WindowFlags flags=SDL_GetWindowFlags(slot->window);
-    const bool native=slot->ui.chrome_desc.enabled && (flags&SDL_WINDOW_BORDERLESS)!=0 && (flags&SDL_WINDOW_FULLSCREEN)==0;
-    if(native!=slot->native_frame_applied) {
-        if(native) {
-            slot->native_chrome_style=uintptr_t(GetWindowLongPtrW(hwnd,GWL_STYLE)&kNativeFrameMask);slot->native_frame_applied=true;
-            SetWindowLongPtrW(hwnd,GWL_STYLE,(GetWindowLongPtrW(hwnd,GWL_STYLE) & ~WS_POPUP) | kNativeFrameStyle);
+    const WindowBackdrop backdrop = slot->ui.chrome_desc.backdrop;
+    const DWM_SYSTEMBACKDROP_TYPE material = backdrop == WindowBackdrop::SystemMica ? DWMSBT_MAINWINDOW :
+        backdrop == WindowBackdrop::SystemAcrylic ? DWMSBT_TRANSIENTWINDOW : DWMSBT_NONE;
+    DwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, &material, sizeof(material));
+    const SDL_WindowFlags flags = SDL_GetWindowFlags(slot->window);
+    const bool native = slot->ui.chrome_desc.enabled && (flags & SDL_WINDOW_BORDERLESS) != 0 && (flags & SDL_WINDOW_FULLSCREEN) == 0;
+    if (native != slot->native_frame_applied) {
+        if (native) {
+            slot->native_chrome_style = uintptr_t(GetWindowLongPtrW(hwnd, GWL_STYLE) & kNativeFrameMask);
+            slot->native_frame_applied = true;
+            const LONG_PTR desired = ((flags & SDL_WINDOW_RESIZABLE) != 0) ? kNativeFrameStyle : kNativeFrameFixedStyle;
+            SetWindowLongPtrW(hwnd, GWL_STYLE, (GetWindowLongPtrW(hwnd, GWL_STYLE) & ~kNativeFrameMask) | desired);
         } else {
-            slot->native_frame_applied=false;SetWindowLongPtrW(hwnd,GWL_STYLE,(GetWindowLongPtrW(hwnd,GWL_STYLE)&~kNativeFrameMask)|LONG_PTR(slot->native_chrome_style));
-            const MARGINS margins={};DwmExtendFrameIntoClientArea(hwnd,&margins);
+            slot->native_frame_applied = false;
+            SetWindowLongPtrW(hwnd, GWL_STYLE, (GetWindowLongPtrW(hwnd, GWL_STYLE) & ~kNativeFrameMask) | LONG_PTR(slot->native_chrome_style));
         }
-        SetWindowPos(hwnd,nullptr,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOZORDER|SWP_NOACTIVATE|SWP_FRAMECHANGED);
+        SetWindowPos(hwnd, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
     }
-    if(native) {
-        const DWMNCRENDERINGPOLICY policy=DWMNCRP_ENABLED;DwmSetWindowAttribute(hwnd,DWMWA_NCRENDERING_POLICY,&policy,sizeof(policy));
-        const MARGINS margins={1,1,1,1};DwmExtendFrameIntoClientArea(hwnd,&margins);
+    if (native) {
+        const DWMNCRENDERINGPOLICY policy = DWMNCRP_ENABLED;
+        DwmSetWindowAttribute(hwnd, DWMWA_NCRENDERING_POLICY, &policy, sizeof(policy));
     }
-    const DWM_WINDOW_CORNER_PREFERENCE corners=slot->ui.chrome_desc.enabled?DWMWCP_ROUND:DWMWCP_DEFAULT;
-    DwmSetWindowAttribute(hwnd,DWMWA_WINDOW_CORNER_PREFERENCE,&corners,sizeof(corners));
-    const Color bg=active_theme(ctx).bg_canvas;
-    const BOOL dark=int(bg.r)+int(bg.g)+int(bg.b)<384;
-    DwmSetWindowAttribute(hwnd,DWMWA_USE_IMMERSIVE_DARK_MODE,&dark,sizeof(dark));
-    const Color border=active_theme(ctx).border_subtle;
-    const COLORREF border_ref=RGB(border.r,border.g,border.b);
-    DwmSetWindowAttribute(hwnd,static_cast<DWMWINDOWATTRIBUTE>(34),&border_ref,sizeof(border_ref));
+    apply_win32_dwm_margins(hwnd, slot);
+    const DWM_WINDOW_CORNER_PREFERENCE corners = slot->ui.chrome_desc.enabled ? DWMWCP_ROUND : DWMWCP_DEFAULT;
+    DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &corners, sizeof(corners));
+    const Color bg = ctx->base_theme.bg_canvas;
+    const BOOL dark = int(bg.r) + int(bg.g) + int(bg.b) < 384;
+    DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
+    const Color border = Color::blend_over(bg, ctx->base_theme.border_subtle);
+    const COLORREF border_ref = RGB(border.r, border.g, border.b);
+    DwmSetWindowAttribute(hwnd, static_cast<DWMWINDOWATTRIBUTE>(34), &border_ref, sizeof(border_ref));
 #else
-    (void)ctx;(void)slot;
+    (void)ctx; (void)slot;
 #endif
 }
 void detach_win32_chrome(ClaimedWindowSlot* slot) noexcept {
 #if defined(_WIN32)
-    if (!slot->native_chrome_proc) return;
-    HWND hwnd=static_cast<HWND>(SDL_GetPointerProperty(SDL_GetWindowProperties(slot->window),SDL_PROP_WINDOW_WIN32_HWND_POINTER,nullptr));
-    if (hwnd) {
-        if(slot->native_frame_applied) {
-            slot->native_frame_applied=false;SetWindowLongPtrW(hwnd,GWL_STYLE,(GetWindowLongPtrW(hwnd,GWL_STYLE)&~kNativeFrameMask)|LONG_PTR(slot->native_chrome_style));
-            const MARGINS margins={};DwmExtendFrameIntoClientArea(hwnd,&margins);
-            SetWindowPos(hwnd,nullptr,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOZORDER|SWP_NOACTIVATE|SWP_FRAMECHANGED);
+    if (!slot->chrome_subclass_attached) return;
+    HWND hwnd = static_cast<HWND>(SDL_GetPointerProperty(SDL_GetWindowProperties(slot->window), SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr));
+    if (hwnd && IsWindow(hwnd)) {
+        if (slot->native_frame_applied) {
+            slot->native_frame_applied = false;
+            SetWindowLongPtrW(hwnd, GWL_STYLE, (GetWindowLongPtrW(hwnd, GWL_STYLE) & ~kNativeFrameMask) | LONG_PTR(slot->native_chrome_style));
+            const MARGINS margins = {}; DwmExtendFrameIntoClientArea(hwnd, &margins);
+            SetWindowPos(hwnd, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
         }
-        SetWindowLongPtrW(hwnd,GWLP_WNDPROC,reinterpret_cast<LONG_PTR>(slot->native_chrome_proc));
-        RemovePropW(hwnd,kChromeSlotProperty);
+        RemoveWindowSubclass(hwnd, chrome_subclass_proc, kChromeSubclassId);
     }
-    slot->native_chrome_proc=nullptr;
+    slot->chrome_subclass_attached = false;
 #else
     (void)slot;
 #endif

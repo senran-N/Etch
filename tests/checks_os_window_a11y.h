@@ -665,6 +665,27 @@ inline bool verify_os_window_a11y_checks() noexcept {
         check((GetWindowLongPtrW(native,GWL_STYLE)&WS_DISABLED)!=0,__LINE__);
         SDL_DestroyWindow(borderless);
     } else check(false,__LINE__);
+    // Non-resizable borderless window must not gain WS_THICKFRAME / WS_MAXIMIZEBOX; subclass detach must survive out-of-order teardown.
+    if(SDL_Window* fixed_bl=SDL_CreateWindow("Fixed borderless",240,160,SDL_WINDOW_HIDDEN|SDL_WINDOW_BORDERLESS)) {
+        begin_window_frame(wctx,fixed_bl,0);end_window_frame(wctx);
+        HWND native=static_cast<HWND>(SDL_GetPointerProperty(SDL_GetWindowProperties(fixed_bl),SDL_PROP_WINDOW_WIN32_HWND_POINTER,nullptr));
+        set_window_chrome({.enabled=true},fixed_bl);
+        const LONG_PTR style=GetWindowLongPtrW(native,GWL_STYLE);
+        check((style&(WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX))==(WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX),__LINE__);
+        check((style&(WS_THICKFRAME|WS_MAXIMIZEBOX))==0,__LINE__);
+        // Multi-window set_theme must dirty ALL claimed windows.
+        for(int i=0;i<4;++i){begin_window_frame(wctx,win,0);end_window_frame(wctx);begin_window_frame(wctx,fixed_bl,0);end_window_frame(wctx);}
+        check(!needs_window_redraw(wctx,win) && !needs_window_redraw(wctx,fixed_bl),__LINE__);
+        set_theme(Theme::light(),wctx);
+        check(needs_window_redraw(wctx,win) && needs_window_redraw(wctx,fixed_bl),__LINE__);
+        set_theme(Theme::dark(),wctx);
+        // Out-of-order detach: disable OS A11y while chrome is active, then destroy window without explicit release_window.
+        const uint32_t before_destroy=claimed_window_count(wctx);
+        set_os_a11y_enabled(wctx,false);
+        set_os_a11y_enabled(wctx,true);
+        SDL_DestroyWindow(fixed_bl);
+        check(claimed_window_count(wctx)+1u==before_destroy,__LINE__);
+    } else check(false,__LINE__);
 #endif
     const bool fs_ok = set_window_fullscreen(true, win);
     if (fs_ok && is_window_fullscreen(wctx, win)) {

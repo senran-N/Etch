@@ -731,7 +731,11 @@ void emit_draw_list_command(
 
 bool needs_redraw(const Context* ctx) noexcept {
     if (!ctx) return false;
-    if (ctx->headless_ui.redraw_budget || ctx->headless_ui.active_anim_count) return true;
+    if ((ctx->headless || ctx->claimed_window_count == 0u) &&
+        (ctx->headless_ui.redraw_budget || ctx->headless_ui.active_anim_count))
+    {
+        return true;
+    }
     for (uint32_t i = 0; i < ctx->claimed_window_cap; ++i) {
         if (!ctx->claimed_windows[i]) continue;
         const ClaimedWindowSlot& slot = *ctx->claimed_windows[i];
@@ -758,7 +762,7 @@ void wake_up(Context* ctx_arg) noexcept {
         SDL_Event ev = {};
         ev.type = ctx->wake_event_type;
         SDL_PushEvent(&ev);
-    } else {
+    } else if (ctx->headless) {
         ctx->active_ui->redraw_budget = 2u;
     }
 }
@@ -767,9 +771,9 @@ bool wait_events(Context* ctx, SDL_Event* first_event_out, int32_t timeout_ms) n
     if (!first_event_out) {
         return false;
     }
+    const uint64_t now = SDL_GetTicks();
     WindowUiState* caret_ui = ctx ? window_ui(ctx, ctx->ime_active_window) : nullptr;
     if (caret_ui && caret_ui->ime_focused_id != 0u && caret_ui->caret_blink_cycles < 20u) {
-        const uint64_t now = SDL_GetTicks();
         if (!caret_ui->caret_blink_tick) caret_ui->caret_blink_tick = now;
         const uint64_t elapsed = now - caret_ui->caret_blink_tick;
         if (elapsed >= 500) {
@@ -781,6 +785,28 @@ bool wait_events(Context* ctx, SDL_Event* first_event_out, int32_t timeout_ms) n
         }
         const int32_t remaining = elapsed >= 500 ? 500 : int32_t(500 - elapsed);
         if (timeout_ms < 0 || remaining < timeout_ms) timeout_ms = remaining;
+    }
+    if (ctx) {
+        auto check_tooltip_deadline = [&](WindowUiState& wui) noexcept {
+            if (wui.tooltip_wake_tick == 0u) return;
+            if (now >= wui.tooltip_wake_tick) {
+                wui.tooltip_wake_tick = 0u;
+                if (wui.redraw_budget < 2u) wui.redraw_budget = 2u;
+            } else {
+                const uint64_t diff = wui.tooltip_wake_tick - now;
+                const int32_t rem = diff > 60000u ? 60000 : static_cast<int32_t>(diff);
+                if (timeout_ms < 0 || rem < timeout_ms) timeout_ms = rem;
+            }
+        };
+        if (ctx->headless || ctx->claimed_window_count == 0u) {
+            check_tooltip_deadline(ctx->headless_ui);
+        }
+        for (uint32_t i = 0; i < ctx->claimed_window_cap; ++i) {
+            ClaimedWindowSlot* slot = ctx->claimed_windows[i];
+            if (!slot || !slot->window) continue;
+            if ((SDL_GetWindowFlags(slot->window) & SDL_WINDOW_MINIMIZED) != 0u) continue;
+            check_tooltip_deadline(slot->ui);
+        }
     }
     if (needs_redraw(ctx)) return SDL_PollEvent(first_event_out);
     if (ctx) timeout_ms = shader_surface_timeout(ctx, nullptr, true, timeout_ms);
@@ -1280,6 +1306,13 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
     ctx->active_ui->last_canvas_clip_radius_px = 0.0f;
     ctx->active_ui->pending_chrome_drag_count = 0u;
     ctx->active_ui->pending_chrome_client_count = 0u;
+    if (ctx->active_ui->tooltip_frame_winner == 0u) {
+        ctx->active_ui->tooltip_target = 0u;
+        ctx->active_ui->tooltip_wake_tick = 0u;
+    }
+    ctx->active_ui->tooltip_prev_winner = ctx->active_ui->tooltip_frame_winner;
+    ctx->active_ui->tooltip_frame_winner = 0u;
+    ctx->active_ui->tooltip_frame_rank = 0u;
     ctx->active_ui->drag_drop_pending = false;
     ctx->active_ui->drag_accepted_this_frame = false;
     if (ctx->active_ui->marquee_finished_canvas_id != 0u) {

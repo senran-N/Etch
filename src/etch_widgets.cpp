@@ -438,11 +438,39 @@ bool combo_box(const ComboBoxDesc& d) noexcept {
 }
 void set_tooltip(uint32_t target, const TooltipDesc& d) noexcept {
     if(!desktop_frame(target) || !d.text.chars || !std::isfinite(d.delay_seconds) || !std::isfinite(d.max_width_px) || d.max_width_px<=0) return;
-    auto& ui=*current_context()->active_ui;
-    if(!hovered(target)) {if(ui.tooltip_target==target) ui.tooltip_target=0;return;}
-    if(ui.tooltip_target!=target) {ui.tooltip_target=target;ui.tooltip_start=ui.elapsed_seconds;}
-    if(ui.elapsed_seconds-ui.tooltip_start<d.delay_seconds) {request_redraw(current_context());return;}
-    const Theme& thm = active_theme(current_context());
+    Context* ctx = current_context();
+    auto& ui = *ctx->active_ui;
+    if(!hovered(target)) {if(ui.tooltip_target==target) {ui.tooltip_target=0;ui.tooltip_wake_tick=0;} return;}
+    uint32_t rank = 0u;
+    if (const WidgetState* ws = state_map_find(&ui.states, target); ws && ws->is_text_span && ws->span_hovered) {
+        Clay_SetCurrentContext(ui.clay_ctx);
+        rank = static_cast<uint32_t>(Clay_GetPointerOverIds().length) + 1u;
+    } else {
+        Clay_SetCurrentContext(ui.clay_ctx);
+        const Clay_ElementIdArray over = Clay_GetPointerOverIds();
+        for (int32_t i = over.length - 1; i >= 0; --i) {
+            if (over.internalArray[i].id == target) { rank = static_cast<uint32_t>(i) + 1u; break; }
+        }
+    }
+    if (rank > ui.tooltip_frame_rank) { ui.tooltip_frame_rank = rank; ui.tooltip_frame_winner = target; }
+    if ((ui.tooltip_prev_winner != 0u && ui.tooltip_prev_winner != target) || ui.tooltip_frame_winner != target) return;
+    if(ui.tooltip_target!=target) {
+        ui.tooltip_target=target;
+        ui.tooltip_start=ui.elapsed_seconds;
+        ui.tooltip_start_tick=SDL_GetTicks();
+        ui.tooltip_wake_tick=0;
+    }
+    const float frame_elapsed = ui.elapsed_seconds - ui.tooltip_start;
+    const float elapsed = ctx->headless
+        ? frame_elapsed
+        : std::fmax(frame_elapsed, static_cast<float>(SDL_GetTicks() - ui.tooltip_start_tick) * 0.001f);
+    if(elapsed < d.delay_seconds) {
+        const uint64_t rem_ms = static_cast<uint64_t>(std::ceil((d.delay_seconds - elapsed) * 1000.0f));
+        ui.tooltip_wake_tick = SDL_GetTicks() + (rem_ms > 0u ? rem_ms : 1u);
+        return;
+    }
+    ui.tooltip_wake_tick = 0;
+    const Theme& thm = active_theme(ctx);
     const uint32_t id=id_index(target,0x2305);const Vec2 p=pointer_pos();
     begin_box({.id=id,.width=Sizing::fit(0,d.max_width_px),.padding=Padding::all(8),.background=thm.bg_tooltip,.border_color=thm.border_tooltip,.border_width=1,.radius=Corners::all(thm.radius_small_px),
         .attach_to=AttachTo::Root,.anchor_parent=Anchor::TopLeft,.floating_offset={p.x+12,p.y+18},.z_index=d.z_index,.pointer_passthrough=true,.clamp_to_viewport=true});

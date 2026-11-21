@@ -205,7 +205,7 @@ target_include_directories(etch
 target_link_libraries(etch PUBLIC SDL3::SDL3 PRIVATE ${ETCH_HB_LIB_TARGET})
 target_compile_definitions(etch PRIVATE ETCH_ENABLE_OS_A11Y=$<BOOL:${ETCH_ENABLE_OS_A11Y}>)
 if (WIN32)
-    target_link_libraries(etch PRIVATE user32 dwmapi)
+    target_link_libraries(etch PRIVATE user32 dwmapi comctl32 shell32)
 endif ()
 if (WIN32 AND ETCH_ENABLE_OS_A11Y)
     target_link_libraries(etch PRIVATE oleaut32)

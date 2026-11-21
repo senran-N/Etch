@@ -107,6 +107,7 @@ struct DialogSharedQueue {
     SDL_AtomicInt refs = {};
     SDL_Mutex* mutex = nullptr;
     Context* live_ctx = nullptr;
+    uint32_t wake_event_type = 0;
     PendingDialogEvent* head = nullptr;
     PendingDialogEvent* tail = nullptr;
 };
@@ -154,6 +155,7 @@ DialogSharedQueue* ensure_dialog_queue(Context* ctx) noexcept {
     }
     SDL_SetAtomicInt(&q->refs, 1);
     q->live_ctx = ctx;
+    q->wake_event_type = ctx->wake_event_type;
     ctx->dialog_queue = q;
     return q;
 }
@@ -219,17 +221,21 @@ DialogRequestCookie* make_dialog_cookie(Context* ctx, uint32_t request_tag, std:
 void enqueue_dialog_event(DialogSharedQueue* q, PendingDialogEvent* ev) noexcept {
     if (!q || !ev) return;
     SDL_LockMutex(q->mutex);
-    Context* wake_target = q->live_ctx;
-    if (!wake_target) {
+    if (!q->live_ctx) {
         SDL_UnlockMutex(q->mutex);
         free_pending_dialog_event(ev);
         return;
     }
+    const uint32_t wake_ev = q->wake_event_type;
     if (q->tail) q->tail->next = ev;
     else q->head = ev;
     q->tail = ev;
     SDL_UnlockMutex(q->mutex);
-    wake_up(wake_target);
+    if (wake_ev != 0u) {
+        SDL_Event push_ev = {};
+        push_ev.type = wake_ev;
+        SDL_PushEvent(&push_ev);
+    }
 }
 
 void SDLCALL sdl_dialog_callback(void* userdata, const char* const* filelist, int filter) {

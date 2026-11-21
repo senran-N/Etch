@@ -691,6 +691,7 @@ bool claim_window_swapchain(Context* ctx, SDL_Window* win) noexcept {
         slot.hit_test_attached = true;
     apply_platform_window_chrome(ctx, &slot);
     os_a11y_attach_window(ctx, &slot);
+    sync_window_event_watch(ctx);
     return true;
 }
 
