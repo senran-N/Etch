@@ -449,13 +449,10 @@ void set_tooltip(uint32_t target, const TooltipDesc& d) noexcept {
     if(!hovered(target)) {if(ui.tooltip_target==target) {ui.tooltip_target=0;ui.tooltip_wake_tick=0;} return;}
     uint32_t rank = 0u;
     if (const WidgetState* ws = state_map_find(&ui.states, target); ws && ws->is_text_span && ws->span_hovered) {
-        Clay_SetCurrentContext(ui.clay_ctx);
-        rank = static_cast<uint32_t>(Clay_GetPointerOverIds().length) + 1u;
+        rank = ui.pointer_over_ids.count + 1u;
     } else {
-        Clay_SetCurrentContext(ui.clay_ctx);
-        const Clay_ElementIdArray over = Clay_GetPointerOverIds();
-        for (int32_t i = over.length - 1; i >= 0; --i) {
-            if (over.internalArray[i].id == target) { rank = static_cast<uint32_t>(i) + 1u; break; }
+        for (uint32_t i = ui.pointer_over_ids.count; i > 0u; --i) {
+            if (ui.pointer_over_ids.data[i - 1u] == target) { rank = i; break; }
         }
     }
     if (rank > ui.tooltip_frame_rank) { ui.tooltip_frame_rank = rank; ui.tooltip_frame_winner = target; }

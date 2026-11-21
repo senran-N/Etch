@@ -33,7 +33,7 @@ SplitResult begin_split(const SplitDesc& desc) noexcept {
     const float total_span = (desc.axis == Axis::Row) ? ws_split->last_box_logical.w : ws_split->last_box_logical.h;
     const float avail = total_span - div_sz;
     const bool dragging_div = (ctx->active_ui->active_id == div_id);
-    const bool hovered_div = (ctx->active_ui->active_id == 0u) && Clay_PointerOver(make_clay_id(div_id));
+    const bool hovered_div = (ctx->active_ui->active_id == 0u) && pointer_over_id(ctx->active_ui, div_id);
 
     if (ws_div->pressed_this_frame) {
         if (ctx->active_ui->last_mouse_clicks >= 2u) {
@@ -116,9 +116,11 @@ SplitResult begin_split(const SplitDesc& desc) noexcept {
         .height = desc.height,
     });
 
-    Clay__GetOpenLayoutElement()->config.layout.percentAfterFixed = true;
-    Clay__GetOpenLayoutElement()->config.layout.percentMinFirst = desc.min_first_px;
-    Clay__GetOpenLayoutElement()->config.layout.percentMinSecond = desc.min_second_px;
+    if (LayoutNode* open_n = layout_engine_open_node(ctx->active_ui->layout)) {
+        open_n->cfg.percent_after_fixed = true;
+        open_n->cfg.percent_min_first = desc.min_first_px;
+        open_n->cfg.percent_min_second = desc.min_second_px;
+    }
     const Sizing first_primary = Sizing::percent(ratio);
     begin_box(BoxDesc{
         .axis = Axis::Col,
@@ -149,7 +151,7 @@ void split_second() noexcept {
 
     const uint32_t div_id = id_index(se.id, kSplitDividerTag);
     const bool dragging_div = (ctx->active_ui->active_id == div_id);
-    const bool hovered_div = (ctx->active_ui->active_id == 0u) && Clay_PointerOver(make_clay_id(div_id));
+    const bool hovered_div = (ctx->active_ui->active_id == 0u) && pointer_over_id(ctx->active_ui, div_id);
     const Color div_col = dragging_div
         ? se.divider_active_color
         : (hovered_div ? se.divider_hover_color : se.divider_color);
@@ -807,35 +809,31 @@ VirtualListSlice begin_virtual_list_with_c_measure(const VirtualListDesc& desc, 
         };
     }
 
-    Clay__OpenElementWithId(make_clay_id(desc.id));
+    layout_open(ctx->active_ui->layout, desc.id);
 
     const bool has_border = (desc.border_width > 0.0f && eff_border.a > 0u);
 
-    Clay_ElementDeclaration decl = {};
-    decl.layout.sizing.width = to_clay_sizing(desc.width);
-    decl.layout.sizing.height = to_clay_sizing(desc.height);
-    decl.layout.padding = Clay_Padding{
-        .left = to_u16_round(desc.padding.left),
-        .right = to_u16_round(desc.padding.right),
-        .top = to_u16_round(desc.padding.top),
-        .bottom = to_u16_round(desc.padding.bottom),
-    };
-    decl.layout.childGap = gap_u16;
-    decl.layout.layoutDirection = CLAY_TOP_TO_BOTTOM;
-    decl.cornerRadius = to_clay_corners(eff_radius);
-    decl.userData = extra;
+    LayoutNodeConfig decl = {};
+    decl.width = desc.width;
+    decl.height = desc.height;
+    decl.padding = desc.padding;
+    decl.child_gap = float(gap_u16);
+    decl.axis = Axis::Col;
+    decl.corner_radius = eff_radius;
+    decl.user_data = extra;
     if (extra) {
-        decl.custom.customData = extra;
+        decl.emit_custom = true;
+        decl.custom_data = extra;
     }
-    decl.clip.horizontal = true;
-    decl.clip.vertical = true;
-    decl.clip.childOffset = Clay_Vector2{ 0.0f, child_offset_y };
+    decl.clip_x = true;
+    decl.clip_y = true;
+    decl.scroll_y = true;
+    decl.child_offset = { 0.0f, child_offset_y };
     if (has_border || desc.show_scrollbar) {
-        decl.border.color = Clay_Color{255.0f, 255.0f, 255.0f, 1.0f};
-        decl.border.width = Clay_BorderWidth{1u, 1u, 1u, 1u, 0u};
+        decl.emit_border = true;
     }
 
-    Clay__ConfigureOpenElement(decl);
+    layout_configure_open(ctx->active_ui->layout, decl);
 
     ctx->a11y_parent=a11y_emit(ctx,desc.id,A11yRole::List,{}, {},0,12u);
     const bool at_bottom = (ws->vscroll_max_y <= 0.5) || (ws->vscroll_pos_y >= ws->vscroll_max_y - 2.0);
@@ -855,7 +853,7 @@ void end_virtual_list() noexcept {
         return;
     }
     if(current_context()->a11y_parent)current_context()->a11y_parent=current_context()->a11y_parent->parent;
-    Clay__CloseElement();
+    layout_close(current_context()->active_ui->layout);
 }
 
 double virtual_list_scroll_offset(uint32_t list_id) noexcept {
@@ -1045,21 +1043,22 @@ CanvasState begin_canvas(const CanvasDesc& desc_in) noexcept {
         }
     }
 
-    Clay__OpenElementWithId(make_clay_id(desc.id));
+    layout_open(ctx->active_ui->layout, desc.id);
 
-    Clay_ElementDeclaration decl = {};
-    decl.layout.sizing.width = to_clay_sizing(desc.width);
-    decl.layout.sizing.height = to_clay_sizing(desc.height);
-    decl.layout.layoutDirection = CLAY_TOP_TO_BOTTOM;
-    decl.cornerRadius = to_clay_corners(desc.radius);
-    decl.userData = extra;
+    LayoutNodeConfig decl = {};
+    decl.width = desc.width;
+    decl.height = desc.height;
+    decl.axis = Axis::Col;
+    decl.corner_radius = desc.radius;
+    decl.user_data = extra;
     if (extra) {
-        decl.custom.customData = extra;
+        decl.emit_custom = true;
+        decl.custom_data = extra;
     }
-    decl.clip.horizontal = true;
-    decl.clip.vertical = true;
+    decl.clip_x = true;
+    decl.clip_y = true;
 
-    Clay__ConfigureOpenElement(decl);
+    layout_configure_open(ctx->active_ui->layout, decl);
     ctx->a11y_parent=a11y_emit(ctx,desc.id,A11yRole::Canvas);
     return cs;
 }
@@ -1104,7 +1103,7 @@ void end_canvas() noexcept {
         });
     }
     if(ctx->a11y_parent)ctx->a11y_parent=ctx->a11y_parent->parent;
-    Clay__CloseElement();
+    layout_close(ctx->active_ui->layout);
 }
 
 void canvas_wire(const CanvasWireDesc& desc) noexcept {
@@ -1132,22 +1131,21 @@ void canvas_wire(const CanvasWireDesc& desc) noexcept {
     extra->kind = CustomCmdKind::CanvasWire;
     extra->canvas_wire = cw;
 
-    Clay__OpenElement();
-    Clay_ElementDeclaration decl = {};
-    decl.layout.sizing.width = CLAY_SIZING_PERCENT(1.0f);
-    decl.layout.sizing.height = CLAY_SIZING_PERCENT(1.0f);
-    decl.custom.customData = extra;
-    decl.userData = extra;
-    decl.floating.attachTo = CLAY_ATTACH_TO_PARENT;
-    decl.floating.attachPoints = Clay_FloatingAttachPoints{
-        .element = CLAY_ATTACH_POINT_LEFT_TOP,
-        .parent = CLAY_ATTACH_POINT_LEFT_TOP,
-    };
-    decl.floating.zIndex = desc.z_index;
-    decl.floating.pointerCaptureMode = CLAY_POINTER_CAPTURE_MODE_PASSTHROUGH;
-    decl.floating.clipTo = CLAY_CLIP_TO_ATTACHED_PARENT;
-    Clay__ConfigureOpenElement(decl);
-    Clay__CloseElement();
+    layout_open(ctx->active_ui->layout, 0u);
+    LayoutNodeConfig decl = {};
+    decl.width = Sizing::percent(1.0f);
+    decl.height = Sizing::percent(1.0f);
+    decl.emit_custom = true;
+    decl.custom_data = extra;
+    decl.user_data = extra;
+    decl.attach_to = AttachTo::Parent;
+    decl.anchor_element = Anchor::TopLeft;
+    decl.anchor_parent = Anchor::TopLeft;
+    decl.z_index = desc.z_index;
+    decl.hitbox_behavior = HitboxBehavior::Passthrough;
+    decl.clip_to_parent = true;
+    layout_configure_open(ctx->active_ui->layout, decl);
+    layout_close(ctx->active_ui->layout);
 }
 
 CanvasNodeResult begin_canvas_node(const CanvasNodeDesc& desc) noexcept {
@@ -1166,7 +1164,7 @@ CanvasNodeResult begin_canvas_node(const CanvasNodeDesc& desc) noexcept {
     ws->owner_canvas_id = ce.id;
 
     Vec2 node_pos = desc.world_pos ? *desc.world_pos : desc.pos_value;
-    const bool hovered_node = Clay_PointerOver(make_clay_id(desc.id));
+    const bool hovered_node = pointer_over_id(ctx->active_ui, desc.id);
     const bool can_drag = desc.draggable && ce.desc.interactive;
     const bool dragging = can_drag && (ctx->active_ui->active_id == desc.id) && ctx->active_ui->prev_pointer_down;
 
@@ -1223,7 +1221,9 @@ CanvasNodeResult begin_canvas_node(const CanvasNodeDesc& desc) noexcept {
         .pointer_passthrough = false,
         .clip_to_parent = true,
     });
-    if (auto* extra = static_cast<BoxExtra*>(Clay__GetOpenLayoutElement()->config.userData)) extra->world_scale = z;
+    if (LayoutNode* open_n = layout_engine_open_node(ctx->active_ui->layout)) {
+        if (auto* extra = static_cast<BoxExtra*>(open_n->cfg.user_data)) extra->world_scale = z;
+    }
     ce.in_node = true;
 
     return CanvasNodeResult{
@@ -1821,10 +1821,12 @@ TableResult begin_table(const TableDesc& desc_in) noexcept {
     result.slice = begin_virtual_list({ .id = desc.id, .item_count = desc.item_count, .item_height_px = desc.row_height_px,
         .row_gap_px = desc.row_gap_px, .overscan_rows = desc.overscan_rows, .width = Sizing::grow(), .height = Sizing::grow(),
         .padding = desc.padding, .background = Color::transparent(), .border_width = 0, .show_scrollbar = desc.show_scrollbar, .scroll_fade_px=desc.scroll_fade_px });
-    Clay__GetOpenLayoutElement()->config.layout.shrinkWidth = true;
-    // The list viewport must shrink inside the clipped table body. Its rows
-    // describe scrollable content, not a minimum height for the table.
-    Clay__GetOpenLayoutElement()->config.layout.shrinkHeight = true;
+    if (LayoutNode* open_n = layout_engine_open_node(ctx->active_ui->layout)) {
+        open_n->cfg.shrink_width = true;
+        // The list viewport must shrink inside the clipped table body. Its rows
+        // describe scrollable content, not a minimum height for the table.
+        open_n->cfg.shrink_height = true;
+    }
     // Rows own the horizontal insets, including the scrollbar gutter. Keep the list's vertical padding.
     ws=state_map_find(&ctx->active_ui->states,desc.id);
     const WidgetState* outer_ws = desc.horizontal_scroll ? state_map_find(&ctx->active_ui->states, outer_id) : nullptr;
@@ -1834,8 +1836,10 @@ TableResult begin_table(const TableDesc& desc_in) noexcept {
     ws->is_focusable=desc.keyboard_navigation;
     if(desc.keyboard_navigation && reserve_focus(ctx->active_ui)) ctx->active_ui->focus_order[ctx->active_ui->focus_count++]=desc.id;
     a11y_semantic(desc.id,A11yRole::Table,{},0,desc.keyboard_navigation ? 1u : 0u);
-    Clay__GetOpenLayoutElement()->config.layout.padding.left = 0;
-    Clay__GetOpenLayoutElement()->config.layout.padding.right = 0;
+    if (LayoutNode* open_n = layout_engine_open_node(ctx->active_ui->layout)) {
+        open_n->cfg.padding.left = 0.0f;
+        open_n->cfg.padding.right = 0.0f;
+    }
     t.cursor_row = result.slice.first_index; t.end_row = result.slice.end_index;
     return result;
 }
@@ -2009,9 +2013,8 @@ CollapsibleResult begin_collapsible(const CollapsibleDesc& d_in) noexcept {
     const bool open = ws->collapsible_open;
     float content_h = ws->collapsible_content_h;
     const uint32_t clip_id = id_index(d.id,0xC013u), content_id = id_index(d.id,0xC014u);
-    Clay_SetCurrentContext(ctx->active_ui->clay_ctx);
-    const Clay_ScrollContainerData sc = Clay_GetScrollContainerData(make_clay_id(clip_id));
-    if (sc.found && sc.contentDimensions.height > 0.5f) content_h = sc.contentDimensions.height;
+    const LayoutScrollData sc = layout_engine_scroll_data(ctx->active_ui->layout, clip_id);
+    if (sc.found && sc.content_dim.y > 0.5f) content_h = sc.content_dim.y;
     else if (element_bounds(content_id).h > 0.5f) content_h = element_bounds(content_id).h;
     ws->collapsible_content_h = content_h;
     // spring/begin_box may rehash StateMap: retain only values across those calls.
@@ -2053,16 +2056,16 @@ void end_collapsible() noexcept {
     end_box(); end_box(); end_box();
 }
 
-static void update_selectable_text_pointer(Context* ctx, WidgetState* ws, Clay_RenderCommandArray cmds) noexcept {
-    const Clay_RenderCommand* best = nullptr;
+static void update_selectable_text_pointer(Context* ctx, WidgetState* ws, std::span<const LayoutCmd> cmds) noexcept {
+    const LayoutCmd* best = nullptr;
     float best_y = 1.0e30f, best_x = 1.0e30f;
     const Vec2 p = ctx->active_ui->pointer_pos;
-    for (int32_t i = 0; i < cmds.length; ++i) {
-        const auto* cmd = Clay_RenderCommandArray_Get(&cmds,i);
-        if (cmd->commandType != CLAY_RENDER_COMMAND_TYPE_TEXT || !cmd->userData || selection_line(cmd).id != ws->key) continue;
-        const auto& bb = cmd->boundingBox;
-        const float dy = p.y < bb.y ? bb.y-p.y : (p.y > bb.y+bb.height ? p.y-bb.y-bb.height : 0);
-        const float dx = p.x < bb.x ? bb.x-p.x : (p.x > bb.x+bb.width ? p.x-bb.x-bb.width : 0);
+    for (size_t i = 0; i < cmds.size(); ++i) {
+        const LayoutCmd* cmd = &cmds[i];
+        if (cmd->kind != LayoutCmdKind::Text || !cmd->user_data || selection_line(cmd).id != ws->key) continue;
+        const Rect& bb = cmd->bounds;
+        const float dy = p.y < bb.y ? bb.y-p.y : (p.y > bb.y+bb.h ? p.y-bb.y-bb.h : 0);
+        const float dx = p.x < bb.x ? bb.x-p.x : (p.x > bb.x+bb.w ? p.x-bb.x-bb.w : 0);
         if (dy < best_y || (dy == best_y && dx < best_x)) { best = cmd; best_y = dy; best_x = dx; }
     }
     if (!best) return;

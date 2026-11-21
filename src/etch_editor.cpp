@@ -610,7 +610,7 @@ CodeEditorResult code_editor(const CodeEditorDesc& input) noexcept {
 
     int32_t hovered_line = -1;
     int32_t clicked_gutter_line = -1;
-    if (Clay_PointerOver(make_clay_id(d.id))) {
+    if (pointer_over_id(ctx->active_ui, d.id)) {
         const bool in_gutter = gutter > 0.0f && ui.pointer_pos.x >= bounds.x && ui.pointer_pos.x < origin_x;
         set_cursor(ui.pointer_pos.x >= origin_x && ui.pointer_pos.x < bounds.x + bounds.w - 14.0f
             ? Cursor::IBeam
@@ -1183,14 +1183,15 @@ CodeEditorResult code_editor(const CodeEditorDesc& input) noexcept {
     extra->is_virtual_list = true;
     extra->desc.show_scrollbar = d.show_scrollbar;
 
-    Clay__OpenElementWithId(make_clay_id(d.id));
-    Clay_ElementDeclaration decl = {};
-    decl.layout.sizing.width = to_clay_sizing(d.width);
-    decl.layout.sizing.height = to_clay_sizing(d.height);
-    decl.custom.customData = extra;
-    decl.userData = extra;
-    Clay__ConfigureOpenElement(decl);
-    Clay__CloseElement();
+    layout_open(ctx->active_ui->layout, d.id);
+    LayoutNodeConfig decl = {};
+    decl.width = d.width;
+    decl.height = d.height;
+    decl.emit_custom = true;
+    decl.custom_data = extra;
+    decl.user_data = extra;
+    layout_configure_open(ctx->active_ui->layout, decl);
+    layout_close(ctx->active_ui->layout);
     if (changed) request_redraw(ctx);
     if (focus && !d.read_only) {
         ui.ime_cursor_logical = {
@@ -1358,10 +1359,10 @@ void emit_editor_token_slice(
 }
 } // namespace
 
-void emit_code_editor_command(Context* ctx, const CodeEditorExtra* e, Clay_BoundingBox bb, const ClipEntry& outer, float dpi) noexcept {
+void emit_code_editor_command(Context* ctx, const CodeEditorExtra* e, Rect bb, const ClipEntry& outer, float dpi) noexcept {
     const auto& d = e->desc;
     auto* ws = state_map_find(&ctx->active_ui->states, d.id);
-    const Rect box = { bb.x, bb.y, bb.width, bb.height };
+    const Rect box = bb;
     ws->last_box_logical = box;
     ws->viewport_dim = { box.w, box.h };
     ws->vscroll_total_h = e->total_h;
@@ -1645,7 +1646,7 @@ void emit_code_editor_command(Context* ctx, const CodeEditorExtra* e, Clay_Bound
             const uint32_t thumb_id = id_index(d.id, kScrollbarYTag);
             const bool sb_active = (ctx->active_ui->active_id == thumb_id);
             const bool sb_hover = (ctx->active_ui->active_id == 0u) && sb.hit_track.contains(ctx->active_ui->pointer_pos) &&
-                Clay_PointerOver(make_clay_id(d.id));
+                pointer_over_id(ctx->active_ui, d.id);
             const Color thumb_col = sb_active
                 ? e->scoped_theme.scrollbar_thumb_drag
                 : (sb_hover ? e->scoped_theme.scrollbar_thumb_hover : e->scoped_theme.scrollbar_thumb);

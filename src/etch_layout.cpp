@@ -43,20 +43,21 @@ void emit_vector_icon_quad(
 }
 
 DrawCmdNode* append_open_box_draw_cmd(Context* ctx, bool foreground) noexcept {
-    if (!ctx || !ctx->in_frame || !ctx->active_ui->clay_ctx) {
+    if (!ctx || !ctx->in_frame || !ctx->active_ui->layout) {
         return nullptr;
     }
     BoxExtra* extra = ctx->layout_draw_target;
+    LayoutNode* open_elem = nullptr;
     if (!extra) {
-        Clay_SetCurrentContext(ctx->active_ui->clay_ctx);
-        if (ctx->active_ui->clay_ctx->openLayoutElementStack.length < 2) {
+        LayoutEngine* le = ctx->active_ui->layout;
+        if (le->open_stack.count < 2u) {
             return nullptr;
         }
-        Clay_LayoutElement* open_elem = Clay__GetOpenLayoutElement();
-        if (!open_elem || open_elem->isTextElement) {
+        open_elem = layout_engine_open_node(le);
+        if (!open_elem || open_elem->is_text) {
             return nullptr;
         }
-        extra = static_cast<BoxExtra*>(open_elem->config.userData);
+        extra = static_cast<BoxExtra*>(open_elem->cfg.user_data);
         if (!extra) {
             extra = ctx->frame_arena.alloc<BoxExtra>();
             if (!extra) {
@@ -64,20 +65,19 @@ DrawCmdNode* append_open_box_draw_cmd(Context* ctx, bool foreground) noexcept {
             }
             extra->layer = ctx->active_ui->current_layer;
             extra->kind = CustomCmdKind::Box;
-            open_elem->config.userData = extra;
+            open_elem->cfg.user_data = extra;
         }
     }
     if (!ctx->layout_draw_target && !foreground) {
-        Clay_LayoutElement* open_elem = Clay__GetOpenLayoutElement();
-        if (open_elem->config.custom.customData == nullptr) {
-            open_elem->config.custom.customData = extra;
+        if (!open_elem) open_elem = layout_engine_open_node(ctx->active_ui->layout);
+        if (open_elem && !open_elem->cfg.emit_custom) {
+            open_elem->cfg.emit_custom = true;
+            open_elem->cfg.custom_data = extra;
         }
     } else if (!ctx->layout_draw_target) {
-        Clay_LayoutElement* open_elem = Clay__GetOpenLayoutElement();
-        const Clay_BorderWidth& bw = open_elem->config.border.width;
-        if (bw.left == 0u && bw.right == 0u && bw.top == 0u && bw.bottom == 0u && bw.betweenChildren == 0u) {
-            open_elem->config.border.color = Clay_Color{255.0f, 255.0f, 255.0f, 1.0f};
-            open_elem->config.border.width = Clay_BorderWidth{1u, 1u, 1u, 1u, 0u};
+        if (!open_elem) open_elem = layout_engine_open_node(ctx->active_ui->layout);
+        if (open_elem) {
+            open_elem->cfg.emit_border = true;
         }
     }
     DrawCmdNode* node = ctx->frame_arena.alloc<DrawCmdNode>();
@@ -1122,7 +1122,7 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
     if (!ctx || ctx->in_frame || !ctx->active_ui) {
         return;
     }
-    if (!ctx->active_ui->clay_ctx) {
+    if (!ctx->active_ui->layout) {
         const float dpi = (desc.dpi_scale > 0.0f) ? desc.dpi_scale : 1.0f;
         const float init_w = desc.viewport_w ? (static_cast<float>(desc.viewport_w) / dpi) : 1280.0f;
         const float init_h = desc.viewport_h ? (static_cast<float>(desc.viewport_h) / dpi) : 720.0f;
@@ -1130,7 +1130,6 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
             return;
         }
     }
-    Clay_SetCurrentContext(ctx->active_ui->clay_ctx);
     set_current_context(ctx);
     ctx->in_frame = true;
     ctx->theme_depth = 0u;
@@ -1139,7 +1138,10 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
     ctx->active_ui->bloom_threshold = std::isfinite(desc.bloom_threshold) ? clamp_range(desc.bloom_threshold,0,1) : .7f;
     ctx->draw_list_window = ctx->active_window;
     ctx->active_ui->current_layer=nullptr;
-    Clay_SetCullingEnabled(true);
+    ctx->active_ui->layout->culling_enabled = true;
+    ctx->active_ui->subtree_depth = 0u;
+    ctx->active_ui->cached_subtree_hits = 0u;
+    ctx->active_ui->last_released_drag_dist_sq = 0.0f;
     ctx->active_ui->box_build_stack=nullptr;
     ctx->active_render_layer=nullptr;
     ctx->active_ui->focus_scope_depth = 0;
@@ -1354,11 +1356,9 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
         }
     }
 
-    const Clay_Dimensions logical_dims = {
-        .width = static_cast<float>(ctx->active_ui->viewport_w) / dpi,
-        .height = static_cast<float>(ctx->active_ui->viewport_h) / dpi,
-    };
-    Clay_SetLayoutDimensions(logical_dims);
+    const float logical_w = static_cast<float>(ctx->active_ui->viewport_w) / dpi;
+    const float logical_h = static_cast<float>(ctx->active_ui->viewport_h) / dpi;
+    layout_engine_set_viewport(ctx->active_ui->layout, logical_w, logical_h);
 
     ctx->active_ui->had_pointer = ctx->active_ui->has_pointer;
     ctx->active_ui->prev_pointer_pos = ctx->active_ui->pointer_pos;
@@ -1415,12 +1415,22 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
     ctx->active_ui->frame_scroll_delta = scroll;
     ctx->active_ui->event_scroll_delta = {};
 
-    // Update Clay hit-test results against the previous frame's tree BEFORE Clay_BeginLayout() resets it.
-    Clay_SetPointerState(ctx->active_ui->has_pointer ? Clay_Vector2{pointer_pos.x, pointer_pos.y} : Clay_Vector2{-FLT_MAX,-FLT_MAX}, pointer_down);
-    Clay_UpdateScrollContainers(false, Clay_Vector2{0.0f, 0.0f}, 0.0f);
+    // Run inverse-transformed true occlusion hit testing against the previous frame's hitbox tree
+    // BEFORE layout_begin() resets the current-frame tree.
+    hitbox_run_hit_test(
+        ctx->active_ui->hitboxes.data,
+        ctx->active_ui->hitboxes.count,
+        pointer_pos,
+        ctx->active_ui->has_pointer,
+        &ctx->active_ui->pointer_over_ids,
+        &ctx->active_ui->topmost_hovered_id,
+        &ctx->active_ui->hovered_span_id);
 
     state_map_clear_flags(&ctx->active_ui->states, true, false);
-    const Clay_ElementIdArray over = Clay_GetPointerOverIds();
+    const std::span<const uint32_t> over{
+        ctx->active_ui->pointer_over_ids.data,
+        ctx->active_ui->pointer_over_ids.count,
+    };
     const uint32_t hovered_span_id = hit_test_span_regions(ctx, pointer_pos);
     if (hovered_span_id != 0u) {
         if (WidgetState* sws = state_map_find(&ctx->active_ui->states, hovered_span_id)) {
@@ -1473,7 +1483,7 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
                 if (WidgetState* ws = state_map_find(&ctx->active_ui->states, ctx->active_ui->right_active_id)) {
                     const bool over_right = ws->is_text_span
                         ? ws->span_hovered
-                        : Clay_PointerOver(make_clay_id(ctx->active_ui->right_active_id));
+                        : pointer_over_id(ctx->active_ui, ctx->active_ui->right_active_id);
                     if (ws->is_user_element && over_right) {
                         ws->right_clicked_this_frame = true;
                     }
@@ -1495,8 +1505,8 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
             request_redraw(ctx);
         } else {
             bool handled_scrollbar = false;
-            for (int32_t i = over.length - 1; i >= 0; --i) {
-                WidgetState* ws = state_map_find(&ctx->active_ui->states, over.internalArray[i].id);
+            for (int32_t i = static_cast<int32_t>(over.size()) - 1; i >= 0; --i) {
+                WidgetState* ws = state_map_find(&ctx->active_ui->states, over[static_cast<size_t>(i)]);
                 if (!ws || !ws->is_user_element) continue;
                 for(uint32_t axis=0;axis<2;++axis) {
                     const bool horizontal=axis==1;
@@ -1531,8 +1541,8 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
                         }
                     }
                 }
-                for (int32_t i = over.length - 1; i >= 0; --i) {
-                    const uint32_t oid = over.internalArray[i].id;
+                for (int32_t i = static_cast<int32_t>(over.size()) - 1; i >= 0; --i) {
+                    const uint32_t oid = over[static_cast<size_t>(i)];
                     WidgetState* ws = state_map_find(&ctx->active_ui->states, oid);
                     if (ws && ws->is_user_element) {
                         if (top_hit == 0u) {
@@ -1653,7 +1663,7 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
                 if (WidgetState* ws = state_map_find(&ctx->active_ui->states, ctx->active_ui->active_id)) {
                     const bool over_active = ws->is_text_span
                         ? ws->span_hovered
-                        : Clay_PointerOver(make_clay_id(ctx->active_ui->active_id));
+                        : pointer_over_id(ctx->active_ui, ctx->active_ui->active_id);
                     if (ws->is_user_element && over_active) {
                         ws->clicked_this_frame = true;
                     }
@@ -1661,6 +1671,7 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
             }
         }
         state_map_clear_flags(&ctx->active_ui->states, false, true);
+        ctx->active_ui->last_released_drag_dist_sq = ctx->active_ui->left_max_drag_dist_sq;
         ctx->active_ui->active_id = 0u;
         ctx->active_ui->left_max_drag_dist_sq = 0.0f;
     }
@@ -1696,8 +1707,8 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
         WidgetState* target_scroll = nullptr;
         WidgetState* fallback_scroll = nullptr;
         WidgetState* target_canvas = nullptr;
-        for (int32_t i = over.length - 1; i >= 0; --i) {
-            WidgetState* ws = state_map_find(&ctx->active_ui->states, over.internalArray[i].id);
+        for (int32_t i = static_cast<int32_t>(over.size()) - 1; i >= 0; --i) {
+            WidgetState* ws = state_map_find(&ctx->active_ui->states, over[static_cast<size_t>(i)]);
             if (!ws || !ws->is_user_element) {
                 continue;
             }
@@ -1856,11 +1867,11 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
     }
 
     if (ctx->active_ui->applied_font_revision != ctx->atlas.font_revision) {
-        Clay_ResetMeasureTextCache();
+        layout_engine_reset_text_cache(ctx->active_ui->layout);
         ctx->active_ui->applied_font_revision = ctx->atlas.font_revision;
     }
 
-    Clay_BeginLayout();
+    layout_begin(ctx->active_ui->layout, logical_w, logical_h);
 }
 
 void begin_box(const BoxDesc& desc_in) noexcept {
@@ -1895,6 +1906,7 @@ void begin_box(const BoxDesc& desc_in) noexcept {
         desc.width = scale_sizing(desc.width, wscale);
         desc.height = scale_sizing(desc.height, wscale);
         desc.padding = scale_padding(desc.padding, wscale);
+        desc.margin = scale_padding(desc.margin, wscale);
         desc.gap *= wscale;
         if (desc.row_gap >= 0) desc.row_gap *= wscale;
         desc.border_width *= wscale;
@@ -1942,9 +1954,10 @@ void begin_box(const BoxDesc& desc_in) noexcept {
                 clear_ime_composition(ctx);
             }
         }
-        Clay__OpenElementWithId(make_clay_id(desc.id));
-    } else {
-        Clay__OpenElement();
+    }
+    const uint32_t node_idx = layout_open(ctx->active_ui->layout, desc.id);
+    if (node_idx == kLayoutInvalidNode) {
+        return;
     }
 
     if(box_ws && (desc.scroll_x || desc.scroll_y)) {
@@ -1974,7 +1987,8 @@ void begin_box(const BoxDesc& desc_in) noexcept {
     const bool focus_ring = eff_desc.focusable && keyboard_focus_visible(eff_desc.id);
     const bool is_scroll = eff_desc.scroll_x || eff_desc.scroll_y;
     const bool any_clip = eff_desc.clip_children || is_scroll || eff_desc.shrink_width || eff_desc.shrink_height;
-    const bool is_floating_blocker = (eff_desc.attach_to != AttachTo::None && !eff_desc.pointer_passthrough);
+    const HitboxBehavior eff_hitbox = eff_desc.pointer_passthrough ? HitboxBehavior::Passthrough : eff_desc.hitbox_behavior;
+    const bool is_floating_blocker = (eff_desc.attach_to != AttachTo::None && eff_hitbox != HitboxBehavior::Passthrough);
     const bool has_beam=eff_desc.border_beam.color.a>0 || eff_desc.border_beam.base_color.a>0 || eff_desc.top_rim_alpha>0;
     const bool has_border = (eff_desc.border_color.a > 0u &&
         (eff_desc.border_width > 0.0f || has_border_sides(eff_desc))) || has_beam;
@@ -1987,8 +2001,23 @@ void begin_box(const BoxDesc& desc_in) noexcept {
         eff_desc.backdrop_blur > 0.0f ||
         has_border || focus_ring;
 
+    if (ctx->active_ui->subtree_depth > 0u) {
+        SubtreeMeta* sm = ctx->active_ui->subtree_stack[ctx->active_ui->subtree_depth - 1u].meta;
+        if (sm) {
+            if (desc.id != 0u) sm->has_interactive = true;
+            if (eff_desc.attach_to != AttachTo::None || eff_desc.backdrop_blur > 0.0f ||
+                eff_desc.opacity < 1.0f || eff_desc.animate_layout || eff_desc.hero_id != 0u || is_scroll)
+            {
+                sm->tainted = true;
+            }
+        }
+    }
+
     BoxExtra* extra = nullptr;
-    if (has_visual || any_clip || is_floating_blocker || eff_desc.id || ctx->active_ui->current_layer || eff_desc.opacity<1 || eff_desc.animate_layout || eff_desc.hero_id || eff_desc.hover_scale!=1 || eff_desc.press_scale!=1) {
+    if (has_visual || any_clip || is_floating_blocker || eff_hitbox == HitboxBehavior::BlockMouse ||
+        eff_desc.id || ctx->active_ui->current_layer || eff_desc.opacity<1 || eff_desc.animate_layout ||
+        eff_desc.hero_id || eff_desc.hover_scale!=1 || eff_desc.press_scale!=1)
+    {
         extra = ctx->frame_arena.alloc<BoxExtra>();
         if (extra) {
             extra->desc = eff_desc;
@@ -2012,83 +2041,84 @@ void begin_box(const BoxDesc& desc_in) noexcept {
         }
     }
 
-    Clay_ElementDeclaration decl = {};
-    decl.layout.sizing.width = to_clay_sizing(desc.width);
-    decl.layout.sizing.height = to_clay_sizing(desc.height);
-    decl.layout.padding = Clay_Padding{
-        .left = to_u16_round(desc.padding.left),
-        .right = to_u16_round(desc.padding.right),
-        .top = to_u16_round(desc.padding.top),
-        .bottom = to_u16_round(desc.padding.bottom),
-    };
-    decl.aspectRatio.aspectRatio = std::isfinite(desc.aspect_ratio) && desc.aspect_ratio > 0 ? desc.aspect_ratio : 0;
-    decl.layout.wrap = desc.wrap;
-    decl.layout.shrinkWidth = desc.shrink_width;
-    decl.layout.shrinkHeight = desc.shrink_height;
-    decl.layout.crossChildGap = to_u16_round(std::isfinite(desc.row_gap) && desc.row_gap >= 0 ? desc.row_gap : desc.gap);
-    decl.layout.gridColumns = desc.grid_columns > 128 ? 128 : desc.grid_columns;
-    decl.layout.gridColSpan = desc.grid_col_span > 0 ? desc.grid_col_span : 1;
-    const size_t track_count = desc.grid_tracks.size() > 128 ? 128 : desc.grid_tracks.size();
-    if (track_count) {
-        auto* tracks = ctx->frame_arena.alloc<Clay__GridTrack>(track_count);
-        if (tracks) {
-            for (size_t i = 0; i < track_count; ++i) {
-                const GridTrack& t = desc.grid_tracks[i];
-                const uint8_t kind = t.kind == SizingKind::Fixed ? 2 : t.kind == SizingKind::Percent ? 3 : t.kind == SizingKind::Fit ? 0 : 1;
-                const float lo = std::isfinite(t.min_px) && t.min_px > 0 ? t.min_px * wscale : 0;
-                const float hi = std::isfinite(t.max_px) && t.max_px > 0 ? ((lo > t.max_px * wscale) ? lo : t.max_px * wscale) : 0;
-                const float value = std::isfinite(t.value) && t.value >= 0 ? t.value : 0;
-                tracks[i] = {kind, kind == 2 ? value * wscale : value, lo, hi};
-            }
-            decl.layout.gridTracks = tracks;
-            decl.layout.gridTrackCount = static_cast<uint16_t>(track_count);
+    const auto pack_grid_tracks = [&](std::span<const GridTrack> src, const LayoutGridTrack** out_ptr, uint16_t* out_cnt) noexcept {
+        const size_t n = src.size() > 128u ? 128u : src.size();
+        if (!n) return;
+        auto* tracks = ctx->frame_arena.alloc<LayoutGridTrack>(n);
+        if (!tracks) return;
+        for (size_t i = 0; i < n; ++i) {
+            const GridTrack& t = src[i];
+            const float lo = std::isfinite(t.min_px) && t.min_px > 0.0f ? t.min_px * wscale : 0.0f;
+            const float hi = std::isfinite(t.max_px) && t.max_px > 0.0f ? ((lo > t.max_px * wscale) ? lo : t.max_px * wscale) : 0.0f;
+            const float value = std::isfinite(t.value) && t.value >= 0.0f ? t.value : 0.0f;
+            tracks[i] = LayoutGridTrack{
+                .kind = t.kind,
+                .value = t.kind == SizingKind::Fixed ? value * wscale : value,
+                .min_px = lo,
+                .max_px = hi,
+            };
         }
-    }
-    decl.layout.childGap = to_u16_round(desc.gap);
-    decl.layout.childAlignment = Clay_ChildAlignment{
-        .x = to_clay_align_x(desc.align_x),
-        .y = to_clay_align_y(desc.align_y),
+        *out_ptr = tracks;
+        *out_cnt = static_cast<uint16_t>(n);
     };
-    decl.layout.layoutDirection = to_clay_axis(desc.axis);
-    decl.cornerRadius = to_clay_corners(desc.radius);
-    decl.userData = extra;
 
-    if ((has_visual || is_floating_blocker || desc.id || (extra && extra->layer)) && extra) {
-        // Emit via CUSTOM command so shadows + gradients + borders + floating blockers render/occlude uniformly.
-        decl.custom.customData = extra;
+    LayoutNodeConfig decl = {};
+    decl.width = desc.width;
+    decl.height = desc.height;
+    decl.padding = desc.padding;
+    decl.margin = desc.margin;
+    decl.child_gap = std::isfinite(desc.gap) && desc.gap > 0.0f ? desc.gap : 0.0f;
+    decl.cross_gap = std::isfinite(desc.row_gap) && desc.row_gap >= 0.0f ? desc.row_gap : decl.child_gap;
+    decl.axis = desc.axis;
+    decl.align_x = desc.align_x;
+    decl.align_y = desc.align_y;
+    decl.justify = desc.justify;
+    decl.align_self = desc.align_self;
+    decl.flex_grow = std::isfinite(desc.flex_grow) && desc.flex_grow > 0.0f ? desc.flex_grow : 0.0f;
+    decl.flex_shrink = std::isfinite(desc.flex_shrink) && desc.flex_shrink >= 0.0f ? desc.flex_shrink : 1.0f;
+    decl.aspect_ratio = std::isfinite(desc.aspect_ratio) && desc.aspect_ratio > 0.0f ? desc.aspect_ratio : 0.0f;
+    decl.wrap = desc.wrap;
+    decl.shrink_width = desc.shrink_width;
+    decl.shrink_height = desc.shrink_height;
+    decl.grid_columns = desc.grid_columns > 128u ? 128u : desc.grid_columns;
+    decl.grid_col_span = desc.grid_col_span > 0u ? desc.grid_col_span : 1u;
+    decl.grid_row_span = desc.grid_row_span > 0u ? desc.grid_row_span : 1u;
+    pack_grid_tracks(desc.grid_tracks, &decl.grid_col_tracks, &decl.grid_col_track_count);
+    pack_grid_tracks(desc.grid_row_tracks, &decl.grid_row_tracks, &decl.grid_row_track_count);
+    decl.corner_radius = desc.radius;
+    decl.hitbox_behavior = eff_hitbox;
+    decl.user_data = extra;
+
+    if ((has_visual || is_floating_blocker || eff_hitbox == HitboxBehavior::BlockMouse || desc.id || (extra && extra->layer)) && extra) {
+        decl.emit_custom = true;
+        decl.custom_data = extra;
     }
     if (desc.attach_to != AttachTo::None) {
-        decl.floating.attachTo = to_clay_attach_to(desc.attach_to);
-        decl.floating.parentId = desc.attach_element_id;
-        decl.floating.attachPoints = Clay_FloatingAttachPoints{
-            .element = to_clay_attach_point(desc.anchor_element),
-            .parent = to_clay_attach_point(desc.anchor_parent),
-        };
-        decl.floating.offset = Clay_Vector2{ desc.floating_offset.x, desc.floating_offset.y };
-        decl.floating.zIndex = desc.z_index;
-        decl.floating.pointerCaptureMode = desc.pointer_passthrough
-            ? CLAY_POINTER_CAPTURE_MODE_PASSTHROUGH
-            : CLAY_POINTER_CAPTURE_MODE_CAPTURE;
-        decl.floating.clipTo = desc.clip_to_parent
-            ? CLAY_CLIP_TO_ATTACHED_PARENT
-            : CLAY_CLIP_TO_NONE;
-        decl.floating.clampToViewport = desc.clamp_to_viewport;
+        decl.attach_to = desc.attach_to;
+        decl.attach_element_id = desc.attach_element_id;
+        decl.anchor_element = desc.anchor_element;
+        decl.anchor_parent = desc.anchor_parent;
+        decl.floating_offset = desc.floating_offset;
+        decl.z_index = desc.z_index;
+        decl.clip_to_parent = desc.clip_to_parent;
+        decl.clamp_to_viewport = desc.clamp_to_viewport;
+        decl.flip_on_overflow = desc.flip_on_overflow;
     }
     if (any_clip) {
-        decl.clip.horizontal = desc.clip_children || desc.scroll_x || desc.shrink_width;
-        decl.clip.vertical = desc.clip_children || desc.scroll_y || desc.shrink_height;
+        decl.clip_x = desc.clip_children || desc.scroll_x || desc.shrink_width;
+        decl.clip_y = desc.clip_children || desc.scroll_y || desc.shrink_height;
+        decl.scroll_x = desc.scroll_x;
+        decl.scroll_y = desc.scroll_y;
         if (is_scroll && box_ws) {
-            decl.clip.childOffset = Clay_Vector2{ -box_ws->scroll_pos.x, -box_ws->scroll_pos.y };
+            decl.child_offset = Vec2{ -box_ws->scroll_pos.x, -box_ws->scroll_pos.y };
         }
     }
     if ((has_border && (any_clip || has_segmented_border(eff_desc))) || (any_clip && has_scrollbar) || has_beam) {
-        // Ask Clay to emit a border command after children for scrollbars and material rims.
-        decl.border.color = Clay_Color{255.0f, 255.0f, 255.0f, 1.0f};
-        decl.border.width = Clay_BorderWidth{1u, 1u, 1u, 1u, 0u};
+        decl.emit_border = true;
     }
 
-    Clay__ConfigureOpenElement(decl);
-    const uint32_t aid = Clay__GetOpenLayoutElement()->id;
+    layout_configure_open(ctx->active_ui->layout, decl);
+    const uint32_t aid = ctx->active_ui->layout->nodes.data[node_idx].id;
     auto* semantic = a11y_emit(ctx, desc.id ? desc.id : aid, is_scroll ? A11yRole::ScrollArea : A11yRole::Group, {}, {}, 0, (is_scroll?12u:0u)|(desc.id?2u:0u)|(desc.focusable?1u:0u));
     if (semantic) { semantic->clay_id = aid; ctx->a11y_parent = semantic; }
 }
@@ -2098,7 +2128,7 @@ void end_box() noexcept {
         return;
     }
     if (current_context()->a11y_parent) current_context()->a11y_parent = current_context()->a11y_parent->parent;
-    Clay__CloseElement();
+    layout_close(current_context()->active_ui->layout);
     auto& ui=*current_context()->active_ui;
     if(ui.box_build_stack) {ui.current_layer=ui.box_build_stack->previous_layer;ui.box_build_stack=ui.box_build_stack->parent;}
 }
@@ -2147,66 +2177,56 @@ void text(Str content, const TextDesc& desc) noexcept {
         return;
     }
 
-    Clay_String clay_str = {
-        .isStaticallyAllocated = content.is_static,
-        .length = static_cast<int32_t>(content.length),
-        .chars = content.chars,
-    };
+    Str text_str = content;
     if (!content.is_static) {
-        // Copy non-static transient strings into the frame arena so Clay holds valid pointers until end_frame().
+        // Copy non-static transient strings into the frame arena so layout holds valid pointers until end_frame().
         const Str copied = ctx->frame_arena.push_str(content.chars, content.length);
         if (!copied.chars) {
             return;
         }
-        clay_str.chars = copied.chars;
-        clay_str.length = static_cast<int32_t>(copied.length);
+        text_str = copied;
     }
 
     const float wscale = current_world_scale(ctx);
     const float raw_px = (desc.font_size_px > 0.0f) ? desc.font_size_px : 16.0f;
     const float clamped_px = clamp_range(raw_px * wscale, 0.25f, 65535.0f);
-    const uint32_t size_q8 = static_cast<uint32_t>(clamped_px * 256.0f + 0.5f);
-    uint32_t int_px = size_q8 >> 8;
-    uint32_t frac_px = size_q8 & 0xFFu;
-    if (int_px > 0xFFFFu) {
-        int_px = 0xFFFFu;
-        frac_px = 0xFFu;
-    }
 
     const Theme& thm = active_theme(ctx);
     const Color eff_color = resolve_theme_color(desc.color, thm.text_primary);
     const Color eff_sel_color = resolve_theme_color(desc.selection_color, thm.selection);
 
-    Clay_TextElementConfig cfg = {};
-    cfg.textColor = to_clay_color(eff_color);
-    const uint16_t slot_bits = (desc.font_id < kMaxFontSlots) ? desc.font_id : kFontSans;
-    cfg.fontId = static_cast<uint16_t>((slot_bits & 0x7Fu) | ((frac_px & 0xFFu) << 7));
-    cfg.fontSize = static_cast<uint16_t>(int_px);
-    cfg.letterSpacing = to_u16_round(desc.letter_spacing * wscale);
-    cfg.lineHeight = desc.line_height_px > 0.0f ? to_u16_round(desc.line_height_px * wscale) : 0u;
+    LayoutTextConfig cfg = {};
+    cfg.text_color = eff_color;
+    cfg.font_id = (desc.font_id < kMaxFontSlots) ? desc.font_id : kFontSans;
+    cfg.font_size_px = clamped_px;
+    cfg.letter_spacing = std::isfinite(desc.letter_spacing) ? desc.letter_spacing * wscale : 0.0f;
+    cfg.line_height = desc.line_height_px > 0.0f ? (desc.line_height_px * wscale) : 0.0f;
     cfg.ellipsis = desc.ellipsis;
-    cfg.maxLines = desc.max_lines;
-    cfg.wrapMode = desc.wrap ? CLAY_TEXT_WRAP_WORDS : CLAY_TEXT_WRAP_NONE;
-    cfg.textAlignment = desc.align_x == AlignX::Center ? CLAY_TEXT_ALIGN_CENTER : (desc.align_x == AlignX::Right ? CLAY_TEXT_ALIGN_RIGHT : CLAY_TEXT_ALIGN_LEFT);
+    cfg.max_lines = desc.max_lines;
+    cfg.wrap = desc.wrap;
+    cfg.align_x = desc.align_x;
 
     SelectableTextExtra* extra = nullptr;
     if ((desc.selectable && desc.id) || ctx->active_ui->current_layer) {
         extra = ctx->frame_arena.alloc<SelectableTextExtra>();
         if (!extra) return;
-        extra->layer=ctx->active_ui->current_layer;
-        extra->full_utf8 = clay_str.chars; extra->total_bytes = content.length;
-        extra->selectable_id = desc.selectable ? desc.id : 0; extra->selection_color = eff_sel_color;
-        cfg.userData = extra;
-        if(desc.selectable && desc.id) register_selectable_text(ctx,desc.id,clay_str.chars,content.length,content.is_static);
+        extra->layer = ctx->active_ui->current_layer;
+        extra->full_utf8 = text_str.chars; extra->total_bytes = content.length;
+        extra->selectable_id = desc.selectable ? desc.id : 0u; extra->selection_color = eff_sel_color;
+        cfg.user_data = extra;
+        if (desc.selectable && desc.id) {
+            register_selectable_text(ctx, desc.id, text_str.chars, content.length, content.is_static);
+            if (ctx->active_ui->subtree_depth > 0u && ctx->active_ui->subtree_stack[ctx->active_ui->subtree_depth - 1u].meta) {
+                ctx->active_ui->subtree_stack[ctx->active_ui->subtree_depth - 1u].meta->has_interactive = true;
+            }
+        }
     }
-    Clay_Context* cctx = Clay_GetCurrentContext();
-    const int32_t prev_len = cctx->layoutElements.length;
-    Clay__OpenTextElement(clay_str, cfg);
-    if (cctx->layoutElements.length > prev_len) {
-        const uint32_t cid = cctx->layoutElements.internalArray[cctx->layoutElements.length-1].id;
-        auto* n = a11y_emit(ctx,desc.id ? desc.id : cid,A11yRole::StaticText,content); if(n)n->clay_id=cid;
+    const uint32_t cid = layout_open_text(ctx->active_ui->layout, text_str, cfg);
+    if (cid != 0u) {
+        auto* n = a11y_emit(ctx, desc.id ? desc.id : cid, A11yRole::StaticText, content);
+        if (n) n->clay_id = cid;
+        if (extra) extra->clay_elem_id = cid;
     }
-    if (extra && cctx->layoutElements.length > prev_len) extra->clay_elem_id = cctx->layoutElements.internalArray[cctx->layoutElements.length-1].id;
 }
 
 void text_spans(std::span<const TextSpan> spans, const RichTextDesc& desc) noexcept {
@@ -2386,31 +2406,32 @@ void text_spans(std::span<const TextSpan> spans, const RichTextDesc& desc) noexc
         register_selectable_text(ctx,desc.id,plain_utf8,text_bytes,false);
     }
 
-    Clay_TextElementConfig cfg = {};
-    cfg.userData = rich;
-    cfg.textColor = to_clay_color(base_color);
-    cfg.fontId = static_cast<uint16_t>((cfg_hash & 0x7FFFu) | 0x8000u);
-    cfg.fontSize = static_cast<uint16_t>(cfg_hash >> 16);
-    cfg.letterSpacing = 0u;
-    cfg.lineHeight = 0u;
+    LayoutTextConfig cfg = {};
+    cfg.text_color = base_color;
+    cfg.font_size_px = base_px;
+    cfg.font_id = (desc.font_id < kMaxFontSlots) ? desc.font_id : kFontSans;
+    cfg.line_height = final_lh;
     cfg.ellipsis = desc.ellipsis;
-    cfg.maxLines = desc.max_lines;
-    cfg.wrapMode = desc.wrap ? CLAY_TEXT_WRAP_WORDS : CLAY_TEXT_WRAP_NONE;
-    cfg.textAlignment = (desc.align_x == AlignX::Center)
-        ? CLAY_TEXT_ALIGN_CENTER
-        : ((desc.align_x == AlignX::Right) ? CLAY_TEXT_ALIGN_RIGHT : CLAY_TEXT_ALIGN_LEFT);
+    cfg.max_lines = desc.max_lines;
+    cfg.wrap = desc.wrap;
+    cfg.align_x = desc.align_x;
+    cfg.is_rich = true;
+    cfg.rich_hash = cfg_hash;
+    cfg.user_data = rich;
 
-    Clay_String clay_str = {
-        .isStaticallyAllocated = false,
-        .length = static_cast<int32_t>(total_bytes),
-        .chars = full_utf8,
-    };
-    Clay_Context* cctx = Clay_GetCurrentContext();
-    const int32_t prev_elem_len = cctx ? cctx->layoutElements.length : 0;
-    Clay__OpenTextElement(clay_str, cfg);
-    if (cctx && cctx->layoutElements.length > prev_elem_len) {
-        rich->clay_elem_id = cctx->layoutElements.internalArray[cctx->layoutElements.length - 1].id;
-        auto* n=a11y_emit(ctx,desc.id ? desc.id : rich->clay_elem_id,A11yRole::StaticText,{plain_utf8,text_bytes}); if(n)n->clay_id=rich->clay_elem_id;
+    if (ctx->active_ui->subtree_depth > 0u && ctx->active_ui->subtree_stack[ctx->active_ui->subtree_depth - 1u].meta) {
+        bool any_interactive = (desc.selectable && desc.id != 0u);
+        for (uint32_t i = 0; i < out_idx && !any_interactive; ++i) {
+            if (int_spans[i].id != 0u) any_interactive = true;
+        }
+        if (any_interactive) ctx->active_ui->subtree_stack[ctx->active_ui->subtree_depth - 1u].meta->has_interactive = true;
+    }
+
+    const uint32_t cid = layout_open_text(ctx->active_ui->layout, Str{full_utf8, total_bytes, false}, cfg);
+    if (cid != 0u) {
+        rich->clay_elem_id = cid;
+        auto* n = a11y_emit(ctx, desc.id ? desc.id : cid, A11yRole::StaticText, {plain_utf8, text_bytes});
+        if (n) n->clay_id = cid;
     }
 }
 
@@ -2449,23 +2470,22 @@ void image(const ImageDesc& desc_in) noexcept {
     extra->layer=ctx->active_ui->current_layer;
     extra->desc = desc;
 
-    if (desc.id != 0u) {
-        Clay__OpenElementWithId(make_clay_id(desc.id));
-    } else {
-        Clay__OpenElement();
+    if (layout_open(ctx->active_ui->layout, desc.id) == kLayoutInvalidNode) {
+        return;
     }
 
-    Clay_ElementDeclaration decl = {};
-    decl.layout.sizing.width = to_clay_sizing(desc.width);
-    decl.layout.sizing.height = to_clay_sizing(desc.height);
-    decl.aspectRatio.aspectRatio = std::isfinite(desc.aspect_ratio) && desc.aspect_ratio > 0 ? desc.aspect_ratio : 0;
-    decl.layout.gridColSpan = desc.grid_col_span > 0 ? desc.grid_col_span : 1;
-    decl.cornerRadius = to_clay_corners(desc.radius);
-    decl.image.imageData = extra;
-    decl.userData = extra;
+    LayoutNodeConfig decl = {};
+    decl.width = desc.width;
+    decl.height = desc.height;
+    decl.aspect_ratio = std::isfinite(desc.aspect_ratio) && desc.aspect_ratio > 0.0f ? desc.aspect_ratio : 0.0f;
+    decl.grid_col_span = desc.grid_col_span > 0u ? desc.grid_col_span : 1u;
+    decl.corner_radius = desc.radius;
+    decl.emit_image = true;
+    decl.image_data = extra;
+    decl.user_data = extra;
 
-    Clay__ConfigureOpenElement(decl);
-    Clay__CloseElement();
+    layout_configure_open(ctx->active_ui->layout, decl);
+    layout_close(ctx->active_ui->layout);
 }
 
 void icon(const IconDesc& desc_in) noexcept {
@@ -2486,24 +2506,26 @@ void icon(const IconDesc& desc_in) noexcept {
                 ? ctx->active_ui->canvas_stack[ctx->active_ui->canvas_depth - 1u].id
                 : 0u;
         }
-        Clay__OpenElementWithId(make_clay_id(desc.id));
-    } else {
-        Clay__OpenElement();
+    }
+    if (layout_open(ctx->active_ui->layout, desc.id) == kLayoutInvalidNode) {
+        return;
     }
 
     BoxExtra* extra = ctx->frame_arena.alloc<BoxExtra>();
-    Clay_ElementDeclaration decl = {};
-    decl.layout.sizing.width = CLAY_SIZING_FIXED(layout_sz);
-    decl.layout.sizing.height = CLAY_SIZING_FIXED(layout_sz);
+    LayoutNodeConfig decl = {};
+    decl.width = Sizing::fixed(layout_sz);
+    decl.height = Sizing::fixed(layout_sz);
     if (extra) {
         extra->layer = ctx->active_ui->current_layer;
         extra->kind = CustomCmdKind::Icon;
+        extra->desc.id = desc.id;
         extra->icon_desc = desc;
-        decl.custom.customData = extra;
-        decl.userData = extra;
+        decl.emit_custom = true;
+        decl.custom_data = extra;
+        decl.user_data = extra;
     }
-    Clay__ConfigureOpenElement(decl);
-    Clay__CloseElement();
+    layout_configure_open(ctx->active_ui->layout, decl);
+    layout_close(ctx->active_ui->layout);
 }
 
 void draw_rect(const RectDrawDesc& desc) noexcept {
@@ -3406,7 +3428,7 @@ static TextInputResult text_input_impl(const TextInputDesc& desc_in, const void*
     if (show_clear) desc.padding.right += 24;
     bool is_focused = (desc.id != 0u && ctx->active_ui->focus_id == desc.id &&
         (!ctx->active_ui->modal_scope || focus_scope_contains(*ctx->active_ui, ctx->active_ui->modal_scope)));
-    const bool is_hovered = (desc.id != 0u && Clay_PointerOver(make_clay_id(desc.id)));
+    const bool is_hovered = (desc.id != 0u && pointer_over_id(ctx->active_ui, desc.id));
     if (is_hovered || (desc.id != 0u && ctx->active_ui->active_id == desc.id)) {
         set_cursor(Cursor::IBeam);
     }
@@ -3903,43 +3925,40 @@ static TextInputResult text_input_impl(const TextInputDesc& desc_in, const void*
         ti_extra->cursor_byte = cursor;
         ti_extra->sel_anchor_byte = anchor;
         ti_extra->is_focused = is_focused;
+        extra->desc.id = desc.id;
         extra->text_input = ti_extra;
     }
 
-    if (desc.id != 0u) {
-        Clay__OpenElementWithId(make_clay_id(desc.id));
-    } else {
-        Clay__OpenElement();
+    const uint32_t ti_node_idx = layout_open(ctx->active_ui->layout, desc.id);
+    uint32_t semantic_id = desc.id;
+    if (ti_node_idx != kLayoutInvalidNode) {
+        LayoutNodeConfig decl = {};
+        decl.width = desc.width;
+        decl.height = desc.height;
+        decl.padding = desc.padding;
+        decl.corner_radius = desc.radius;
+        if (extra && ti_extra) {
+            decl.emit_custom = true;
+            decl.custom_data = extra;
+            decl.user_data = extra;
+        }
+        layout_configure_open(ctx->active_ui->layout, decl);
+        if (ctx->active_ui->subtree_depth > 0u && ctx->active_ui->subtree_stack[ctx->active_ui->subtree_depth - 1u].meta) {
+            ctx->active_ui->subtree_stack[ctx->active_ui->subtree_depth - 1u].meta->tainted = true;
+        }
+        if (show_clear) {
+            begin_box({.id=clear_id,.width=Sizing::fixed(20),.height=Sizing::fixed(20),.align_y=AlignY::Center,
+                .attach_to=AttachTo::Parent,.anchor_element=Anchor::CenterRight,.anchor_parent=Anchor::CenterRight,.floating_offset={-4,0}});
+            if (hovered(clear_id)) set_cursor(Cursor::Hand);
+            const Color color=desc.text_color;
+            draw_line({.from={6,6},.to={14,14},.color=color,.thickness=1.5f});
+            draw_line({.from={14,6},.to={6,14},.color=color,.thickness=1.5f});
+            a11y_semantic(clear_id,A11yRole::Button,str_lit("Clear"),0,3u);
+            end_box();
+        }
+        semantic_id = ctx->active_ui->layout->nodes.data[ti_node_idx].id;
+        layout_close(ctx->active_ui->layout);
     }
-
-    Clay_ElementDeclaration decl = {};
-    decl.layout.sizing.width = to_clay_sizing(desc.width);
-    decl.layout.sizing.height = to_clay_sizing(desc.height);
-    decl.layout.padding = Clay_Padding{
-        .left = to_u16_round(desc.padding.left),
-        .right = to_u16_round(desc.padding.right),
-        .top = to_u16_round(desc.padding.top),
-        .bottom = to_u16_round(desc.padding.bottom),
-    };
-    decl.cornerRadius = to_clay_corners(desc.radius);
-    if (extra && ti_extra) {
-        decl.custom.customData = extra;
-        decl.userData = extra;
-    }
-
-    Clay__ConfigureOpenElement(decl);
-    if (show_clear) {
-        begin_box({.id=clear_id,.width=Sizing::fixed(20),.height=Sizing::fixed(20),.align_y=AlignY::Center,
-            .attach_to=AttachTo::Parent,.anchor_element=Anchor::CenterRight,.anchor_parent=Anchor::CenterRight,.floating_offset={-4,0}});
-        if (hovered(clear_id)) set_cursor(Cursor::Hand);
-        const Color color=desc.text_color;
-        draw_line({.from={6,6},.to={14,14},.color=color,.thickness=1.5f});
-        draw_line({.from={14,6},.to={6,14},.color=color,.thickness=1.5f});
-        a11y_semantic(clear_id,A11yRole::Button,str_lit("Clear"),0,3u);
-        end_box();
-    }
-    const uint32_t semantic_id=Clay__GetOpenLayoutElement()->id;
-    Clay__CloseElement();
 
     Str semantic_value={buf,len};
     if(desc.password) {
@@ -3968,7 +3987,7 @@ TextInputResult text_input(const TextInputDesc& desc) noexcept {
 
 bool hovered(uint32_t element_id) noexcept {
     Context* ctx = current_context();
-    if (element_id == 0u || !ctx || !ctx->active_ui->clay_ctx) {
+    if (element_id == 0u || !ctx || !ctx->active_ui->layout) {
         return false;
     }
     if (ctx->active_ui->active_id != 0u && ctx->active_ui->active_id != element_id) {
@@ -3979,8 +3998,20 @@ bool hovered(uint32_t element_id) noexcept {
             return ws->span_hovered;
         }
     }
-    Clay_SetCurrentContext(ctx->active_ui->clay_ctx);
-    return Clay_PointerOver(make_clay_id(element_id));
+    return pointer_over_id(ctx->active_ui, element_id);
+}
+
+uint32_t topmost_hovered_id() noexcept {
+    const Context* ctx = current_context();
+    return (ctx && ctx->active_ui) ? ctx->active_ui->topmost_hovered_id : 0u;
+}
+
+bool clicked_without_drag(uint32_t element_id, float max_drag_px) noexcept {
+    if (!clicked(element_id)) return false;
+    const Context* ctx = current_context();
+    if (!ctx || !ctx->active_ui) return false;
+    const float th = (std::isfinite(max_drag_px) && max_drag_px > 0.0f) ? max_drag_px : 0.0f;
+    return ctx->active_ui->last_released_drag_dist_sq <= (th * th);
 }
 
 bool pressed(uint32_t element_id) noexcept {
@@ -4070,7 +4101,7 @@ bool screen_to_element_local(uint32_t element_id, Vec2 screen_pos, Vec2* out_loc
 
 Rect element_bounds(uint32_t element_id) noexcept {
     Context* ctx = current_context();
-    if (!ctx || !ctx->active_ui->clay_ctx || element_id == 0u) {
+    if (!ctx || !ctx->active_ui->layout || element_id == 0u) {
         return {};
     }
     if (const WidgetState* ws = state_map_find(&ctx->active_ui->states, element_id)) {
@@ -4101,17 +4132,151 @@ Rect element_bounds(uint32_t element_id) noexcept {
             return found ? Rect{ min_x, min_y, max_x - min_x, max_y - min_y } : Rect{};
         }
     }
-    Clay_SetCurrentContext(ctx->active_ui->clay_ctx);
-    const Clay_ElementData ed = Clay_GetElementData(make_clay_id(element_id));
-    if (!ed.found) {
-        return {};
+    bool found = false;
+    const Rect b = layout_engine_bounds(ctx->active_ui->layout, element_id, &found);
+    return found ? b : Rect{};
+}
+
+bool begin_cached_subtree(uint32_t subtree_id, uint64_t content_hash) noexcept {
+    Context* ctx = current_context();
+    if (!ctx || !ctx->in_frame || !ctx->active_ui || !ctx->active_ui->layout || subtree_id == 0u) {
+        return true;
     }
-    return Rect{
-        ed.boundingBox.x,
-        ed.boundingBox.y,
-        ed.boundingBox.width,
-        ed.boundingBox.height,
+    auto& ui = *ctx->active_ui;
+    const bool cache_eligible =
+        ctx->theme_depth == 0u &&
+        ui.current_layer == nullptr &&
+        ui.canvas_depth == 0u &&
+        ui.subtree_depth == 0u;
+
+    if (cache_eligible) {
+        SubtreeCacheEntry* entry = subtree_cache_find(ui.subtree_cache.data, ui.subtree_cache.count, subtree_id);
+        if (entry && entry->valid &&
+            entry->content_hash == content_hash &&
+            entry->theme_epoch == ctx->theme_epoch &&
+            entry->font_revision == ctx->atlas.font_revision &&
+            entry->atlas_uv_epoch == ctx->atlas.uv_epoch &&
+            entry->dpi_scale == ui.dpi_scale &&
+            entry->viewport_w == ui.viewport_w &&
+            entry->viewport_h == ui.viewport_h)
+        {
+            bool interactive_hot = false;
+            if (entry->has_interactive) {
+                const Rect expanded = {
+                    entry->logical_bounds.x - 2.0f,
+                    entry->logical_bounds.y - 2.0f,
+                    entry->logical_bounds.w + 4.0f,
+                    entry->logical_bounds.h + 4.0f,
+                };
+                if ((ui.has_pointer && expanded.contains(ui.pointer_pos)) ||
+                    (ui.had_pointer && expanded.contains(ui.prev_pointer_pos)) ||
+                    ui.frame_scroll_delta.x != 0.0f || ui.frame_scroll_delta.y != 0.0f)
+                {
+                    interactive_hot = true;
+                } else if (ui.active_id != 0u || ui.focus_id != 0u || ui.right_active_id != 0u) {
+                    for (uint32_t i = 0; i < entry->hitbox_count; ++i) {
+                        const uint32_t hid = entry->hitboxes[i].id;
+                        if (hid != 0u && (hid == ui.active_id || hid == ui.focus_id || hid == ui.right_active_id)) {
+                            interactive_hot = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            if (!interactive_hot) {
+                entry->last_used_frame = ui.frame_index;
+                SubtreeMeta* meta = ctx->frame_arena.alloc<SubtreeMeta>();
+                if (meta) {
+                    meta->id = subtree_id;
+                    meta->content_hash = content_hash;
+                    meta->parent_a11y = ctx->a11y_parent;
+                }
+                const uint32_t node_idx = layout_open(ui.layout, id_index(subtree_id, 0xCA7Eu));
+                if (node_idx != kLayoutInvalidNode) {
+                    LayoutNodeConfig decl = {};
+                    decl.width = Sizing::fixed(entry->logical_bounds.w);
+                    decl.height = Sizing::fixed(entry->logical_bounds.h);
+                    decl.cached_subtree_id = subtree_id;
+                    decl.cached_subtree_hit = true;
+                    decl.user_data = meta;
+                    layout_configure_open(ui.layout, decl);
+                    layout_close(ui.layout);
+                    return false;
+                }
+            }
+        }
+    }
+
+    if (!cache_eligible || ui.subtree_depth >= 16u) {
+        if (ui.subtree_depth < 16u) {
+            ui.subtree_stack[ui.subtree_depth++] = SubtreeCaptureFrame{.id = 0u, .meta = nullptr};
+        }
+        return true;
+    }
+
+    SubtreeMeta* meta = ctx->frame_arena.alloc<SubtreeMeta>();
+    if (!meta) {
+        ui.subtree_stack[ui.subtree_depth++] = SubtreeCaptureFrame{.id = 0u, .meta = nullptr};
+        return true;
+    }
+    *meta = SubtreeMeta{
+        .id = subtree_id,
+        .content_hash = content_hash,
+        .a11y_start = ctx->a11y_count,
+        .a11y_end = ctx->a11y_count,
+        .anim_count_start = ui.active_anim_count,
+        .parent_a11y = ctx->a11y_parent,
+        .tainted = false,
+        .has_interactive = false,
     };
+    const uint32_t node_idx = layout_open(ui.layout, id_index(subtree_id, 0xCA7Eu));
+    if (node_idx == kLayoutInvalidNode) {
+        ui.subtree_stack[ui.subtree_depth++] = SubtreeCaptureFrame{.id = 0u, .meta = nullptr};
+        return true;
+    }
+    LayoutNodeConfig decl = {};
+    decl.width = Sizing::fit();
+    decl.height = Sizing::fit();
+    decl.axis = Axis::Col;
+    decl.cached_subtree_id = subtree_id;
+    decl.cached_subtree_hit = false;
+    decl.user_data = meta;
+    layout_configure_open(ui.layout, decl);
+    ui.subtree_stack[ui.subtree_depth++] = SubtreeCaptureFrame{.id = subtree_id, .meta = meta};
+    return true;
+}
+
+void end_cached_subtree() noexcept {
+    Context* ctx = current_context();
+    if (!ctx || !ctx->in_frame || !ctx->active_ui || ctx->active_ui->subtree_depth == 0u) {
+        return;
+    }
+    auto& ui = *ctx->active_ui;
+    const SubtreeCaptureFrame frame = ui.subtree_stack[--ui.subtree_depth];
+    if (frame.id == 0u || !frame.meta) {
+        return;
+    }
+    frame.meta->a11y_end = ctx->a11y_count;
+    if (ui.active_anim_count > frame.meta->anim_count_start) {
+        frame.meta->tainted = true;
+    }
+    layout_close(ui.layout);
+}
+
+void invalidate_cached_subtree(uint32_t subtree_id, Context* ctx_arg) noexcept {
+    Context* ctx = ctx_arg ? ctx_arg : current_context();
+    if (!ctx) return;
+    const auto clear_ui = [subtree_id](WindowUiState& ui) noexcept {
+        for (uint32_t i = 0; i < ui.subtree_cache.count; ++i) {
+            SubtreeCacheEntry& e = ui.subtree_cache.data[i];
+            if (subtree_id == 0u || e.id == subtree_id) e.valid = false;
+        }
+    };
+    if (ctx->active_ui) clear_ui(*ctx->active_ui);
+    clear_ui(ctx->headless_ui);
+    for (uint32_t i = 0; i < ctx->claimed_window_cap; ++i) {
+        if (ctx->claimed_windows[i]) clear_ui(ctx->claimed_windows[i]->ui);
+    }
 }
 
 void push_id(uint32_t scope_id) noexcept {
@@ -4300,7 +4465,7 @@ bool dragging(uint32_t element_id, float threshold_px) noexcept {
 
 bool should_close_popover(uint32_t popover_id, uint32_t trigger_id) noexcept {
     Context* ctx = current_context();
-    if (!ctx || !ctx->active_ui->clay_ctx || popover_id == 0u || ctx->active_ui->frame_index <= 1u) {
+    if (!ctx || !ctx->active_ui->layout || popover_id == 0u || ctx->active_ui->frame_index <= 1u) {
         return false;
     }
     const WidgetState* pop_ws = state_map_find(&ctx->active_ui->states, popover_id);
@@ -4319,12 +4484,11 @@ bool should_close_popover(uint32_t popover_id, uint32_t trigger_id) noexcept {
     if (!ctx->active_ui->left_pressed_this_frame && !ctx->active_ui->right_pressed_this_frame) {
         return false;
     }
-    Clay_SetCurrentContext(ctx->active_ui->clay_ctx);
     const auto is_over_elem = [&](uint32_t id, const WidgetState* ws) noexcept -> bool {
         if (id == 0u) {
             return false;
         }
-        if (Clay_PointerOver(make_clay_id(id))) {
+        if (pointer_over_id(ctx->active_ui, id)) {
             return true;
         }
         if (ws && (ws->last_seen_frame + 1u >= ctx->active_ui->frame_index) &&

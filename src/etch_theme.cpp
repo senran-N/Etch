@@ -300,6 +300,7 @@ void set_theme(const Theme& t, Context* ctx) noexcept {
     }
     if (!theme_equals(target->base_theme, t)) {
         target->base_theme = t;
+        ++target->theme_epoch;
         if (target->headless || target->claimed_window_count == 0u) {
             target->headless_ui.redraw_budget = 2u;
         }

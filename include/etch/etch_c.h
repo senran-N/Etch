@@ -201,6 +201,29 @@ typedef enum EtchAlignY {
     ETCH_ALIGN_Y_BOTTOM = 2
 } EtchAlignY;
 
+typedef enum EtchJustify {
+    ETCH_JUSTIFY_START         = 0,
+    ETCH_JUSTIFY_CENTER        = 1,
+    ETCH_JUSTIFY_END           = 2,
+    ETCH_JUSTIFY_SPACE_BETWEEN = 3,
+    ETCH_JUSTIFY_SPACE_AROUND  = 4,
+    ETCH_JUSTIFY_SPACE_EVENLY  = 5
+} EtchJustify;
+
+typedef enum EtchAlignSelf {
+    ETCH_ALIGN_SELF_AUTO    = 0,
+    ETCH_ALIGN_SELF_START   = 1,
+    ETCH_ALIGN_SELF_CENTER  = 2,
+    ETCH_ALIGN_SELF_END     = 3,
+    ETCH_ALIGN_SELF_STRETCH = 4
+} EtchAlignSelf;
+
+typedef enum EtchHitboxBehavior {
+    ETCH_HITBOX_NORMAL      = 0,
+    ETCH_HITBOX_BLOCK_MOUSE = 1,
+    ETCH_HITBOX_PASSTHROUGH = 2
+} EtchHitboxBehavior;
+
 typedef enum EtchCursor {
     ETCH_CURSOR_ARROW = 0,
     ETCH_CURSOR_HAND,
@@ -800,6 +823,7 @@ typedef struct EtchFrameStats {
     int32_t ime_cursor_offset_win;
     uint32_t sprite_count;
     uint32_t sprite_atlas_size;
+    uint32_t cached_subtree_hits;
 } EtchFrameStats;
 
 typedef enum EtchBorderAlign { ETCH_BORDER_INSIDE=0, ETCH_BORDER_CENTER=1, ETCH_BORDER_OUTSIDE=2 } EtchBorderAlign;
@@ -871,6 +895,16 @@ typedef struct EtchBoxDesc {
     float border_dash_px;
     float border_gap_px;
     EtchPadding edge_fade;
+    EtchJustify justify;
+    EtchAlignSelf align_self;
+    float flex_grow;
+    float flex_shrink;
+    EtchPadding margin;
+    const EtchGridTrack* grid_row_tracks;
+    uint32_t grid_row_track_count;
+    uint16_t grid_row_span;
+    bool flip_on_overflow;
+    EtchHitboxBehavior hitbox_behavior;
 } EtchBoxDesc;
 
 typedef struct EtchTextDesc {
@@ -2219,6 +2253,11 @@ bool etch_right_clicked(uint32_t element_id);
 bool etch_right_clicked_anywhere(void);
 bool etch_double_clicked(uint32_t element_id);
 bool etch_dragging(uint32_t element_id, float threshold_px);
+bool etch_clicked_without_drag(uint32_t element_id, float max_drag_px);
+uint32_t etch_topmost_hovered_id(void);
+bool etch_begin_cached_subtree(uint32_t id, uint64_t content_hash);
+void etch_end_cached_subtree(void);
+void etch_invalidate_cached_subtree(uint32_t id, EtchContext* ctx);
 bool etch_should_close_popover(uint32_t popover_id, uint32_t trigger_id);
 
 uint32_t etch_dropped_file_count(void);

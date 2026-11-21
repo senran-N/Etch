@@ -24,6 +24,7 @@
 #include "checks_v021.h"
 #include "checks_v022.h"
 #include "checks_phase1_gpu.h"
+#include "checks_phase2_layout.h"
 #include "etch_uber_vs_msl.h"
 #include "etch_uber_ps_msl.h"
 #include "etch_kawase_vs_msl.h"
@@ -593,7 +594,7 @@ static bool v019_regression() noexcept {
 }
 
 static bool gpu_suite() noexcept {
-    const bool media_ok=v019_regression() && verify_v021_gpu() && verify_v022_gpu() && verify_phase1_gpu() && verify_workbench_materials_gpu() && verify_shader_surface_gpu() && verify_texture_regions_gpu() && verify_mesh_gpu() && verify_punch_gpu() && verify_beam_fade_gpu() && verify_media_emoji_checks() && verify_sprite_recycling_gpu() && verify_border_coverage() && verify_visual_quality_gpu() && verify_closure_gpu();
+    const bool media_ok=v019_regression() && verify_v021_gpu() && verify_v022_gpu() && verify_phase1_gpu() && verify_phase2_cached_subtree_gpu() && verify_workbench_materials_gpu() && verify_shader_surface_gpu() && verify_texture_regions_gpu() && verify_mesh_gpu() && verify_punch_gpu() && verify_beam_fade_gpu() && verify_media_emoji_checks() && verify_sprite_recycling_gpu() && verify_border_coverage() && verify_visual_quality_gpu() && verify_closure_gpu();
     const bool v070_ok=verify_theme_wrap_checks();
     static_assert(sizeof(Prim)==64);
     bool ok=source_ok(g_etch_uber_vs_msl,sizeof(g_etch_uber_vs_msl),"vertex vs_main_out vs_main(") && source_ok(g_etch_uber_ps_msl,sizeof(g_etch_uber_ps_msl),"fragment ps_main_out ps_main(") && source_ok(g_etch_kawase_vs_msl,sizeof(g_etch_kawase_vs_msl),"vertex vs_main_out vs_main(") && source_ok(g_etch_kawase_ps_msl,sizeof(g_etch_kawase_ps_msl),"fragment ps_main_out ps_main(");
@@ -630,11 +631,12 @@ int main(int argc,char** argv) {
     if(argc==2 && std::strcmp(argv[1],"--suite=motion_layers_presence")==0) return verify_motion_checks() ? 0 : 1;
     if(argc==2 && std::strcmp(argv[1],"--suite=closure_gpu")==0) return verify_closure_gpu() ? 0 : 1;
     if(argc==2 && std::strcmp(argv[1],"--suite=phase1_gpu")==0) return verify_phase1_gpu() ? 0 : 1;
+    if(argc==2 && std::strcmp(argv[1],"--suite=phase2_layout")==0) return (verify_phase2_layout_cpu() && verify_phase2_cached_subtree_gpu()) ? 0 : 1;
     const char* names[]={"arena_and_elasticity","unicode_bidi_grapheme","layout_clay_flex_grid","fenwick_virtual_list_1m","widgets_and_dockspace","text_buffer_and_code_editor","a11y_semantic_tree","headless_gpu_invariants"};
     const char* selected=argc==2 && std::strncmp(argv[1],"--suite=",8)==0?argv[1]+8:nullptr;
     if(argc>1 && !selected) { return 2; } bool found=false,ok=true;
     for(uint32_t i=0;i<8;++i)if(!selected || std::strcmp(selected,names[i])==0){found=true;bool pass=false;
-        switch(i){case 0:pass=arena_suite();break;case 1:pass=unicode_suite();break;case 2:pass=perceptual_color_checks::verify() && layout_suite() && verify_desktop_precision() && verify_visual_quality_cpu() && verify_workbench_checks() && verify_closure_controls();break;case 3:pass=list_suite();break;case 4:pass=verify_desktop_checks(nullptr);break;case 5:pass=verify_editor_checks(nullptr);break;case 6:pass=verify_a11y_checks(nullptr) && verify_os_window_a11y_checks();break;case 7:pass=gpu_suite();break;}
+        switch(i){case 0:pass=arena_suite();break;case 1:pass=unicode_suite();break;case 2:pass=perceptual_color_checks::verify() && layout_suite() && verify_phase2_layout_cpu() && verify_desktop_precision() && verify_visual_quality_cpu() && verify_workbench_checks() && verify_closure_controls();break;case 3:pass=list_suite();break;case 4:pass=verify_desktop_checks(nullptr);break;case 5:pass=verify_editor_checks(nullptr);break;case 6:pass=verify_a11y_checks(nullptr) && verify_os_window_a11y_checks();break;case 7:pass=gpu_suite();break;}
         std::printf("%s: %s\n",names[i],pass?"PASS":"FAIL");ok &= pass;
     }return !found?2:ok?0:1;
 }

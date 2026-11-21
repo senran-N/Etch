@@ -171,6 +171,15 @@ inline etch::BoxDesc to_cpp(const EtchBoxDesc& d) noexcept {
     out.border_dash_px = d.border_dash_px;
     out.border_gap_px = d.border_gap_px;
     out.edge_fade = to_cpp(d.edge_fade);
+    out.justify = static_cast<etch::Justify>(d.justify);
+    out.align_self = static_cast<etch::AlignSelf>(d.align_self);
+    out.flex_grow = d.flex_grow;
+    out.flex_shrink = d.flex_shrink;
+    out.margin = to_cpp(d.margin);
+    out.grid_row_tracks = convert_frame_span<etch::GridTrack, EtchGridTrack>(d.grid_row_tracks, d.grid_row_track_count, to_cpp);
+    out.grid_row_span = d.grid_row_span ? d.grid_row_span : 1u;
+    out.flip_on_overflow = d.flip_on_overflow;
+    out.hitbox_behavior = static_cast<etch::HitboxBehavior>(d.hitbox_behavior);
     return out;
 }
 
@@ -289,7 +298,10 @@ EtchBoxDesc etch_box_desc_default(void) {
             from_cpp(d.floating_offset), d.z_index, d.pointer_passthrough, d.clip_to_parent,
             d.backdrop_blur, d.clamp_to_viewport, d.wrap, d.row_gap, d.aspect_ratio,
             d.grid_columns, nullptr, 0u, d.grid_col_span, d.shrink_width, d.shrink_height, d.continuous_corners, d.shadow_spread, d.window_drag_passthrough,static_cast<EtchBorderAlign>(d.border_align),d.opacity,from_cpp(d.hover_background),from_cpp(d.hover_border_color),d.hover_scale,d.press_scale,d.animate_layout,d.hero_id,from_cpp(d.transition),from_cpp(d.border_beam),d.top_rim_alpha,d.scroll_fade_px,
-            from_cpp(d.border_sides), d.border_dash_px, d.border_gap_px, from_cpp(d.edge_fade)};
+            from_cpp(d.border_sides), d.border_dash_px, d.border_gap_px, from_cpp(d.edge_fade),
+            static_cast<EtchJustify>(d.justify), static_cast<EtchAlignSelf>(d.align_self),
+            d.flex_grow, d.flex_shrink, from_cpp(d.margin), nullptr, 0u, d.grid_row_span,
+            d.flip_on_overflow, static_cast<EtchHitboxBehavior>(d.hitbox_behavior)};
 }
 
 EtchTextDesc etch_text_desc_default(void) {
@@ -822,7 +834,7 @@ EtchFrameStats etch_frame_stats(const EtchContext* ctx) {
             s.slug_glyph_count, s.slug_curve_count, s.dynamic_slug_curve_count,
             s.arena_used_bytes, s.arena_peak_bytes, s.layout_ms, s.gpu_submit_ms,
             s.active_animations, s.idle_sleeping, s.ime_cursor_offset_win,
-            s.sprite_count, s.sprite_atlas_size};
+            s.sprite_count, s.sprite_atlas_size, s.cached_subtree_hits};
 }
 
 bool etch_render_window(EtchContext* ctx, EtchColor clear_color, struct SDL_Window* window_override) {
@@ -1503,6 +1515,11 @@ bool etch_right_clicked(uint32_t element_id) { return etch::right_clicked(elemen
 bool etch_right_clicked_anywhere(void) { return etch::right_clicked_anywhere(); }
 bool etch_double_clicked(uint32_t element_id) { return etch::double_clicked(element_id); }
 bool etch_dragging(uint32_t element_id, float threshold_px) { return etch::dragging(element_id, threshold_px); }
+bool etch_clicked_without_drag(uint32_t element_id, float max_drag_px) { return etch::clicked_without_drag(element_id, max_drag_px); }
+uint32_t etch_topmost_hovered_id(void) { return etch::topmost_hovered_id(); }
+bool etch_begin_cached_subtree(uint32_t id, uint64_t content_hash) { return etch::begin_cached_subtree(id, content_hash); }
+void etch_end_cached_subtree(void) { etch::end_cached_subtree(); }
+void etch_invalidate_cached_subtree(uint32_t id, EtchContext* ctx) { etch::invalidate_cached_subtree(id, to_ctx(ctx)); }
 bool etch_should_close_popover(uint32_t popover_id, uint32_t trigger_id) { return etch::should_close_popover(popover_id, trigger_id); }
 
 uint32_t etch_dropped_file_count(void) { return static_cast<uint32_t>(etch::dropped_files().size()); }

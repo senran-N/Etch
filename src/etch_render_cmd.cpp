@@ -1,4 +1,4 @@
-// Declarative Clay layout adapter, UTF-8 + stb_truetype FontAtlas, and Prim batch lowering.
+// Owned layout adapter, UTF-8 + HarfBuzz/stb_truetype FontAtlas, and Prim batch lowering.
 // Compiled via src/etch_unity.cpp.
 
 #include <cmath>
@@ -6,69 +6,6 @@
 namespace etch {
 
 // Internal unity-build helpers have etch namespace linkage.
-
-constexpr Clay_ElementId make_clay_id(uint32_t element_id) noexcept {
-    return Clay_ElementId{
-        .id = element_id,
-        .offset = 0u,
-        .baseId = element_id,
-        .stringId = Clay_String{ .isStaticallyAllocated = true, .length = 0, .chars = "" },
-    };
-}
-
-inline Clay_Color to_clay_color(Color c) noexcept {
-    return Clay_Color{
-        static_cast<float>(c.r),
-        static_cast<float>(c.g),
-        static_cast<float>(c.b),
-        static_cast<float>(c.a),
-    };
-}
-
-constexpr Clay_SizingAxis to_clay_sizing(const Sizing& s) noexcept {
-    Clay_SizingAxis out = {};
-    switch (s.kind) {
-        case SizingKind::Fit:
-            out.type = CLAY__SIZING_TYPE_FIT;
-            out.size.minMax = Clay_SizingMinMax{ s.min, s.max };
-            break;
-        case SizingKind::Grow:
-            out.type = CLAY__SIZING_TYPE_GROW;
-            out.size.minMax = Clay_SizingMinMax{ s.min, s.max };
-            break;
-        case SizingKind::Fixed:
-            out.type = CLAY__SIZING_TYPE_FIXED;
-            out.size.minMax = Clay_SizingMinMax{ s.value, s.value };
-            break;
-        case SizingKind::Percent:
-            out.type = CLAY__SIZING_TYPE_PERCENT;
-            out.size.percent = (s.value < 0.0f) ? 0.0f : ((s.value > 1.0f) ? 1.0f : s.value);
-            break;
-    }
-    return out;
-}
-
-constexpr Clay_LayoutDirection to_clay_axis(Axis axis) noexcept {
-    return (axis == Axis::Col) ? CLAY_TOP_TO_BOTTOM : CLAY_LEFT_TO_RIGHT;
-}
-
-constexpr Clay_LayoutAlignmentX to_clay_align_x(AlignX ax) noexcept {
-    switch (ax) {
-        case AlignX::Left:   return CLAY_ALIGN_X_LEFT;
-        case AlignX::Center: return CLAY_ALIGN_X_CENTER;
-        case AlignX::Right:  return CLAY_ALIGN_X_RIGHT;
-    }
-    return CLAY_ALIGN_X_LEFT;
-}
-
-constexpr Clay_LayoutAlignmentY to_clay_align_y(AlignY ay) noexcept {
-    switch (ay) {
-        case AlignY::Top:    return CLAY_ALIGN_Y_TOP;
-        case AlignY::Center: return CLAY_ALIGN_Y_CENTER;
-        case AlignY::Bottom: return CLAY_ALIGN_Y_BOTTOM;
-    }
-    return CLAY_ALIGN_Y_TOP;
-}
 
 inline uint16_t to_u16_round(float v) noexcept {
     if (v <= 0.0f) {
@@ -78,16 +15,6 @@ inline uint16_t to_u16_round(float v) noexcept {
         return 65535u;
     }
     return static_cast<uint16_t>(v + 0.5f);
-}
-
-inline Clay_CornerRadius to_clay_corners(const Corners& c) noexcept {
-    // Note: Clay_CornerRadius puts bottomLeft before bottomRight.
-    return Clay_CornerRadius{
-        .topLeft = c.tl,
-        .topRight = c.tr,
-        .bottomLeft = c.bl,
-        .bottomRight = c.br,
-    };
 }
 
 constexpr Rect rect_intersect(Rect a, Rect b) noexcept {
@@ -158,12 +85,12 @@ inline float current_world_scale(const Context* ctx) noexcept {
     return 1.0f;
 }
 
-WidgetState* resolve_canvas_owner(Context* ctx, const Clay_ElementIdArray& over) noexcept {
+WidgetState* resolve_canvas_owner(Context* ctx, std::span<const uint32_t> over) noexcept {
     if (!ctx) {
         return nullptr;
     }
-    for (int32_t i = over.length - 1; i >= 0; --i) {
-        WidgetState* ws = state_map_find(&ctx->active_ui->states, over.internalArray[i].id);
+    for (int32_t i = static_cast<int32_t>(over.size()) - 1; i >= 0; --i) {
+        WidgetState* ws = state_map_find(&ctx->active_ui->states, over[static_cast<size_t>(i)]);
         if (!ws || !ws->is_user_element) {
             continue;
         }
@@ -178,31 +105,6 @@ WidgetState* resolve_canvas_owner(Context* ctx, const Clay_ElementIdArray& over)
         }
     }
     return nullptr;
-}
-
-constexpr Clay_FloatingAttachPointType to_clay_attach_point(Anchor a) noexcept {
-    switch (a) {
-        case Anchor::TopLeft:      return CLAY_ATTACH_POINT_LEFT_TOP;
-        case Anchor::TopCenter:    return CLAY_ATTACH_POINT_CENTER_TOP;
-        case Anchor::TopRight:     return CLAY_ATTACH_POINT_RIGHT_TOP;
-        case Anchor::CenterLeft:   return CLAY_ATTACH_POINT_LEFT_CENTER;
-        case Anchor::Center:       return CLAY_ATTACH_POINT_CENTER_CENTER;
-        case Anchor::CenterRight:  return CLAY_ATTACH_POINT_RIGHT_CENTER;
-        case Anchor::BottomLeft:   return CLAY_ATTACH_POINT_LEFT_BOTTOM;
-        case Anchor::BottomCenter: return CLAY_ATTACH_POINT_CENTER_BOTTOM;
-        case Anchor::BottomRight:  return CLAY_ATTACH_POINT_RIGHT_BOTTOM;
-    }
-    return CLAY_ATTACH_POINT_LEFT_TOP;
-}
-
-constexpr Clay_FloatingAttachToElement to_clay_attach_to(AttachTo at) noexcept {
-    switch (at) {
-        case AttachTo::None:    return CLAY_ATTACH_TO_NONE;
-        case AttachTo::Parent:  return CLAY_ATTACH_TO_PARENT;
-        case AttachTo::Element: return CLAY_ATTACH_TO_ELEMENT_WITH_ID;
-        case AttachTo::Root:    return CLAY_ATTACH_TO_ROOT;
-    }
-    return CLAY_ATTACH_TO_NONE;
 }
 
 constexpr SDL_SystemCursor to_sdl_system_cursor(Cursor c) noexcept {
@@ -486,14 +388,6 @@ void measure_line_segment_x(
     if (out_total_w) *out_total_w = total_w;
 }
 
-constexpr float decode_clay_font_px(uint16_t font_size, uint16_t font_id) noexcept {
-    const uint32_t frac = (font_id >> 7) & 0xFFu;
-    if (font_size == 0u && frac == 0u) {
-        return 16.0f;
-    }
-    return static_cast<float>(font_size) + static_cast<float>(frac) * (1.0f / 256.0f);
-}
-
 float measure_rich_span_segment(
     Context* ctx,
     const RichSpanInternal& sp,
@@ -522,133 +416,78 @@ float measure_rich_span_segment(
     return w;
 }
 
-Clay_Dimensions measure_rich_slice(
+Vec2 measure_rich_slice(
     Context* ctx,
     const RichTextExtra* rich,
-    Clay_StringSlice slice) noexcept
+    Str slice) noexcept
 {
-    if (!slice.chars || slice.length <= 0 || !rich || !rich->spans || rich->span_count == 0u) {
-        return Clay_Dimensions{ .width = 0.0f, .height = rich ? rich->line_height_px : 16.0f };
+    if (!slice.chars || slice.length == 0u || !rich || !rich->spans || rich->span_count == 0u) {
+        return Vec2{ 0.0f, rich ? rich->line_height_px : 16.0f };
     }
     const char* base = rich->full_utf8;
     const char* base_end = rich->full_utf8 + rich->total_bytes;
     const char* slice_end = slice.chars + slice.length;
     if (!base || slice.chars < base || slice_end > base_end) {
         const RichSpanInternal& s0 = rich->spans[0];
-        const float w = measure_rich_span_segment(
-            ctx, s0, slice.chars, static_cast<uint32_t>(slice.length), true);
-        return Clay_Dimensions{ .width = w, .height = rich->line_height_px };
+        const float w = measure_rich_span_segment(ctx, s0, slice.chars, slice.length, true);
+        return Vec2{ w, rich->line_height_px };
     }
 
     const uint32_t s0 = static_cast<uint32_t>(slice.chars - base);
-    const uint32_t s1 = s0 + static_cast<uint32_t>(slice.length);
+    const uint32_t s1 = s0 + slice.length;
     float total_w = 0.0f;
     for (uint32_t i = 0u; i < rich->span_count; ++i) {
         const RichSpanInternal& sp = rich->spans[i];
-        if (sp.byte_end <= s0) {
-            continue;
-        }
-        if (sp.byte_start >= s1) {
-            break;
-        }
+        if (sp.byte_end <= s0) continue;
+        if (sp.byte_start >= s1) break;
         const uint32_t ov0 = (s0 > sp.byte_start) ? s0 : sp.byte_start;
         const uint32_t ov1 = (s1 < sp.byte_end) ? s1 : sp.byte_end;
         const bool is_last_seg = (ov1 == s1);
         const uint32_t text_start = std::max(ov0, sp.layout_text_start());
         if (ov1 > text_start)
             total_w += measure_rich_span_segment(ctx, sp, base + text_start, ov1 - text_start, is_last_seg);
-        if (ov0 == sp.byte_start) {
-            total_w += sp.padding_x + sp.icon_advance;
-        }
-        if (ov1 == sp.byte_end) {
-            total_w += sp.padding_x;
-        }
+        if (ov0 == sp.byte_start) total_w += sp.padding_x + sp.icon_advance;
+        if (ov1 == sp.byte_end) total_w += sp.padding_x;
     }
-    return Clay_Dimensions{ .width = total_w, .height = rich->line_height_px };
+    return Vec2{ total_w, rich->line_height_px };
 }
 
-Clay_Dimensions etch_measure_text(
-    Clay_StringSlice text,
-    Clay_TextElementConfig* config,
-    void* user_data) noexcept
-{
+Vec2 etch_measure_text(Str text, const LayoutTextConfig& config, void* user_data) noexcept {
     Context* ctx = static_cast<Context*>(user_data);
     const size_t arena_mark = ctx ? ctx->frame_arena.mark() : 0u;
-    Clay_Dimensions dims = {};
-    if (config && (config->fontId & 0x8000u) != 0u && config->userData != nullptr) {
-        dims = measure_rich_slice(ctx, static_cast<const RichTextExtra*>(config->userData), text);
+    Vec2 dims = {};
+    if (config.is_rich && config.user_data != nullptr) {
+        dims = measure_rich_slice(ctx, static_cast<const RichTextExtra*>(config.user_data), text);
     } else {
-        const uint16_t font_id = config ? static_cast<uint16_t>(config->fontId & 0x7Fu) : kFontSans;
-        const float logical_font_px = config ? decode_clay_font_px(config->fontSize, config->fontId) : 16.0f;
-        const float letter_spacing = config ? static_cast<float>(config->letterSpacing) : 0.0f;
-        if (!text.chars || text.length <= 0) {
-            dims = Clay_Dimensions{ .width = 0.0f, .height = logical_font_px };
+        const uint16_t font_id = config.font_id;
+        const float logical_font_px = config.font_size_px > 0.0f ? config.font_size_px : 16.0f;
+        const float letter_spacing = config.letter_spacing;
+        if (!text.chars || text.length == 0u) {
+            dims = Vec2{ 0.0f, logical_font_px };
         } else {
             float width_logical = 0.0f;
             measure_line_segment_x(
-                ctx,
-                font_id,
-                text.chars,
-                static_cast<uint32_t>(text.length),
-                0u,
-                0u,
-                logical_font_px,
-                letter_spacing,
-                false,
-                true,
-                nullptr,
-                nullptr,
-                &width_logical);
-            dims = Clay_Dimensions{
-                .width = width_logical,
-                .height = logical_font_px,
-            };
+                ctx, font_id, text.chars, text.length, 0u, 0u,
+                logical_font_px, letter_spacing, false, true,
+                nullptr, nullptr, &width_logical);
+            dims = Vec2{ width_logical, logical_font_px };
         }
     }
-    if (ctx) {
-        ctx->frame_arena.rewind(arena_mark);
-    }
+    if (ctx) ctx->frame_arena.rewind(arena_mark);
     return dims;
-}
-
-void etch_clay_error_handler(Clay_ErrorData error) noexcept {
-    SDL_LogError(
-        SDL_LOG_CATEGORY_APPLICATION,
-        "Etch Clay error (%d): %.*s",
-        static_cast<int>(error.errorType),
-        error.errorText.length,
-        error.errorText.chars ? error.errorText.chars : "");
 }
 
 bool ensure_window_ui_clay(Context* ctx, WindowUiState* ui, float logical_w, float logical_h) noexcept {
     if (!ctx || !ui) return false;
-    if (ui->clay_ctx) return true;
+    if (ui->layout) return true;
     if (!ui->states.entries && !state_map_init(&ui->states, kDefaultStateCapacity)) {
         return false;
     }
-    Clay_Context* saved_clay = Clay_GetCurrentContext();
-    Clay_SetCurrentContext(nullptr);
-    Clay_SetMaxElementCount(static_cast<int32_t>(ctx->max_layout_elements));
-    Clay_SetMaxMeasureTextCacheWordCount(static_cast<int32_t>(ctx->max_layout_elements * 4u));
-    const uint32_t clay_min = Clay_MinMemorySize();
-    ui->clay_mem = std::malloc(clay_min);
-    if (!ui->clay_mem) {
-        Clay_SetCurrentContext(saved_clay);
-        return false;
-    }
+    ui->layout = layout_engine_create(etch_measure_text, ctx);
+    if (!ui->layout) return false;
     const float w = (logical_w > 0.0f) ? logical_w : 1280.0f;
     const float h = (logical_h > 0.0f) ? logical_h : 720.0f;
-    ui->clay_ctx = Clay_Initialize(
-        Clay_CreateArenaWithCapacityAndMemory(clay_min, ui->clay_mem),
-        Clay_Dimensions{ w, h },
-        Clay_ErrorHandler{ etch_clay_error_handler, ctx });
-    if (ui->clay_ctx) Clay_SetMeasureTextFunction(etch_measure_text, ctx);
-    Clay_SetCurrentContext(saved_clay);
-    if (!ui->clay_ctx) {
-        std::free(ui->clay_mem);
-        ui->clay_mem = nullptr;
-        return false;
-    }
+    layout_engine_set_viewport(ui->layout, w, h);
     return true;
 }
 
@@ -708,10 +547,10 @@ Vec4 box_scroll_fade(Context* ctx,const BoxExtra* extra,float dpi) noexcept {
     double max=extra->is_virtual_list ? ws->vscroll_max_y : ws->scroll_max.y;
     float max_x=ws->scroll_max.x;
     if((extra->desc.scroll_y || extra->desc.scroll_x) && !extra->is_virtual_list) {
-        const auto sc=Clay_GetScrollContainerData(make_clay_id(extra->desc.id));
+        const LayoutScrollData sc = layout_engine_scroll_data(ctx->active_ui->layout, extra->desc.id);
         if(sc.found) {
-            max=std::fmax(0.0f,sc.contentDimensions.height-sc.scrollContainerDimensions.height);
-            max_x=std::fmax(0.0f,sc.contentDimensions.width-sc.scrollContainerDimensions.width);
+            max = std::fmax(0.0f, sc.content_dim.y - sc.viewport_dim.y);
+            max_x = std::fmax(0.0f, sc.content_dim.x - sc.viewport_dim.x);
         }
     }
     return {
@@ -1663,20 +1502,56 @@ struct SelectionLine {
     Color color = {};
     const RichTextExtra* rich = nullptr;
 };
-SelectionLine selection_line(const Clay_RenderCommand* cmd) noexcept {
+inline uint32_t find_parent_hitbox_for_node(const Context* ctx, uint32_t node_idx) noexcept {
+    if (!ctx || !ctx->active_ui->layout || !ctx->active_ui->active_node_to_hitbox) return UINT32_MAX;
+    const LayoutEngine* le = ctx->active_ui->layout;
+    uint32_t p = node_idx < le->nodes.count ? le->nodes.data[node_idx].parent_idx : kLayoutInvalidNode;
+    while (p < ctx->active_ui->active_node_to_hitbox_count) {
+        const uint32_t hb = ctx->active_ui->active_node_to_hitbox[p];
+        if (hb != UINT32_MAX) return hb;
+        if (le->nodes.data[p].is_floating) break;
+        p = le->nodes.data[p].parent_idx;
+    }
+    return UINT32_MAX;
+}
+
+inline void push_span_hitbox(Context* ctx, uint32_t span_id, uint32_t layout_elem_id, uint32_t node_idx,
+                             Rect rect_logical, const ClipEntry& clip, int16_t z_index, float dpi) noexcept {
+    const Rect raw_px = {rect_logical.x * dpi, rect_logical.y * dpi, rect_logical.w * dpi, rect_logical.h * dpi};
+    const Rect vis_px = layer_rect(ctx, raw_px);
+    const Rect vis_logical = {vis_px.x / dpi, vis_px.y / dpi, vis_px.w / dpi, vis_px.h / dpi};
+    const Rect clip_logical = {clip.rect.x / dpi, clip.rect.y / dpi, clip.rect.w / dpi, clip.rect.h / dpi};
+    const Rect visible = rect_intersect(vis_logical, clip_logical);
+    ctx->active_ui->hitboxes.push(HitboxEntry{
+        .id = span_id,
+        .layout_elem_id = layout_elem_id,
+        .parent_idx = find_parent_hitbox_for_node(ctx, node_idx),
+        .layout_rect = rect_logical,
+        .visual_rect = vis_logical,
+        .visible_rect = visible,
+        .clip_rect = clip_logical,
+        .clip_radius = std::fabs(clip.radius) / dpi,
+        .paint_order = ctx->active_ui->hitboxes.count,
+        .z_index = z_index,
+        .behavior = HitboxBehavior::Normal,
+        .is_text_span = true,
+    });
+}
+
+SelectionLine selection_line(const LayoutCmd* cmd) noexcept {
     SelectionLine line = {};
-    if (!cmd->userData) return line;
-    if ((cmd->renderData.text.fontId & 0x8000u) != 0u) {
-        const auto* r = static_cast<const RichTextExtra*>(cmd->userData);
+    if (!cmd->user_data) return line;
+    if (cmd->text_cfg.is_rich) {
+        const auto* r = static_cast<const RichTextExtra*>(cmd->user_data);
         line.base = r->full_utf8; line.id = r->selectable_id;
         line.color = r->selection_color; line.clay_id = r->clay_elem_id; line.rich = r;
     } else {
-        const auto* r = static_cast<const SelectableTextExtra*>(cmd->userData);
+        const auto* r = static_cast<const SelectableTextExtra*>(cmd->user_data);
         line.base = r->full_utf8; line.id = r->selectable_id;
         line.color = r->selection_color; line.clay_id = r->clay_elem_id;
     }
-    line.start = static_cast<uint32_t>(cmd->renderData.text.stringContents.chars - line.base);
-    line.end = line.start + static_cast<uint32_t>(cmd->renderData.text.stringContents.length);
+    line.start = static_cast<uint32_t>(cmd->text.chars - line.base);
+    line.end = line.start + cmd->text.length;
     return line;
 }
 
@@ -1694,10 +1569,10 @@ static uint32_t selection_text_offset(const SelectionLine& line, uint32_t layout
     return span.text_byte_start + std::max(layout_offset, span.layout_text_start()) - span.layout_text_start();
 }
 
-void selection_line_geometry(Context* ctx, const Clay_RenderCommand* cmd, const SelectionLine& line,
+void selection_line_geometry(Context* ctx, const LayoutCmd* cmd, const SelectionLine& line,
     uint32_t a, uint32_t b, float pointer_x, float* xa, float* xb, uint32_t* hit,
     const ClipEntry* selection_clip = nullptr, float dpi = 1.0f) noexcept {
-    float pen = cmd->boundingBox.x;
+    float pen = cmd->bounds.x;
     float best = 1.0e30f;
     bool has_xa = false;
     bool has_xb = false;
@@ -1726,8 +1601,8 @@ void selection_line_geometry(Context* ctx, const Clay_RenderCommand* cmd, const 
                 pen += (tab ? 4.0f : 1.0f) * (slot == kInvalidFont ? 0.55f : ctx->atlas.slots[slot].space_advance_em) * size + advance_spacing();
                 const uint32_t next_pos = static_cast<uint32_t>(cp - line.base);
                 if (selection_clip && byte_a < next_pos && byte_b > pos) {
-                    push_prim(ctx, Prim::make_rect({start_pen * dpi, cmd->boundingBox.y * dpi,
-                        (pen - start_pen) * dpi, cmd->boundingBox.height * dpi},
+                    push_prim(ctx, Prim::make_rect({start_pen * dpi, cmd->bounds.y * dpi,
+                        (pen - start_pen) * dpi, cmd->bounds.h * dpi},
                         selection_clip->rect, line.color, {}, {}, 0, 1, selection_clip->radius));
                 }
                 pos = next_pos; text_edge(pos, pen); continue;
@@ -1761,7 +1636,7 @@ void selection_line_geometry(Context* ctx, const Clay_RenderCommand* cmd, const 
                         const float f0 = static_cast<float>(count_utf8_cps(line.base+pos+c0,lo-pos-c0))/static_cast<float>(count);
                         const float f1 = static_cast<float>(count_utf8_cps(line.base+pos+c0,hi-pos-c0))/static_cast<float>(count);
                         const float x = cluster_x+(pen-cluster_x)*(rtl ? 1.0f-f1 : f0);
-                        push_prim(ctx,Prim::make_rect({x*dpi,cmd->boundingBox.y*dpi,(pen-cluster_x)*(f1-f0)*dpi,cmd->boundingBox.height*dpi},
+                        push_prim(ctx,Prim::make_rect({x*dpi,cmd->bounds.y*dpi,(pen-cluster_x)*(f1-f0)*dpi,cmd->bounds.h*dpi},
                             selection_clip->rect,line.color,{}, {},0,1,selection_clip->radius));
                     }
                 }
@@ -1790,24 +1665,24 @@ void selection_line_geometry(Context* ctx, const Clay_RenderCommand* cmd, const 
             if (hi == sp.byte_end) pen += sp.padding_x;
         }
     } else {
-        const auto& td = cmd->renderData.text;
-        segment(line.start, line.end, static_cast<uint16_t>(td.fontId & 0x7Fu),
-            decode_clay_font_px(td.fontSize, td.fontId), static_cast<float>(td.letterSpacing), false, 0u);
+        const auto& td = cmd->text_cfg;
+        segment(line.start, line.end, td.font_id, td.font_size_px, td.letter_spacing, false, 0u);
     }
     const uint32_t text_end = selection_text_offset(line, line.end);
     if (!has_xa && a >= text_end) *xa = pen;
     if (!has_xb && b >= text_end) *xb = pen;
 }
 
-void emit_selection_line(Context* ctx, const Clay_RenderCommand* cmd, const ClipEntry& clip, float dpi) noexcept {
+void emit_selection_line(Context* ctx, const LayoutCmd* cmd, const ClipEntry& clip, float dpi) noexcept {
     const SelectionLine line = selection_line(cmd);
     if (!line.id) return;
     if (reserve_span_hits(&ctx->active_ui->span_hits, &ctx->active_ui->span_hit_cap, ctx->active_ui->span_hit_count, 256u)) {
         ctx->active_ui->span_hits[ctx->active_ui->span_hit_count++] = SpanHitRegion{
             .id = line.id, .clay_elem_id = line.clay_id,
-            .rect = {cmd->boundingBox.x, cmd->boundingBox.y, cmd->boundingBox.width, cmd->boundingBox.height},
-            .z_index = cmd->zIndex, .clip_rect = {clip.rect.x/dpi,clip.rect.y/dpi,clip.rect.w/dpi,clip.rect.h/dpi}, .has_clip = true };
+            .rect = cmd->bounds,
+            .z_index = cmd->z_index, .clip_rect = {clip.rect.x/dpi,clip.rect.y/dpi,clip.rect.w/dpi,clip.rect.h/dpi}, .has_clip = true };
     }
+    push_span_hitbox(ctx, line.id, line.clay_id, cmd->node_idx, cmd->bounds, clip, cmd->z_index, dpi);
     const auto* ws = state_map_find(&ctx->active_ui->states, line.id);
     if (!ws) return;
     const uint32_t a = ws->edit_cursor < ws->edit_sel_anchor ? ws->edit_cursor : ws->edit_sel_anchor;
@@ -1818,7 +1693,6 @@ void emit_selection_line(Context* ctx, const Clay_RenderCommand* cmd, const Clip
     const size_t mark = ctx->frame_arena.mark();
     selection_line_geometry(ctx, cmd, line, a, b, 0, &xa, &xb, &hit, &clip, dpi);
     ctx->frame_arena.rewind(mark);
-
 }
 
 void emit_vector_icon_quad(Context* ctx, uint16_t icon_id, Rect target_px, Color color,
@@ -1826,23 +1700,22 @@ void emit_vector_icon_quad(Context* ctx, uint16_t icon_id, Rect target_px, Color
 
 void emit_rich_text_command(
     Context* ctx,
-    const Clay_RenderCommand* cmd,
+    const LayoutCmd* cmd,
     const RichTextExtra* rich,
     const ClipEntry& clip,
     float dpi) noexcept
 {
     ClipEntry effective_clip = clip;
-    if(cmd->renderData.text.truncated) {
-        const float width=cmd->renderData.text.maxWidth>0?cmd->renderData.text.maxWidth:cmd->boundingBox.width;
+    if(cmd->text_truncated) {
+        const float width=cmd->text_max_width>0?cmd->text_max_width:cmd->bounds.w;
         const auto* layer=ctx->active_render_layer;
         const float sx=layer ? layer->resolved_scale.x : 1.f;
         const float ox=layer ? layer->resolved_offset_px.x : 0.f;
-        effective_clip.rect=rect_intersect(clip.rect,Rect{cmd->boundingBox.x*dpi*sx+ox,clip.rect.y,width*dpi*sx,clip.rect.h});
+        effective_clip.rect=rect_intersect(clip.rect,Rect{cmd->bounds.x*dpi*sx+ox,clip.rect.y,width*dpi*sx,clip.rect.h});
     }
     if (!rich->has_icon_markers) emit_selection_line(ctx, cmd, effective_clip, dpi);
-    const Clay_TextRenderData& td = cmd->renderData.text;
-    const char* chars = td.stringContents.chars;
-    const int32_t len = td.stringContents.length;
+    const char* chars = cmd->text.chars;
+    const int32_t len = static_cast<int32_t>(cmd->text.length);
     if (!rich || !rich->full_utf8 || !rich->spans || rich->span_count == 0u || !chars || len <= 0) {
         return;
     }
@@ -1855,12 +1728,12 @@ void emit_rich_text_command(
     const uint32_t line_start = static_cast<uint32_t>(chars - base);
     const uint32_t line_end = line_start + static_cast<uint32_t>(len);
     const float content_h = rich->max_ascent_px + rich->max_descent_px;
-    const float top_lead = (content_h > 0.0f) ? (0.5f * (cmd->boundingBox.height - content_h)) : 0.0f;
-    const float line_top_px = cmd->boundingBox.y * dpi;
-    const float line_bot_px = (cmd->boundingBox.y + cmd->boundingBox.height) * dpi;
+    const float top_lead = (content_h > 0.0f) ? (0.5f * (cmd->bounds.h - content_h)) : 0.0f;
+    const float line_top_px = cmd->bounds.y * dpi;
+    const float line_bot_px = (cmd->bounds.y + cmd->bounds.h) * dpi;
     const bool snap_text = ctx->active_ui->pixel_snap &&
         !(ctx->active_render_layer && ctx->active_render_layer->resolved_animating);
-    const float raw_baseline_y = (cmd->boundingBox.y + top_lead + rich->max_ascent_px) * dpi;
+    const float raw_baseline_y = (cmd->bounds.y + top_lead + rich->max_ascent_px) * dpi;
     const float baseline_y_px = snap_text ? std::round(raw_baseline_y) : raw_baseline_y;
 
     struct RichLineSeg {
@@ -1918,7 +1791,7 @@ void emit_rich_text_command(
         effective_clip.rect.h / dpi,
     };
 
-    float pen_logical = cmd->boundingBox.x;
+    float pen_logical = cmd->bounds.x;
     for (uint32_t si = 0u; si < rich->span_count; ++si) {
         const RichSpanInternal& sp = rich->spans[si];
         if (sp.byte_end <= line_start) {
@@ -2020,11 +1893,11 @@ void emit_rich_text_command(
 
     }
 
-    float visible_end_px=cmd->boundingBox.x*dpi;
+    float visible_end_px=cmd->bounds.x*dpi;
     const RichSpanInternal* ellipsis_span=&rich->spans[0];
-    const float full_limit_px=(cmd->boundingBox.x+(td.maxWidth>0?td.maxWidth:cmd->boundingBox.width))*dpi;
+    const float full_limit_px=(cmd->bounds.x+(cmd->text_max_width>0?cmd->text_max_width:cmd->bounds.w))*dpi;
     float text_limit_px=full_limit_px;
-    if(td.truncated) {
+    if(cmd->text_truncated) {
         bool stop=false;
         for(uint32_t ci=0;ci<chunk_count && !stop;++ci) {
             const auto& ch=chunks[ci];const auto& sp=*ch.sp;
@@ -2059,7 +1932,7 @@ void emit_rich_text_command(
         if (background.a == 0u && sp->border_color.a == 0u) {
             continue;
         }
-        const float w_px = (td.truncated ? std::fmin(sg.x1_px,visible_end_px) : sg.x1_px) - sg.x0_px;
+        const float w_px = (cmd->text_truncated ? std::fmin(sg.x1_px,visible_end_px) : sg.x1_px) - sg.x0_px;
         if (w_px <= 0.0f) {
             continue;
         }
@@ -2105,21 +1978,24 @@ void emit_rich_text_command(
     for (uint32_t i = 0u; i < seg_count; ++i) {
         const RichLineSeg& sg = segs[i];
         const RichSpanInternal& sp = *sg.sp;
-        if (sp.id != 0u && sg.x1_px > sg.x0_px &&
-            reserve_span_hits(&ctx->active_ui->span_hits, &ctx->active_ui->span_hit_cap, ctx->active_ui->span_hit_count, 256u)) {
-            ctx->active_ui->span_hits[ctx->active_ui->span_hit_count++] = SpanHitRegion{
-                .id = sp.id,
-                .clay_elem_id = rich->clay_elem_id,
-                .rect = {sg.x0_px / dpi, cmd->boundingBox.y - sp.padding_y, (sg.x1_px - sg.x0_px) / dpi,
-                         cmd->boundingBox.height + sp.padding_y * 2.0f},
-                .z_index = cmd->zIndex,
-                .clip_rect = clip_logical,
-                .has_clip = true,
-            };
+        if (sp.id != 0u && sg.x1_px > sg.x0_px) {
+            const Rect span_rect = {sg.x0_px / dpi, cmd->bounds.y - sp.padding_y, (sg.x1_px - sg.x0_px) / dpi,
+                                    cmd->bounds.h + sp.padding_y * 2.0f};
+            if (reserve_span_hits(&ctx->active_ui->span_hits, &ctx->active_ui->span_hit_cap, ctx->active_ui->span_hit_count, 256u)) {
+                ctx->active_ui->span_hits[ctx->active_ui->span_hit_count++] = SpanHitRegion{
+                    .id = sp.id,
+                    .clay_elem_id = rich->clay_elem_id,
+                    .rect = span_rect,
+                    .z_index = cmd->z_index,
+                    .clip_rect = clip_logical,
+                    .has_clip = true,
+                };
+            }
+            push_span_hitbox(ctx, sp.id, rich->clay_elem_id, cmd->node_idx, span_rect, effective_clip, cmd->z_index, dpi);
         }
     }
 
-    if(td.truncated) visible_end_px=cmd->boundingBox.x*dpi;
+    if(cmd->text_truncated) visible_end_px=cmd->bounds.x*dpi;
     bool elided=false;
     // Pass 2: Emit Slug glyphs, underline, and strikethrough decorations.
     for (uint32_t i = 0u; i < chunk_count; ++i) {
@@ -2136,7 +2012,7 @@ void emit_rich_text_command(
         }
         if (ch.glyphs.empty()) {
             const float size = sp->icon_size * dpi;
-            if (td.truncated && (elided || gx + size > text_limit_px + 0.01f)) break;
+            if (cmd->text_truncated && (elided || gx + size > text_limit_px + 0.01f)) break;
             const float icon_y = baseline_y_px - 0.36f * phys_px - size * 0.5f;
             emit_vector_icon_quad(ctx, sp->icon_id, {gx, icon_y, size, size},
                                   sp->icon_color, effective_clip);
@@ -2146,12 +2022,12 @@ void emit_rich_text_command(
         }
         for (uint32_t gi = 0u; gi < static_cast<uint32_t>(ch.glyphs.size()); ++gi) {
             const ShapedGlyph& g = ch.glyphs[gi];
-            if(td.truncated && (gi==0 || ch.glyphs[gi-1].cluster!=g.cluster)) {
+            if(cmd->text_truncated && (gi==0 || ch.glyphs[gi-1].cluster!=g.cluster)) {
                 float advance=0;
                 for(uint32_t j=gi;j<ch.glyphs.size()&&ch.glyphs[j].cluster==g.cluster;++j)advance+=ch.glyphs[j].x_advance_1px*phys_px+ls_px;
                 if(elided || gx+advance>text_limit_px+0.01f){elided=true;break;}
             }
-            if(td.truncated && elided)break;
+            if(cmd->text_truncated && elided)break;
             ellipsis_span=sp;
             if (ch.trim_last_spacing && (ch.first_glyph_has_ls || gi > 0u)) {
                 gx += ls_px;
@@ -2173,12 +2049,12 @@ void emit_rich_text_command(
         }
     }
 
-    if(td.truncated) {
+    if(cmd->text_truncated) {
         const Str dots=ellipsis_text(ctx,ellipsis_span->font_id);
         float pen=visible_end_px;
         TextWipeParams wipe = {};
         if (ellipsis_span->has_wipe) {
-            float dots_span_x0 = cmd->boundingBox.x * dpi;
+            float dots_span_x0 = cmd->bounds.x * dpi;
             for (uint32_t i = 0u; i < seg_count; ++i) {
                 if (segs[i].sp == ellipsis_span) { dots_span_x0 = segs[i].text_x0_px; break; }
             }
@@ -2193,7 +2069,7 @@ void emit_rich_text_command(
     }
     for (uint32_t i = 0u; i < seg_count; ++i) {
         RichLineSeg sg = segs[i];
-        if(td.truncated && sg.text_x0_px+sg.text_w_px>visible_end_px)sg.text_w_px=visible_end_px-sg.text_x0_px;
+        if(cmd->text_truncated && sg.text_x0_px+sg.text_w_px>visible_end_px)sg.text_w_px=visible_end_px-sg.text_x0_px;
         const RichSpanInternal* sp = sg.sp;
         if (sg.text_w_px <= 0.0f) {
             continue;
@@ -2228,55 +2104,51 @@ void emit_rich_text_command(
 
 void emit_text_command(
     Context* ctx,
-    const Clay_RenderCommand* cmd,
+    const LayoutCmd* cmd,
     const ClipEntry& clip,
     float dpi) noexcept
 {
-    if ((cmd->renderData.text.fontId & 0x8000u) != 0u && cmd->userData != nullptr) {
-        emit_rich_text_command(ctx, cmd, static_cast<const RichTextExtra*>(cmd->userData), clip, dpi);
+    if (cmd->text_cfg.is_rich && cmd->user_data != nullptr) {
+        emit_rich_text_command(ctx, cmd, static_cast<const RichTextExtra*>(cmd->user_data), clip, dpi);
         return;
     }
 
     emit_selection_line(ctx, cmd, clip, dpi);
-    const Clay_TextRenderData& td = cmd->renderData.text;
-    const char* chars = td.stringContents.chars;
-    const int32_t len = td.stringContents.length;
+    const LayoutTextConfig& td = cmd->text_cfg;
+    const char* chars = cmd->text.chars;
+    const int32_t len = static_cast<int32_t>(cmd->text.length);
     if (!chars || len <= 0 || !ctx->atlas.font_valid) {
         return;
     }
 
-    const uint16_t primary_slot = resolve_font_slot_idx(&ctx->atlas, static_cast<uint16_t>(td.fontId & 0x7Fu));
+    const uint16_t primary_slot = resolve_font_slot_idx(&ctx->atlas, td.font_id);
     if (primary_slot == kInvalidFont) {
         return;
     }
     const FontSlot& primary = ctx->atlas.slots[primary_slot];
 
-    const float logical_font_px = decode_clay_font_px(td.fontSize, td.fontId);
+    const float logical_font_px = td.font_size_px > 0.0f ? td.font_size_px : 16.0f;
     const float phys_px = logical_font_px * dpi;
     const float ascender_px = primary.ascent_em * phys_px;
-    const float line_top_px = cmd->boundingBox.y * dpi;
+    const float line_top_px = cmd->bounds.y * dpi;
     const bool snap_text = ctx->active_ui->pixel_snap &&
         !(ctx->active_render_layer && ctx->active_render_layer->resolved_animating);
     const float baseline_y = snap_text ? std::round(line_top_px + ascender_px) : (line_top_px + ascender_px);
-    const float letter_spacing_px = static_cast<float>(td.letterSpacing) * dpi;
+    const float letter_spacing_px = td.letter_spacing * dpi;
 
-    const Color tint = Color::rgba8(
-        static_cast<uint8_t>(td.textColor.r + 0.5f),
-        static_cast<uint8_t>(td.textColor.g + 0.5f),
-        static_cast<uint8_t>(td.textColor.b + 0.5f),
-        static_cast<uint8_t>(td.textColor.a + 0.5f));
+    const Color tint = td.text_color;
 
-    if(td.truncated) {
+    if(cmd->text_truncated) {
         ClipEntry local_clip=clip;
-        const float width=td.maxWidth>0?td.maxWidth:cmd->boundingBox.width;
+        const float width=cmd->text_max_width>0?cmd->text_max_width:cmd->bounds.w;
         const auto* layer=ctx->active_render_layer;
         const float sx=layer ? layer->resolved_scale.x : 1.f;
         const float ox=layer ? layer->resolved_offset_px.x : 0.f;
-        local_clip.rect=rect_intersect(clip.rect,Rect{cmd->boundingBox.x*dpi*sx+ox,clip.rect.y,width*dpi*sx,clip.rect.h});
-        emit_elided_line(ctx,chars,static_cast<uint32_t>(len),primary_slot,logical_font_px,static_cast<float>(td.letterSpacing),
-            cmd->boundingBox.x,baseline_y/dpi,width,local_clip,tint,dpi);return;
+        local_clip.rect=rect_intersect(clip.rect,Rect{cmd->bounds.x*dpi*sx+ox,clip.rect.y,width*dpi*sx,clip.rect.h});
+        emit_elided_line(ctx,chars,static_cast<uint32_t>(len),primary_slot,logical_font_px,td.letter_spacing,
+            cmd->bounds.x,baseline_y/dpi,width,local_clip,tint,dpi);return;
     }
-    float pen_x = snap_text ? std::round(cmd->boundingBox.x * dpi) : (cmd->boundingBox.x * dpi);
+    float pen_x = snap_text ? std::round(cmd->bounds.x * dpi) : (cmd->bounds.x * dpi);
     const uint32_t ulen = static_cast<uint32_t>(len);
     uint32_t pos = 0u;
     while (pos < ulen) {
@@ -2398,7 +2270,7 @@ void emit_canvas_grid_command(
 void emit_canvas_wire_command(
     Context* ctx,
     const CanvasWireExtra* cw,
-    Clay_BoundingBox fallback_box_logical,
+    Rect fallback_box_logical,
     const ClipEntry& clip,
     float dpi) noexcept
 {
@@ -2409,17 +2281,11 @@ void emit_canvas_wire_command(
     const Vec2 pan = cws ? cws->canvas_pan : Vec2{};
     const float zoom = (cws && cws->canvas_zoom > 1e-4f) ? cws->canvas_zoom : 1.0f;
 
-    Rect canvas_logical = {
-        fallback_box_logical.x,
-        fallback_box_logical.y,
-        fallback_box_logical.width,
-        fallback_box_logical.height,
-    };
+    Rect canvas_logical = fallback_box_logical;
     if (cw->canvas_id != 0u) {
-        const Clay_ElementData ed = Clay_GetElementData(make_clay_id(cw->canvas_id));
-        if (ed.found) {
-            canvas_logical = Rect{ ed.boundingBox.x, ed.boundingBox.y, ed.boundingBox.width, ed.boundingBox.height };
-        }
+        bool found = false;
+        const Rect ed = layout_engine_bounds(ctx->active_ui->layout, cw->canvas_id, &found);
+        if (found) canvas_logical = ed;
     }
 
     const Vec2 p0_px = (Vec2{ canvas_logical.x, canvas_logical.y } + pan + cw->from_world * zoom) * dpi;
@@ -2479,20 +2345,7 @@ uint32_t hit_test_span_regions(const Context* ctx, Vec2 pointer_pos) noexcept {
     if (!ctx || pointer_pos.x < 0.0f || pointer_pos.y < 0.0f) {
         return 0u;
     }
-    for (int32_t i = static_cast<int32_t>(ctx->active_ui->span_hit_count) - 1; i >= 0; --i) {
-        const SpanHitRegion& r = ctx->active_ui->span_hits[i];
-        if (!r.rect.contains(pointer_pos)) {
-            continue;
-        }
-        if (r.has_clip && !r.clip_rect.contains(pointer_pos)) {
-            continue;
-        }
-        if (r.id != 0u && r.clay_elem_id != 0u && !Clay_PointerOver(make_clay_id(r.clay_elem_id))) {
-            continue;
-        }
-        return r.id; // Either floating blocker (0u) or top clickable span id
-    }
-    return 0u;
+    return ctx->active_ui->hovered_span_id;
 }
 
 Vec2 window_to_logical_pos_for(const Context* ctx, SDL_Window* win, float wx, float wy) noexcept {

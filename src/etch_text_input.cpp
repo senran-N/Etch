@@ -1612,7 +1612,7 @@ void emit_selection_bands(
 void emit_text_input_command(
     Context* ctx,
     const TextInputExtra* ti,
-    Clay_BoundingBox bounds_logical,
+    Rect bounds_logical,
     Rect box_px,
     const ClipEntry& outer_clip,
     float dpi) noexcept
@@ -1622,7 +1622,7 @@ void emit_text_input_command(
     }
     const TextInputDesc& desc = ti->desc;
     WidgetState* ws = (desc.id != 0u) ? state_map_find(&ctx->active_ui->states, desc.id) : nullptr;
-    const Rect box_logical = { bounds_logical.x, bounds_logical.y, bounds_logical.width, bounds_logical.height };
+    const Rect box_logical = bounds_logical;
     if (ws) {
         ws->last_box_logical = box_logical;
     }
@@ -2142,7 +2142,7 @@ constexpr uint16_t etch_mod_to_sdl(uint16_t emod) noexcept {
 
 WidgetState* find_topmost_user_element(
     Context* ctx,
-    Clay_ElementIdArray over,
+    std::span<const uint32_t> over,
     uint32_t hovered_span_id) noexcept
 {
     if (hovered_span_id != 0u) {
@@ -2152,8 +2152,8 @@ WidgetState* find_topmost_user_element(
             }
         }
     }
-    for (int32_t i = over.length - 1; i >= 0; --i) {
-        WidgetState* ws = state_map_find(&ctx->active_ui->states, over.internalArray[i].id);
+    for (int32_t i = static_cast<int32_t>(over.size()) - 1; i >= 0; --i) {
+        WidgetState* ws = state_map_find(&ctx->active_ui->states, over[static_cast<size_t>(i)]);
         if (ws && ws->is_user_element) {
             return ws;
         }

@@ -6,7 +6,6 @@
 
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_gpu.h>
-#include "clay.h"
 
 #include <cmath>
 #include <cstdio>
@@ -231,21 +230,20 @@ bool check_v15_window_ui() noexcept {
     }
     if (!a || !b) std::fprintf(stderr, "v15 hidden windows: %s\n", SDL_GetError());
     if (a && b) {
-        // Keep A's Clay layout open across window claim/release and destruction of B.
+        // Keep A's layout open across window claim/release and destruction of B.
         etch::Context* other = etch::create_context({.window = b, .headless = true});
         ok &= other != nullptr;
         if (other) {
             const uint32_t probe = etch::id("v15_cross_context");
             etch::begin_frame(ctx, {.viewport_w = 400, .viewport_h = 300});
-            Clay_Context* clay_a = Clay_GetCurrentContext();
             etch::begin_box({.width = etch::Sizing::fixed(80), .height = etch::Sizing::fixed(60)});
             ok &= etch::render_window(other, {}, a);
-            ok &= etch::current_context() == ctx && Clay_GetCurrentContext() == clay_a;
+            ok &= etch::current_context() == ctx;
             etch::release_window(other, a);
             ok &= etch::claimed_window_count(other) == 1;
-            ok &= etch::current_context() == ctx && Clay_GetCurrentContext() == clay_a;
+            ok &= etch::current_context() == ctx;
             etch::destroy_context(other); // B still owns b, so this also releases its window.
-            const bool preserved = etch::current_context() == ctx && Clay_GetCurrentContext() == clay_a;
+            const bool preserved = etch::current_context() == ctx;
             ok &= preserved;
             if (!preserved) etch::set_current_context(ctx); // Finish A safely on regression failure.
             etch::box({.id = probe, .width = etch::Sizing::fixed(30), .height = etch::Sizing::fixed(20),
@@ -254,7 +252,7 @@ bool check_v15_window_ui() noexcept {
             etch::end_frame(ctx);
             const etch::Rect bounds = etch::element_bounds(probe);
             ok &= bounds.w == 30 && bounds.h == 20 && etch::frame_stats(ctx).prim_count > 0;
-            if (!ok) std::fprintf(stderr, "v15 cross-context Clay lifetime failed\n");
+            if (!ok) std::fprintf(stderr, "v15 cross-context layout lifetime failed\n");
         }
     }
     if (a) SDL_DestroyWindow(a);

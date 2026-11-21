@@ -5,15 +5,15 @@ namespace etch {
 
 void end_frame(Context* ctx_arg) noexcept {
     Context* ctx = ctx_arg ? ctx_arg : current_context();
-    if (!ctx || !ctx->in_frame || !ctx->active_ui->clay_ctx) {
+    if (!ctx || !ctx->in_frame || !ctx->active_ui->layout) {
         return;
     }
     ctx->theme_depth = 0u;
     ctx->theme_overflow = 0u;
     ctx->active_ui->id_stack_depth = 0u;
     ctx->active_ui->id_stack_overflow = 0u;
-    Clay_SetCurrentContext(ctx->active_ui->clay_ctx);
 
+    while (ctx->active_ui->subtree_depth) end_cached_subtree();
     while (ctx->active_ui->collapsible_depth) end_collapsible();
     while (ctx->active_ui->tree_depth) end_tree_node();
     const float dpi = ctx->active_ui->dpi_scale;
@@ -30,79 +30,107 @@ void end_frame(Context* ctx_arg) noexcept {
 
     ctx->active_ui->span_hit_count = 0u;
     ctx->active_ui->drop_hit_count = 0;
-    Clay_RenderCommandArray cmds = Clay_EndLayout(0.0f);
+    LayoutEngine* le = ctx->active_ui->layout;
+    const std::span<const LayoutCmd> cmds = layout_end(le);
+
     // Resolve bounds before walking commands: floating descendants can render before ancestors.
-    for(int32_t i=0;i<cmds.length;++i) {
-        const auto* cmd=Clay_RenderCommandArray_Get(&cmds,i);
-        if(cmd->commandType==CLAY_RENDER_COMMAND_TYPE_CUSTOM) {
-            auto* extra=static_cast<BoxExtra*>(cmd->renderData.custom.customData);
-            if(extra) extra->layout_rect_logical={cmd->boundingBox.x,cmd->boundingBox.y,cmd->boundingBox.width,cmd->boundingBox.height};
+    for (size_t i = 0; i < cmds.size(); ++i) {
+        const LayoutCmd& cmd = cmds[i];
+        if (cmd.kind == LayoutCmdKind::Custom) {
+            auto* extra = static_cast<BoxExtra*>(cmd.custom_data);
+            if (extra) extra->layout_rect_logical = cmd.bounds;
         }
     }
     bool corrected_heights = false;
     for (auto* rec = ctx->active_ui->active_vlists; rec; rec = rec->next) {
         // Lock variable row heights while actively dragging this list's vertical scrollbar thumb to prevent thumb jitter.
         if (ctx->active_ui->active_id == id_index(rec->list_id, kScrollbarYTag)) continue;
-        auto* cache = find_vlist(ctx->active_ui,rec->list_id);
-        auto* entry = Clay__GetHashMapItem(make_clay_id(rec->list_id).id);
-        if (!cache || entry == &Clay_LayoutElementHashMapItem_DEFAULT) continue;
-        auto* list = entry->layoutElement;
-        uint32_t count = rec->end_index-rec->first_index;
-        if (count > static_cast<uint32_t>(list->children.length)) count = static_cast<uint32_t>(list->children.length);
-        for (uint32_t i = 0; i < count; ++i) {
-            auto* child = Clay_LayoutElementArray_Get(&Clay_GetCurrentContext()->layoutElements,list->children.elements[i]);
-            float h = child->dimensions.height;
-            if (std::isfinite(h) && h >= 1 && std::fabs(h-vlist_height(cache,rec->first_index+i)) > .25f) {
-                update_vlist_height(ctx,cache,rec->first_index+i,clamp_range(h,1,16384)); corrected_heights = true;
+        auto* cache = find_vlist(ctx->active_ui, rec->list_id);
+        LayoutNode* list = layout_engine_find_cur_node(le, rec->list_id);
+        if (!cache || !list) continue;
+        uint32_t count = rec->end_index - rec->first_index;
+        if (count > list->child_count) count = list->child_count;
+        uint32_t ci = list->first_child;
+        for (uint32_t i = 0; i < count && ci != kLayoutInvalidNode; ++i, ci = le->nodes.data[ci].next_sibling) {
+            const float h = le->nodes.data[ci].height;
+            if (std::isfinite(h) && h >= 1 && std::fabs(h - vlist_height(cache, rec->first_index + i)) > .25f) {
+                update_vlist_height(ctx, cache, rec->first_index + i, clamp_range(h, 1, 16384));
+                corrected_heights = true;
             }
         }
     }
     if (corrected_heights) request_redraw(ctx);
 
     if (ctx->active_ui->active_id) {
-        auto* ws = state_map_find(&ctx->active_ui->states,ctx->active_ui->active_id);
-        if (ws && ws->is_selectable_text && (ws->pressed_this_frame || ws->pressed_down)) update_selectable_text_pointer(ctx,ws,cmds);
+        auto* ws = state_map_find(&ctx->active_ui->states, ctx->active_ui->active_id);
+        if (ws && ws->is_selectable_text && (ws->pressed_this_frame || ws->pressed_down)) update_selectable_text_pointer(ctx, ws, cmds);
     }
-    for (int32_t i = 0; i < cmds.length; ++i) {
-        const Clay_RenderCommand* cmd = Clay_RenderCommandArray_Get(&cmds, i);
-        if (!cmd) {
-            continue;
-        }
+
+    ctx->active_ui->hitboxes.clear();
+    const uint32_t node_count = le->nodes.count;
+    ctx->active_ui->active_node_to_hitbox = node_count ? ctx->frame_arena.alloc_uninit<uint32_t>(node_count) : nullptr;
+    ctx->active_ui->active_node_to_hitbox_count = ctx->active_ui->active_node_to_hitbox ? node_count : 0u;
+    if (ctx->active_ui->active_node_to_hitbox) {
+        std::memset(ctx->active_ui->active_node_to_hitbox, 0xFF, size_t(node_count) * sizeof(uint32_t));
+    }
+
+    struct ActiveSubtreeCap {
+        uint32_t id = 0;
+        SubtreeMeta* meta = nullptr;
+        uint32_t prim_start = 0;
+        uint32_t hitbox_start = 0;
+        uint32_t blur_start = 0;
+        uint32_t clip_shape_start = 0;
+        uint32_t filter_group_start = 0;
+    };
+    ActiveSubtreeCap cap_stack[16] = {};
+    uint32_t cap_depth = 0u;
+
+    for (size_t i = 0; i < cmds.size(); ++i) {
+        const LayoutCmd* cmd = &cmds[i];
         const ClipEntry& cur_clip = clip_stack.entries[clip_stack.depth - 1u];
-        ctx->render_clip_index=cur_clip.indexed ? cur_clip.shape : 0;
-        ctx->render_clip_depth=clip_stack.depth + clip_stack.overflow;
+        ctx->render_clip_index = cur_clip.indexed ? cur_clip.shape : 0;
+        ctx->render_clip_depth = clip_stack.depth + clip_stack.overflow;
         const Rect raw_box_px = {
-            .x = cmd->boundingBox.x * dpi,
-            .y = cmd->boundingBox.y * dpi,
-            .w = cmd->boundingBox.width * dpi,
-            .h = cmd->boundingBox.height * dpi,
+            .x = cmd->bounds.x * dpi,
+            .y = cmd->bounds.y * dpi,
+            .w = cmd->bounds.w * dpi,
+            .h = cmd->bounds.h * dpi,
         };
 
-        ctx->active_render_layer=nullptr;
-        switch(cmd->commandType) {
-            case CLAY_RENDER_COMMAND_TYPE_CUSTOM:
-            case CLAY_RENDER_COMMAND_TYPE_BORDER:
-            case CLAY_RENDER_COMMAND_TYPE_SCISSOR_START: {
-                const auto* extra=static_cast<const BoxExtra*>(cmd->userData);
-                if(extra) ctx->active_render_layer=extra->layer;
+        ctx->active_render_layer = nullptr;
+        switch (cmd->kind) {
+            case LayoutCmdKind::Custom:
+            case LayoutCmdKind::Border:
+            case LayoutCmdKind::ScissorStart: {
+                const auto* extra = static_cast<const BoxExtra*>(cmd->user_data);
+                if (extra) ctx->active_render_layer = extra->layer;
                 break;
             }
-            case CLAY_RENDER_COMMAND_TYPE_TEXT:
-                if(cmd->userData) ctx->active_render_layer=(cmd->renderData.text.fontId&0x8000u) ? static_cast<const RichTextExtra*>(cmd->userData)->layer : static_cast<const SelectableTextExtra*>(cmd->userData)->layer;
+            case LayoutCmdKind::Text:
+                if (cmd->user_data) {
+                    ctx->active_render_layer = cmd->text_cfg.is_rich
+                        ? static_cast<const RichTextExtra*>(cmd->user_data)->layer
+                        : static_cast<const SelectableTextExtra*>(cmd->user_data)->layer;
+                }
                 break;
-            case CLAY_RENDER_COMMAND_TYPE_IMAGE: {
-                const auto* extra=static_cast<const ImageExtra*>(cmd->renderData.image.imageData);
-                if(extra) ctx->active_render_layer=extra->layer;
+            case LayoutCmdKind::Image: {
+                const auto* extra = static_cast<const ImageExtra*>(cmd->custom_data);
+                if (extra) ctx->active_render_layer = extra->layer;
                 break;
             }
             default: break;
         }
-        if(ctx->active_render_layer) resolve_layer_chain(ctx,ctx->active_render_layer,dpi);
-        if (cmd->commandType == CLAY_RENDER_COMMAND_TYPE_SCISSOR_END) {
+        if (ctx->active_render_layer) resolve_layer_chain(ctx, ctx->active_render_layer, dpi);
+        if (cmd->kind == LayoutCmdKind::ScissorEnd) {
             if (ctx->active_filter_group && clip_stack.overflow == 0u && clip_stack.depth <= ctx->active_filter_group->ancestor_clip_depth) {
                 finalize_filter_group(ctx);
             }
-        } else if (cmd->commandType != CLAY_RENDER_COMMAND_TYPE_SCISSOR_START) {
+        } else if (cmd->kind != LayoutCmdKind::ScissorStart &&
+                   cmd->kind != LayoutCmdKind::SubtreeBegin &&
+                   cmd->kind != LayoutCmdKind::SubtreeEnd &&
+                   cmd->kind != LayoutCmdKind::SubtreeReplay)
+        {
             const VisualLayerNode* cmd_blur_root = ctx->active_render_layer ? ctx->active_render_layer->resolved_blur_root : nullptr;
             if (ctx->active_filter_group && ctx->active_filter_group->blur_root != cmd_blur_root) {
                 finalize_filter_group(ctx);
@@ -111,50 +139,327 @@ void end_frame(Context* ctx_arg) noexcept {
                 begin_filter_group(ctx, cmd_blur_root, cur_clip, clip_stack.depth + clip_stack.overflow);
             }
         }
-        const Rect box_px = ctx->active_ui->pixel_snap && !ctx->active_render_layer && cmd->commandType != CLAY_RENDER_COMMAND_TYPE_TEXT ? snap_pixel_rect(raw_box_px) : raw_box_px;
-        switch (cmd->commandType) {
-            case CLAY_RENDER_COMMAND_TYPE_CUSTOM: {
-                BoxExtra* extra = static_cast<BoxExtra*>(cmd->renderData.custom.customData);
+        const Rect box_px = ctx->active_ui->pixel_snap && !ctx->active_render_layer && cmd->kind != LayoutCmdKind::Text ? snap_pixel_rect(raw_box_px) : raw_box_px;
+        switch (cmd->kind) {
+            case LayoutCmdKind::SubtreeBegin: {
+                if (cap_depth < 16u) {
+                    cap_stack[cap_depth++] = ActiveSubtreeCap{
+                        .id = cmd->id,
+                        .meta = static_cast<SubtreeMeta*>(cmd->user_data),
+                        .prim_start = ctx->prim_count,
+                        .hitbox_start = ctx->active_ui->hitboxes.count,
+                        .blur_start = ctx->blur_split_count,
+                        .clip_shape_start = ctx->clip_shape_count,
+                        .filter_group_start = ctx->filter_group_count,
+                    };
+                }
+                break;
+            }
+            case LayoutCmdKind::SubtreeEnd: {
+                if (cap_depth == 0u) break;
+                const ActiveSubtreeCap cap = cap_stack[--cap_depth];
+                SubtreeMeta* meta = cap.meta;
+                bool tainted = !meta || meta->tainted ||
+                    ctx->blur_split_count != cap.blur_start ||
+                    ctx->clip_shape_count != cap.clip_shape_start ||
+                    ctx->filter_group_count != cap.filter_group_start ||
+                    ctx->active_filter_group != nullptr ||
+                    ctx->active_render_layer != nullptr ||
+                    cur_clip.indexed;
+                const uint32_t p_end = ctx->prim_count;
+                if (!tainted && p_end >= cap.prim_start) {
+                    uint32_t bi = 0u;
+                    for (uint32_t pi = cap.prim_start; pi < p_end; ++pi) {
+                        const Prim& p = ctx->prims[pi];
+                        const PrimKind pk = static_cast<PrimKind>(p.style.x & 0xFu);
+                        if (pk == PrimKind::BlurGlass || pk == PrimKind::LayerBlur ||
+                            pk == PrimKind::PunchHole || pk == PrimKind::SlugFill ||
+                            pk == PrimKind::BezierWire || pk == PrimKind::CanvasGrid ||
+                            (p.style.x & (1u << 18)) != 0u)
+                        {
+                            tainted = true;
+                            break;
+                        }
+                        while (bi < ctx->batch_count && pi >= ctx->batches[bi].first_prim + ctx->batches[bi].prim_count) {
+                            ++bi;
+                        }
+                        if (bi < ctx->batch_count && ctx->batches[bi].is_punch_hole) {
+                            tainted = true;
+                            break;
+                        }
+                    }
+                }
+                if (tainted) {
+                    if (SubtreeCacheEntry* existing = subtree_cache_find(ctx->active_ui->subtree_cache.data, ctx->active_ui->subtree_cache.count, cap.id)) {
+                        existing->valid = false;
+                    }
+                    break;
+                }
+                SubtreeCacheEntry* entry = subtree_cache_get_or_create(&ctx->active_ui->subtree_cache, cap.id);
+                if (!entry) break;
+                const uint32_t p_cnt = p_end - cap.prim_start;
+                if (p_cnt > entry->prim_cap) {
+                    auto* fresh = static_cast<CachedPrimRecord*>(std::realloc(entry->prims, size_t(p_cnt) * sizeof(CachedPrimRecord)));
+                    if (!fresh) { entry->valid = false; break; }
+                    entry->prims = fresh;
+                    entry->prim_cap = p_cnt;
+                }
+                uint32_t bi = 0u;
+                for (uint32_t k = 0; k < p_cnt; ++k) {
+                    const uint32_t pi = cap.prim_start + k;
+                    while (bi < ctx->batch_count && pi >= ctx->batches[bi].first_prim + ctx->batches[bi].prim_count) {
+                        ++bi;
+                    }
+                    const Prim& p = ctx->prims[pi];
+                    const uint32_t tex_slot = (p.style.x >> 10) & 0xFu;
+                    SDL_GPUTexture* ext1 = nullptr;
+                    bool is_additive = false;
+                    if (bi < ctx->batch_count) {
+                        const DrawBatch& b = ctx->batches[bi];
+                        if (tex_slot >= 1u && tex_slot <= b.ext_count) ext1 = b.ext_textures[tex_slot - 1u];
+                        is_additive = b.is_additive;
+                    }
+                    entry->prims[k] = CachedPrimRecord{
+                        .prim = p,
+                        .ext1 = ext1,
+                        .ext2 = nullptr,
+                        .is_punch = false,
+                        .is_additive = is_additive,
+                    };
+                }
+                entry->prim_count = p_cnt;
+
+                const uint32_t hb_end = ctx->active_ui->hitboxes.count;
+                const uint32_t hb_cnt = hb_end >= cap.hitbox_start ? (hb_end - cap.hitbox_start) : 0u;
+                if (hb_cnt > entry->hitbox_cap) {
+                    auto* fresh = static_cast<HitboxEntry*>(std::realloc(entry->hitboxes, size_t(hb_cnt) * sizeof(HitboxEntry)));
+                    if (!fresh) { entry->valid = false; break; }
+                    entry->hitboxes = fresh;
+                    entry->hitbox_cap = hb_cnt;
+                }
+                for (uint32_t k = 0; k < hb_cnt; ++k) {
+                    HitboxEntry h = ctx->active_ui->hitboxes.data[cap.hitbox_start + k];
+                    h.parent_idx = (h.parent_idx >= cap.hitbox_start && h.parent_idx < hb_end)
+                        ? (h.parent_idx - cap.hitbox_start)
+                        : UINT32_MAX;
+                    entry->hitboxes[k] = h;
+                }
+                entry->hitbox_count = hb_cnt;
+
+                const uint32_t a_start = meta->a11y_start;
+                const uint32_t a_end = meta->a11y_end;
+                const uint32_t a_cnt = a_end >= a_start ? (a_end - a_start) : 0u;
+                if (a_cnt > entry->a11y_cap) {
+                    auto* fresh = static_cast<CachedA11yRecord*>(std::realloc(entry->a11y_nodes, size_t(a_cnt) * sizeof(CachedA11yRecord)));
+                    if (!fresh) { entry->valid = false; break; }
+                    entry->a11y_nodes = fresh;
+                    entry->a11y_cap = a_cnt;
+                }
+                uint32_t total_str = 0u;
+                uint32_t out_a = 0u;
+                if (a_cnt > 0u) {
+                    for (A11yBuild* b = ctx->a11y_first; b; b = b->next) {
+                        if (b->index < a_start || b->index >= a_end) continue;
+                        total_str += b->node.label.length + 1u + b->node.value_text.length + 1u;
+                    }
+                    if (total_str > entry->a11y_str_cap) {
+                        auto* fresh = static_cast<char*>(std::realloc(entry->a11y_strings, size_t(total_str)));
+                        if (!fresh) { entry->valid = false; break; }
+                        entry->a11y_strings = fresh;
+                        entry->a11y_str_cap = total_str;
+                    }
+                    uint32_t str_off = 0u;
+                    for (A11yBuild* b = ctx->a11y_first; b && out_a < a_cnt; b = b->next) {
+                        if (b->index < a_start || b->index >= a_end) continue;
+                        CachedA11yRecord rec = {};
+                        rec.node = b->node;
+                        bool found = false;
+                        const Rect bb = layout_engine_bounds(le, b->clay_id, &found);
+                        if (found) rec.node.bounds = bb;
+                        rec.parent_rel = (b->parent && b->parent->index >= a_start && b->parent->index < a_end)
+                            ? (b->parent->index - a_start)
+                            : UINT32_MAX;
+                        rec.label_off = str_off;
+                        if (b->node.label.chars && b->node.label.length > 0u) {
+                            std::memcpy(entry->a11y_strings + str_off, b->node.label.chars, b->node.label.length);
+                            str_off += b->node.label.length;
+                        }
+                        entry->a11y_strings[str_off++] = '\0';
+                        rec.value_off = str_off;
+                        if (b->node.value_text.chars && b->node.value_text.length > 0u) {
+                            std::memcpy(entry->a11y_strings + str_off, b->node.value_text.chars, b->node.value_text.length);
+                            str_off += b->node.value_text.length;
+                        }
+                        entry->a11y_strings[str_off++] = '\0';
+                        entry->a11y_nodes[out_a++] = rec;
+                    }
+                    entry->a11y_str_len = str_off;
+                }
+                entry->a11y_count = out_a;
+
+                entry->content_hash = meta->content_hash;
+                entry->theme_epoch = ctx->theme_epoch;
+                entry->font_revision = ctx->atlas.font_revision;
+                entry->atlas_uv_epoch = ctx->atlas.uv_epoch;
+                entry->dpi_scale = dpi;
+                entry->viewport_w = ctx->active_ui->viewport_w;
+                entry->viewport_h = ctx->active_ui->viewport_h;
+                entry->logical_bounds = cmd->bounds;
+                entry->origin_px = {cmd->bounds.x * dpi, cmd->bounds.y * dpi};
+                entry->has_interactive = meta->has_interactive;
+                entry->last_used_frame = ctx->active_ui->frame_index;
+                entry->valid = true;
+                break;
+            }
+            case LayoutCmdKind::SubtreeReplay: {
+                SubtreeCacheEntry* entry = subtree_cache_find(ctx->active_ui->subtree_cache.data, ctx->active_ui->subtree_cache.count, cmd->id);
+                if (!entry || !entry->valid) break;
+                const float dx_logical = cmd->bounds.x - entry->logical_bounds.x;
+                const float dy_logical = cmd->bounds.y - entry->logical_bounds.y;
+                const float dx_px = cmd->bounds.x * dpi - entry->origin_px.x;
+                const float dy_px = cmd->bounds.y * dpi - entry->origin_px.y;
+                const float c_x0 = cur_clip.rect.x;
+                const float c_y0 = cur_clip.rect.y;
+                const float c_x1 = cur_clip.rect.x + cur_clip.rect.w;
+                const float c_y1 = cur_clip.rect.y + cur_clip.rect.h;
+                for (uint32_t k = 0; k < entry->prim_count; ++k) {
+                    const CachedPrimRecord& rec = entry->prims[k];
+                    Prim p = rec.prim;
+                    p.bounds.x += dx_px;
+                    p.bounds.y += dy_px;
+                    p.clip.x = std::fmax(p.clip.x + dx_px, c_x0);
+                    p.clip.y = std::fmax(p.clip.y + dy_px, c_y0);
+                    p.clip.z = std::fmin(p.clip.z + dx_px, c_x1);
+                    p.clip.w = std::fmin(p.clip.w + dy_px, c_y1);
+                    const PrimKind pk = static_cast<PrimKind>(p.style.x & 0xFu);
+                    if ((pk == PrimKind::Glyph || pk == PrimKind::SlugGlyph || pk == PrimKind::Texture) &&
+                        (p.style.x & (uint32_t(PrimFlag_TextClip) << 4)) != 0u)
+                    {
+                        p.style.z = std::bit_cast<uint32_t>(std::bit_cast<float>(p.style.z) + dx_px);
+                        p.style.w = std::bit_cast<uint32_t>(std::bit_cast<float>(p.style.w) + dx_px);
+                    }
+                    push_prim(ctx, p, rec.ext1, 2.0f, rec.ext2, rec.is_additive);
+                }
+                const uint32_t outer_parent_hb = find_parent_hitbox_for_node(ctx, cmd->node_idx);
+                const uint32_t hb_base = ctx->active_ui->hitboxes.count;
+                const Rect cur_clip_logical = {c_x0 / dpi, c_y0 / dpi, cur_clip.rect.w / dpi, cur_clip.rect.h / dpi};
+                for (uint32_t k = 0; k < entry->hitbox_count; ++k) {
+                    HitboxEntry h = entry->hitboxes[k];
+                    h.layout_rect.x += dx_logical;
+                    h.layout_rect.y += dy_logical;
+                    h.visual_rect.x += dx_logical;
+                    h.visual_rect.y += dy_logical;
+                    h.clip_rect.x += dx_logical;
+                    h.clip_rect.y += dy_logical;
+                    h.clip_rect = rect_intersect(h.clip_rect, cur_clip_logical);
+                    h.visible_rect = rect_intersect(h.visual_rect, h.clip_rect);
+                    h.parent_idx = (h.parent_idx == UINT32_MAX) ? outer_parent_hb : (hb_base + h.parent_idx);
+                    h.paint_order = ctx->active_ui->hitboxes.count;
+                    ctx->active_ui->hitboxes.push(h);
+                }
+                if (entry->a11y_count > 0u) {
+                    const SubtreeMeta* meta = static_cast<const SubtreeMeta*>(cmd->user_data);
+                    A11yBuild* outer_parent = meta ? static_cast<A11yBuild*>(meta->parent_a11y) : ctx->a11y_first;
+                    A11yBuild* saved_parent = ctx->a11y_parent;
+                    A11yBuild** replayed = ctx->frame_arena.alloc<A11yBuild*>(entry->a11y_count);
+                    for (uint32_t k = 0; k < entry->a11y_count; ++k) {
+                        const CachedA11yRecord& rec = entry->a11y_nodes[k];
+                        const Str lbl = rec.node.label.length > 0u
+                            ? Str{entry->a11y_strings + rec.label_off, rec.node.label.length, false}
+                            : Str{};
+                        const Str val = rec.node.value_text.length > 0u
+                            ? Str{entry->a11y_strings + rec.value_off, rec.node.value_text.length, false}
+                            : Str{};
+                        ctx->a11y_parent = (rec.parent_rel != UINT32_MAX && replayed && rec.parent_rel < k && replayed[rec.parent_rel])
+                            ? replayed[rec.parent_rel]
+                            : outer_parent;
+                        if (A11yBuild* nb = a11y_emit(ctx, rec.node.id, rec.node.role, lbl, val, rec.node.state_flags, rec.node.actions_mask)) {
+                            nb->node.bounds = {
+                                rec.node.bounds.x + dx_logical,
+                                rec.node.bounds.y + dy_logical,
+                                rec.node.bounds.w,
+                                rec.node.bounds.h,
+                            };
+                            nb->node.value_num = rec.node.value_num;
+                            nb->node.min_value = rec.node.min_value;
+                            nb->node.max_value = rec.node.max_value;
+                            nb->has_explicit_bounds = true;
+                            if (replayed) replayed[k] = nb;
+                        }
+                    }
+                    ctx->a11y_parent = saved_parent;
+                }
+                ++ctx->active_ui->cached_subtree_hits;
+                break;
+            }
+            case LayoutCmdKind::Custom: {
+                BoxExtra* extra = static_cast<BoxExtra*>(cmd->custom_data);
                 if (extra) {
+                    const Rect visual = layer_rect(ctx, raw_box_px);
+                    const Rect visible = rect_intersect(visual, cur_clip.rect);
+                    const auto* layer = ctx->active_render_layer;
+                    if (extra->kind != CustomCmdKind::CanvasWire) {
+                        const LayoutNode& node = le->nodes.data[cmd->node_idx];
+                        const bool opaque_surface =
+                            extra->desc.background.a > 0u || extra->desc.background_end.a > 0u ||
+                            extra->desc.radial_gradient || extra->desc.backdrop_blur > 0.0f ||
+                            extra->code_editor != nullptr || extra->text_input != nullptr ||
+                            extra->kind == CustomCmdKind::Icon;
+                        const uint32_t hb_idx = ctx->active_ui->hitboxes.count;
+                        ctx->active_ui->hitboxes.push(HitboxEntry{
+                            .id = extra->desc.id,
+                            .layout_elem_id = node.id,
+                            .parent_idx = find_parent_hitbox_for_node(ctx, cmd->node_idx),
+                            .layout_rect = cmd->bounds,
+                            .visual_rect = {visual.x / dpi, visual.y / dpi, visual.w / dpi, visual.h / dpi},
+                            .visible_rect = {visible.x / dpi, visible.y / dpi, visible.w / dpi, visible.h / dpi},
+                            .clip_rect = {cur_clip.rect.x / dpi, cur_clip.rect.y / dpi, cur_clip.rect.w / dpi, cur_clip.rect.h / dpi},
+                            .local_scale = {extra->world_scale * (layer ? layer->resolved_scale.x : 1.0f), extra->world_scale * (layer ? layer->resolved_scale.y : 1.0f)},
+                            .visual_opacity = layer ? layer->resolved_opacity : 1.0f,
+                            .clip_radius = std::fabs(cur_clip.radius) / dpi,
+                            .paint_order = hb_idx,
+                            .z_index = cmd->z_index,
+                            .behavior = node.cfg.hitbox_behavior,
+                            .is_floating_root = node.is_floating,
+                            .is_opaque_surface = opaque_surface,
+                            .is_text_span = false,
+                        });
+                        if (ctx->active_ui->active_node_to_hitbox && cmd->node_idx < ctx->active_ui->active_node_to_hitbox_count) {
+                            ctx->active_ui->active_node_to_hitbox[cmd->node_idx] = hb_idx;
+                        }
+                    }
                     if (extra->desc.id && reserve_span_hits(&ctx->active_ui->drop_hits, &ctx->active_ui->drop_hit_cap, ctx->active_ui->drop_hit_count, 512u)) {
                         extra->geometry_recorded = true;
-                        const Rect visual = layer_rect(ctx,raw_box_px);
-                        const Rect visible = rect_intersect(visual,cur_clip.rect);
-                        const auto* layer = ctx->active_render_layer;
                         ctx->active_ui->drop_hits[ctx->active_ui->drop_hit_count++] = SpanHitRegion{
                             .visual_bounds = {visual.x/dpi,visual.y/dpi,visual.w/dpi,visual.h/dpi},
                             .visible_bounds = {visible.x/dpi,visible.y/dpi,visible.w/dpi,visible.h/dpi},
                             .local_scale = {extra->world_scale*(layer ? layer->resolved_scale.x : 1),extra->world_scale*(layer ? layer->resolved_scale.y : 1)},
                             .visual_opacity = layer ? layer->resolved_opacity : 1,
                             .id = extra->desc.id, .clay_elem_id = extra->desc.id,
-                            .rect = {cmd->boundingBox.x, cmd->boundingBox.y, cmd->boundingBox.width, cmd->boundingBox.height},
+                            .rect = cmd->bounds,
                             .paint_order = static_cast<uint32_t>(i),
-                            .z_index = cmd->zIndex,
+                            .z_index = cmd->z_index,
                             .clip_rect = {cur_clip.rect.x / dpi, cur_clip.rect.y / dpi, cur_clip.rect.w / dpi, cur_clip.rect.h / dpi}, .has_clip = true};
                     }
                     if (extra->code_editor) {
-                        emit_code_editor_command(ctx, extra->code_editor, cmd->boundingBox, cur_clip, dpi);
+                        emit_code_editor_command(ctx, extra->code_editor, cmd->bounds, cur_clip, dpi);
                     } else if (extra->text_input) {
-                        emit_text_input_command(ctx, extra->text_input, cmd->boundingBox, box_px, cur_clip, dpi);
+                        emit_text_input_command(ctx, extra->text_input, cmd->bounds, box_px, cur_clip, dpi);
                     } else if (extra->kind == CustomCmdKind::CanvasWire && extra->canvas_wire) {
-                        emit_canvas_wire_command(ctx, extra->canvas_wire, cmd->boundingBox, cur_clip, dpi);
+                        emit_canvas_wire_command(ctx, extra->canvas_wire, cmd->bounds, cur_clip, dpi);
                     } else if (extra->kind == CustomCmdKind::Icon) {
                         emit_vector_icon_quad(ctx, extra->icon_desc.icon_id, raw_box_px, extra->icon_desc.color, cur_clip);
                     } else {
                         if (extra->desc.attach_to != AttachTo::None && !extra->desc.pointer_passthrough &&
+                            extra->desc.hitbox_behavior != HitboxBehavior::Passthrough &&
                             reserve_span_hits(&ctx->active_ui->span_hits, &ctx->active_ui->span_hit_cap, ctx->active_ui->span_hit_count, 256u)) {
                             const uint32_t slot = ctx->active_ui->span_hit_count++;
                             ctx->active_ui->span_hits[slot] = SpanHitRegion{
                                 .id = 0u,
                                 .clay_elem_id = extra->desc.id,
-                                .rect = Rect{
-                                    cmd->boundingBox.x,
-                                    cmd->boundingBox.y,
-                                    cmd->boundingBox.width,
-                                    cmd->boundingBox.height,
-                                },
+                                .rect = cmd->bounds,
                                 .paint_order = static_cast<uint32_t>(i),
-                            .z_index = cmd->zIndex,
+                                .z_index = cmd->z_index,
                                 .clip_rect = Rect{
                                     cur_clip.rect.x / dpi,
                                     cur_clip.rect.y / dpi,
@@ -188,20 +493,15 @@ void end_frame(Context* ctx_arg) noexcept {
                 }
                 break;
             }
-            case CLAY_RENDER_COMMAND_TYPE_SCISSOR_START: {
-                const BoxExtra* extra = static_cast<const BoxExtra*>(cmd->userData);
+            case LayoutCmdKind::ScissorStart: {
+                const BoxExtra* extra = static_cast<const BoxExtra*>(cmd->user_data);
                 if (extra && extra->desc.id != 0u) {
                     if (extra->is_virtual_list) {
                         if (WidgetState* ws = state_map_find(&ctx->active_ui->states, extra->desc.id)) {
-                            const double view_h = static_cast<double>(cmd->boundingBox.height);
-                            if (std::fabs(ws->viewport_dim.x-cmd->boundingBox.width)>.5f || std::fabs(ws->viewport_dim.y-cmd->boundingBox.height)>.5f) request_redraw(ctx);
-                            ws->viewport_dim = Vec2{ cmd->boundingBox.width, cmd->boundingBox.height };
-                            ws->last_box_logical = Rect{
-                                cmd->boundingBox.x,
-                                cmd->boundingBox.y,
-                                cmd->boundingBox.width,
-                                cmd->boundingBox.height,
-                            };
+                            const double view_h = static_cast<double>(cmd->bounds.h);
+                            if (std::fabs(ws->viewport_dim.x - cmd->bounds.w) > .5f || std::fabs(ws->viewport_dim.y - cmd->bounds.h) > .5f) request_redraw(ctx);
+                            ws->viewport_dim = Vec2{ cmd->bounds.w, cmd->bounds.h };
+                            ws->last_box_logical = cmd->bounds;
                             ws->vscroll_max_y = (ws->vscroll_total_h > view_h)
                                 ? (ws->vscroll_total_h - view_h)
                                 : 0.0;
@@ -209,29 +509,22 @@ void end_frame(Context* ctx_arg) noexcept {
                         }
                     } else if (extra->desc.scroll_x || extra->desc.scroll_y) {
                         if (WidgetState* ws = state_map_find(&ctx->active_ui->states, extra->desc.id)) {
-                            const Clay_ScrollContainerData sc = Clay_GetScrollContainerData(make_clay_id(extra->desc.id));
+                            const LayoutScrollData sc = layout_engine_scroll_data(le, extra->desc.id);
                             if (sc.found) {
-                                ws->viewport_dim = Vec2{ sc.scrollContainerDimensions.width, sc.scrollContainerDimensions.height };
-                                ws->content_dim = Vec2{ sc.contentDimensions.width, sc.contentDimensions.height };
+                                ws->viewport_dim = sc.viewport_dim;
+                                ws->content_dim = sc.content_dim;
                                 ws->scroll_max = Vec2{
-                                    (sc.contentDimensions.width > sc.scrollContainerDimensions.width)
-                                        ? (sc.contentDimensions.width - sc.scrollContainerDimensions.width) : 0.0f,
-                                    (sc.contentDimensions.height > sc.scrollContainerDimensions.height)
-                                        ? (sc.contentDimensions.height - sc.scrollContainerDimensions.height) : 0.0f,
+                                    (sc.content_dim.x > sc.viewport_dim.x) ? (sc.content_dim.x - sc.viewport_dim.x) : 0.0f,
+                                    (sc.content_dim.y > sc.viewport_dim.y) ? (sc.content_dim.y - sc.viewport_dim.y) : 0.0f,
                                 };
                                 ws->scroll_pos.x = clamp_range(ws->scroll_pos.x, 0.0f, ws->scroll_max.x);
                                 ws->scroll_pos.y = clamp_range(ws->scroll_pos.y, 0.0f, ws->scroll_max.y);
                             } else {
-                                ws->viewport_dim = Vec2{ cmd->boundingBox.width, cmd->boundingBox.height };
+                                ws->viewport_dim = Vec2{ cmd->bounds.w, cmd->bounds.h };
                                 ws->content_dim = ws->viewport_dim;
                                 ws->scroll_max = {};
                             }
-                            ws->last_box_logical = Rect{
-                                cmd->boundingBox.x,
-                                cmd->boundingBox.y,
-                                cmd->boundingBox.width,
-                                cmd->boundingBox.height,
-                            };
+                            ws->last_box_logical = cmd->bounds;
                         }
                     }
                 }
@@ -252,7 +545,7 @@ void end_frame(Context* ctx_arg) noexcept {
                 }
                 break;
             }
-            case CLAY_RENDER_COMMAND_TYPE_SCISSOR_END: {
+            case LayoutCmdKind::ScissorEnd: {
                 if (clip_stack.overflow > 0u) {
                     --clip_stack.overflow;
                 } else if (clip_stack.depth > 1u) {
@@ -260,8 +553,8 @@ void end_frame(Context* ctx_arg) noexcept {
                 }
                 break;
             }
-            case CLAY_RENDER_COMMAND_TYPE_BORDER: {
-                const BoxExtra* extra = static_cast<const BoxExtra*>(cmd->userData);
+            case LayoutCmdKind::Border: {
+                const BoxExtra* extra = static_cast<const BoxExtra*>(cmd->user_data);
                 if (!extra) {
                     break;
                 }
@@ -286,7 +579,7 @@ void end_frame(Context* ctx_arg) noexcept {
                             const uint32_t thumb_id = id_index(d.id,axis ? kScrollbarXTag : kScrollbarYTag);
                             const bool sb_active = (ctx->active_ui->active_id == thumb_id);
                             const bool sb_hover = (ctx->active_ui->active_id == 0u) && sb.hit_track.contains(ctx->active_ui->pointer_pos) &&
-                                Clay_PointerOver(make_clay_id(d.id));
+                                pointer_over_id(ctx->active_ui, d.id);
                             const Rect track_px = { sb.track.x * dpi, sb.track.y * dpi, sb.track.w * dpi, sb.track.h * dpi };
                             const Rect thumb_px = { sb.thumb.x * dpi, sb.thumb.y * dpi, sb.thumb.w * dpi, sb.thumb.h * dpi };
                             const Color track_col = extra->scrollbar_track;
@@ -354,52 +647,59 @@ void end_frame(Context* ctx_arg) noexcept {
                 }
                 break;
             }
-            case CLAY_RENDER_COMMAND_TYPE_TEXT: {
+            case LayoutCmdKind::Text: {
                 emit_text_command(ctx, cmd, cur_clip, dpi);
                 break;
             }
-            case CLAY_RENDER_COMMAND_TYPE_IMAGE: {
-                const ImageExtra* extra = static_cast<const ImageExtra*>(cmd->renderData.image.imageData);
-                if (extra && (extra->desc.sprite_id != kInvalidSprite || extra->desc.texture != nullptr)) {
+            case LayoutCmdKind::Image: {
+                const ImageExtra* extra = static_cast<const ImageExtra*>(cmd->custom_data);
+                if (extra) {
                     const ImageDesc& idesc = extra->desc;
-                    Vec2 uv0=idesc.uv_min, uv1=idesc.uv_max;
-                    if (idesc.sprite_id != kInvalidSprite && !resolve_sprite_uv_rect(ctx,idesc.sprite_id,uv0,uv1,&uv0,&uv1)) break;
-                    const uint8_t img_flags = static_cast<uint8_t>(
-                        ((idesc.sprite_id != kInvalidSprite || surface_texture_premultiplied(ctx, idesc.texture)) ? PrimFlag_Premultiplied : PrimFlag_None) |
-                        (idesc.continuous_corners ? PrimFlag_LinearGrad : PrimFlag_None));
-                    push_prim(
-                        ctx,
-                        Prim::make_texture(
-                            box_px,
-                            cur_clip.rect,
-                            uv0,
-                            uv1,
-                            0u,
-                            scale_corners(idesc.radius, dpi),
-                            idesc.tint,
-                            idesc.border_color,
-                            idesc.border_width * dpi,
-                            img_flags,
-                            cur_clip.radius),
-                        idesc.sprite_id != kInvalidSprite ? nullptr : idesc.texture);
+                    if (idesc.id != 0u) {
+                        const Rect visual = layer_rect(ctx, raw_box_px);
+                        const Rect visible = rect_intersect(visual, cur_clip.rect);
+                        const uint32_t hb_idx = ctx->active_ui->hitboxes.count;
+                        ctx->active_ui->hitboxes.push(HitboxEntry{
+                            .id = idesc.id,
+                            .layout_elem_id = le->nodes.data[cmd->node_idx].id,
+                            .parent_idx = find_parent_hitbox_for_node(ctx, cmd->node_idx),
+                            .layout_rect = cmd->bounds,
+                            .visual_rect = {visual.x / dpi, visual.y / dpi, visual.w / dpi, visual.h / dpi},
+                            .visible_rect = {visible.x / dpi, visible.y / dpi, visible.w / dpi, visible.h / dpi},
+                            .clip_rect = {cur_clip.rect.x / dpi, cur_clip.rect.y / dpi, cur_clip.rect.w / dpi, cur_clip.rect.h / dpi},
+                            .clip_radius = std::fabs(cur_clip.radius) / dpi,
+                            .paint_order = hb_idx,
+                            .z_index = cmd->z_index,
+                            .behavior = HitboxBehavior::Normal,
+                            .is_opaque_surface = true,
+                        });
+                        if (ctx->active_ui->active_node_to_hitbox && cmd->node_idx < ctx->active_ui->active_node_to_hitbox_count) {
+                            ctx->active_ui->active_node_to_hitbox[cmd->node_idx] = hb_idx;
+                        }
+                    }
+                    if (idesc.sprite_id != kInvalidSprite || idesc.texture != nullptr) {
+                        Vec2 uv0=idesc.uv_min, uv1=idesc.uv_max;
+                        if (idesc.sprite_id != kInvalidSprite && !resolve_sprite_uv_rect(ctx,idesc.sprite_id,uv0,uv1,&uv0,&uv1)) break;
+                        const uint8_t img_flags = static_cast<uint8_t>(
+                            ((idesc.sprite_id != kInvalidSprite || surface_texture_premultiplied(ctx, idesc.texture)) ? PrimFlag_Premultiplied : PrimFlag_None) |
+                            (idesc.continuous_corners ? PrimFlag_LinearGrad : PrimFlag_None));
+                        push_prim(
+                            ctx,
+                            Prim::make_texture(
+                                box_px,
+                                cur_clip.rect,
+                                uv0,
+                                uv1,
+                                0u,
+                                scale_corners(idesc.radius, dpi),
+                                idesc.tint,
+                                idesc.border_color,
+                                idesc.border_width * dpi,
+                                img_flags,
+                                cur_clip.radius),
+                            idesc.sprite_id != kInvalidSprite ? nullptr : idesc.texture);
+                    }
                 }
-                break;
-            }
-            case CLAY_RENDER_COMMAND_TYPE_RECTANGLE: {
-                // Fallback only if a raw Clay rectangle is ever emitted.
-                const Clay_RectangleRenderData& rd = cmd->renderData.rectangle;
-                const Color fill = Color::rgba8(
-                    static_cast<uint8_t>(rd.backgroundColor.r + 0.5f),
-                    static_cast<uint8_t>(rd.backgroundColor.g + 0.5f),
-                    static_cast<uint8_t>(rd.backgroundColor.b + 0.5f),
-                    static_cast<uint8_t>(rd.backgroundColor.a + 0.5f));
-                const Corners cr = {
-                    rd.cornerRadius.topLeft * dpi,
-                    rd.cornerRadius.topRight * dpi,
-                    rd.cornerRadius.bottomRight * dpi,
-                    rd.cornerRadius.bottomLeft * dpi,
-                };
-                push_prim(ctx, Prim::make_rect(box_px, cur_clip.rect, fill, cr, {}, 0.0f, 1.0f, cur_clip.radius));
                 break;
             }
             default:
@@ -408,29 +708,28 @@ void end_frame(Context* ctx_arg) noexcept {
     }
     finalize_filter_group(ctx);
 
-    // Clay may omit CUSTOM commands for viewport-culled boxes. Retain their
-    // coordinate mapping without emitting primitives or disabling render culling.
-    const auto& elements = Clay_GetCurrentContext()->layoutElements;
-    for (int32_t i=0; i<elements.length; ++i) {
-        const auto& element = elements.internalArray[i];
-        if (element.isTextElement || !element.config.custom.customData) continue;
-        auto* extra = static_cast<BoxExtra*>(element.config.custom.customData);
-        if (!extra->desc.id || extra->geometry_recorded) continue;
-        const auto data = Clay_GetElementData(make_clay_id(extra->desc.id));
-        if (!data.found) continue;
-        const auto& r = data.boundingBox;
+    // Retain coordinate mapping for viewport-culled boxes without emitting primitives or disabling culling.
+    for (uint32_t i = 0; i < le->nodes.count; ++i) {
+        const LayoutNode& element = le->nodes.data[i];
+        if (element.is_text || !element.cfg.emit_custom || !element.cfg.custom_data) continue;
+        auto* extra = static_cast<BoxExtra*>(element.cfg.custom_data);
+        if (!extra->desc.id || extra->geometry_recorded || !element.positioned) continue;
+        const Rect& r = element.bounds;
         ctx->active_render_layer = extra->layer;
-        const Rect visual = layer_rect(ctx,{r.x*dpi,r.y*dpi,r.width*dpi,r.height*dpi});
+        const Rect visual = layer_rect(ctx, {r.x * dpi, r.y * dpi, r.w * dpi, r.h * dpi});
         const auto* layer = extra->layer;
-        if (reserve_span_hits(&ctx->active_ui->drop_hits,&ctx->active_ui->drop_hit_cap,ctx->active_ui->drop_hit_count,512u)) {
+        if (reserve_span_hits(&ctx->active_ui->drop_hits, &ctx->active_ui->drop_hit_cap, ctx->active_ui->drop_hit_count, 512u)) {
             ctx->active_ui->drop_hits[ctx->active_ui->drop_hit_count++] = SpanHitRegion{
-                .visual_bounds={visual.x/dpi,visual.y/dpi,visual.w/dpi,visual.h/dpi},
-                .local_scale={extra->world_scale*(layer ? layer->resolved_scale.x : 1),extra->world_scale*(layer ? layer->resolved_scale.y : 1)},
-                .visual_opacity=layer ? layer->resolved_opacity : 1,
-                .id=extra->desc.id};
+                .visual_bounds = {visual.x / dpi, visual.y / dpi, visual.w / dpi, visual.h / dpi},
+                .local_scale = {extra->world_scale * (layer ? layer->resolved_scale.x : 1.0f), extra->world_scale * (layer ? layer->resolved_scale.y : 1.0f)},
+                .visual_opacity = layer ? layer->resolved_opacity : 1.0f,
+                .id = extra->desc.id};
         }
     }
-    ctx->active_render_layer=nullptr;
+    ctx->active_render_layer = nullptr;
+    ctx->active_ui->active_node_to_hitbox = nullptr;
+    ctx->active_ui->active_node_to_hitbox_count = 0u;
+    subtree_cache_gc(&ctx->active_ui->subtree_cache, ctx->active_ui->frame_index);
     ctx->active_ui->frame_text_op_count = 0u;
     ctx->active_ui->frame_text_utf8_len = 0u;
     ctx->active_ui->frame_key_count = 0u;
@@ -541,15 +840,14 @@ void end_frame(Context* ctx_arg) noexcept {
                 continue;
             }
             if (ws.is_user_element || ws.split_initialized || ws.is_canvas || ws.is_canvas_node || ws.is_virtual_list) {
-                const Clay_ElementData ed = Clay_GetElementData(make_clay_id(ws.key));
-                if (ed.found) {
-                    ws.last_box_logical = Rect{
-                        ed.boundingBox.x,
-                        ed.boundingBox.y,
-                        ed.boundingBox.width,
-                        ed.boundingBox.height,
-                    };
-                    if(ws.edit_text_buffer) {ws.viewport_dim={ed.boundingBox.width,ed.boundingBox.height};ws.vscroll_max_y=std::fmax(0.0,ws.vscroll_total_h-ed.boundingBox.height);}
+                bool found = false;
+                const Rect bb = layout_engine_bounds(le, ws.key, &found);
+                if (found) {
+                    ws.last_box_logical = bb;
+                    if (ws.edit_text_buffer) {
+                        ws.viewport_dim = {bb.w, bb.h};
+                        ws.vscroll_max_y = std::fmax(0.0, ws.vscroll_total_h - bb.h);
+                    }
                 }
             }
         }
@@ -930,6 +1228,7 @@ void end_frame(Context* ctx_arg) noexcept {
     ctx->stats.arena_peak_bytes = ctx->frame_arena.peak_offset;
     ctx->stats.layout_ms = layout_ms;
     ctx->stats.active_animations = ctx->active_ui->active_anim_count;
+    ctx->stats.cached_subtree_hits = ctx->active_ui->cached_subtree_hits;
     ctx->stats.idle_sleeping = idle_now;
     ctx->stats.ime_cursor_offset_win = ctx->active_ui->ime_cursor_offset_win;
     if (a11y_ok) os_a11y_notify_commit(ctx);

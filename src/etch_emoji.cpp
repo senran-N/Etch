@@ -303,6 +303,7 @@ bool ensure_subpixel_atlas(Context* ctx, uint32_t w, uint32_t h, uint32_t* out_x
         a.subpixel_dirty = true;
         a.subpixel_dirty_y0 = 0u;
         a.subpixel_dirty_y1 = next_h;
+        ++a.uv_epoch;
         const float sx = float(old_w) / float(next_w);
         const float sy = float(old_h) / float(next_h);
         remap_subpixel_prims_scale(ctx->prims, ctx->prim_count, sx, sy);

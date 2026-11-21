@@ -50,9 +50,6 @@
 #include "etch_kawase_vs_msl.h"
 #include "etch_kawase_ps_msl.h"
 
-#define CLAY_IMPLEMENTATION
-#include "clay.h"
-
 #define STB_TRUETYPE_IMPLEMENTATION
 #include "stb_truetype.h"
 
@@ -95,6 +92,7 @@
 #    include <unistd.h>
 #endif
 
+#include "etch_layout_engine.cpp"
 #include "etch_arena.cpp"
 #include "etch_theme.cpp"
 #include "etch_color.cpp"

@@ -842,7 +842,11 @@ void destroy_window_ui_state(Context*, WindowUiState* ui) noexcept {
     std::free(ui->dock_spaces); std::free(ui->dock_cursor.stack); std::free(ui->tables);
     std::free(ui->focus_order); std::free(ui->prev_focus_order);
     std::free(ui->span_hits); std::free(ui->drop_hits);
-    std::free(ui->clay_mem); state_map_destroy(&ui->states);
+    layout_engine_destroy(ui->layout); ui->layout = nullptr;
+    ui->hitboxes.destroy();
+    ui->pointer_over_ids.destroy();
+    subtree_cache_destroy_all(&ui->subtree_cache);
+    state_map_destroy(&ui->states);
 }
 
 bool claim_window_swapchain(Context* ctx, SDL_Window* win) noexcept {
@@ -886,7 +890,9 @@ bool claim_window_swapchain(Context* ctx, SDL_Window* win) noexcept {
         return false;
     }
     if (!SDL_ClaimWindowForGPUDevice(ctx->device, win)) {
-        std::free(ui.clay_mem); state_map_destroy(&ui.states); ui = WindowUiState{}; std::free(allocated); return false;
+        layout_engine_destroy(ui.layout); ui.layout = nullptr;
+        ui.hitboxes.destroy(); ui.pointer_over_ids.destroy(); subtree_cache_destroy_all(&ui.subtree_cache);
+        state_map_destroy(&ui.states); ui = WindowUiState{}; std::free(allocated); return false;
     }
     ctx->claimed_windows[index] = allocated;
     slot.window = win;
@@ -2619,7 +2625,6 @@ void destroy_context(Context* ctx) noexcept {
     }
     if (current_context() == ctx) {
         set_current_context(nullptr);
-        Clay_SetCurrentContext(nullptr);
     }
 
     ctx->in_frame = false;
@@ -3011,7 +3016,6 @@ void release_window(Context* ctx, SDL_Window* window) noexcept {
             for (uint32_t j = 0; j < ctx->claimed_window_cap; ++j)
                 if (ctx->claimed_windows[j]) { ctx->window = ctx->claimed_windows[j]->window; break; }
         }
-        if (current_context() == ctx) Clay_SetCurrentContext(ctx->active_ui->clay_ctx);
         return;
     }
 }

@@ -321,6 +321,7 @@ struct FontAtlas {
     uint16_t          fallback_order[kMaxFontSlots] = {};
     uint32_t          fallback_count = 0;
     uint32_t          font_revision = 1;
+    uint32_t          uv_epoch = 1;
     bool              font_valid = false;
     bool              bold_probed = false;
     bool              mono_probed = false;
@@ -627,7 +628,7 @@ void emit_utf8_glyph_run(Context*, uint16_t, const char*, uint32_t, float, float
 void clear_ime_composition(Context*) noexcept;
 struct ScrollbarGeom;
 ScrollbarGeom compute_vscrollbar_geom(const WidgetState*) noexcept;
-void emit_code_editor_command(Context*, const CodeEditorExtra*, Clay_BoundingBox, const ClipEntry&, float) noexcept;
+void emit_code_editor_command(Context*, const CodeEditorExtra*, Rect, const ClipEntry&, float) noexcept;
 void optimize_render_batches(Context*) noexcept;
 
 struct ClipStack {
@@ -780,7 +781,7 @@ void free_vlist(VarVirtualListCache* c) noexcept {
 struct DesktopPopup { uint32_t id = 0; Vec2 anchor = {}; uint32_t opened_frame = 0; int selection = 0; uint32_t parent_id = 0; };
 struct DropRecord { uint32_t offset, length; };
 struct PendingA11yAction { uint32_t id = 0; A11yAction action = {}; bool consumed = false; uint8_t age = 0; float number = 0; uint32_t length = 0; char text[1024] = {}; };
-struct A11yBuild { A11yNode node = {}; A11yBuild* next = nullptr; A11yBuild* parent = nullptr; uint32_t index = 0, clay_id = 0; };
+struct A11yBuild { A11yNode node = {}; A11yBuild* next = nullptr; A11yBuild* parent = nullptr; uint32_t index = 0, clay_id = 0; bool has_explicit_bounds = false; };
 struct A11yPatch { A11yOverrideDesc desc = {}; A11yPatch* next = nullptr; };
 struct A11yIndexEntry { uint32_t id = 0; A11yBuild* build = nullptr; A11yPatch* patches = nullptr; A11yPatch* tail = nullptr; };
 struct WindowUiState {
@@ -812,8 +813,18 @@ struct WindowUiState {
     uint32_t active_vlist_count = 0;
     ModalFocusScope modal_scopes[32] = {};
     uint32_t modal_count = 0;
-    void* clay_mem = nullptr;
-    Clay_Context* clay_ctx = nullptr;
+    LayoutEngine* layout = nullptr;
+    PodBuf<HitboxEntry> hitboxes = {};
+    PodBuf<uint32_t> pointer_over_ids = {};
+    uint32_t topmost_hovered_id = 0;
+    uint32_t hovered_span_id = 0;
+    float last_released_drag_dist_sq = 0.0f;
+    PodBuf<SubtreeCacheEntry> subtree_cache = {};
+    SubtreeCaptureFrame subtree_stack[16] = {};
+    uint32_t subtree_depth = 0;
+    uint32_t* active_node_to_hitbox = nullptr;
+    uint32_t active_node_to_hitbox_count = 0;
+    uint32_t cached_subtree_hits = 0;
     StateMap states = {};
     SDL_GPUTexture* scene_tex = nullptr;
     SDL_GPUTexture* blur_ping_tex = nullptr;
@@ -1068,6 +1079,7 @@ struct Context {
     Cursor applied_cursor = Cursor::Arrow;
 
     uint64_t arena_epoch = 1u;
+    uint32_t theme_epoch = 1u;
     Arena         frame_arena = {};
     FontAtlas     atlas = {};
 
@@ -1626,15 +1638,20 @@ void arena_destroy(Arena* arena) noexcept {
     *arena = {};
 }
 
+inline bool pointer_over_id(const WindowUiState* ui, uint32_t id) noexcept {
+    if (!ui || id == 0u) return false;
+    for (uint32_t i = 0; i < ui->pointer_over_ids.count; ++i) {
+        if (ui->pointer_over_ids.data[i] == id) return true;
+    }
+    return false;
+}
+
 Context* current_context() noexcept {
     return g_current_context;
 }
 
 void set_current_context(Context* ctx) noexcept {
     g_current_context = ctx;
-    if (ctx && ctx->active_ui->clay_ctx) {
-        Clay_SetCurrentContext(ctx->active_ui->clay_ctx);
-    }
 }
 
 Arena* frame_arena(Context* ctx) noexcept {

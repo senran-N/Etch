@@ -800,6 +800,7 @@ void build_studio_ui(StudioApp* app, const etch::FrameStats& prev_stats) noexcep
         if (pane == kPaneInspector) {
         // Pane 1: Left Inspector (UTF-8 IME filter + Spring shader controls + Inertial Node List)
         ETCH_BOX({
+            .id = etch::id("studio_inspector_scroll"),
             .axis = etch::Axis::Col,
             .width = etch::Sizing::percent(1),
             .height = etch::Sizing::grow(),
@@ -2455,6 +2456,9 @@ int run_headless(const char* out_png_path) noexcept {
         return 1;
     }
 
+    const uint32_t kInspectorScroll = etch::id("studio_inspector_scroll");
+    etch::set_scroll_offset(kInspectorScroll, etch::Vec2{0.0f, 180.0f}, true);
+    step_headless_frame(&app, kW, kH, kDt);
     const uint32_t kPal0 = etch::id_index(etch::id("studio_palette"), 0u);
     const etch::Rect pal_r = etch::element_bounds(kPal0);
     const etch::Rect cv_r = etch::element_bounds(kCanvas);
@@ -2475,6 +2479,7 @@ int run_headless(const char* out_png_path) noexcept {
         cleanup_release();
         return 1;
     }
+    etch::set_scroll_offset(kInspectorScroll, etch::Vec2{0.0f, 0.0f}, true);
     step_headless_frame(&app, kW, kH, kDt);
 
     const etch::CanvasState cs_m = etch::canvas_state(kCanvas);
@@ -2697,17 +2702,19 @@ int run_headless(const char* out_png_path) noexcept {
     step_headless_frame(&app,kW,kH,kDt);
     const uint32_t telem_id = etch::id("studio_telemetry_selection"), card_id = etch::id("studio_pass_collapsible");
     etch::set_text_selection(telem_id,0,8);
-    bool s13_ok = etch::has_text_selection(telem_id) && etch::selected_text(telem_id).length > 0;
+    const bool s13_a = etch::has_text_selection(telem_id) && etch::selected_text(telem_id).length > 0;
     const auto tb = etch::element_bounds(telem_id);
     step_headless_frame(&app,kW,kH,kDt,{tb.x+2,tb.y+3},true);
     step_headless_frame(&app,kW,kH,kDt,{tb.x+tb.w*.6f,tb.y+3},true);
-    s13_ok &= etch::has_text_selection(telem_id);
+    const bool s13_b = etch::has_text_selection(telem_id);
     step_headless_frame(&app,kW,kH,kDt,{tb.x+tb.w*.6f,tb.y+3},false);
     etch::request_focus(telem_id);
     step_headless_frame(&app,kW,kH,kDt,{-1,-1},false,false,0,etch::Mod_Primary,SDLK_A);
     step_headless_frame(&app,kW,kH,kDt,{-1,-1},false,false,0,etch::Mod_Primary,SDLK_C);
     const auto selected = etch::selected_text(telem_id), copied = etch::get_clipboard_text();
-    s13_ok &= selected.length > 8 && copied.length == selected.length && std::memcmp(selected.chars,copied.chars,selected.length)==0;
+    const bool s13_c = selected.length > 8 && copied.length == selected.length && std::memcmp(selected.chars,copied.chars,selected.length)==0;
+    etch::set_scroll_offset(kInspectorScroll, etch::Vec2{0.0f, 180.0f}, true);
+    step_headless_frame(&app,kW,kH,kDt);
     const uint32_t header = etch::id_index(card_id,0xC011u);
     const auto hb = etch::element_bounds(header);
     const etch::Vec2 hp = {hb.x+hb.w*.5f,hb.y+hb.h*.5f};
@@ -2719,12 +2726,17 @@ int run_headless(const char* out_png_path) noexcept {
         const float h = etch::element_bounds(etch::id_index(card_id,0xC013u)).h;
         intermediate |= h > .5f && h < 20;
     }
-    s13_ok &= !etch::is_collapsible_open(card_id) && intermediate;
+    const bool s13_d = !etch::is_collapsible_open(card_id) && intermediate;
     etch::request_focus(header);
     step_headless_frame(&app,kW,kH,kDt,{-1,-1},false,false,0,etch::Mod_None,SDLK_SPACE);
     for (int f=0;f<60;++f) step_headless_frame(&app,kW,kH,kDt);
-    s13_ok &= etch::is_collapsible_open(card_id) && etch::element_bounds(etch::id_index(card_id,0xC013u)).h > 1 && etch::frame_stats(ctx).draw_call_count <= 64;
-    if (!s13_ok) { std::fprintf(stderr,"Headless Studio [S13] failed: selection/collapsible regression\n"); cleanup_release(); return 1; }
+    const bool s13_e = etch::is_collapsible_open(card_id) && etch::element_bounds(etch::id_index(card_id,0xC013u)).h > 1 && etch::frame_stats(ctx).draw_call_count <= 64;
+    etch::set_scroll_offset(kInspectorScroll, etch::Vec2{0.0f, 0.0f}, true);
+    step_headless_frame(&app,kW,kH,kDt);
+    if (!(s13_a && s13_b && s13_c && s13_d && s13_e)) {
+        std::fprintf(stderr,"Headless Studio [S13] failed: selection/collapsible regression\n");
+        cleanup_release(); return 1;
+    }
     const char* driver = SDL_GetGPUDeviceDriver(etch::gpu_device(ctx));
     // [S14] Visible v2.1 strip fits the inspector and settled frames sleep.
     for(int f=0;f<90 && etch::needs_redraw(ctx);++f)step_headless_frame(&app,kW,kH,kDt);

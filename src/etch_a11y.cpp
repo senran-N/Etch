@@ -102,9 +102,12 @@ bool a11y_commit_snapshot(Context* ctx) noexcept {
     for(auto* b=ctx->a11y_first;b;b=b->next) {
         auto& n=ui.a11y_nodes[b->index];n=b->node;
         n.label=ui.a11y_arena.push_str(n.label.chars,n.label.length);n.value_text=ui.a11y_arena.push_str(n.value_text.chars,n.value_text.length);
-        const auto box=Clay_GetElementData(make_clay_id(b->clay_id));
-        if(box.found)n.bounds={box.boundingBox.x,box.boundingBox.y,box.boundingBox.width,box.boundingBox.height};
-        else if(const auto* ws=state_map_find(&ui.states,n.id))n.bounds=ws->last_box_logical;
+        if (!b->has_explicit_bounds) {
+            bool box_found = false;
+            const Rect box = layout_engine_bounds(ui.layout, b->clay_id, &box_found);
+            if (box_found) n.bounds = box;
+            else if (const auto* ws = state_map_find(&ui.states, n.id)) n.bounds = ws->last_box_logical;
+        }
         if(b->parent) {
             const uint32_t pi=b->parent->index;n.parent_id=b->parent->node.id;
             if(tails[pi]==0xFFFFFFFFu)ui.a11y_nodes[pi].first_child_idx=b->index;else ui.a11y_nodes[tails[pi]].next_sibling_idx=b->index;

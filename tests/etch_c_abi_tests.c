@@ -641,7 +641,36 @@ int main(void) {
         !etch_is_window_minimized(ctx, NULL);
     const EtchFileDialogResult empty_dlg = etch_poll_file_dialog(ctx, NULL);
     const bool ok_v24_c99 = !empty_dlg.ready && !etch_open_folder_dialog(ctx, NULL, NULL, 7u, false) &&
-        sheet.show_handle && !sheet.dismiss_on_backdrop && !sheet.dismiss_on_escape && sheet.corner_radius_px == 16.0f;
+        sheet.show_handle && !sheet.dismiss_on_backdrop && !sheet.dismiss_on_escape && sheet.corner_radius_px == 16.0f &&
+        v22_box.justify == ETCH_JUSTIFY_START && v22_box.align_self == ETCH_ALIGN_SELF_AUTO &&
+        v22_box.flex_grow == 0.0f && v22_box.flex_shrink == 1.0f && v22_box.grid_row_span == 1u &&
+        !v22_box.flip_on_overflow && v22_box.hitbox_behavior == ETCH_HITBOX_NORMAL &&
+        etch_topmost_hovered_id() == 0u && !etch_clicked_without_drag(etch_id("none"), 4.0f);
+    {
+        EtchFrameDesc p2f = etch_frame_desc_default();
+        p2f.viewport_w = 160; p2f.viewport_h = 80;
+        const uint32_t sub = etch_id("c_p2_sub");
+        int builds = 0;
+        for (int pass = 0; pass < 2; ++pass) {
+            etch_begin_frame(ctx, &p2f);
+            if (etch_begin_cached_subtree(sub, 0xCAFEu)) {
+                ++builds;
+                EtchBoxDesc cb = etch_box_desc_default();
+                cb.width = etch_sizing_fixed(64.0f); cb.height = etch_sizing_fixed(32.0f);
+                cb.background = (EtchColor){40, 80, 120, 255};
+                etch_box(&cb);
+                etch_end_cached_subtree();
+            }
+            etch_end_frame(ctx);
+        }
+        etch_invalidate_cached_subtree(sub, ctx);
+        if (builds != 1 || etch_frame_stats(ctx).cached_subtree_hits != 1u) {
+            fprintf(stderr, "c99_abi_smoke: phase2 cached subtree failed (builds=%d hits=%u)\n",
+                builds, etch_frame_stats(ctx).cached_subtree_hits);
+            etch_destroy_context(ctx);
+            return 1;
+        }
+    }
     const bool ok_material_defaults=ok_v22_c99 && ok_v24_c99 && surface.max_fps==60 && surface.spirv.entrypoint!=NULL &&
         surface.num_samplers==0u && !surface.sampler_mirror_repeat &&
         eval.width==1 && eval.enabled && eval.textures[0]==NULL && cell.width==1 && sheet.snap_count==3 &&

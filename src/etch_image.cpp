@@ -154,6 +154,7 @@ bool grow_sprite_atlas(Context* ctx) noexcept {
     a.dirty = true;
     a.dirty_y0 = 0;
     a.dirty_y1 = n;
+    ++a.uv_epoch;
     if (!ctx->in_frame)
         ctx->stats.sprite_atlas_size = n;
     return true;
@@ -179,7 +180,7 @@ bool compact_sprite_atlas(Context* ctx) noexcept {
     remap_atlas_prims_compact(ctx->filter_prims, ctx->filter_prim_count, a, plan);
     for(uint32_t row=0;row<8;++row)std::memset(pixels+size_t(row)*a.width*4,255,32);
     std::memcpy(a.sprites,plan,size_t(a.sprite_used)*sizeof(SpriteSlot));std::free(plan);std::free(a.pixels);a.pixels=pixels;
-    a.shelf_x=x;a.shelf_y=y;a.shelf_h=shelf;a.dirty=true;a.dirty_y0=0;a.dirty_y1=a.height;
+    a.shelf_x=x;a.shelf_y=y;a.shelf_h=shelf;a.dirty=true;a.dirty_y0=0;a.dirty_y1=a.height;++a.uv_epoch;
     return true;
 }
 bool allocate_sprite_rect(Context* ctx, uint32_t w, uint32_t h, SpriteSlot* s) noexcept {
@@ -365,6 +366,7 @@ bool update_sprite_rgba(Context* ctx, uint32_t id, uint32_t w, uint32_t h, const
         if (ctx->gpu_prims && ctx->gpu_prims != ctx->prims)
             remap_list(ctx->gpu_prims, ctx->prim_count);
         remap_list(ctx->filter_prims, ctx->filter_prim_count);
+        ++ctx->atlas.uv_epoch;
     }
     return true;
 }

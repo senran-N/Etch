@@ -1146,6 +1146,7 @@ struct FrameStats {
     int32_t ime_cursor_offset_win = 0; // Cursor within the IME area, in window pixels.
     uint32_t sprite_count = 0;
     uint32_t sprite_atlas_size = 0;
+    uint32_t cached_subtree_hits = 0;
 };
 
 enum class SizingKind : uint8_t {
@@ -1193,6 +1194,29 @@ enum class AlignY : uint8_t {
     Top = 0,
     Center = 1,
     Bottom = 2,
+};
+
+enum class Justify : uint8_t {
+    Start = 0,
+    Center = 1,
+    End = 2,
+    SpaceBetween = 3,
+    SpaceAround = 4,
+    SpaceEvenly = 5,
+};
+
+enum class AlignSelf : uint8_t {
+    Auto = 0,
+    Start = 1,
+    Center = 2,
+    End = 3,
+    Stretch = 4,
+};
+
+enum class HitboxBehavior : uint8_t {
+    Normal = 0,
+    BlockMouse = 1,
+    Passthrough = 2,
 };
 
 enum class Cursor : uint8_t {
@@ -1334,6 +1358,15 @@ struct BoxDesc {
     float border_dash_px = 0.0f;
     float border_gap_px = 0.0f; // Zero uses the dash length.
     Padding edge_fade = {}; // Logical px fade on {left, right, top, bottom} for clipped containers.
+    Justify justify = Justify::Start;
+    AlignSelf align_self = AlignSelf::Auto;
+    float flex_grow = 0.0f;
+    float flex_shrink = 1.0f;
+    Padding margin = {};
+    std::span<const GridTrack> grid_row_tracks = {};
+    uint16_t grid_row_span = 1;
+    bool flip_on_overflow = false;
+    HitboxBehavior hitbox_behavior = HitboxBehavior::Normal;
 };
 
 inline constexpr uint16_t kFontSans       = 0u;
@@ -2464,8 +2497,15 @@ FileDialogResult poll_file_dialog(Context* ctx = nullptr, Arena* arena = nullptr
 
 // Interaction, pointer capture, focus navigation, cursor & layout queries
 bool hovered(uint32_t element_id) noexcept;
+uint32_t topmost_hovered_id() noexcept;
 bool pressed(uint32_t element_id) noexcept;
 bool clicked(uint32_t element_id) noexcept;
+bool clicked_without_drag(uint32_t element_id, float max_drag_px = 6.0f) noexcept;
+// Dirty subtree caching: returns true on miss (caller builds subtree and calls end_cached_subtree()),
+// returns false on O(1) cache hit (replays cached bounds, prims, hitboxes & A11y without rebuilding).
+bool begin_cached_subtree(uint32_t id, uint64_t content_hash) noexcept;
+void end_cached_subtree() noexcept;
+void invalidate_cached_subtree(uint32_t id, Context* ctx = nullptr) noexcept;
 bool active(uint32_t element_id) noexcept;
 uint32_t active_id() noexcept;
 void set_active(uint32_t element_id) noexcept;

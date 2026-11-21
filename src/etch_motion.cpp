@@ -79,8 +79,8 @@ void push_layer(const LayerDesc& desc) noexcept {
     local.opacity=std::fmin(1.f,std::fmax(0.f,local.opacity));
     local.blur_px=std::isfinite(local.blur_px) ? std::fmin(64.f,std::fmax(0.f,local.blur_px)) : 0.f;
     if(local.translate.x!=0.0f || local.translate.y!=0.0f || local.scale.x!=1.0f || local.scale.y!=1.0f) {
-        // Clay cannot cull in layout space when a visual layer can move or scale content into view.
-        Clay_SetCullingEnabled(false);
+        // Disable layout-space culling when a visual layer can move or scale content into view.
+        if (ctx->active_ui->layout) ctx->active_ui->layout->culling_enabled = false;
     }
     auto* node=ctx->frame_arena.alloc<VisualLayerNode>();
     if(!node) return;

@@ -24,13 +24,6 @@ Podtelezhnikov. Preserve that file's full copyright notices and both
 disclaimer paragraphs in copies. It also directs readers to individual files
 and subdirectory COPYING files for additional notices or different licenses.
 
-## Clay
-
-[third_party/clay.h](third_party/clay.h), version 0.14, includes its
-zlib/libpng license at the end of the header:
-`Copyright (c) 2024 Nic Barker`. Do not misrepresent origin; mark altered
-source versions and preserve the notice in source distributions.
-
 ## stb headers
 
 - [stb_image.h](third_party/stb_image.h) v2.32, Copyright (c) 2017 Sean Barrett. MIT / Public Domain. Used for static JPEG/GIF/TGA image decoding.
