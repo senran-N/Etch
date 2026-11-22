@@ -26,8 +26,10 @@
 #include "checks_phase1_gpu.h"
 #include "checks_phase2_layout.h"
 #include "checks_craft_upgrades.h"
+#include "checks_v027.h"
 #include "etch_uber_vs_msl.h"
 #include "etch_uber_ps_msl.h"
+#include "etch_quad_ps_msl.h"
 #include "etch_kawase_vs_msl.h"
 #include "etch_kawase_ps_msl.h"
 using namespace etch;
@@ -595,14 +597,15 @@ static bool v019_regression() noexcept {
 }
 
 static bool gpu_suite() noexcept {
-    const bool media_ok=v019_regression() && verify_v021_gpu() && verify_v022_gpu() && verify_phase1_gpu() && verify_phase2_cached_subtree_gpu() && verify_workbench_materials_gpu() && verify_shader_surface_gpu() && verify_texture_regions_gpu() && verify_mesh_gpu() && verify_punch_gpu() && verify_beam_fade_gpu() && verify_media_emoji_checks() && verify_sprite_recycling_gpu() && verify_border_coverage() && verify_visual_quality_gpu() && verify_closure_gpu();
+    const bool media_ok=v019_regression() && verify_v021_gpu() && verify_v022_gpu() && verify_v027() && verify_phase1_gpu() && verify_phase2_cached_subtree_gpu() && verify_workbench_materials_gpu() && verify_shader_surface_gpu() && verify_texture_regions_gpu() && verify_mesh_gpu() && verify_punch_gpu() && verify_beam_fade_gpu() && verify_media_emoji_checks() && verify_sprite_recycling_gpu() && verify_border_coverage() && verify_visual_quality_gpu() && verify_closure_gpu();
     const bool v070_ok=verify_theme_wrap_checks();
     static_assert(sizeof(Prim)==64);
-    bool ok=source_ok(g_etch_uber_vs_msl,sizeof(g_etch_uber_vs_msl),"vertex vs_main_out vs_main(") && source_ok(g_etch_uber_ps_msl,sizeof(g_etch_uber_ps_msl),"fragment ps_main_out ps_main(") && source_ok(g_etch_kawase_vs_msl,sizeof(g_etch_kawase_vs_msl),"vertex vs_main_out vs_main(") && source_ok(g_etch_kawase_ps_msl,sizeof(g_etch_kawase_ps_msl),"fragment ps_main_out ps_main(");
-    const char* vs=reinterpret_cast<const char*>(g_etch_uber_vs_msl);const char* ps=reinterpret_cast<const char*>(g_etch_uber_ps_msl);const char* ks=reinterpret_cast<const char*>(g_etch_kawase_ps_msl);
+    bool ok=source_ok(g_etch_uber_vs_msl,sizeof(g_etch_uber_vs_msl),"vertex vs_main_out vs_main(") && source_ok(g_etch_uber_ps_msl,sizeof(g_etch_uber_ps_msl),"fragment ps_main_out ps_main(") && source_ok(g_etch_quad_ps_msl,sizeof(g_etch_quad_ps_msl),"fragment ps_main_out ps_main(") && source_ok(g_etch_kawase_vs_msl,sizeof(g_etch_kawase_vs_msl),"vertex vs_main_out vs_main(") && source_ok(g_etch_kawase_ps_msl,sizeof(g_etch_kawase_ps_msl),"fragment ps_main_out ps_main(");
+    const char* vs=reinterpret_cast<const char*>(g_etch_uber_vs_msl);const char* ps=reinterpret_cast<const char*>(g_etch_uber_ps_msl);const char* qps=reinterpret_cast<const char*>(g_etch_quad_ps_msl);const char* ks=reinterpret_cast<const char*>(g_etch_kawase_ps_msl);
     ok &= std::strstr(vs,"GlobalsVS [[buffer(0)]]") && std::strstr(vs,"g_prims [[buffer(1)]]") && std::strstr(ks,"KawaseFS [[buffer(0)]]") && std::strstr(ks,"g_src_tex [[texture(0)]]") && std::strstr(ks,"g_src_texSmplr [[sampler(0)]]");
     for(uint32_t i=0;i<9;++i){char slot[80];std::snprintf(slot,sizeof(slot),"g_tex%u [[texture(%u)]]",i,i);ok &= std::strstr(ps,slot)!=nullptr;std::snprintf(slot,sizeof(slot),"g_tex%uSmplr [[sampler(%u)]]",i,i);ok &= std::strstr(ps,slot)!=nullptr;}
-    const char* buffers[]={"g_slug_curves [[buffer(0)]]","g_slug_bands [[buffer(1)]]","g_dyn_slug_curves [[buffer(2)]]","g_dyn_slug_bands [[buffer(3)]]","g_clip_shapes [[buffer(4)]]"};for(const char* b:buffers)ok &= std::strstr(ps,b)!=nullptr;
+    const char* buffers[]={"g_slug_curves [[buffer(0)]]","g_slug_bands [[buffer(1)]]","g_dyn_slug_curves [[buffer(2)]]","g_dyn_slug_bands [[buffer(3)]]","g_clip_shapes [[buffer(4)]]","g_grad_stops [[buffer(5)]]"};for(const char* b:buffers)ok &= std::strstr(ps,b)!=nullptr;
+    ok &= std::strstr(qps,"g_clip_shapes [[buffer(0)]]")!=nullptr && std::strstr(qps,"g_grad_stops [[buffer(1)]]")!=nullptr;
     Context* bad=create_context({.headless=true,.gpu_driver="nonexistent_driver_xyz"});
     if(!bad)return false;
     ok &= gpu_device(bad)==nullptr;
@@ -634,6 +637,7 @@ int main(int argc,char** argv) {
     if(argc==2 && std::strcmp(argv[1],"--suite=phase1_gpu")==0) return verify_phase1_gpu() ? 0 : 1;
     if(argc==2 && std::strcmp(argv[1],"--suite=phase2_layout")==0) return (verify_phase2_layout_cpu() && verify_phase2_cached_subtree_gpu()) ? 0 : 1;
     if(argc==2 && std::strcmp(argv[1],"--suite=craft_upgrades")==0) return verify_craft_upgrades() ? 0 : 1;
+    if(argc==2 && std::strcmp(argv[1],"--suite=v027")==0) return verify_v027() ? 0 : 1;
     const char* names[]={"arena_and_elasticity","unicode_bidi_grapheme","layout_clay_flex_grid","fenwick_virtual_list_1m","widgets_and_dockspace","text_buffer_and_code_editor","a11y_semantic_tree","headless_gpu_invariants"};
     const char* selected=argc==2 && std::strncmp(argv[1],"--suite=",8)==0?argv[1]+8:nullptr;
     if(argc>1 && !selected) { return 2; } bool found=false,ok=true;

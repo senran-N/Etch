@@ -78,9 +78,15 @@ void push_layer(const LayerDesc& desc) noexcept {
        !std::isfinite(local.pivot_norm.x) || !std::isfinite(local.pivot_norm.y)) local={};
     local.opacity=std::fmin(1.f,std::fmax(0.f,local.opacity));
     local.blur_px=std::isfinite(local.blur_px) ? std::fmin(64.f,std::fmax(0.f,local.blur_px)) : 0.f;
-    if(local.translate.x!=0.0f || local.translate.y!=0.0f || local.scale.x!=1.0f || local.scale.y!=1.0f) {
-        // Disable layout-space culling when a visual layer can move or scale content into view.
+    local.rotation_rad=std::isfinite(local.rotation_rad) ? local.rotation_rad : 0.f;
+    if(local.translate.x!=0.0f || local.translate.y!=0.0f || local.scale.x!=1.0f || local.scale.y!=1.0f || local.rotation_rad!=0.0f) {
+        // Disable layout-space culling when a visual layer can move, scale, or rotate content into view.
         if (ctx->active_ui->layout) ctx->active_ui->layout->culling_enabled = false;
+        if (ctx->active_ui->subtree_depth > 0u) {
+            if (SubtreeMeta* sm = ctx->active_ui->subtree_stack[ctx->active_ui->subtree_depth - 1u].meta) {
+                sm->tainted = true;
+            }
+        }
     }
     auto* node=ctx->frame_arena.alloc<VisualLayerNode>();
     if(!node) return;
@@ -98,7 +104,8 @@ namespace {
 void resolve_layer_chain(Context* ctx, const VisualLayerNode* node, float dpi) noexcept {
     if(node->resolved_frame==ctx->active_ui->frame_index) return;
     Vec2 parent_scale={1,1},parent_offset={}, inherited_scale={1,1},inherited_offset={};
-    float parent_opacity=1, parent_blur=0; bool parent_animating=false, parent_plus_lighter=false;
+    float parent_opacity=1, parent_blur=0, parent_rot=0; bool parent_animating=false, parent_plus_lighter=false;
+    float pm[6] = {1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f};
     const VisualLayerNode* parent_blur_root = nullptr;
     if(node->parent) {
         resolve_layer_chain(ctx,node->parent,dpi);
@@ -106,6 +113,8 @@ void resolve_layer_chain(Context* ctx, const VisualLayerNode* node, float dpi) n
         parent_opacity=node->parent->resolved_opacity;parent_animating=node->parent->resolved_animating;
         parent_blur=node->parent->resolved_blur_px;parent_plus_lighter=node->parent->resolved_plus_lighter;
         parent_blur_root=node->parent->resolved_blur_root;
+        parent_rot=node->parent->resolved_rotation_rad;
+        std::memcpy(pm,node->parent->resolved_m,sizeof(pm));
         inherited_scale=node->parent->inherited_scale;inherited_offset=node->parent->inherited_offset_px;
     }
     LayerDesc d=node->local;
@@ -192,6 +201,39 @@ void resolve_layer_chain(Context* ctx, const VisualLayerNode* node, float dpi) n
     const Vec2 offset={d.translate.x*dpi+pivot.x*(1-d.scale.x),d.translate.y*dpi+pivot.y*(1-d.scale.y)};
     node->resolved_scale={parent_scale.x*d.scale.x,parent_scale.y*d.scale.y};
     node->resolved_offset_px={parent_offset.x+parent_scale.x*offset.x,parent_offset.y+parent_scale.y*offset.y};
+    if(parent_rot == 0.0f && d.rotation_rad == 0.0f) {
+        node->resolved_rotation_rad = 0.0f;
+        node->resolved_m[0] = node->resolved_scale.x;
+        node->resolved_m[1] = 0.0f;
+        node->resolved_m[2] = node->resolved_offset_px.x;
+        node->resolved_m[3] = 0.0f;
+        node->resolved_m[4] = node->resolved_scale.y;
+        node->resolved_m[5] = node->resolved_offset_px.y;
+    } else {
+        const float local_rot = d.rotation_rad;
+        const float c = std::cos(local_rot);
+        const float s = std::sin(local_rot);
+        const float la = c * d.scale.x;
+        const float lb = -s * d.scale.y;
+        const float ltx = pivot.x + d.translate.x * dpi - (la * pivot.x + lb * pivot.y);
+        const float lc = s * d.scale.x;
+        const float ld = c * d.scale.y;
+        const float lty = pivot.y + d.translate.y * dpi - (lc * pivot.x + ld * pivot.y);
+        node->resolved_m[0] = pm[0] * la + pm[1] * lc;
+        node->resolved_m[1] = pm[0] * lb + pm[1] * ld;
+        node->resolved_m[2] = pm[0] * ltx + pm[1] * lty + pm[2];
+        node->resolved_m[3] = pm[3] * la + pm[4] * lc;
+        node->resolved_m[4] = pm[3] * lb + pm[4] * ld;
+        node->resolved_m[5] = pm[3] * ltx + pm[4] * lty + pm[5];
+        const float* m = node->resolved_m;
+        node->resolved_scale = { std::hypot(m[0], m[3]), std::hypot(m[1], m[4]) };
+        float rot = std::atan2(m[3], m[0]);
+        if (std::fabs(rot) <= 1e-4f) {
+            rot = 0.0f;
+            node->resolved_offset_px = { m[2], m[5] };
+        }
+        node->resolved_rotation_rad = rot;
+    }
     node->resolved_opacity=parent_opacity*d.opacity;
     node->resolved_animating=parent_animating || d.animating;
     const float local_blur = d.blur_px > 0.05f ? d.blur_px * dpi : 0.0f;
@@ -206,12 +248,178 @@ void resolve_layer_chain(Context* ctx, const VisualLayerNode* node, float dpi) n
 Rect layer_rect(Context* ctx, Rect r) noexcept {
     if(const auto* layer=ctx->active_render_layer) {
         resolve_layer_chain(ctx,layer,ctx->active_ui->dpi_scale);
-        const auto s=layer->resolved_scale,o=layer->resolved_offset_px;
+        const auto s=layer->resolved_scale;
+        if(std::fabs(layer->resolved_rotation_rad)>1e-4f) {
+            const float rcx=r.x+r.w*0.5f;
+            const float rcy=r.y+r.h*0.5f;
+            const float* m=layer->resolved_m;
+            const float cx=m[0]*rcx+m[1]*rcy+m[2];
+            const float cy=m[3]*rcx+m[4]*rcy+m[5];
+            const float vw=r.w*std::fabs(s.x);
+            const float vh=r.h*std::fabs(s.y);
+            return {cx-vw*0.5f,cy-vh*0.5f,vw,vh};
+        }
+        const auto o=layer->resolved_offset_px;
         return {r.x*s.x+o.x,r.y*s.y+o.y,r.w*s.x,r.h*s.y};
     }
     return r;
 }
 
+}
+float eval_easing(EasingSpec spec, float t) noexcept {
+    if (!std::isfinite(t) || t <= 0.0f) return 0.0f;
+    if (t >= 1.0f) return 1.0f;
+    float x1 = 0.0f, y1 = 0.0f, x2 = 1.0f, y2 = 1.0f;
+    switch (spec.kind) {
+        case EasingKind::Linear:
+            return t;
+        case EasingKind::EaseIn:
+            x1 = 0.42f; y1 = 0.0f; x2 = 1.0f; y2 = 1.0f;
+            break;
+        case EasingKind::EaseOut:
+            x1 = 0.0f; y1 = 0.0f; x2 = 0.58f; y2 = 1.0f;
+            break;
+        case EasingKind::EaseInOut:
+            x1 = 0.42f; y1 = 0.0f; x2 = 0.58f; y2 = 1.0f;
+            break;
+        case EasingKind::CubicBezier:
+            x1 = std::isfinite(spec.x1) ? std::fmin(1.0f, std::fmax(0.0f, spec.x1)) : 0.0f;
+            y1 = std::isfinite(spec.y1) ? spec.y1 : 0.0f;
+            x2 = std::isfinite(spec.x2) ? std::fmin(1.0f, std::fmax(0.0f, spec.x2)) : 1.0f;
+            y2 = std::isfinite(spec.y2) ? spec.y2 : 1.0f;
+            break;
+        default:
+            return t;
+    }
+    if (x1 == y1 && x2 == y2) return t;
+
+    const float cx = 3.0f * x1;
+    const float bx = 3.0f * (x2 - x1) - cx;
+    const float ax = 1.0f - cx - bx;
+    const float cy = 3.0f * y1;
+    const float by = 3.0f * (y2 - y1) - cy;
+    const float ay = 1.0f - cy - by;
+
+    float lo = 0.0f;
+    float hi = 1.0f;
+    float u = t;
+    bool converged = false;
+    for (int i = 0; i < 6; ++i) {
+        const float x = ((ax * u + bx) * u + cx) * u;
+        const float err = x - t;
+        const float dx = (3.0f * ax * u + 2.0f * bx) * u + cx;
+        if (std::fabs(err) < 1e-6f && std::fabs(err) <= 1e-6f * std::fabs(dx)) {
+            converged = true;
+            break;
+        }
+        if (err < 0.0f) lo = u;
+        else hi = u;
+        if (std::fabs(dx) > 1e-6f) {
+            const float next = u - err / dx;
+            if (next > lo && next < hi) {
+                u = next;
+                continue;
+            }
+        }
+        u = 0.5f * (lo + hi);
+    }
+    if (!converged && (hi - lo) > 1e-6f) {
+        const float x0 = ((ax * u + bx) * u + cx) * u;
+        const float err0 = x0 - t;
+        const float dx0 = (3.0f * ax * u + 2.0f * bx) * u + cx;
+        if (!(std::fabs(err0) < 1e-6f && std::fabs(err0) <= 1e-6f * std::fabs(dx0))) {
+            if (err0 < 0.0f) lo = u;
+            else hi = u;
+            for (int i = 0; i < 20 && (hi - lo) > 1e-6f; ++i) {
+                u = 0.5f * (lo + hi);
+                const float x = ((ax * u + bx) * u + cx) * u;
+                const float err = x - t;
+                if (err == 0.0f) break;
+                if (err < 0.0f) lo = u;
+                else hi = u;
+            }
+            u = 0.5f * (lo + hi);
+        }
+    }
+    return ((ay * u + by) * u + cy) * u;
+}
+
+float stagger_delay(uint32_t index, float step_sec, float max_delay_sec) noexcept {
+    const float step = (std::isfinite(step_sec) && step_sec > 0.0f) ? step_sec : 0.0f;
+    const float delay = static_cast<float>(index) * step;
+    if (!std::isfinite(delay)) {
+        return (std::isfinite(max_delay_sec) && max_delay_sec > 0.0f) ? max_delay_sec : 0.0f;
+    }
+    if (std::isfinite(max_delay_sec) && max_delay_sec > 0.0f) {
+        return std::fmin(delay, max_delay_sec);
+    }
+    return delay;
+}
+
+float tween(uint32_t id, float target, float duration_sec, EasingSpec spec, float delay_sec) noexcept {
+    if (!std::isfinite(target)) return 0.0f;
+    Context* ctx = current_context();
+    if (!ctx || !ctx->active_ui || id == 0u) return target;
+    const float dur = (std::isfinite(duration_sec) && duration_sec > 0.0f) ? duration_sec : 0.0f;
+    const float del = (std::isfinite(delay_sec) && delay_sec > 0.0f) ? delay_sec : 0.0f;
+    const uint32_t frame = ctx->active_ui->frame_index;
+    WidgetState* ws = state_map_get_or_insert(&ctx->active_ui->states, id, frame);
+    if (!ws) return target;
+
+    if (!ws->tween_initialized) {
+        ws->tween_initialized = true;
+        ws->tween_start = target;
+        ws->tween_target = target;
+        ws->tween_value = target;
+        ws->tween_elapsed = 0.0f;
+        ws->tween_duration = 0.0f;
+        ws->tween_delay = 0.0f;
+        ws->tween_frame = frame;
+        return ws->tween_value;
+    }
+
+    if (ctx->reduced_motion || dur <= 1e-4f) {
+        ws->tween_start = target;
+        ws->tween_target = target;
+        ws->tween_value = target;
+        ws->tween_elapsed = 0.0f;
+        ws->tween_duration = 0.0f;
+        ws->tween_delay = 0.0f;
+        ws->tween_frame = frame;
+        return ws->tween_value;
+    }
+
+    const bool target_changed = std::fabs(target - ws->tween_target) > 1e-5f;
+    if (target_changed) {
+        ws->tween_start = ws->tween_value;
+        ws->tween_target = target;
+        ws->tween_elapsed = 0.0f;
+        ws->tween_duration = dur;
+        ws->tween_delay = del;
+        if (ws->tween_frame == frame && ctx->time_scale > 0.0f) {
+            ++ctx->active_ui->active_anim_count;
+        }
+    }
+
+    if (ws->tween_duration > 1e-4f && ws->tween_frame != frame) {
+        ws->tween_frame = frame;
+        ws->tween_elapsed += ctx->active_ui->sim_dt;
+        const float total = ws->tween_delay + ws->tween_duration;
+        if (ws->tween_elapsed >= total) {
+            ws->tween_value = ws->tween_target;
+            ws->tween_start = ws->tween_target;
+            ws->tween_elapsed = total;
+            ws->tween_duration = 0.0f;
+        } else {
+            const float raw_u = (ws->tween_elapsed - ws->tween_delay) / ws->tween_duration;
+            const float u = std::fmin(1.0f, std::fmax(0.0f, raw_u));
+            ws->tween_value = ws->tween_start + (ws->tween_target - ws->tween_start) * eval_easing(spec, u);
+            if (ctx->time_scale > 0.0f) {
+                ++ctx->active_ui->active_anim_count;
+            }
+        }
+    }
+    return ws->tween_value;
 }
 void set_time_scale(Context* ctx, float scale) noexcept {
     if(!ctx || !std::isfinite(scale) || scale<0 || scale>16) return;

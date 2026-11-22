@@ -189,6 +189,54 @@ inline etch::SpringSpec to_cpp(EtchSpringSpec s) noexcept { return {s.response, 
 inline EtchSpringSpec from_cpp(etch::SpringSpec s) noexcept { return {s.response, s.damping_ratio}; }
 inline etch::BorderBeamStyle to_cpp(EtchBorderBeamStyle s) noexcept { return {to_cpp(s.color),to_cpp(s.base_color),s.width,s.angle_rad,s.sweep_fraction,s.glow_px,s.speed,s.softness,s.beam_active,s.symmetric_dual}; }
 inline EtchBorderBeamStyle from_cpp(etch::BorderBeamStyle s) noexcept { return {from_cpp(s.color),from_cpp(s.base_color),s.width,s.angle_rad,s.sweep_fraction,s.glow_px,s.speed,s.softness,s.beam_active,s.symmetric_dual}; }
+inline etch::ShadowLayer to_cpp(const EtchShadowLayer& s) noexcept {
+    return {to_cpp(s.offset), s.blur_px, s.spread_px, to_cpp(s.color), s.inset};
+}
+inline EtchShadowLayer from_cpp(const etch::ShadowLayer& s) noexcept {
+    return {from_cpp(s.offset), s.blur_px, s.spread_px, from_cpp(s.color), s.inset};
+}
+inline etch::GradientDesc to_cpp(const EtchGradientDesc& g) noexcept {
+    etch::GradientDesc out{};
+    out.kind = (static_cast<uint32_t>(g.kind) <= static_cast<uint32_t>(ETCH_GRADIENT_CONIC))
+        ? static_cast<etch::GradientKind>(g.kind)
+        : etch::GradientKind::None;
+    out.oklab = g.oklab;
+    out.dir = to_cpp(g.dir);
+    out.center = to_cpp(g.center);
+    out.angle_rad = g.angle_rad;
+    out.stop_count = g.stop_count > 8u ? 8u : g.stop_count;
+    for (uint32_t i = 0u; i < 8u; ++i) {
+        out.stops[i] = {to_cpp(g.stops[i].color), g.stops[i].position};
+    }
+    return out;
+}
+inline EtchGradientDesc from_cpp(const etch::GradientDesc& g) noexcept {
+    EtchGradientDesc out{};
+    out.kind = static_cast<EtchGradientKind>(g.kind);
+    out.oklab = g.oklab;
+    out.dir = from_cpp(g.dir);
+    out.center = from_cpp(g.center);
+    out.angle_rad = g.angle_rad;
+    out.stop_count = g.stop_count;
+    for (uint32_t i = 0u; i < 8u; ++i) {
+        out.stops[i] = {from_cpp(g.stops[i].color), g.stops[i].position};
+    }
+    return out;
+}
+inline etch::EasingSpec to_cpp(EtchEasingSpec s) noexcept {
+    const etch::EasingKind kind = (static_cast<uint32_t>(s.kind) <= static_cast<uint32_t>(ETCH_EASING_CUBIC_BEZIER))
+        ? static_cast<etch::EasingKind>(s.kind)
+        : etch::EasingKind::EaseOut;
+    return {kind, s.x1, s.y1, s.x2, s.y2};
+}
+inline EtchEasingSpec from_cpp(etch::EasingSpec s) noexcept {
+    return {static_cast<EtchEasingKind>(s.kind), s.x1, s.y1, s.x2, s.y2};
+}
+inline etch::ImageFit to_cpp(EtchImageFit f) noexcept {
+    return (static_cast<uint32_t>(f) <= static_cast<uint32_t>(ETCH_IMAGE_FIT_COVER))
+        ? static_cast<etch::ImageFit>(f)
+        : etch::ImageFit::Fill;
+}
 
 inline etch::GridTrack to_cpp(const EtchGridTrack& t) noexcept {
     return {static_cast<etch::SizingKind>(t.kind), t.value, t.min_px, t.max_px};
@@ -321,6 +369,18 @@ inline etch::BoxDesc to_cpp(const EtchBoxDesc& d) noexcept {
     out.flip_on_overflow = d.flip_on_overflow;
     out.hitbox_behavior = static_cast<etch::HitboxBehavior>(d.hitbox_behavior);
     out.stick_to_bottom = d.stick_to_bottom;
+    for (uint32_t i = 0u; i < 4u; ++i) {
+        out.shadows[i] = to_cpp(d.shadows[i]);
+    }
+    out.shadow_count = d.shadow_count > 4u ? 4u : d.shadow_count;
+    out.elevation = (static_cast<uint32_t>(d.elevation) <= static_cast<uint32_t>(ETCH_ELEVATION_XL))
+        ? static_cast<etch::Elevation>(d.elevation)
+        : etch::Elevation::None;
+    out.shadow_inset = d.shadow_inset;
+    out.gradient = to_cpp(d.gradient);
+    out.backdrop_saturation = d.backdrop_saturation;
+    out.backdrop_brightness = d.backdrop_brightness;
+    out.backdrop_noise = d.backdrop_noise;
     return out;
 }
 
@@ -440,6 +500,14 @@ ETCH_API EtchWindowFrameDesc etch_window_frame_desc_default(void) {
             d.dt, d.min_scale, d.pixel_snap, d.bloom_intensity, d.bloom_threshold};
 }
 
+ETCH_API EtchShadowLayer etch_shadow_layer_default(void) {
+    return from_cpp(etch::ShadowLayer{});
+}
+
+ETCH_API EtchGradientDesc etch_gradient_desc_default(void) {
+    return from_cpp(etch::GradientDesc{});
+}
+
 ETCH_API EtchBoxDesc etch_box_desc_default(void) {
     const etch::BoxDesc d{};
     return {static_cast<uint32_t>(sizeof(EtchBoxDesc)),
@@ -458,7 +526,10 @@ ETCH_API EtchBoxDesc etch_box_desc_default(void) {
             static_cast<EtchJustify>(d.justify), static_cast<EtchAlignSelf>(d.align_self),
             d.flex_grow, d.flex_shrink, from_cpp(d.margin), nullptr, 0u, d.grid_row_span,
             d.flip_on_overflow, static_cast<EtchHitboxBehavior>(d.hitbox_behavior),
-            d.stick_to_bottom};
+            d.stick_to_bottom, 0u,
+            {from_cpp(d.shadows[0]), from_cpp(d.shadows[1]), from_cpp(d.shadows[2]), from_cpp(d.shadows[3])},
+            d.shadow_count, static_cast<EtchElevation>(d.elevation), d.shadow_inset,
+            from_cpp(d.gradient), d.backdrop_saturation, d.backdrop_brightness, d.backdrop_noise};
 }
 
 ETCH_API EtchTextDesc etch_text_desc_default(void) {
@@ -505,7 +576,8 @@ ETCH_API EtchImageDesc etch_image_desc_default(void) {
     const etch::ImageDesc d{};
     return {d.id, d.texture, d.sprite_id, from_cpp(d.width), from_cpp(d.height),
             from_cpp(d.uv_min), from_cpp(d.uv_max), from_cpp(d.radius), from_cpp(d.tint),
-            from_cpp(d.border_color), d.border_width, d.aspect_ratio, d.grid_col_span, d.continuous_corners};
+            from_cpp(d.border_color), d.border_width, d.aspect_ratio, d.grid_col_span,
+            d.continuous_corners, static_cast<EtchImageFit>(d.fit), from_cpp(d.source_size)};
 }
 
 ETCH_API EtchIconDesc etch_icon_desc_default(void) {
@@ -518,7 +590,8 @@ ETCH_API EtchRectDrawDesc etch_rect_draw_desc_default(void) {
     const etch::RectDrawDesc d{};
     return {from_cpp(d.rect), from_cpp(d.fill), from_cpp(d.fill_end), from_cpp(d.gradient_dir),
             d.radial_gradient, from_cpp(d.radius), from_cpp(d.border_color), d.border_width,
-            d.foreground, d.angle_rad, d.softness, d.continuous_corners,static_cast<EtchBorderAlign>(d.border_align)};
+            d.foreground, d.angle_rad, d.softness, d.continuous_corners,
+            static_cast<EtchBorderAlign>(d.border_align), from_cpp(d.gradient)};
 }
 
 ETCH_API EtchLineDesc etch_line_draw_desc_default(void) {
@@ -583,13 +656,14 @@ ETCH_API EtchTextDrawDesc etch_text_draw_desc_default(void) {
 ETCH_API EtchImageDrawDesc etch_image_draw_desc_default(void) {
     const etch::ImageDrawDesc d{};
     return {d.texture, d.sprite_id, from_cpp(d.rect), from_cpp(d.uv_rect),
-            from_cpp(d.tint), d.radius, d.foreground, d.continuous_corners};
+            from_cpp(d.tint), d.radius, d.foreground, d.continuous_corners,
+            static_cast<EtchImageFit>(d.fit), from_cpp(d.source_size)};
 }
 
 ETCH_API EtchTextureDesc etch_texture_desc_default(void) {
     const etch::TextureDesc d{};
     return {d.rgba_pixels, d.width, d.height, d.row_pitch_bytes, d.srgb,
-            d.debug_name, d.premultiplied_alpha};
+            d.debug_name, d.premultiplied_alpha, d.generate_mipmaps};
 }
 
 ETCH_API EtchWindowChromeDesc etch_window_chrome_desc_default(void) {
@@ -894,6 +968,22 @@ ETCH_API EtchSpringSpec etch_spring_spec_snappy(void) { return from_cpp(etch::Sp
 ETCH_API EtchSpringSpec etch_spring_spec_fluid(void) { return from_cpp(etch::SpringSpec::fluid()); }
 ETCH_API EtchSpringSpec etch_spring_spec_bouncy(void) { return from_cpp(etch::SpringSpec::bouncy()); }
 ETCH_API EtchSpringSpec etch_spring_spec_gentle(void) { return from_cpp(etch::SpringSpec::gentle()); }
+ETCH_API EtchEasingSpec etch_easing_linear(void) { return from_cpp(etch::EasingSpec::linear()); }
+ETCH_API EtchEasingSpec etch_easing_in(void) { return from_cpp(etch::EasingSpec::ease_in()); }
+ETCH_API EtchEasingSpec etch_easing_out(void) { return from_cpp(etch::EasingSpec::ease_out()); }
+ETCH_API EtchEasingSpec etch_easing_in_out(void) { return from_cpp(etch::EasingSpec::ease_in_out()); }
+ETCH_API EtchEasingSpec etch_easing_cubic_bezier(float x1, float y1, float x2, float y2) {
+    return from_cpp(etch::EasingSpec::cubic_bezier(x1, y1, x2, y2));
+}
+ETCH_API float etch_eval_easing(EtchEasingSpec spec, float t) {
+    return etch::eval_easing(to_cpp(spec), t);
+}
+ETCH_API float etch_tween(uint32_t id, float target, float duration_sec, EtchEasingSpec spec, float delay_sec) {
+    return etch::tween(id, target, duration_sec, to_cpp(spec), delay_sec);
+}
+ETCH_API float etch_stagger_delay(uint32_t index, float step_sec, float max_delay_sec) {
+    return etch::stagger_delay(index, step_sec, max_delay_sec);
+}
 ETCH_API EtchTheme etch_theme_high_contrast(void) { return from_cpp(etch::Theme::high_contrast()); }
 ETCH_API EtchTheme etch_theme_industrial(void) { return from_cpp(etch::Theme::industrial()); }
 ETCH_API void etch_set_theme(const EtchTheme* theme, EtchContext* ctx) { if (theme) etch::set_theme(to_cpp(*theme), to_ctx(ctx)); }
@@ -1240,7 +1330,7 @@ ETCH_API void etch_image(const EtchImageDesc* desc) {
     etch::image({desc->id, desc->texture, desc->sprite_id, to_cpp(desc->width), to_cpp(desc->height),
                  to_cpp(desc->uv_min), to_cpp(desc->uv_max), to_cpp(desc->radius), to_cpp(desc->tint),
                  to_cpp(desc->border_color), desc->border_width, desc->aspect_ratio, desc->grid_col_span,
-                 desc->continuous_corners});
+                 desc->continuous_corners, to_cpp(desc->fit), to_cpp(desc->source_size)});
 }
 ETCH_API void etch_icon(const EtchIconDesc* desc) {
     if (!desc) return;
@@ -1252,7 +1342,9 @@ ETCH_API void etch_draw_rect(const EtchRectDrawDesc* desc) {
     if (!desc) return;
     etch::draw_rect({to_cpp(desc->rect), to_cpp(desc->fill), to_cpp(desc->fill_end),
                      to_cpp(desc->gradient_dir), desc->radial_gradient, to_cpp(desc->radius),
-                     to_cpp(desc->border_color), desc->border_width, desc->foreground, desc->angle_rad, desc->softness, desc->continuous_corners,static_cast<etch::BorderAlign>(desc->border_align)});
+                     to_cpp(desc->border_color), desc->border_width, desc->foreground, desc->angle_rad,
+                     desc->softness, desc->continuous_corners,
+                     static_cast<etch::BorderAlign>(desc->border_align), to_cpp(desc->gradient)});
 }
 ETCH_API EtchMeshRectDrawDesc etch_mesh_rect_draw_desc_default(void) {
     EtchMeshRectDrawDesc d={};d.oklab=true;return d;
@@ -1356,7 +1448,8 @@ ETCH_API void etch_draw_text(const EtchTextDrawDesc* desc) {
 ETCH_API void etch_draw_image(const EtchImageDrawDesc* desc) {
     if (!desc) return;
     etch::draw_image({desc->texture, desc->sprite_id, to_cpp(desc->rect), to_cpp(desc->uv_rect),
-                      to_cpp(desc->tint), desc->radius, desc->foreground, desc->continuous_corners});
+                      to_cpp(desc->tint), desc->radius, desc->foreground, desc->continuous_corners,
+                      to_cpp(desc->fit), to_cpp(desc->source_size)});
 }
 
 /* ============================================================================
@@ -1367,7 +1460,8 @@ ETCH_API uint32_t etch_create_sprite_rgba(EtchContext* ctx, const EtchTextureDes
     if (!desc) return ETCH_INVALID_SPRITE;
     return etch::create_sprite_rgba(to_ctx(ctx), {desc->rgba_pixels, desc->width, desc->height,
                                                   desc->row_pitch_bytes, desc->srgb,
-                                                  desc->debug_name, desc->premultiplied_alpha});
+                                                  desc->debug_name, desc->premultiplied_alpha,
+                                                  desc->generate_mipmaps});
 }
 ETCH_API bool etch_update_sprite_rgba(EtchContext* ctx, uint32_t sprite_id, uint32_t width, uint32_t height, const void* rgba_pixels, uint32_t row_pitch_bytes) {
     return etch::update_sprite_rgba(to_ctx(ctx), sprite_id, width, height, rgba_pixels, row_pitch_bytes);
@@ -1382,7 +1476,7 @@ ETCH_API EtchLoadedTexture etch_create_texture_rgba(EtchContext* ctx, const Etch
     if (!desc) return {};
     const etch::LoadedTexture t = etch::create_texture_rgba(to_ctx(ctx), {
         desc->rgba_pixels, desc->width, desc->height, desc->row_pitch_bytes, desc->srgb,
-        desc->debug_name, desc->premultiplied_alpha});
+        desc->debug_name, desc->premultiplied_alpha, desc->generate_mipmaps});
     return {t.texture, t.width, t.height};
 }
 ETCH_API bool etch_flush_texture_uploads(EtchContext* ctx) { return etch::flush_texture_uploads(to_ctx(ctx)); }
@@ -2028,16 +2122,18 @@ ETCH_API EtchPresenceResult etch_presence(uint32_t id, bool mounted, EtchSpringS
 ETCH_API void etch_set_time_scale(EtchContext* ctx, float scale) { etch::set_time_scale(to_ctx(ctx),scale); }
 
 ETCH_API EtchLayerDesc etch_layer_desc_default(void) {
-    const etch::LayerDesc d;
+    const etch::LayerDesc d{};
     return {static_cast<uint32_t>(sizeof(EtchLayerDesc)),
-            d.opacity,from_cpp(d.translate),from_cpp(d.scale),from_cpp(d.pivot_norm),from_cpp(d.pivot_px),d.animating,d.blur_px,d.blend_plus_lighter};
+            d.opacity, from_cpp(d.translate), from_cpp(d.scale), from_cpp(d.pivot_norm),
+            from_cpp(d.pivot_px), d.animating, d.blur_px, d.blend_plus_lighter, d.rotation_rad};
 }
 ETCH_API void etch_push_layer(const EtchLayerDesc* desc) {
     if (!desc) { etch::push_layer(etch::LayerDesc{}); return; }
     EtchLayerDesc scratch{};
     const EtchLayerDesc* d = resolve_c_desc(desc, &scratch, etch_layer_desc_default);
     if (!d) return;
-    etch::push_layer({d->opacity,to_cpp(d->translate),to_cpp(d->scale),to_cpp(d->pivot_norm),to_cpp(d->pivot_px),d->animating,d->blur_px,d->blend_plus_lighter});
+    etch::push_layer({d->opacity, to_cpp(d->translate), to_cpp(d->scale), to_cpp(d->pivot_norm),
+                      to_cpp(d->pivot_px), d->animating, d->blur_px, d->blend_plus_lighter, d->rotation_rad});
 }
 ETCH_API void etch_pop_layer(void) {etch::pop_layer();}
 

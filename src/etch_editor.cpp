@@ -1643,17 +1643,10 @@ void emit_code_editor_command(Context* ctx, const CodeEditorExtra* e, Rect bb, c
     ctx->render_clip_index=outer_clip_index;
     if (d.show_scrollbar) {
         const ScrollbarGeom sb = compute_vscrollbar_geom(ws);
-        if (sb.visible) {
-            const uint32_t thumb_id = id_index(d.id, kScrollbarYTag);
-            const bool sb_active = (ctx->active_ui->active_id == thumb_id);
-            const bool sb_hover = (ctx->active_ui->active_id == 0u) && sb.hit_track.contains(ctx->active_ui->pointer_pos) &&
-                pointer_over_id(ctx->active_ui, d.id);
-            const Color thumb_col = sb_active
-                ? e->scoped_theme.scrollbar_thumb_drag
-                : (sb_hover ? e->scoped_theme.scrollbar_thumb_hover : e->scoped_theme.scrollbar_thumb);
-            rect(sb.track, e->scoped_theme.scrollbar_track);
-            rect(sb.thumb, thumb_col);
-        }
+        emit_scrollbar_overlay(
+            ctx, d.id, sb, false, outer,
+            e->scoped_theme.scrollbar_track, e->scoped_theme.scrollbar_thumb,
+            e->scoped_theme.scrollbar_thumb_hover, e->scoped_theme.scrollbar_thumb_drag, dpi);
     }
 }
 } // namespace etch

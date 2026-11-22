@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(etch VERSION 0.26.0 LANGUAGES C CXX)
+project(etch VERSION 0.27.0 LANGUAGES C CXX)
 
 option(ETCH_BUILD_EXAMPLES "Build Etch sandbox and etch_studio examples" ${PROJECT_IS_TOP_LEVEL})
 option(ETCH_BUILD_TESTS "Build Etch CTest suite" ${PROJECT_IS_TOP_LEVEL})
@@ -77,13 +77,21 @@ include(cmake/EtchShaderTools.cmake)
 if (ETCH_COMPILE_SHADERS AND ETCH_DXC_EXE)
     execute_process(
         COMMAND "${ETCH_DXC_EXE}" -spirv "-fspv-target-env=vulkan1.0" -T vs_6_0 -E vs_main
+                -I "${CMAKE_CURRENT_SOURCE_DIR}/shaders"
                 -Fo "${CMAKE_CURRENT_BINARY_DIR}/_etch_spv_probe.spv"
                 "${CMAKE_CURRENT_SOURCE_DIR}/shaders/etch_uber.hlsl"
         RESULT_VARIABLE _etch_spv_probe_res
         OUTPUT_QUIET ERROR_QUIET)
     file(REMOVE "${CMAKE_CURRENT_BINARY_DIR}/_etch_spv_probe.spv")
+    set(_etch_common_hlsli "${CMAKE_CURRENT_SOURCE_DIR}/shaders/etch_common.hlsli")
     foreach(shader etch_uber etch_quad etch_subpixel etch_kawase)
         set(_etch_hlsl "${CMAKE_CURRENT_SOURCE_DIR}/shaders/${shader}.hlsl")
+        set(_etch_shader_deps "${_etch_hlsl}")
+        set(_etch_dxc_inc "")
+        if (shader STREQUAL "etch_uber" OR shader STREQUAL "etch_quad")
+            list(APPEND _etch_shader_deps "${_etch_common_hlsli}")
+            set(_etch_dxc_inc -I "${CMAKE_CURRENT_SOURCE_DIR}/shaders")
+        endif ()
         foreach(stage vs ps)
             set(_etch_base "${ETCH_SHADER_OUT_DIR}/${shader}_${stage}")
             if (stage STREQUAL "vs")
@@ -93,9 +101,9 @@ if (ETCH_COMPILE_SHADERS AND ETCH_DXC_EXE)
             endif ()
             add_custom_command(
                 OUTPUT "${_etch_base}_dxil.h"
-                COMMAND "${ETCH_DXC_EXE}" -T ${stage}_6_0 -E ${stage}_main -O3 -WX -Ges
+                COMMAND "${ETCH_DXC_EXE}" -T ${stage}_6_0 -E ${stage}_main -O3 -WX -Ges ${_etch_dxc_inc}
                         -Vn g_${shader}_${stage}_dxil -Fh "${_etch_base}_dxil.h" "${_etch_hlsl}"
-                DEPENDS "${_etch_hlsl}"
+                DEPENDS ${_etch_shader_deps}
                 COMMENT "Compiling ${shader} (${stage} DXIL)"
                 VERBATIM)
             list(APPEND ETCH_GENERATED_SHADER_HEADERS "${_etch_base}_dxil.h")
@@ -103,9 +111,9 @@ if (ETCH_COMPILE_SHADERS AND ETCH_DXC_EXE)
                 add_custom_command(
                     OUTPUT "${_etch_base}_spv.h"
                     COMMAND "${ETCH_DXC_EXE}" -spirv "-fspv-target-env=vulkan1.0"
-                            -T ${stage}_6_0 -E ${stage}_main -O3 -WX -Ges
+                            -T ${stage}_6_0 -E ${stage}_main -O3 -WX -Ges ${_etch_dxc_inc}
                             -Vn g_${shader}_${stage}_spv -Fh "${_etch_base}_spv.h" "${_etch_hlsl}"
-                    DEPENDS "${_etch_hlsl}"
+                    DEPENDS ${_etch_shader_deps}
                     COMMENT "Compiling ${shader} (${stage} SPIR-V)"
                     VERBATIM)
                 list(APPEND ETCH_GENERATED_SHADER_HEADERS "${_etch_base}_spv.h")
@@ -113,9 +121,9 @@ if (ETCH_COMPILE_SHADERS AND ETCH_DXC_EXE)
                     add_custom_command(
                         OUTPUT "${_etch_base}.spv"
                         COMMAND "${ETCH_DXC_EXE}" -spirv "-fspv-target-env=vulkan1.0"
-                                -T ${stage}_6_0 -E ${stage}_main -O3 -WX -Ges
+                                -T ${stage}_6_0 -E ${stage}_main -O3 -WX -Ges ${_etch_dxc_inc}
                                 -Fo "${_etch_base}.spv" "${_etch_hlsl}"
-                        DEPENDS "${_etch_hlsl}"
+                        DEPENDS ${_etch_shader_deps}
                         VERBATIM)
                     add_custom_command(
                         OUTPUT "${_etch_base}.msl"

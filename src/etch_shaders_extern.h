@@ -1,21 +1,19 @@
-// Private extern declarations for compiled GPU shader byte arrays (used when ETCH_UNITY_BUILD=OFF).
-// Sizes match the checked-in src/shaders_gen/*.h headers; when ETCH_COMPILE_SHADERS=ON and DXC runs,
-// CMake generates an overriding copy of this header inside the build directory's shaders_gen folder.
+// Auto-generated shader extern declarations matching compiled shader headers.
 #ifndef ETCH_SHADERS_EXTERN_H
 #define ETCH_SHADERS_EXTERN_H
 
-extern const unsigned char g_etch_uber_vs_dxil[13576];
-extern const unsigned char g_etch_uber_vs_spv[30884];
-extern const unsigned char g_etch_uber_vs_msl[48077];
-extern const unsigned char g_etch_uber_ps_dxil[37744];
-extern const unsigned char g_etch_uber_ps_spv[105200];
-extern const unsigned char g_etch_uber_ps_msl[226176];
-extern const unsigned char g_etch_quad_vs_dxil[9936];
-extern const unsigned char g_etch_quad_vs_spv[16408];
-extern const unsigned char g_etch_quad_vs_msl[17216];
-extern const unsigned char g_etch_quad_ps_dxil[12172];
-extern const unsigned char g_etch_quad_ps_spv[26072];
-extern const unsigned char g_etch_quad_ps_msl[31984];
+extern const unsigned char g_etch_uber_vs_dxil[15000];
+extern const unsigned char g_etch_uber_vs_spv[36300];
+extern const unsigned char g_etch_uber_vs_msl[64417];
+extern const unsigned char g_etch_uber_ps_dxil[44520];
+extern const unsigned char g_etch_uber_ps_spv[124280];
+extern const unsigned char g_etch_uber_ps_msl[269506];
+extern const unsigned char g_etch_quad_vs_dxil[11064];
+extern const unsigned char g_etch_quad_vs_spv[21692];
+extern const unsigned char g_etch_quad_vs_msl[25385];
+extern const unsigned char g_etch_quad_ps_dxil[18736];
+extern const unsigned char g_etch_quad_ps_spv[45132];
+extern const unsigned char g_etch_quad_ps_msl[61844];
 extern const unsigned char g_etch_subpixel_vs_dxil[7464];
 extern const unsigned char g_etch_subpixel_vs_spv[6508];
 extern const unsigned char g_etch_subpixel_vs_msl[5703];

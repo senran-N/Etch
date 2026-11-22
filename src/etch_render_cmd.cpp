@@ -501,11 +501,29 @@ Rect snap_pixel_rect(Rect r) noexcept {
     return w > 0 && h > 0 ? Rect{x, y, w, h} : r;
 }
 
+inline Rect rotated_aabb(Rect r, float angle_rad) noexcept {
+    const float ac = std::fabs(std::cos(angle_rad));
+    const float as = std::fabs(std::sin(angle_rad));
+    const float hx = 0.5f * r.w;
+    const float hy = 0.5f * r.h;
+    const float ex = ac * hx + as * hy;
+    const float ey = as * hx + ac * hy;
+    const float cx = r.x + hx;
+    const float cy = r.y + hy;
+    return { cx - ex, cy - ey, 2.0f * ex, 2.0f * ey };
+}
+
 ClipEntry make_box_clip(Context* ctx,const ClipEntry& parent,Rect bounds,Corners radii,bool continuous,Vec4 fade = {}) noexcept {
     if(const auto* layer=ctx->active_render_layer) {
         resolve_layer_chain(ctx,layer,ctx->active_ui->dpi_scale);
-        const auto scale=layer->resolved_scale,offset=layer->resolved_offset_px;
-        bounds={bounds.x*scale.x+offset.x,bounds.y*scale.y+offset.y,bounds.w*scale.x,bounds.h*scale.y};
+        const auto scale=layer->resolved_scale;
+        if(std::fabs(layer->resolved_rotation_rad)>1e-4f) {
+            bounds=rotated_aabb(layer_rect(ctx,bounds),layer->resolved_rotation_rad);
+            radii={};
+        } else {
+            const auto offset=layer->resolved_offset_px;
+            bounds={bounds.x*scale.x+offset.x,bounds.y*scale.y+offset.y,bounds.w*scale.x,bounds.h*scale.y};
+        }
         const float k=.5f*(scale.x+scale.y);
         radii={radii.tl*k,radii.tr*k,radii.br*k,radii.bl*k};
         fade={fade.x*scale.y,fade.y*scale.y,fade.z*scale.x,fade.w*scale.x};
@@ -560,6 +578,155 @@ Vec4 box_scroll_fade(Context* ctx,const BoxExtra* extra,float dpi) noexcept {
         std::fmax(fade.z, extra->desc.scroll_x ? std::fmin(extra->desc.scroll_fade_px,ws->scroll_pos.x)*dpi : 0.0f),
         std::fmax(fade.w, extra->desc.scroll_x ? std::fmin(extra->desc.scroll_fade_px,std::fmax(0.f,max_x-ws->scroll_pos.x))*dpi : 0.0f),
     };
+}
+
+Vec2 gradient_param_xy(const GradientDesc& g) noexcept {
+    if (g.kind == GradientKind::Linear) {
+        if (std::isfinite(g.dir.x) && std::isfinite(g.dir.y)) {
+            const float len = std::hypot(g.dir.x, g.dir.y);
+            if (std::isfinite(len) && len > 1e-6f) {
+                return { g.dir.x / len, g.dir.y / len };
+            }
+        }
+        return { 0.0f, 1.0f };
+    }
+    return {
+        std::isfinite(g.center.x) ? g.center.x : 0.5f,
+        std::isfinite(g.center.y) ? g.center.y : 0.5f,
+    };
+}
+
+bool alloc_grad_stops(
+    Context* ctx,
+    const GradientDesc& g,
+    uint32_t* out_offset,
+    uint8_t* out_count,
+    Color* out_fallback) noexcept
+{
+    if (!ctx || g.kind == GradientKind::None ||
+        static_cast<uint8_t>(g.kind) > static_cast<uint8_t>(GradientKind::Conic) ||
+        g.stop_count < 2u)
+    {
+        return false;
+    }
+    const uint8_t count = g.stop_count > 8u ? 8u : g.stop_count;
+    const uint32_t needed = ctx->grad_stop_count + count;
+    if (needed > 65536u) {
+        return false;
+    }
+    if (needed > ctx->grad_stop_capacity) {
+        uint32_t next_cap = ctx->grad_stop_capacity ? ctx->grad_stop_capacity : 128u;
+        while (next_cap < needed) {
+            next_cap = (next_cap > 32768u) ? 65536u : (next_cap * 2u);
+        }
+        auto* grown = static_cast<GradientStopGpu*>(std::realloc(ctx->grad_stops, size_t(next_cap) * sizeof(GradientStopGpu)));
+        if (!grown) {
+            return false;
+        }
+        const bool first_alloc = (ctx->grad_stop_capacity == 0u);
+        ctx->grad_stops = grown;
+        ctx->grad_stop_capacity = next_cap;
+        if (first_alloc) {
+            ctx->grad_stops[0] = GradientStopGpu{};
+        }
+    }
+
+    float layer_opacity = 1.0f;
+    if (const auto* layer = ctx->active_render_layer) {
+        resolve_layer_chain(ctx, layer, ctx->active_ui->dpi_scale);
+        layer_opacity = layer->resolved_opacity;
+    }
+
+    const uint32_t offset = ctx->grad_stop_count;
+    const float angle = std::isfinite(g.angle_rad) ? g.angle_rad : 0.0f;
+    float prev_pos = 0.0f;
+    for (uint8_t i = 0u; i < count; ++i) {
+        Color col = g.stops[i].color;
+        if (layer_opacity < 0.9999f) {
+            col.a = static_cast<uint8_t>(clamp_range(float(col.a) * layer_opacity + 0.5f, 0.0f, 255.0f));
+        }
+        float pos = std::isfinite(g.stops[i].position) ? clamp_range(g.stops[i].position, 0.0f, 1.0f) : 0.0f;
+        if (i > 0u && pos < prev_pos) {
+            pos = prev_pos;
+        }
+        prev_pos = pos;
+        ctx->grad_stops[offset + i] = GradientStopGpu{
+            .rgba8 = col.pack_rgba8(),
+            .pos = pos,
+            .p0 = (i == 0u) ? angle : 0.0f,
+            .p1 = 0.0f,
+        };
+    }
+    ctx->grad_stop_count += count;
+    if (out_offset) *out_offset = offset;
+    if (out_count) *out_count = count;
+    if (out_fallback) *out_fallback = g.stops[0].color;
+    return true;
+}
+
+void apply_image_fit(
+    const Context* ctx,
+    ImageFit fit,
+    Vec2 source_size,
+    uint32_t sprite_id,
+    Rect* io_rect,
+    Vec2* io_uv_min,
+    Vec2* io_uv_max) noexcept
+{
+    if (fit == ImageFit::Fill || !std::isfinite(io_rect->w) || !std::isfinite(io_rect->h) ||
+        io_rect->w <= 0.0f || io_rect->h <= 0.0f)
+    {
+        return;
+    }
+    Vec2 src = source_size;
+    if ((!std::isfinite(src.x) || !std::isfinite(src.y) || src.x <= 0.0f || src.y <= 0.0f) &&
+        sprite_id != kInvalidSprite)
+    {
+        src = sprite_size(ctx, sprite_id);
+    }
+    if (!std::isfinite(src.x) || !std::isfinite(src.y) || src.x <= 0.0f || src.y <= 0.0f) {
+        return;
+    }
+    const float uv_w = std::fabs(io_uv_max->x - io_uv_min->x);
+    const float uv_h = std::fabs(io_uv_max->y - io_uv_min->y);
+    if (std::isfinite(uv_w) && uv_w > 0.0f && std::isfinite(uv_h) && uv_h > 0.0f) {
+        src.x *= uv_w;
+        src.y *= uv_h;
+    }
+    const float src_aspect = src.x / src.y;
+    const float dst_aspect = io_rect->w / io_rect->h;
+    if (!std::isfinite(src_aspect) || src_aspect <= 0.0f ||
+        !std::isfinite(dst_aspect) || dst_aspect <= 0.0f ||
+        std::fabs(src_aspect - dst_aspect) <= 1e-4f)
+    {
+        return;
+    }
+    if (fit == ImageFit::Contain) {
+        if (src_aspect > dst_aspect) {
+            const float nh = io_rect->w / src_aspect;
+            io_rect->y += 0.5f * (io_rect->h - nh);
+            io_rect->h = nh;
+        } else {
+            const float nw = io_rect->h * src_aspect;
+            io_rect->x += 0.5f * (io_rect->w - nw);
+            io_rect->w = nw;
+        }
+    } else if (fit == ImageFit::Cover) {
+        const float du = io_uv_max->x - io_uv_min->x;
+        const float dv = io_uv_max->y - io_uv_min->y;
+        if (!std::isfinite(du) || !std::isfinite(dv)) {
+            return;
+        }
+        if (src_aspect > dst_aspect) {
+            const float trim = 0.5f * (1.0f - (dst_aspect / src_aspect)) * du;
+            io_uv_min->x += trim;
+            io_uv_max->x -= trim;
+        } else {
+            const float trim = 0.5f * (1.0f - (src_aspect / dst_aspect)) * dv;
+            io_uv_min->y += trim;
+            io_uv_max->y -= trim;
+        }
+    }
 }
 
 bool append_prim_to_batch(
@@ -679,10 +846,18 @@ void push_prim(
 {
     if (!ctx || !ctx->prims) return;
     const auto* layer=ctx->active_render_layer;
+    bool layer_rotated = false;
     if(layer) {
         resolve_layer_chain(ctx,layer,ctx->active_ui->dpi_scale);
-        const Vec2 scale=layer->resolved_scale, offset=layer->resolved_offset_px;
-        prim.bounds={prim.bounds.x*scale.x+offset.x,prim.bounds.y*scale.y+offset.y,prim.bounds.z*scale.x,prim.bounds.w*scale.y};
+        const Vec2 scale=layer->resolved_scale;
+        layer_rotated = std::fabs(layer->resolved_rotation_rad) > 1e-4f;
+        if(layer_rotated) {
+            const Rect tb = layer_rect(ctx, {prim.bounds.x, prim.bounds.y, prim.bounds.z, prim.bounds.w});
+            prim.bounds = {tb.x, tb.y, tb.w, tb.h};
+        } else {
+            const Vec2 offset=layer->resolved_offset_px;
+            prim.bounds={prim.bounds.x*scale.x+offset.x,prim.bounds.y*scale.y+offset.y,prim.bounds.z*scale.x,prim.bounds.w*scale.y};
+        }
         const auto fade=[&](uint32_t c) noexcept {return (c&0xFFFFFFu) | (uint32_t(float(c>>24)*layer->resolved_opacity+.5f)<<24);};
         const PrimKind kind=static_cast<PrimKind>(prim.style.x&15u);
         if(kind==PrimKind::BlurGlass) prim.payload.x=std::bit_cast<uint32_t>(1.f-layer->resolved_opacity);
@@ -701,12 +876,23 @@ void push_prim(
         if(kind==PrimKind::BezierWire || kind==PrimKind::RingArc) prim.payload.w=fade(prim.payload.w);
         if(kind==PrimKind::MeshGrad) {prim.payload.x=fade(prim.payload.x);prim.payload.y=fade(prim.payload.y);}
         if(kind==PrimKind::SlugFill) prim.payload.z=fade(prim.payload.z);
-        if((kind==PrimKind::Rect || kind==PrimKind::RotatedRect) && (prim.style.x & ((PrimFlag_LinearGrad|PrimFlag_RadialGrad)<<4))) prim.payload.x=fade(prim.payload.x);
+        if(kind==PrimKind::Rect || kind==PrimKind::RotatedRect) {
+            const uint32_t gf = (prim.style.x >> 4) & (PrimFlag_LinearGrad | PrimFlag_RadialGrad);
+            if(gf != 0u && gf != (PrimFlag_LinearGrad | PrimFlag_RadialGrad)) {
+                prim.payload.x=fade(prim.payload.x);
+            }
+        }
         const float metric_scale=.5f*(scale.x+scale.y);
         const auto scaled_pair=[metric_scale](uint32_t pair) noexcept {
             return pack_f16x2(unpack_f16_cpu(uint16_t(pair))*metric_scale,unpack_f16_cpu(uint16_t(pair>>16))*metric_scale);
         };
         if(kind==PrimKind::BezierWire || kind==PrimKind::RingArc || kind==PrimKind::Shadow) prim.style.w=scaled_pair(prim.style.w);
+        if(kind==PrimKind::Shadow && (prim.style.x & (uint32_t(PrimFlag_LinearGrad)<<4)) != 0u) {
+            prim.payload.x = pack_f16x2(
+                unpack_f16_cpu(uint16_t(prim.payload.x)) * scale.x,
+                unpack_f16_cpu(uint16_t(prim.payload.x >> 16)) * scale.y);
+            prim.payload.y = scaled_pair(prim.payload.y);
+        }
         if(kind==PrimKind::RingArc) prim.payload.z=scaled_pair(prim.payload.z);
         if(kind==PrimKind::BorderBeam) prim.payload.y=scaled_pair(prim.payload.y);
         if(kind==PrimKind::Rect || kind==PrimKind::RotatedRect || kind==PrimKind::Shadow || kind==PrimKind::Texture || kind==PrimKind::BlurGlass || kind==PrimKind::MeshGrad || kind==PrimKind::PunchHole || kind==PrimKind::BorderBeam) {
@@ -715,6 +901,25 @@ void push_prim(
             prim.payload.z=scale_pair(prim.payload.z);prim.payload.w=scale_pair(prim.payload.w);
             if(kind==PrimKind::Rect || kind==PrimKind::BlurGlass || kind==PrimKind::RotatedRect) prim.style.w=(prim.style.w&0xFFFF0000u) | pack_f16(unpack_f16_cpu(uint16_t(prim.style.w))*k);
         }
+        if(layer_rotated) {
+            if(kind==PrimKind::Rect) {
+                const float ang = std::atan2(std::sin(layer->resolved_rotation_rad), std::cos(layer->resolved_rotation_rad));
+                prim.style.x = (prim.style.x & ~0xFu) | static_cast<uint32_t>(PrimKind::RotatedRect);
+                prim.style.w = (prim.style.w & 0x0000FFFFu) | (static_cast<uint32_t>(pack_f16(ang)) << 16);
+            } else if(kind==PrimKind::RotatedRect) {
+                const float combined = unpack_f16_cpu(static_cast<uint16_t>(prim.style.w >> 16)) + layer->resolved_rotation_rad;
+                const float ang = std::atan2(std::sin(combined), std::cos(combined));
+                prim.style.w = (prim.style.w & 0x0000FFFFu) | (static_cast<uint32_t>(pack_f16(ang)) << 16);
+            } else if(kind==PrimKind::SlugGlyph) {
+                const float combined = std::bit_cast<float>(prim.payload.z) + layer->resolved_rotation_rad;
+                const float ang = std::atan2(std::sin(combined), std::cos(combined));
+                prim.payload.z = std::bit_cast<uint32_t>(ang);
+            } else if(kind==PrimKind::Shadow) {
+                const float combined = (prim.style.z != 0u ? std::bit_cast<float>(prim.style.z) : 0.0f) + layer->resolved_rotation_rad;
+                const float ang = std::atan2(std::sin(combined), std::cos(combined));
+                prim.style.z = (std::fabs(ang) > 1e-4f) ? std::bit_cast<uint32_t>(ang) : 0u;
+            }
+        }
         cull_pad_px *= std::fmax(scale.x, scale.y);
 
     }
@@ -722,7 +927,7 @@ void push_prim(
     const PrimKind snap_kind=static_cast<PrimKind>(prim.style.x&15u);
     const bool snap_rect=snap_kind==PrimKind::Rect && unpack_f16_cpu(static_cast<uint16_t>(prim.style.w>>16))<=1;
     const bool snap_image=(snap_kind==PrimKind::Texture && (prim.style.x & (uint32_t(PrimFlag_TextClip)<<4))==0) || snap_kind==PrimKind::BlurGlass;
-    if (ctx->active_ui->pixel_snap && !(layer && layer->resolved_animating) && (snap_rect || snap_image)) {
+    if (ctx->active_ui->pixel_snap && !(layer && (layer->resolved_animating || layer_rotated)) && (snap_rect || snap_image)) {
         const Rect r = snap_pixel_rect({prim.bounds.x, prim.bounds.y, prim.bounds.z, prim.bounds.w});
         prim.bounds = {r.x, r.y, r.w, r.h};
         const float width = unpack_f16_cpu(static_cast<uint16_t>(prim.style.w));
@@ -749,16 +954,16 @@ void push_prim(
     if(kind==PrimKind::BorderBeam) cull_pad_px=std::fmax(std::fmax(unpack_f16_cpu(uint16_t(prim.payload.y>>16)),1.f)+2,
         unpack_f16_cpu(uint16_t(prim.style.w>>16))*.5f+1);
     if(kind==PrimKind::PunchHole) cull_pad_px=std::fmax(cull_pad_px,unpack_f16_cpu(uint16_t(prim.style.w>>16))*.5f+1);
-    if (kind == PrimKind::RotatedRect || (kind == PrimKind::SlugGlyph && prim.payload.z != 0u)) {
+    if (kind == PrimKind::RotatedRect ||
+        (kind == PrimKind::SlugGlyph && prim.payload.z != 0u) ||
+        (kind == PrimKind::Shadow && prim.style.z != 0u))
+    {
         const float angle = kind == PrimKind::RotatedRect
             ? unpack_f16_cpu(static_cast<uint16_t>(prim.style.w >> 16))
-            : std::bit_cast<float>(prim.payload.z);
-        const float hx = 0.5f * prim.bounds.z, hy = 0.5f * prim.bounds.w;
-        const float cx = prim.bounds.x + hx, cy = prim.bounds.y + hy;
-        const float ac = std::fabs(std::cos(angle)), as = std::fabs(std::sin(angle));
-        const float ex = ac * hx + as * hy, ey = as * hx + ac * hy;
-        min_x = cx - ex; min_y = cy - ey;
-        max_x = cx + ex; max_y = cy + ey;
+            : (kind == PrimKind::Shadow ? std::bit_cast<float>(prim.style.z) : std::bit_cast<float>(prim.payload.z));
+        const Rect aabb = rotated_aabb({prim.bounds.x, prim.bounds.y, prim.bounds.z, prim.bounds.w}, angle);
+        min_x = aabb.x; min_y = aabb.y;
+        max_x = aabb.x + aabb.w; max_y = aabb.y + aabb.h;
     }
     if ((max_x + cull_pad_px <= prim.clip.x) ||
         (min_x - cull_pad_px >= prim.clip.z) ||
@@ -1214,6 +1419,61 @@ void emit_segmented_border(Context* ctx, const BoxDesc& d, Rect box, const ClipE
     ctx->render_clip_index = saved_clip;
 }
 
+inline bool inset_shadow_active(Color col, float blur_px, float spread_px, Vec2 offset) noexcept {
+    return col.a > 0u &&
+        ((std::isfinite(blur_px) && blur_px > 0.0f) ||
+         (std::isfinite(spread_px) && spread_px != 0.0f) ||
+         (std::isfinite(offset.x) && offset.x != 0.0f) ||
+         (std::isfinite(offset.y) && offset.y != 0.0f));
+}
+
+Prim make_multistop_or_fallback_rect_prim(
+    Context* ctx,
+    Rect rect,
+    const ClipEntry& clip,
+    const GradientDesc& grad,
+    Color fallback_col,
+    Corners radius,
+    Color border_col,
+    float border_w,
+    bool continuous_corners,
+    float softness = 1.0f,
+    float angle_rad = 0.0f) noexcept
+{
+    uint32_t stop_offset = 0u;
+    uint8_t stop_count = 0u;
+    Color grad_fallback = fallback_col;
+    const bool rotated = std::fabs(angle_rad) > 1e-5f;
+    Prim p = {};
+    if (alloc_grad_stops(ctx, grad, &stop_offset, &stop_count, &grad_fallback)) {
+        p = Prim::make_multistop_gradient_rect(
+            rect,
+            clip.rect,
+            stop_offset,
+            stop_count,
+            static_cast<uint8_t>(grad.kind),
+            grad.oklab,
+            gradient_param_xy(grad),
+            grad_fallback,
+            radius,
+            border_col,
+            border_w,
+            clip.radius,
+            softness);
+        if (rotated) {
+            const float ang = std::atan2(std::sin(angle_rad), std::cos(angle_rad));
+            p.style.x = (p.style.x & ~0xFu) | static_cast<uint32_t>(PrimKind::RotatedRect);
+            p.style.w = pack_f16x2(border_w, ang);
+        }
+    } else {
+        const Color solid = (grad.stop_count > 0u && grad.stops[0].color.a > 0u) ? grad.stops[0].color : fallback_col;
+        p = rotated
+            ? Prim::make_rotated_rect(rect, clip.rect, solid, angle_rad, radius, border_col, border_w, {}, {0.0f, 1.0f}, false, clip.radius)
+            : Prim::make_rect(rect, clip.rect, solid, radius, border_col, border_w, softness, clip.radius);
+    }
+    return continuous_prim(p, continuous_corners);
+}
+
 void emit_box_background_and_shadow(
     Context* ctx,
     const BoxExtra* extra,
@@ -1225,39 +1485,117 @@ void emit_box_background_and_shadow(
         return;
     }
     const BoxDesc& d = extra->desc;
+    const Rect base_box_px = box_px;
     Corners rad_px = scale_corners(d.radius, dpi);
-    const bool has_grad = (d.background_end.a > 0u) || d.radial_gradient;
-    const Rect visual_box=layer_rect(ctx,box_px);
-    const bool box_visible = rect_intersect(clip.rect,visual_box).w>0 && rect_intersect(clip.rect,visual_box).h>0;
+    const Corners base_rad_px = rad_px;
+    const bool has_legacy_grad = (d.background_end.a > 0u) || d.radial_gradient;
+    const bool want_multi_grad = (d.gradient.kind != GradientKind::None) && (d.gradient.stop_count >= 2u);
+    const Rect visual_box = layer_rect(ctx, box_px);
+    Rect visible_box = visual_box;
+    if (const auto* layer = ctx->active_render_layer; layer && std::fabs(layer->resolved_rotation_rad) > 1e-4f) {
+        visible_box = rotated_aabb(visual_box, layer->resolved_rotation_rad);
+    }
+    const bool box_visible = rect_intersect(clip.rect, visible_box).w > 0.0f && rect_intersect(clip.rect, visible_box).h > 0.0f;
     const bool use_blur =
-        (d.backdrop_blur > 0.0f) && !has_grad && box_visible &&
-        begin_blur_layer(ctx, visual_box, d.backdrop_blur * dpi);
+        (d.backdrop_blur > 0.0f) && !has_legacy_grad && !want_multi_grad && box_visible &&
+        begin_blur_layer(ctx, visible_box, d.backdrop_blur * dpi);
 
-    if (d.shadow_color.a > 0u && d.shadow_blur > 0.0f) {
-        const float blur_px = d.shadow_blur * dpi;
-        const Rect shadow_rect = {
-            .x = box_px.x + d.shadow_offset.x * dpi,
-            .y = box_px.y + d.shadow_offset.y * dpi,
-            .w = box_px.w,
-            .h = box_px.h,
-        };
+    const auto emit_shadow = [&](Vec2 offset_px, float blur_px, float spread_px, Color col, bool inset) noexcept {
+        if (col.a == 0u) return;
+        const float ox = std::isfinite(offset_px.x) ? offset_px.x : 0.0f;
+        const float oy = std::isfinite(offset_px.y) ? offset_px.y : 0.0f;
+        const float br = (std::isfinite(blur_px) && blur_px > 0.0f) ? blur_px : 0.0f;
+        const float sp = std::isfinite(spread_px) ? spread_px : 0.0f;
+        if (!inset && br <= 0.0f) return;
         push_prim(
             ctx,
-            continuous_prim(Prim::make_shadow(
-                shadow_rect,
-                clip.rect,
-                d.shadow_color,
-                rad_px,
-                blur_px,
-                clip.radius, {}, d.shadow_spread * dpi), d.continuous_corners),
+            continuous_prim(
+                Prim::make_shadow(base_box_px, clip.rect, col, base_rad_px, br, clip.radius, {ox, oy}, sp, inset),
+                d.continuous_corners),
             nullptr,
-            2.0f * blur_px + 2.0f);
+            inset ? 2.0f : (2.0f * br + 2.0f));
+    };
+
+    const uint8_t sc = d.shadow_count < 4u ? d.shadow_count : 4u;
+    bool has_custom_drop_shadow =
+        (!d.shadow_inset && d.shadow_color.a > 0u && std::isfinite(d.shadow_blur) && d.shadow_blur > 0.0f);
+    for (uint8_t si = 0u; si < sc && !has_custom_drop_shadow; ++si) {
+        const ShadowLayer& sl = d.shadows[si];
+        if (!sl.inset && sl.color.a > 0u &&
+            ((std::isfinite(sl.blur_px) && sl.blur_px > 0.0f) ||
+             (std::isfinite(sl.spread_px) && sl.spread_px != 0.0f)))
+        {
+            has_custom_drop_shadow = true;
+        }
     }
 
-    const bool has_fill = (d.background.a > 0u) || has_grad;
+    // Drop shadows BEFORE fill.
+    if (!has_custom_drop_shadow && d.elevation != Elevation::None) {
+        const Theme& thm = active_theme(ctx);
+        const uint32_t bg_luma = (77u * thm.bg_canvas.r + 150u * thm.bg_canvas.g + 29u * thm.bg_canvas.b) >> 8;
+        const bool dark = bg_luma < 128u;
+        const float es = dpi * extra->world_scale;
+        ShadowLayer preset[2] = {};
+        switch (d.elevation) {
+            case Elevation::Sm:
+                if (dark) {
+                    preset[0] = {{0.0f, 2.0f}, 5.0f, 0.0f, Color::rgba8(0, 0, 0, 64), false};
+                    preset[1] = {{0.0f, 1.0f}, 2.0f, 0.0f, Color::rgba8(0, 0, 0, 76), false};
+                } else {
+                    preset[0] = {{0.0f, 1.0f}, 3.0f, 0.0f, Color::rgba8(15, 23, 42, 24), false};
+                    preset[1] = {{0.0f, 1.0f}, 2.0f, 0.0f, Color::rgba8(15, 23, 42, 18), false};
+                }
+                break;
+            case Elevation::Md:
+                if (dark) {
+                    preset[0] = {{0.0f, 8.0f}, 18.0f, -2.0f, Color::rgba8(0, 0, 0, 118), false};
+                    preset[1] = {{0.0f, 2.0f}, 6.0f, -1.0f, Color::rgba8(0, 0, 0, 96), false};
+                } else {
+                    preset[0] = {{0.0f, 6.0f}, 14.0f, -2.0f, Color::rgba8(15, 23, 42, 28), false};
+                    preset[1] = {{0.0f, 2.0f}, 4.0f, -1.0f, Color::rgba8(15, 23, 42, 16), false};
+                }
+                break;
+            case Elevation::Lg:
+                if (dark) {
+                    preset[0] = {{0.0f, 16.0f}, 32.0f, -4.0f, Color::rgba8(0, 0, 0, 148), false};
+                    preset[1] = {{0.0f, 4.0f}, 10.0f, -2.0f, Color::rgba8(0, 0, 0, 115), false};
+                } else {
+                    preset[0] = {{0.0f, 14.0f}, 28.0f, -4.0f, Color::rgba8(15, 23, 42, 36), false};
+                    preset[1] = {{0.0f, 4.0f}, 8.0f, -2.0f, Color::rgba8(15, 23, 42, 18), false};
+                }
+                break;
+            case Elevation::Xl:
+                if (dark) {
+                    preset[0] = {{0.0f, 26.0f}, 54.0f, -6.0f, Color::rgba8(0, 0, 0, 185), false};
+                    preset[1] = {{0.0f, 8.0f}, 18.0f, -4.0f, Color::rgba8(0, 0, 0, 132), false};
+                } else {
+                    preset[0] = {{0.0f, 24.0f}, 48.0f, -8.0f, Color::rgba8(15, 23, 42, 50), false};
+                    preset[1] = {{0.0f, 8.0f}, 16.0f, -4.0f, Color::rgba8(15, 23, 42, 22), false};
+                }
+                break;
+            default:
+                break;
+        }
+        for (uint32_t pi = 0u; pi < 2u; ++pi) {
+            if (preset[pi].color.a > 0u && preset[pi].blur_px > 0.0f) {
+                emit_shadow(preset[pi].offset * es, preset[pi].blur_px * es, preset[pi].spread_px * es, preset[pi].color, false);
+            }
+        }
+    }
+    if (!d.shadow_inset && d.shadow_color.a > 0u && std::isfinite(d.shadow_blur) && d.shadow_blur > 0.0f) {
+        emit_shadow(d.shadow_offset * dpi, d.shadow_blur * dpi, d.shadow_spread * dpi, d.shadow_color, false);
+    }
+    for (uint8_t si = 0u; si < sc; ++si) {
+        const ShadowLayer& sl = d.shadows[si];
+        if (!sl.inset && sl.color.a > 0u && std::isfinite(sl.blur_px) && sl.blur_px > 0.0f) {
+            emit_shadow(sl.offset * dpi, sl.blur_px * dpi, sl.spread_px * dpi, sl.color, false);
+        }
+    }
+
+    const bool has_fill = (d.background.a > 0u) || has_legacy_grad || want_multi_grad;
     const bool any_clip = d.clip_children || d.scroll_x || d.scroll_y || d.shrink_width || d.shrink_height;
     const bool draw_border_here = !any_clip && !has_segmented_border(d) && d.border_width > 0.0f && d.border_color.a > 0u;
-    if(draw_border_here) align_border_bounds(&box_px,&rad_px,d.border_width*dpi,d.border_align);
+    if (draw_border_here) align_border_bounds(&box_px, &rad_px, d.border_width * dpi, d.border_align);
     if (has_fill || draw_border_here || use_blur) {
         const Color border_col = draw_border_here ? d.border_color : Color{};
         const float border_w = draw_border_here ? (d.border_width * dpi) : 0.0f;
@@ -1273,9 +1611,17 @@ void emit_box_background_and_shadow(
                     border_col,
                     border_w,
                     0u,
-                    clip.radius), d.continuous_corners),
+                    clip.radius,
+                    d.backdrop_saturation,
+                    d.backdrop_brightness,
+                    d.backdrop_noise), d.continuous_corners),
                 blur_tex_sentinel());
-        } else if (has_grad) {
+        } else if (want_multi_grad) {
+            push_prim(
+                ctx,
+                make_multistop_or_fallback_rect_prim(
+                    ctx, box_px, clip, d.gradient, d.background, rad_px, border_col, border_w, d.continuous_corners));
+        } else if (has_legacy_grad) {
             push_prim(
                 ctx,
                 continuous_prim(Prim::make_gradient_rect(
@@ -1301,6 +1647,17 @@ void emit_box_background_and_shadow(
                     border_w,
                     1.0f,
                     clip.radius), d.continuous_corners));
+        }
+    }
+
+    // Inset shadows AFTER fill.
+    if (d.shadow_inset && inset_shadow_active(d.shadow_color, d.shadow_blur, d.shadow_spread, d.shadow_offset)) {
+        emit_shadow(d.shadow_offset * dpi, d.shadow_blur * dpi, d.shadow_spread * dpi, d.shadow_color, true);
+    }
+    for (uint8_t si = 0u; si < sc; ++si) {
+        const ShadowLayer& sl = d.shadows[si];
+        if (sl.inset && inset_shadow_active(sl.color, sl.blur_px, sl.spread_px, sl.offset)) {
+            emit_shadow(sl.offset * dpi, sl.blur_px * dpi, sl.spread_px * dpi, sl.color, true);
         }
     }
 
@@ -1344,13 +1701,19 @@ void emit_slug_outline_quad(
     const ClipEntry& clip_px,
     Color tint, bool color_layer = false, const TextWipeParams* wipe = nullptr) noexcept
 {
+    if (ctx->active_render_layer) {
+        resolve_layer_chain(ctx, ctx->active_render_layer, ctx->active_ui->dpi_scale);
+    }
+    const bool layer_rotated = ctx->active_render_layer &&
+        std::fabs(ctx->active_render_layer->resolved_rotation_rad) > 1e-4f;
     const bool snap_glyph = ctx->active_ui->pixel_snap &&
-        !(ctx->active_render_layer && ctx->active_render_layer->resolved_animating);
+        !(ctx->active_render_layer && (ctx->active_render_layer->resolved_animating || layer_rotated));
     if (snap_glyph) {
         baseline_y_px = std::round(baseline_y_px);
     }
     const float scale_px = ctx->atlas.slots[slot_idx].scale_1px * phys_px;
     const bool allow_hinted = ctx->atlas.hinted_small_text && !color_layer && phys_px <= 24.0f && snap_glyph &&
+        !layer_rotated &&
         !(ctx->active_render_layer && (std::fabs(ctx->active_render_layer->resolved_scale.x - 1.0f) > 1e-3f ||
                                        std::fabs(ctx->active_render_layer->resolved_scale.y - 1.0f) > 1e-3f));
     if (allow_hinted) {
@@ -1531,6 +1894,7 @@ inline void push_span_hitbox(Context* ctx, uint32_t span_id, uint32_t layout_ele
         .visual_rect = vis_logical,
         .visible_rect = visible,
         .clip_rect = clip_logical,
+        .rotation_rad = ctx->active_render_layer ? ctx->active_render_layer->resolved_rotation_rad : 0.0f,
         .clip_radius = std::fabs(clip.radius) / dpi,
         .paint_order = ctx->active_ui->hitboxes.count,
         .z_index = z_index,
@@ -2218,6 +2582,71 @@ void apply_scrollbar_drag(WidgetState* ws, float pointer_y, float grab_offset, b
             ws->scroll_vel.y = 0.0f;
             ws->scroll_stuck_bottom = (ws->scroll_max.y <= 0.5f) || (ws->scroll_pos.y >= ws->scroll_max.y - 2.0f);
         }
+    }
+}
+
+void emit_scrollbar_overlay(
+    Context* ctx, uint32_t widget_id, const ScrollbarGeom& sb, bool horizontal,
+    const ClipEntry& clip, Color track_col, Color thumb_col, Color hover_col, Color drag_col, float dpi) noexcept
+{
+    if (!sb.visible) {
+        return;
+    }
+    const uint32_t thumb_id = id_index(widget_id, horizontal ? kScrollbarXTag : kScrollbarYTag);
+    const bool sb_active = (ctx->active_ui->active_id == thumb_id);
+    const bool sb_hover = (ctx->active_ui->active_id == 0u) && sb.hit_track.contains(ctx->active_ui->pointer_pos) &&
+        pointer_over_id(ctx->active_ui, widget_id);
+    const Rect track_px = { sb.track.x * dpi, sb.track.y * dpi, sb.track.w * dpi, sb.track.h * dpi };
+    Rect thumb_px = { sb.thumb.x * dpi, sb.thumb.y * dpi, sb.thumb.w * dpi, sb.thumb.h * dpi };
+    if (!sb_hover && !sb_active) {
+        const float slim_px = 4.0f * dpi;
+        if (!horizontal) {
+            const float w = std::fmin(thumb_px.w, slim_px);
+            thumb_px.x = (track_px.x + track_px.w) - w;
+            thumb_px.w = w;
+        } else {
+            const float h = std::fmin(thumb_px.h, slim_px);
+            thumb_px.y = (track_px.y + track_px.h) - h;
+            thumb_px.h = h;
+        }
+    } else {
+        const float full_px = 6.0f * dpi;
+        if (!horizontal) {
+            const float w = std::fmax(thumb_px.w, full_px);
+            thumb_px.x = (track_px.x + track_px.w) - w;
+            thumb_px.w = w;
+        } else {
+            const float h = std::fmax(thumb_px.h, full_px);
+            thumb_px.y = (track_px.y + track_px.h) - h;
+            thumb_px.h = h;
+        }
+    }
+    const Color resolved_thumb_col = sb_active ? drag_col : (sb_hover ? hover_col : thumb_col);
+    if (track_col.a > 0u) {
+        push_prim(
+            ctx,
+            Prim::make_rect(
+                track_px,
+                clip.rect,
+                track_col,
+                Corners::all(0.5f * std::fmin(track_px.w, track_px.h)),
+                {},
+                0.0f,
+                1.0f,
+                clip.radius));
+    }
+    if (resolved_thumb_col.a > 0u) {
+        push_prim(
+            ctx,
+            Prim::make_rect(
+                thumb_px,
+                clip.rect,
+                resolved_thumb_col,
+                Corners::all(0.5f * std::fmin(thumb_px.w, thumb_px.h)),
+                {},
+                0.0f,
+                1.0f,
+                clip.radius));
     }
 }
 

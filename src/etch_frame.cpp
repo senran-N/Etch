@@ -82,7 +82,9 @@ void end_frame(Context* ctx_arg) noexcept {
         uint32_t hitbox_start = 0;
         uint32_t blur_start = 0;
         uint32_t clip_shape_start = 0;
+        uint32_t grad_stop_start = 0;
         uint32_t filter_group_start = 0;
+        bool had_layer = false;
     };
     ActiveSubtreeCap cap_stack[16] = {};
     uint32_t cap_depth = 0u;
@@ -122,7 +124,12 @@ void end_frame(Context* ctx_arg) noexcept {
             }
             default: break;
         }
-        if (ctx->active_render_layer) resolve_layer_chain(ctx, ctx->active_render_layer, dpi);
+        if (ctx->active_render_layer) {
+            resolve_layer_chain(ctx, ctx->active_render_layer, dpi);
+            for (uint32_t ci = 0u; ci < cap_depth; ++ci) {
+                cap_stack[ci].had_layer = true;
+            }
+        }
         if (cmd->kind == LayoutCmdKind::ScissorEnd) {
             if (ctx->active_filter_group && clip_stack.overflow == 0u && clip_stack.depth <= ctx->active_filter_group->ancestor_clip_depth) {
                 finalize_filter_group(ctx);
@@ -151,6 +158,7 @@ void end_frame(Context* ctx_arg) noexcept {
                         .hitbox_start = ctx->active_ui->hitboxes.count,
                         .blur_start = ctx->blur_split_count,
                         .clip_shape_start = ctx->clip_shape_count,
+                        .grad_stop_start = ctx->grad_stop_count,
                         .filter_group_start = ctx->filter_group_count,
                     };
                 }
@@ -163,9 +171,10 @@ void end_frame(Context* ctx_arg) noexcept {
                 bool tainted = !meta || meta->tainted ||
                     ctx->blur_split_count != cap.blur_start ||
                     ctx->clip_shape_count != cap.clip_shape_start ||
+                    ctx->grad_stop_count != cap.grad_stop_start ||
                     ctx->filter_group_count != cap.filter_group_start ||
                     ctx->active_filter_group != nullptr ||
-                    ctx->active_render_layer != nullptr ||
+                    cap.had_layer ||
                     cur_clip.indexed;
                 const uint32_t p_end = ctx->prim_count;
                 if (!tainted && p_end >= cap.prim_start) {
@@ -403,7 +412,9 @@ void end_frame(Context* ctx_arg) noexcept {
                         const LayoutNode& node = le->nodes.data[cmd->node_idx];
                         const bool opaque_surface =
                             extra->desc.background.a > 0u || extra->desc.background_end.a > 0u ||
-                            extra->desc.radial_gradient || extra->desc.backdrop_blur > 0.0f ||
+                            extra->desc.radial_gradient ||
+                            (extra->desc.gradient.kind != GradientKind::None && extra->desc.gradient.stop_count >= 2u) ||
+                            extra->desc.backdrop_blur > 0.0f ||
                             extra->code_editor != nullptr || extra->text_input != nullptr ||
                             extra->kind == CustomCmdKind::Icon;
                         const uint32_t hb_idx = ctx->active_ui->hitboxes.count;
@@ -417,6 +428,7 @@ void end_frame(Context* ctx_arg) noexcept {
                             .clip_rect = {cur_clip.rect.x / dpi, cur_clip.rect.y / dpi, cur_clip.rect.w / dpi, cur_clip.rect.h / dpi},
                             .local_scale = {extra->world_scale * (layer ? layer->resolved_scale.x : 1.0f), extra->world_scale * (layer ? layer->resolved_scale.y : 1.0f)},
                             .visual_opacity = layer ? layer->resolved_opacity : 1.0f,
+                            .rotation_rad = layer ? layer->resolved_rotation_rad : 0.0f,
                             .clip_radius = std::fabs(cur_clip.radius) / dpi,
                             .paint_order = hb_idx,
                             .z_index = cmd->z_index,
@@ -599,42 +611,13 @@ void end_frame(Context* ctx_arg) noexcept {
                         ? make_box_clip(ctx,parent_clip,box_px,scale_corners(d.radius,dpi),d.continuous_corners) : cur_clip;
                     ctx->render_clip_index=scrollbar_clip.indexed ? scrollbar_clip.shape : 0;
                     if (const WidgetState* ws = state_map_find(&ctx->active_ui->states, d.id)) {
-                        for(uint32_t axis=0;axis<2;++axis) {
-                        const ScrollbarGeom sb = axis ? compute_hscrollbar_geom(ws) : compute_vscrollbar_geom(ws);
-                        if (sb.visible) {
-                            const uint32_t thumb_id = id_index(d.id,axis ? kScrollbarXTag : kScrollbarYTag);
-                            const bool sb_active = (ctx->active_ui->active_id == thumb_id);
-                            const bool sb_hover = (ctx->active_ui->active_id == 0u) && sb.hit_track.contains(ctx->active_ui->pointer_pos) &&
-                                pointer_over_id(ctx->active_ui, d.id);
-                            const Rect track_px = { sb.track.x * dpi, sb.track.y * dpi, sb.track.w * dpi, sb.track.h * dpi };
-                            const Rect thumb_px = { sb.thumb.x * dpi, sb.thumb.y * dpi, sb.thumb.w * dpi, sb.thumb.h * dpi };
-                            const Color track_col = extra->scrollbar_track;
-                            const Color thumb_col = sb_active
-                                ? extra->scrollbar_thumb_drag
-                                : (sb_hover ? extra->scrollbar_thumb_hover : extra->scrollbar_thumb);
-                            push_prim(
-                                ctx,
-                                Prim::make_rect(
-                                    track_px,
-                                    scrollbar_clip.rect,
-                                    track_col,
-                                    Corners::all(0.5f * std::fmin(track_px.w,track_px.h)),
-                                    {},
-                                    0.0f,
-                                    1.0f,
-                                    scrollbar_clip.radius));
-                            push_prim(
-                                ctx,
-                                Prim::make_rect(
-                                    thumb_px,
-                                    scrollbar_clip.rect,
-                                    thumb_col,
-                                    Corners::all(0.5f * std::fmin(thumb_px.w,thumb_px.h)),
-                                    {},
-                                    0.0f,
-                                    1.0f,
-                                    scrollbar_clip.radius));
-                        }
+                        for (uint32_t axis = 0u; axis < 2u; ++axis) {
+                            const bool horizontal = (axis != 0u);
+                            const ScrollbarGeom sb = horizontal ? compute_hscrollbar_geom(ws) : compute_vscrollbar_geom(ws);
+                            emit_scrollbar_overlay(
+                                ctx, d.id, sb, horizontal, scrollbar_clip,
+                                extra->scrollbar_track, extra->scrollbar_thumb,
+                                extra->scrollbar_thumb_hover, extra->scrollbar_thumb_drag, dpi);
                         }
                     }
                 }
@@ -681,6 +664,7 @@ void end_frame(Context* ctx_arg) noexcept {
                 const ImageExtra* extra = static_cast<const ImageExtra*>(cmd->custom_data);
                 if (extra) {
                     const ImageDesc& idesc = extra->desc;
+                    const auto* layer = ctx->active_render_layer;
                     if (idesc.id != 0u) {
                         const Rect visual = layer_rect(ctx, raw_box_px);
                         const Rect visible = rect_intersect(visual, cur_clip.rect);
@@ -693,6 +677,9 @@ void end_frame(Context* ctx_arg) noexcept {
                             .visual_rect = {visual.x / dpi, visual.y / dpi, visual.w / dpi, visual.h / dpi},
                             .visible_rect = {visible.x / dpi, visible.y / dpi, visible.w / dpi, visible.h / dpi},
                             .clip_rect = {cur_clip.rect.x / dpi, cur_clip.rect.y / dpi, cur_clip.rect.w / dpi, cur_clip.rect.h / dpi},
+                            .local_scale = {layer ? layer->resolved_scale.x : 1.0f, layer ? layer->resolved_scale.y : 1.0f},
+                            .visual_opacity = layer ? layer->resolved_opacity : 1.0f,
+                            .rotation_rad = 0.0f,
                             .clip_radius = std::fabs(cur_clip.radius) / dpi,
                             .paint_order = hb_idx,
                             .z_index = cmd->z_index,
@@ -704,15 +691,20 @@ void end_frame(Context* ctx_arg) noexcept {
                         }
                     }
                     if (idesc.sprite_id != kInvalidSprite || idesc.texture != nullptr) {
-                        Vec2 uv0=idesc.uv_min, uv1=idesc.uv_max;
-                        if (idesc.sprite_id != kInvalidSprite && !resolve_sprite_uv_rect(ctx,idesc.sprite_id,uv0,uv1,&uv0,&uv1)) break;
+                        Rect img_px = box_px;
+                        Vec2 uv0 = idesc.uv_min, uv1 = idesc.uv_max;
+                        apply_image_fit(ctx, idesc.fit, idesc.source_size, idesc.sprite_id, &img_px, &uv0, &uv1);
+                        if (ctx->active_ui->pixel_snap && !layer && idesc.fit == ImageFit::Contain) {
+                            img_px = snap_pixel_rect(img_px);
+                        }
+                        if (idesc.sprite_id != kInvalidSprite && !resolve_sprite_uv_rect(ctx, idesc.sprite_id, uv0, uv1, &uv0, &uv1)) break;
                         const uint8_t img_flags = static_cast<uint8_t>(
                             ((idesc.sprite_id != kInvalidSprite || surface_texture_premultiplied(ctx, idesc.texture)) ? PrimFlag_Premultiplied : PrimFlag_None) |
                             (idesc.continuous_corners ? PrimFlag_LinearGrad : PrimFlag_None));
                         push_prim(
                             ctx,
                             Prim::make_texture(
-                                box_px,
+                                img_px,
                                 cur_clip.rect,
                                 uv0,
                                 uv1,

@@ -266,8 +266,17 @@ bool button(const ButtonDesc& d) noexcept {
     const Color label_col = d.disabled
         ? thm.text_disabled
         : (d.variant == ButtonVariant::Primary ? thm.on_primary : d.variant == ButtonVariant::Danger ? thm.on_error : thm.text_primary);
+    const bool surface_btn = !d.disabled && d.variant != ButtonVariant::Ghost;
+    const Color border_col = surface_btn
+        ? (d.variant == ButtonVariant::Default ? thm.border_control : Color::rgba8(255, 255, 255, 28))
+        : Color{};
+    const float border_w = surface_btn ? 1.0f : 0.0f;
+    const float rim_alpha = surface_btn ? 0.10f : 0.0f;
+    const Elevation elev = surface_btn ? Elevation::Sm : Elevation::None;
     begin_box({.id=d.id,.width=d.width,.height=d.height,.padding=d.padding,.gap=8,.align_x=d.align_x,.align_y=AlignY::Center,
-        .background=desktop_bg(d.id,bg,d.disabled),.radius=resolve_theme_corners(d.radius,Corners::all(thm.radius_control_px)),.focusable=!d.disabled});
+        .background=desktop_bg(d.id,bg,d.disabled),.border_color=border_col,.border_width=border_w,
+        .radius=resolve_theme_corners(d.radius,Corners::all(thm.radius_control_px)),.focusable=!d.disabled,
+        .top_rim_alpha=rim_alpha,.elevation=elev});
     a11y_semantic(d.id,A11yRole::Button,d.label,d.disabled?A11yState_Disabled:0u,3u);
     if (d.icon_id != kInvalidIcon) icon({.icon_id=d.icon_id,.size_px=d.font_size_px,.color=label_col});
     desktop_label(d.label,d.font_size_px,d.font_id,label_col);
@@ -460,17 +469,19 @@ bool begin_popup(const PopupDesc& d) noexcept {
     const float sh_blur = (std::isfinite(d.shadow_blur) && d.shadow_blur > 0.0f) ? d.shadow_blur : 0.0f;
     const float b_blur = (std::isfinite(d.backdrop_blur) && d.backdrop_blur > 0.0f) ? d.backdrop_blur : 0.0f;
     const bool attached = d.attach_to_trigger && d.trigger_id != 0u;
+    const bool use_elev = d.shadow_color.is_theme_auto() && sh_blur == 20.0f;
     begin_box({.id=d.id,.axis=Axis::Col,.width=d.match_trigger_width && d.trigger_id ? Sizing::percent(1) : d.width,.height=d.height,.padding=d.padding,.gap=d.gap,
         .background=resolve_theme_color(d.background, thm.bg_popup),
         .border_color=resolve_theme_color(d.border_color, thm.border_control),.border_width=1,
         .radius=resolve_theme_corners(d.radius, Corners::all(thm.radius_control_px)),
-        .shadow_color=sh_blur > 0.0f ? sh_col : Color{},
-        .shadow_blur=sh_blur,
-        .shadow_offset=sh_blur > 0.0f ? Vec2{0.0f, 6.0f} : Vec2{},
+        .shadow_color=(!use_elev && sh_blur > 0.0f) ? sh_col : Color{},
+        .shadow_blur=use_elev ? 0.0f : sh_blur,
+        .shadow_offset=(!use_elev && sh_blur > 0.0f) ? Vec2{0.0f, 6.0f} : Vec2{},
         .scroll_y=d.scroll_y && d.height.kind==SizingKind::Fixed,
         .attach_to=attached ? AttachTo::Element : AttachTo::Root,.attach_element_id=d.trigger_id,
         .anchor_parent=attached ? Anchor::BottomLeft : Anchor::TopLeft,.floating_offset=attached ? Vec2{} : pop.anchor,.z_index=d.z_index,
-        .backdrop_blur=b_blur,.clamp_to_viewport=true,.flip_on_overflow=d.flip_on_overflow});
+        .backdrop_blur=b_blur,.clamp_to_viewport=true,.top_rim_alpha=0.08f,.flip_on_overflow=d.flip_on_overflow,
+        .elevation=use_elev ? Elevation::Lg : Elevation::None});
     a11y_semantic(d.id,A11yRole::Menu,{},0,64u);
     ui.popup_build_ids[ui.popup_depth++]=d.id;return true;
 }
@@ -696,7 +707,8 @@ bool begin_modal(const ModalDesc& d) noexcept {
     begin_box({.id=backdrop,.width=Sizing::fixed(float(ui.viewport_w)/dpi),.height=Sizing::fixed(float(ui.viewport_h)/dpi),.background=resolve_theme_color(d.backdrop_color,thm.backdrop),.attach_to=AttachTo::Root,.anchor_parent=Anchor::TopLeft,.z_index=z});
     begin_focus_scope(d.id,true);
     begin_box({.id=d.id,.axis=Axis::Col,.width=Sizing::fixed(d.width_px),.height=d.height,.padding=Padding::all(18),.gap=12,.background=resolve_theme_color(d.background,thm.bg_popup),.border_color=resolve_theme_color(d.border_color,thm.border_control),.border_width=1,.radius=resolve_theme_corners(d.radius,Corners::all(thm.radius_panel_px)),
-        .attach_to=AttachTo::Parent,.anchor_element=Anchor::Center,.anchor_parent=Anchor::Center,.z_index=static_cast<int16_t>(z+1),.clamp_to_viewport=true});
+        .attach_to=AttachTo::Parent,.anchor_element=Anchor::Center,.anchor_parent=Anchor::Center,.z_index=static_cast<int16_t>(z+1),.clamp_to_viewport=true,
+        .top_rim_alpha=0.08f,.elevation=Elevation::Xl});
     a11y_semantic(d.id,A11yRole::Dialog,d.title,A11yState_Modal,64u);
     desktop_label(d.title,16,kFontBold);++ui.modal_depth;return true;
 }

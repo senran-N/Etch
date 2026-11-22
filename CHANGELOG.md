@@ -4,6 +4,32 @@ All notable changes to Etch are documented here. This file follows
 [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html).
 
+## [0.27.0] - 2026-11-22
+
+- Add multi-layer elevation shadows (`ShadowLayer`, `Elevation` presets `Sm`/`Md`/`Lg`/`Xl`,
+  up to 4 stacked layers per `BoxDesc`) and analytic rounded/continuous SDF **inset shadows**
+  (`ShadowLayer::inset`, `BoxDesc::shadow_inset`, `Prim::make_shadow(..., inset = true)`) with
+  zero `Prim` bloat and single-draw-call `QuadAlpha` batch coalescing.
+- Add 2-to-8 stop **Linear, Radial, and Conic Gradients** (`GradientKind`, `GradientStop`,
+  `GradientDesc`, `BoxDesc::gradient`, `RectDrawDesc::gradient`) with optional perceptual
+  Oklab interpolation and IGN dithering backed by a 16-byte-aligned frame-aux GPU storage
+  buffer (`GradientStopGpu`).
+- Upgrade `BlurGlass` with optical vibrancy controls (`BoxDesc::backdrop_saturation`,
+  `backdrop_brightness`, `backdrop_noise`) packed into existing 64-byte `Prim` payload with
+  full backward compatibility.
+- Add full 2D subtree affine rotation (`LayerDesc::rotation_rad`) with composed 2x3 layer
+  transforms, automatic Slug vector routing for rotated text, and exact inverse-rotated
+  occlusion hitboxes.
+- Add hardware texture mipmap generation (`TextureDesc::generate_mipmaps` via
+  `SDL_GenerateMipmapsForGPUTexture` + trilinear `max_lod = 16.0` linear sampler) and
+  `ImageFit` (`Fill`/`Contain`/`Cover`) on `ImageDesc` and `ImageDrawDesc`.
+- Add easing curves and staggered transitions (`EasingKind`, `EasingSpec`, `eval_easing`,
+  `tween`, `stagger_delay`) with full pure C99 ABI parity (`include/etch/etch_c.h`).
+- Upgrade default `Theme::dark()` and `Theme::light()` to modern restrained neutral desktop
+  palettes, refine scrollbars to sleek auto-expanding overlay pill thumbs (transparent track
+  by default, honoring explicit non-zero `scrollbar_track`), and polish default desktop
+  controls with subtle elevation shadows and specular top highlights.
+
 ## [0.26.0] - 2026-11-22
 
 - Default small hinted text (<= 24 px) to single-channel `R8_UNORM` 4x X-phase grayscale

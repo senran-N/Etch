@@ -205,7 +205,7 @@ bool ensure_uber_shaders(Context* ctx) noexcept {
         .code_size = ps_size, .code = ps_code, .entrypoint = "ps_main",
         .format = ctx->gpu_shader_fmt, .stage = SDL_GPU_SHADERSTAGE_FRAGMENT,
         .num_samplers = 9u, .num_storage_textures = 0u,
-        .num_storage_buffers = 5u, .num_uniform_buffers = 0u, .props = 0u,
+        .num_storage_buffers = 6u, .num_uniform_buffers = 0u, .props = 0u,
     };
     if (!ctx->vs_shader) ctx->vs_shader = SDL_CreateGPUShader(ctx->device, &vs_info);
     if (!ctx->ps_shader) ctx->ps_shader = SDL_CreateGPUShader(ctx->device, &ps_info);
@@ -238,7 +238,7 @@ bool ensure_quad_shaders(Context* ctx) noexcept {
         .code_size = ps_size, .code = ps_code, .entrypoint = "ps_main",
         .format = ctx->gpu_shader_fmt, .stage = SDL_GPU_SHADERSTAGE_FRAGMENT,
         .num_samplers = 0u, .num_storage_textures = 0u,
-        .num_storage_buffers = 1u, .num_uniform_buffers = 0u, .props = 0u,
+        .num_storage_buffers = 2u, .num_uniform_buffers = 0u, .props = 0u,
     };
     if (!ctx->quad_vs_shader) ctx->quad_vs_shader = SDL_CreateGPUShader(ctx->device, &vs_info);
     if (!ctx->quad_ps_shader) ctx->quad_ps_shader = SDL_CreateGPUShader(ctx->device, &ps_info);
@@ -780,11 +780,12 @@ void emit_gpu_batches(
     SDL_GPUBuffer* vertex_bufs[2] = { ctx->prim_gpu_buf, ctx->prim_depth_gpu_buf };
     SDL_BindGPUVertexStorageBuffers(render_pass, 0u, vertex_bufs, 2u);
 
-    SDL_GPUBuffer* uber_frag_bufs[5] = {
+    SDL_GPUBuffer* uber_frag_bufs[6] = {
         ctx->slug_curve_gpu_buf, ctx->slug_band_gpu_buf,
         ctx->dyn_slug_curve_gpu_buf, ctx->dyn_slug_band_gpu_buf,
-        ctx->clip_shape_gpu,
+        ctx->clip_shape_gpu, ctx->grad_stop_gpu,
     };
+    SDL_GPUBuffer* quad_frag_bufs[2] = { ctx->clip_shape_gpu, ctx->grad_stop_gpu };
     SDL_GPUBuffer* clip_only_buf[1] = { ctx->clip_shape_gpu };
 
     const uint32_t manual_srgb_bit = (is_srgb_gpu_format(target_fmt) || is_linear_float_format(target_fmt)) ? 0u : (1u << 31);
@@ -798,7 +799,7 @@ void emit_gpu_batches(
     const uintptr_t filter_end = filter_base + kMaxFilterSlices * kMaxFilterLevels;
 
     SDL_GPUGraphicsPipeline* bound_pipe = nullptr;
-    uint8_t bound_frag_layout = 0u; // 1 = clip_only (Quad/Text), 2 = uber_5 (Uber)
+    uint8_t bound_frag_layout = 0u; // 1 = quad_2 (Quad), 2 = uber_6 (Uber), 3 = clip_only (Text)
     uint32_t bound_blend_rgb = 0xFFFFFFFFu;
 
     auto resolve_tex = [&](SDL_GPUTexture* t) noexcept -> SDL_GPUTexture* {
@@ -836,14 +837,16 @@ void emit_gpu_batches(
         }
 
         const uint8_t need_frag_layout = (kind == GpuPipelineKind::QuadOpaque ||
-                                          kind == GpuPipelineKind::QuadAlpha ||
-                                          kind == GpuPipelineKind::GrayscaleText ||
-                                          kind == GpuPipelineKind::SubpixelText) ? 1u : 2u;
+                                          kind == GpuPipelineKind::QuadAlpha) ? 1u
+            : ((kind == GpuPipelineKind::GrayscaleText ||
+                kind == GpuPipelineKind::SubpixelText) ? 3u : 2u);
         if (need_frag_layout != bound_frag_layout) {
             if (need_frag_layout == 1u) {
+                SDL_BindGPUFragmentStorageBuffers(render_pass, 0u, quad_frag_bufs, 2u);
+            } else if (need_frag_layout == 3u) {
                 SDL_BindGPUFragmentStorageBuffers(render_pass, 0u, clip_only_buf, 1u);
             } else {
-                SDL_BindGPUFragmentStorageBuffers(render_pass, 0u, uber_frag_bufs, 5u);
+                SDL_BindGPUFragmentStorageBuffers(render_pass, 0u, uber_frag_bufs, 6u);
             }
             bound_frag_layout = need_frag_layout;
         }
@@ -1156,6 +1159,13 @@ bool record_frame_commands(
     if (clip_shapes_dirty && !ensure_slug_storage_pair(ctx->device, ctx->clip_shape_count, sizeof(ClipShapeGpu), &ctx->clip_shape_gpu, &ctx->clip_shape_gpu_capacity,
         &ctx->clip_shape_transfer, &ctx->clip_shape_transfer_capacity, &clip_uploaded)) return false;
     const ClipShapeGpu empty_clip={};
+    const uint32_t grad_stop_upload_count = (ctx->grad_stops && ctx->grad_stop_count > 0u) ? ctx->grad_stop_count : 1u;
+    const bool grad_stops_dirty = ctx->grad_stop_count > 1u || !ctx->grad_stop_sentinel_uploaded || !ctx->grad_stop_gpu;
+    uint32_t grad_uploaded = 0u;
+    if (grad_stops_dirty && !ensure_slug_storage_pair(ctx->device, grad_stop_upload_count,
+        static_cast<uint32_t>(sizeof(GradientStopGpu)), &ctx->grad_stop_gpu, &ctx->grad_stop_gpu_capacity,
+        &ctx->grad_stop_transfer, &ctx->grad_stop_transfer_capacity, &grad_uploaded)) return false;
+    const GradientStopGpu empty_grad_stop = {};
     uint32_t dyn_curves_uploaded = 0u;
     uint32_t dyn_bands_uploaded = 0u;
     if (ctx->dyn_slug_curve_count > 0u && !ensure_slug_storage_pair(ctx->device,
@@ -1248,7 +1258,7 @@ bool record_frame_commands(
     }
     const bool atlas_upload = atlas.dirty && atlas.dirty_y1 > atlas.dirty_y0;
     const bool subpixel_upload = atlas.subpixel_gpu_tex && atlas.subpixel_dirty && atlas.subpixel_dirty_y1 > atlas.subpixel_dirty_y0;
-    if (clip_shapes_dirty || atlas_upload || subpixel_upload || total_prims > 0u || slug_curves_pending || slug_bands_pending ||
+    if (clip_shapes_dirty || grad_stops_dirty || atlas_upload || subpixel_upload || total_prims > 0u || slug_curves_pending || slug_bands_pending ||
         ctx->dyn_slug_curve_count > 0u || ctx->dyn_slug_band_count > 0u) {
         SDL_GPUCopyPass* copy_pass = SDL_BeginGPUCopyPass(cmd);
         if (!copy_pass) {
@@ -1259,6 +1269,17 @@ bool record_frame_commands(
             if(!upload_slug_delta(ctx->device,copy_pass,ctx->clip_shapes ? ctx->clip_shapes : &empty_clip,sizeof(ClipShapeGpu),ctx->clip_shape_count,
                 &clip_uploaded,ctx->clip_shape_gpu,ctx->clip_shape_transfer,true)) {SDL_EndGPUCopyPass(copy_pass);return false;}
             ctx->clip_shape_sentinel_uploaded = true;
+        }
+
+        if (grad_stops_dirty) {
+            if (!upload_slug_delta(ctx->device, copy_pass, ctx->grad_stops ? ctx->grad_stops : &empty_grad_stop,
+                static_cast<uint32_t>(sizeof(GradientStopGpu)), grad_stop_upload_count,
+                &grad_uploaded, ctx->grad_stop_gpu, ctx->grad_stop_transfer, true))
+            {
+                SDL_EndGPUCopyPass(copy_pass);
+                return false;
+            }
+            ctx->grad_stop_sentinel_uploaded = true;
         }
 
         if (atlas_upload) {
@@ -1799,6 +1820,8 @@ bool ensure_gpu_device(Context* ctx) noexcept {
             if (ctx->texture_upload_cmd) SDL_CancelGPUCommandBuffer(ctx->texture_upload_cmd);
             if (ctx->clip_shape_gpu) SDL_ReleaseGPUBuffer(ctx->device, ctx->clip_shape_gpu);
             if (ctx->clip_shape_transfer) SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->clip_shape_transfer);
+            if (ctx->grad_stop_gpu) SDL_ReleaseGPUBuffer(ctx->device, ctx->grad_stop_gpu);
+            if (ctx->grad_stop_transfer) SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->grad_stop_transfer);
             if (ctx->texture_upload_buf) SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->texture_upload_buf);
             if (ctx->slug_curve_gpu_buf) SDL_ReleaseGPUBuffer(ctx->device, ctx->slug_curve_gpu_buf);
             if (ctx->slug_band_gpu_buf) SDL_ReleaseGPUBuffer(ctx->device, ctx->slug_band_gpu_buf);
@@ -1819,6 +1842,9 @@ bool ensure_gpu_device(Context* ctx) noexcept {
         ctx->texture_upload_cmd = nullptr;
         ctx->clip_shape_gpu = nullptr; ctx->clip_shape_transfer = nullptr;
         ctx->clip_shape_gpu_capacity = ctx->clip_shape_transfer_capacity = 0u;
+        ctx->grad_stop_gpu = nullptr; ctx->grad_stop_transfer = nullptr;
+        ctx->grad_stop_gpu_capacity = ctx->grad_stop_transfer_capacity = 0u;
+        ctx->grad_stop_sentinel_uploaded = false;
         ctx->texture_upload_buf = nullptr; ctx->texture_upload_cap = 0u;
         ctx->slug_curve_gpu_buf = ctx->slug_band_gpu_buf = nullptr;
         ctx->dyn_slug_curve_gpu_buf = ctx->dyn_slug_band_gpu_buf = nullptr;
@@ -1894,7 +1920,7 @@ bool ensure_gpu_device(Context* ctx) noexcept {
         .max_anisotropy = 1.0f,
         .compare_op = SDL_GPU_COMPAREOP_INVALID,
         .min_lod = 0.0f,
-        .max_lod = 0.0f,
+        .max_lod = 16.0f,
         .enable_anisotropy = false,
         .enable_compare = false,
         .padding1 = 0u,
@@ -1909,6 +1935,7 @@ bool ensure_gpu_device(Context* ctx) noexcept {
     nearest_info.min_filter = SDL_GPU_FILTER_NEAREST;
     nearest_info.mag_filter = SDL_GPU_FILTER_NEAREST;
     nearest_info.mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_NEAREST;
+    nearest_info.max_lod = 0.0f;
     ctx->nearest_sampler = SDL_CreateGPUSampler(ctx->device, &nearest_info);
     if (!ctx->nearest_sampler) {
         return fail();
@@ -2027,7 +2054,18 @@ void compute_prim_screen_aabb(const Prim& prim, float* ox0, float* oy0, float* o
                kind == PrimKind::CanvasGrid || kind == PrimKind::MeshGrad || kind == PrimKind::LayerBlur) {
         pad = 0.0f;
     } else if (kind == PrimKind::Shadow) {
-        pad = std::fmax(unpack_f16_cpu(static_cast<uint16_t>(prim.style.w >> 16)), 1.0f) * 2.0f + 2.0f;
+        if (prim.style.z != 0u) {
+            const float angle = std::bit_cast<float>(prim.style.z);
+            const float hx = 0.5f * prim.bounds.z, hy = 0.5f * prim.bounds.w;
+            const float cx = prim.bounds.x + hx, cy = prim.bounds.y + hy;
+            const float ac = std::fabs(std::cos(angle)), as = std::fabs(std::sin(angle));
+            const float ex = ac * hx + as * hy, ey = as * hx + ac * hy;
+            min_x = cx - ex; min_y = cy - ey;
+            max_x = cx + ex; max_y = cy + ey;
+        }
+        pad = ((((prim.style.x >> 4) & 0x3Fu) & PrimFlag_LinearGrad) != 0u)
+            ? 1.0f
+            : (std::fmax(unpack_f16_cpu(static_cast<uint16_t>(prim.style.w >> 16)), 1.0f) * 2.0f + 2.0f);
     } else if (kind == PrimKind::BorderBeam) {
         pad = std::fmax(std::fmax(unpack_f16_cpu(static_cast<uint16_t>(prim.payload.y >> 16)), 1.0f) + 2.0f,
                         unpack_f16_cpu(static_cast<uint16_t>(prim.style.w >> 16)) * 0.5f + 1.0f);
@@ -2074,7 +2112,8 @@ GpuPipelineKind classify_prim_pipeline(const Prim& p, bool is_punch, bool is_add
                                    (((header >> 20) & 0xFFFu) == 0u);
             const bool fill_opaque = (p.style.y >> 24) == 255u;
             const bool has_grad = (flags & (PrimFlag_LinearGrad | PrimFlag_RadialGrad)) != 0u;
-            const bool grad_opaque = !has_grad || ((p.payload.x >> 24) == 255u);
+            const bool is_multistop = (flags & (PrimFlag_LinearGrad | PrimFlag_RadialGrad)) == (PrimFlag_LinearGrad | PrimFlag_RadialGrad);
+            const bool grad_opaque = !has_grad || (!is_multistop && ((p.payload.x >> 24) == 255u));
             const bool int_bounds =
                 p.bounds.z >= 1.0f && p.bounds.w >= 1.0f &&
                 p.bounds.x == std::floor(p.bounds.x) && p.bounds.y == std::floor(p.bounds.y) &&
@@ -2651,6 +2690,7 @@ Context* create_context(const ContextDesc& desc) noexcept {
         return nullptr;
     }
     ctx->supports_d32_depth = true;
+    ctx->grad_stop_count = 1u;
 
     ctx->max_layout_elements = desc.max_layout_elements < 4096u ? 4096u : (desc.max_layout_elements > (1u << 20) ? (1u << 20) : desc.max_layout_elements);
     if (!ensure_batch_cap(ctx)) { destroy_context(ctx); return nullptr; }
@@ -2806,6 +2846,10 @@ void destroy_context(Context* ctx) noexcept {
         if(ctx->clip_shape_gpu) SDL_ReleaseGPUBuffer(ctx->device,ctx->clip_shape_gpu);
         if(ctx->clip_shape_transfer) SDL_ReleaseGPUTransferBuffer(ctx->device,ctx->clip_shape_transfer);
         ctx->clip_shape_gpu=nullptr;ctx->clip_shape_transfer=nullptr;ctx->clip_shape_gpu_capacity=ctx->clip_shape_transfer_capacity=0;
+        if (ctx->grad_stop_gpu) SDL_ReleaseGPUBuffer(ctx->device, ctx->grad_stop_gpu);
+        if (ctx->grad_stop_transfer) SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->grad_stop_transfer);
+        ctx->grad_stop_gpu = nullptr; ctx->grad_stop_transfer = nullptr;
+        ctx->grad_stop_gpu_capacity = ctx->grad_stop_transfer_capacity = 0u;
         if (ctx->texture_upload_buf) SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->texture_upload_buf);
         if (ctx->atlas.gpu_tex) SDL_ReleaseGPUTexture(ctx->device, ctx->atlas.gpu_tex);
         if (ctx->atlas.subpixel_gpu_tex) SDL_ReleaseGPUTexture(ctx->device, ctx->atlas.subpixel_gpu_tex);
@@ -2842,6 +2886,7 @@ void destroy_context(Context* ctx) noexcept {
     ctx->clipboard_fallback = nullptr;
     ctx->clipboard_fallback_cap = 0u;
     std::free(ctx->clip_shapes);
+    std::free(ctx->grad_stops);
     std::free(ctx->dyn_slug_curves);
     std::free(ctx->dyn_slug_bands);
     std::free(ctx->prims);
@@ -2850,6 +2895,9 @@ void destroy_context(Context* ctx) noexcept {
     std::free(ctx->gpu_prims); std::free(ctx->gpu_prim_depths);
     std::free(ctx->gpu_batches); std::free(ctx->gpu_blur_splits);
     std::free(ctx->filter_prims); std::free(ctx->filter_batches); std::free(ctx->filter_groups);
+    std::free(ctx->mipmapped_textures);
+    ctx->mipmapped_textures = nullptr;
+    ctx->mipmapped_texture_count = ctx->mipmapped_texture_cap = 0u;
     arena_destroy(&ctx->frame_arena);
 
     if (ctx->owns_video_init) {
@@ -3022,6 +3070,34 @@ bool render_headless_png(
 
 namespace {
 
+bool is_mipmapped_texture(const Context* ctx, SDL_GPUTexture* tex) noexcept {
+    for (uint32_t i = 0u; i < ctx->mipmapped_texture_count; ++i) {
+        if (ctx->mipmapped_textures[i] == tex) return true;
+    }
+    return false;
+}
+
+void track_mipmapped_texture(Context* ctx, SDL_GPUTexture* tex) noexcept {
+    if (is_mipmapped_texture(ctx, tex)) return;
+    if (ctx->mipmapped_texture_count == ctx->mipmapped_texture_cap) {
+        const uint32_t next_cap = ctx->mipmapped_texture_cap ? (ctx->mipmapped_texture_cap * 2u) : 16u;
+        void* p = std::realloc(ctx->mipmapped_textures, static_cast<size_t>(next_cap) * sizeof(SDL_GPUTexture*));
+        if (!p) return;
+        ctx->mipmapped_textures = static_cast<SDL_GPUTexture**>(p);
+        ctx->mipmapped_texture_cap = next_cap;
+    }
+    ctx->mipmapped_textures[ctx->mipmapped_texture_count++] = tex;
+}
+
+void untrack_mipmapped_texture(Context* ctx, SDL_GPUTexture* tex) noexcept {
+    for (uint32_t i = 0u; i < ctx->mipmapped_texture_count; ++i) {
+        if (ctx->mipmapped_textures[i] == tex) {
+            ctx->mipmapped_textures[i] = ctx->mipmapped_textures[--ctx->mipmapped_texture_count];
+            return;
+        }
+    }
+}
+
 void invalidate_surfaces_sampling_texture(Context* ctx, SDL_GPUTexture* texture) noexcept {
     for (ShaderSurfaceSlot& s : ctx->shader_surfaces) {
         if (!s.shader) continue;
@@ -3160,14 +3236,29 @@ LoadedTexture create_texture_rgba(Context* ctx, const TextureDesc& desc) noexcep
         return {};
     }
 
+    const SDL_GPUTextureFormat fmt = desc.srgb ? SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB : SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+    SDL_GPUTextureUsageFlags usage = SDL_GPU_TEXTUREUSAGE_SAMPLER;
+    uint32_t num_levels = 1u;
+    if (desc.generate_mipmaps && (desc.width > 1u || desc.height > 1u)) {
+        const SDL_GPUTextureUsageFlags mip_usage = SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COLOR_TARGET;
+        if (SDL_GPUTextureSupportsFormat(ctx->device, fmt, SDL_GPU_TEXTURETYPE_2D, mip_usage)) {
+            usage = mip_usage;
+            uint32_t dim = desc.width > desc.height ? desc.width : desc.height;
+            while (dim > 1u) {
+                dim >>= 1u;
+                ++num_levels;
+            }
+        }
+    }
+
     const SDL_GPUTextureCreateInfo tex_info = {
         .type = SDL_GPU_TEXTURETYPE_2D,
-        .format = desc.srgb ? SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB : SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,
-        .usage = SDL_GPU_TEXTUREUSAGE_SAMPLER,
+        .format = fmt,
+        .usage = usage,
         .width = desc.width,
         .height = desc.height,
         .layer_count_or_depth = 1u,
-        .num_levels = 1u,
+        .num_levels = num_levels,
         .sample_count = SDL_GPU_SAMPLECOUNT_1,
         .props = 0u,
     };
@@ -3182,6 +3273,12 @@ LoadedTexture create_texture_rgba(Context* ctx, const TextureDesc& desc) noexcep
             SDL_ReleaseGPUTexture(ctx->device, tex);
             return {};
         }
+        if (num_levels > 1u) {
+            SDL_GenerateMipmapsForGPUTexture(ctx->texture_upload_cmd, tex);
+        }
+    }
+    if (num_levels > 1u) {
+        track_mipmapped_texture(ctx, tex);
     }
 
     return LoadedTexture{
@@ -3207,6 +3304,9 @@ bool update_texture_rgba(
         return false;
     }
     if (!upload_rgba_rows(ctx, texture, width, height, rgba_pixels, row_pitch_bytes, true)) return false;
+    if (is_mipmapped_texture(ctx, texture) && ctx->texture_upload_cmd) {
+        SDL_GenerateMipmapsForGPUTexture(ctx->texture_upload_cmd, texture);
+    }
     invalidate_surfaces_sampling_texture(ctx, texture);
     return true;
 }
@@ -3219,6 +3319,9 @@ bool update_texture_region_rgba(Context* ctx, SDL_GPUTexture* texture,
        (row_pitch_bytes && row_pitch_bytes<width*4)) return false;
     // Cycling the destination would discard pixels outside this rectangle.
     if (!upload_rgba_rows(ctx,texture,width,height,rgba_pixels,row_pitch_bytes,false,x,y)) return false;
+    if (is_mipmapped_texture(ctx, texture) && ctx->texture_upload_cmd) {
+        SDL_GenerateMipmapsForGPUTexture(ctx->texture_upload_cmd, texture);
+    }
     invalidate_surfaces_sampling_texture(ctx, texture);
     return true;
 }
@@ -3243,6 +3346,7 @@ void destroy_texture(Context* ctx, LoadedTexture* tex) noexcept {
         return;
     }
     if (ctx && ctx->device && tex->texture) {
+        untrack_mipmapped_texture(ctx, tex->texture);
         flush_texture_uploads(ctx);
         SDL_ReleaseGPUTexture(ctx->device, tex->texture);
     }
@@ -3253,6 +3357,7 @@ void destroy_texture(Context* ctx, LoadedTexture* tex) noexcept {
 
 void destroy_texture(Context* ctx, SDL_GPUTexture* tex) noexcept {
     if (ctx && ctx->device && tex) {
+        untrack_mipmapped_texture(ctx, tex);
         flush_texture_uploads(ctx);
         SDL_ReleaseGPUTexture(ctx->device, tex);
     }

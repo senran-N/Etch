@@ -1460,7 +1460,8 @@ int run_headless(const char* out_png_path, const char* renderer) noexcept {
             v20_ok &= start && (start+drag.length == full.chars+full.length || (static_cast<unsigned char>(start[drag.length]) & 0xC0u) != 0x80u);
         }
         bool highlight = false;
-        for (const auto& prim : etch::frame_prims(ctx)) highlight |= (prim.style.x & 15u) == uint32_t(etch::PrimKind::Rect) && prim.style.y == etch::Color::rgba8(56,189,248,88).pack_rgba8();
+        const uint32_t expected_sel = etch::theme(ctx).selection.pack_rgba8();
+        for (const auto& prim : etch::frame_prims(ctx)) highlight |= (prim.style.x & 15u) == uint32_t(etch::PrimKind::Rect) && prim.style.y == expected_sel;
         v20_ok &= highlight && etch::frame_stats(ctx).draw_call_count <= 12;
         v20_frame({160,y+20},false);
         etch::request_focus(target);
@@ -1563,7 +1564,8 @@ int run_headless(const char* out_png_path, const char* renderer) noexcept {
             if (!(marker)) { v21_ok=false; std::fprintf(stderr,"v21 check line %d failed\n",__LINE__); }
             etch::request_focus(mixed);etch::set_text_selection(mixed,5,14);step();
             bool highlight=false;
-            for(const auto& prim:etch::frame_prims(test))highlight|=(prim.style.x&15u)==uint32_t(etch::PrimKind::Rect)&&prim.style.y==etch::Color::rgba8(56,189,248,88).pack_rgba8()&&prim.bounds.z>0.1f;
+            const uint32_t expected_sel = etch::theme(test).selection.pack_rgba8();
+            for(const auto& prim:etch::frame_prims(test))highlight|=(prim.style.x&15u)==uint32_t(etch::PrimKind::Rect)&&prim.style.y==expected_sel&&prim.bounds.z>0.1f;
             if (!(highlight)) { v21_ok=false; std::fprintf(stderr,"v21 check line %d failed\n",__LINE__); }
             uint32_t color_count=0,last_color=0;
             for(const auto& prim:etch::frame_prims(test)) {

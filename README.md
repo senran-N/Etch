@@ -1,10 +1,13 @@
 # Etch
 
 Etch is a Pure-GPU UI Engine for desktop applications on Windows, Linux, and
-macOS. It combines immediate UI construction, Clay layout, Unicode text
-handling, a pure C99 ABI facade (`<etch/etch_c.h>`), and SDL3 GPU rendering. The
-sandbox is the regression harness; Etch Studio demonstrates docking, tables,
-trees, themes, and a virtual editor.
+macOS. It combines immediate UI construction, an owned 2-pass Flexbox / 2D Grid /
+Anchor layout engine (`src/etch_layout_engine.cpp`) with dirty-subtree replay
+caching and inverse-transformed occlusion hitboxes, full Unicode/HarfBuzz text
+shaping, a versioned pure C99 ABI facade (`<etch/etch_c.h>`), and SDL3 GPU
+rendering. `etch_showcase` demonstrates visual craft and materials; `sandbox` is
+the regression harness; `etch_studio` demonstrates docking, node graphs, tables,
+trees, themes, and a virtualized code editor.
 
 The historical audit closure and current verification boundaries are tracked in
 [CLOSURE.md](CLOSURE.md); the v0.12 corrections are in [AUDIT_v0.12.md](AUDIT_v0.12.md). Descriptor additions require recompiling
@@ -13,19 +16,36 @@ and register custom maximize controls with `window_maximize_button_region(id)`.
 
 ## Architecture
 
-- Orthodox C++20, without exceptions or RTTI, plus a zero-heap pure C99 ABI
-  header ([include/etch/etch_c.h](include/etch/etch_c.h)). The engine compiles as
-  one translation unit, [src/etch_unity.cpp](src/etch_unity.cpp), with cohesive core modules and no hard code-size limits.
-- GPU geometry uses 64-byte, `alignas(16)` `etch::Prim` (`EtchPrim`) records.
-  UI geometry, glyphs, and small sprite thumbnails/images packed into the
-  dynamic sprite atlas batch into 1–3 draw calls per window UI pass through
-  [etch_uber.hlsl](shaders/etch_uber.hlsl); [etch_kawase.hlsl](shaders/etch_kawase.hlsl)
-  handles backdrop blur and presentation. Native RGBA/PNG/JPEG/GIF/TGA/BMP
-  decoding feeds both sprites and zero-copy `SDL_GPUTexture*` slots.
+- Orthodox C++20, without exceptions or RTTI, plus a zero-heap versioned pure C99 ABI
+  header ([include/etch/etch_c.h](include/etch/etch_c.h)). Supports both single-TU unity
+  compilation ([src/etch_unity.cpp](src/etch_unity.cpp)) and modular multi-TU builds
+  (`-DETCH_UNITY_BUILD=OFF`).
+- **Lean Multi-Pipeline GPU + Indexed Aux Buffers**: 64-byte, `alignas(16)` `etch::Prim`
+  (`EtchPrim`) records paired with indexed frame-arena GPU storage buffers
+  (`ClipShapeGpu`, `GradientStopGpu`) and specialized low-VGPR pipelines:
+  - [etch_quad.hlsl](shaders/etch_quad.hlsl): Early-Z opaque quads, rounded/superellipse
+    boxes, disjoint-area borders, multi-layer elevation & analytic inset shadows, and
+    2-to-8 stop Linear/Radial/Conic Oklab gradients.
+  - [etch_subpixel.hlsl](shaders/etch_subpixel.hlsl): Adaptive small hinted text (`<= 24 px`)
+    defaulting to a bounded `R8_UNORM` 4x X-phase grayscale atlas with polarity-calibrated
+    stem darkening (single draw call across all text colors, 1/4 VRAM), with explicit
+    opt-in 3-channel ClearType RGB LCD blending (`set_lcd_subpixel_text`).
+  - [etch_uber.hlsl](shaders/etch_uber.hlsl): Slug GPU quadratic Bezier vectors/large &
+    rotated text, optical vibrancy `BlurGlass` (saturation, brightness, micro-grain),
+    mesh gradients, mipmapped textures (`ImageFit::Fill`/`Contain`/`Cover`), Bezier wires,
+    ring arcs, and animated border beams.
+  - [etch_kawase.hlsl](shaders/etch_kawase.hlsl): Dual-Kawase backdrop/layer blur, bloom,
+    and presentation.
+- **Strict Memory & Power Discipline**: Prefers low-power integrated GPU adapters by
+  default (`ContextDesc::prefer_high_performance_gpu = false`), lazy shader/PSO creation,
+  lean initial buffers with geometric growth, ring-slice GPU uploads, bounded LRU glyph
+  atlas reclamation, and automatic idle release for offscreen render/staging targets.
 - HarfBuzz shapes text; [src/etch_slug.cpp](src/etch_slug.cpp) extracts Slug
   GPU Bezier contours and bands, [src/etch_emoji.cpp](src/etch_emoji.cpp) provides
-  color emoji fallbacks (`COLR v0`, `CBDT`, `sbix`), and multiline `text_input` /
-  `code_editor` support soft word-wrapping plus semantic `Theme` tokens.
+  color emoji fallbacks (`COLR v0`, `CBDT`, `sbix`) and hinted small-text rasterization,
+  and multiline `text_input` / `code_editor` support soft word-wrapping plus modern
+  semantic `Theme` tokens and easing/spring motion (`eval_easing`, `tween`, `stagger_delay`,
+  2D subtree `LayerDesc::rotation_rad`).
 - [src/etch_a11y.cpp](src/etch_a11y.cpp) and [src/etch_a11y_os.cpp](src/etch_a11y_os.cpp)
   expose zero-heap A11y snapshots/actions, smooth live window resize,
   multi-monitor DPI sync, and optional OS accessibility bridges (Windows UIA).
@@ -156,7 +176,7 @@ configuring the consumer. If installation was disabled, reconfigure Etch with
 ```cmake
 cmake_minimum_required(VERSION 3.24)
 project(my_app LANGUAGES C CXX)
-find_package(Etch 0.20 CONFIG REQUIRED)
+find_package(Etch 0.27 CONFIG REQUIRED)
 add_executable(my_app main.cpp)
 target_link_libraries(my_app PRIVATE Etch::etch)
 ```

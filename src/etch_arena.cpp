@@ -72,6 +72,14 @@ struct WidgetState {
     bool     spring_initialized = false;
     float    spring_pos = 0.0f;
     float    spring_vel = 0.0f;
+    bool     tween_initialized = false;
+    float    tween_start = 0.0f;
+    float    tween_target = 0.0f;
+    float    tween_elapsed = 0.0f;
+    float    tween_duration = 0.0f;
+    float    tween_delay = 0.0f;
+    float    tween_value = 0.0f;
+    uint32_t tween_frame = 0u;
     bool show_scrollbar = true;
     bool     is_scroll_x = false;
     bool     is_scroll_y = false;
@@ -446,6 +454,8 @@ struct VisualLayerNode {
     mutable float resolved_opacity = 1;
     mutable Vec2 resolved_scale = {1,1}, resolved_offset_px = {};
     mutable Vec2 inherited_scale = {1,1}, inherited_offset_px = {};
+    mutable float resolved_rotation_rad = 0.0f;
+    mutable float resolved_m[6] = {1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f};
     mutable float resolved_blur_px = 0.0f;
     mutable const VisualLayerNode* resolved_blur_root = nullptr;
     mutable bool resolved_plus_lighter = false;
@@ -648,6 +658,14 @@ struct alignas(16) ClipShapeGpu {
 };
 static_assert(sizeof(ClipShapeGpu)==48 && sizeof(ClipShapeGpu)%16==0);
 
+struct alignas(16) GradientStopGpu {
+    uint32_t rgba8 = 0; // Packed sRGB RGBA8
+    float    pos = 0.0f; // Monotonic [0, 1]
+    float    p0 = 0.0f; // Stop 0 carries conic start angle (rad)
+    float    p1 = 0.0f; // Reserved
+};
+static_assert(sizeof(GradientStopGpu) == 16 && sizeof(GradientStopGpu) % 16 == 0);
+
 struct ClipEntry {
     Rect  rect = {};
 
@@ -673,6 +691,7 @@ void emit_utf8_glyph_run(Context*, uint16_t, const char*, uint32_t, float, float
 void clear_ime_composition(Context*) noexcept;
 struct ScrollbarGeom;
 ScrollbarGeom compute_vscrollbar_geom(const WidgetState*) noexcept;
+void emit_scrollbar_overlay(Context* ctx, uint32_t widget_id, const ScrollbarGeom& sb, bool horizontal, const ClipEntry& clip, Color track_col, Color thumb_col, Color hover_col, Color drag_col, float dpi) noexcept;
 void emit_code_editor_command(Context*, const CodeEditorExtra*, Rect, const ClipEntry&, float) noexcept;
 void optimize_render_batches(Context*) noexcept;
 Vec4 color_to_oklab_internal(Color c) noexcept;
@@ -1131,6 +1150,11 @@ struct Context {
     bool clip_shape_sentinel_uploaded = false;
     SDL_GPUBuffer* clip_shape_gpu = nullptr; SDL_GPUTransferBuffer* clip_shape_transfer = nullptr;
     uint32_t clip_shape_gpu_capacity = 0, clip_shape_transfer_capacity = 0;
+    GradientStopGpu* grad_stops = nullptr;
+    uint32_t grad_stop_count = 1, grad_stop_capacity = 0;
+    bool grad_stop_sentinel_uploaded = false;
+    SDL_GPUBuffer* grad_stop_gpu = nullptr; SDL_GPUTransferBuffer* grad_stop_transfer = nullptr;
+    uint32_t grad_stop_gpu_capacity = 0, grad_stop_transfer_capacity = 0;
     BoxExtra* layout_draw_target = nullptr;
     float layout_draw_scale = 1;
     uint32_t wake_event_type = 0;
@@ -1280,6 +1304,8 @@ struct Context {
     uint32_t                 subpixel_tbuf_size = 0;
     SDL_GPUCommandBuffer*    texture_upload_cmd = nullptr;
     SDL_GPUTransferBuffer*   texture_upload_buf = nullptr; uint32_t texture_upload_cap = 0;
+    SDL_GPUTexture**         mipmapped_textures = nullptr;
+    uint32_t                 mipmapped_texture_count = 0u, mipmapped_texture_cap = 0u;
     uint32_t atlas_tbuf_size = 0;
     SDL_GPUBuffer*           slug_curve_gpu_buf = nullptr;
     uint32_t                 slug_curve_gpu_cap = 0;

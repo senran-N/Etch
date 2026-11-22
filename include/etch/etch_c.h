@@ -8,7 +8,7 @@
 
 #ifndef ETCH_VERSION_MAJOR
 #define ETCH_VERSION_MAJOR 0
-#define ETCH_VERSION_MINOR 26
+#define ETCH_VERSION_MINOR 27
 #define ETCH_VERSION_PATCH 0
 #define ETCH_VERSION_STR_DETAIL(x) #x
 #define ETCH_VERSION_STR(x) ETCH_VERSION_STR_DETAIL(x)
@@ -860,6 +860,73 @@ typedef struct EtchFrameStats {
 
 typedef enum EtchBorderAlign { ETCH_BORDER_INSIDE=0, ETCH_BORDER_CENTER=1, ETCH_BORDER_OUTSIDE=2 } EtchBorderAlign;
 
+typedef enum EtchElevation {
+    ETCH_ELEVATION_NONE = 0,
+    ETCH_ELEVATION_SM = 1,
+    ETCH_ELEVATION_MD = 2,
+    ETCH_ELEVATION_LG = 3,
+    ETCH_ELEVATION_XL = 4
+} EtchElevation;
+
+typedef struct EtchShadowLayer {
+    EtchVec2 offset;
+    float blur_px;
+    float spread_px;
+    EtchColor color;
+    bool inset;
+} EtchShadowLayer;
+ETCH_API EtchShadowLayer etch_shadow_layer_default(void);
+
+typedef enum EtchGradientKind {
+    ETCH_GRADIENT_NONE = 0,
+    ETCH_GRADIENT_LINEAR = 1,
+    ETCH_GRADIENT_RADIAL = 2,
+    ETCH_GRADIENT_CONIC = 3
+} EtchGradientKind;
+
+typedef struct EtchGradientStop {
+    EtchColor color;
+    float position;
+} EtchGradientStop;
+
+typedef struct EtchGradientDesc {
+    EtchGradientKind kind;
+    bool oklab;
+    EtchVec2 dir;
+    EtchVec2 center;
+    float angle_rad;
+    uint8_t stop_count;
+    EtchGradientStop stops[8];
+} EtchGradientDesc;
+ETCH_API EtchGradientDesc etch_gradient_desc_default(void);
+
+typedef enum EtchImageFit {
+    ETCH_IMAGE_FIT_FILL = 0,
+    ETCH_IMAGE_FIT_CONTAIN = 1,
+    ETCH_IMAGE_FIT_COVER = 2
+} EtchImageFit;
+
+typedef enum EtchEasingKind {
+    ETCH_EASING_LINEAR = 0,
+    ETCH_EASING_IN = 1,
+    ETCH_EASING_OUT = 2,
+    ETCH_EASING_IN_OUT = 3,
+    ETCH_EASING_CUBIC_BEZIER = 4
+} EtchEasingKind;
+
+typedef struct EtchEasingSpec {
+    EtchEasingKind kind;
+    float x1, y1, x2, y2;
+} EtchEasingSpec;
+ETCH_API EtchEasingSpec etch_easing_linear(void);
+ETCH_API EtchEasingSpec etch_easing_in(void);
+ETCH_API EtchEasingSpec etch_easing_out(void);
+ETCH_API EtchEasingSpec etch_easing_in_out(void);
+ETCH_API EtchEasingSpec etch_easing_cubic_bezier(float x1, float y1, float x2, float y2);
+ETCH_API float etch_eval_easing(EtchEasingSpec spec, float t);
+ETCH_API float etch_tween(uint32_t id, float target, float duration_sec, EtchEasingSpec spec, float delay_sec);
+ETCH_API float etch_stagger_delay(uint32_t index, float step_sec, float max_delay_sec);
+
 typedef struct EtchBorderBeamStyle {
     EtchColor color, base_color;
     float width, angle_rad, sweep_fraction, glow_px, speed, softness;
@@ -939,6 +1006,15 @@ typedef struct EtchBoxDesc {
     bool flip_on_overflow;
     EtchHitboxBehavior hitbox_behavior;
     bool stick_to_bottom;
+    size_t reserved_v026_pad;
+    EtchShadowLayer shadows[4];
+    uint8_t shadow_count;
+    EtchElevation elevation;
+    bool shadow_inset;
+    EtchGradientDesc gradient;
+    float backdrop_saturation;
+    float backdrop_brightness;
+    float backdrop_noise;
 } EtchBoxDesc;
 
 typedef struct EtchTextDesc {
@@ -1052,6 +1128,8 @@ typedef struct EtchImageDesc {
     float aspect_ratio;
     uint16_t grid_col_span;
     bool continuous_corners;
+    EtchImageFit fit;
+    EtchVec2 source_size;
 } EtchImageDesc;
 
 typedef struct EtchIconDesc {
@@ -1079,6 +1157,7 @@ typedef struct EtchRectDrawDesc {
     float softness;
     bool continuous_corners;
     EtchBorderAlign border_align;
+    EtchGradientDesc gradient;
 } EtchRectDrawDesc;
 
 typedef struct EtchMeshRectDrawDesc {
@@ -1246,6 +1325,8 @@ typedef struct EtchImageDrawDesc {
     float radius;
     bool foreground;
     bool continuous_corners;
+    EtchImageFit fit;
+    EtchVec2 source_size;
 } EtchImageDrawDesc;
 
 typedef struct EtchTextureDesc {
@@ -1256,6 +1337,7 @@ typedef struct EtchTextureDesc {
     bool srgb;
     const char* debug_name;
     bool premultiplied_alpha;
+    bool generate_mipmaps;
 } EtchTextureDesc;
 
 typedef struct EtchLoadedTexture {
@@ -1986,6 +2068,7 @@ typedef struct EtchLayerDesc {
     bool animating;
     float blur_px;
     bool blend_plus_lighter;
+    float rotation_rad;
 } EtchLayerDesc;
 ETCH_API EtchLayerDesc etch_layer_desc_default(void);
 ETCH_API void etch_push_layer(const EtchLayerDesc* desc);

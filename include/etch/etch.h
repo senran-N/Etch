@@ -12,7 +12,7 @@
 #include <type_traits>
 
 #define ETCH_VERSION_MAJOR 0
-#define ETCH_VERSION_MINOR 26
+#define ETCH_VERSION_MINOR 27
 #define ETCH_VERSION_PATCH 0
 #define ETCH_VERSION_STR_DETAIL(x) #x
 #define ETCH_VERSION_STR(x) ETCH_VERSION_STR_DETAIL(x)
@@ -588,6 +588,44 @@ struct alignas(16) Prim {
         };
     }
 
+    static constexpr Prim make_multistop_gradient_rect(
+        Rect rect,
+        Rect clip_rect,
+        uint32_t stop_offset,
+        uint8_t stop_count,
+        uint8_t grad_kind,
+        bool oklab,
+        Vec2 param_xy,
+        Color fallback_color = {},
+        Corners radius = {},
+        Color border_color = {},
+        float border_width = 0.0f,
+        float clip_radius = 0.0f,
+        float softness = 1.0f) noexcept
+    {
+        const uint8_t clip_flag = (clip_radius != 0.0f) ? PrimFlag_RoundedClip : PrimFlag_None;
+        const uint32_t meta = (stop_offset & 0xFFFFu) |
+                              ((static_cast<uint32_t>(stop_count) & 0xFu) << 16) |
+                              ((static_cast<uint32_t>(grad_kind) & 0x3u) << 20) |
+                              (oklab ? (1u << 22) : 0u);
+        return Prim{
+            .bounds = {rect.x, rect.y, rect.w, rect.h},
+            .clip = {clip_rect.x, clip_rect.y, clip_rect.x + clip_rect.w, clip_rect.y + clip_rect.h},
+            .payload = {
+                meta,
+                pack_f16x2(param_xy.x, param_xy.y),
+                pack_f16x2(radius.tl, radius.tr),
+                pack_f16x2(radius.br, radius.bl),
+            },
+            .style = {
+                pack_header(PrimKind::Rect, static_cast<uint8_t>(PrimFlag_LinearGrad | PrimFlag_RadialGrad | clip_flag), 0, clip_radius),
+                fallback_color.pack_rgba8(),
+                border_color.pack_rgba8(),
+                pack_f16x2(border_width, softness),
+            },
+        };
+    }
+
     static constexpr Prim make_mesh_grad(Rect rect, Rect clip_rect,
         Color tl, Color tr, Color br, Color bl, Corners radius = {},
         bool oklab = true, float grain = 0, float phase = 0, bool continuous = false, float clip_radius = 0) noexcept {
@@ -624,8 +662,27 @@ struct alignas(16) Prim {
         Color shadow_color,
         Corners radius = {},
         float blur_radius = 12.0f,
-        float clip_radius = 0.0f, Vec2 offset = {}, float spread = 0.0f) noexcept
+        float clip_radius = 0.0f, Vec2 offset = {}, float spread = 0.0f, bool inset = false) noexcept
     {
+        if (inset) {
+            const uint8_t flags = static_cast<uint8_t>(PrimFlag_LinearGrad | ((clip_radius != 0.0f) ? PrimFlag_RoundedClip : PrimFlag_None));
+            return Prim{
+                .bounds = {rect.x, rect.y, rect.w, rect.h},
+                .clip = {clip_rect.x, clip_rect.y, clip_rect.x + clip_rect.w, clip_rect.y + clip_rect.h},
+                .payload = {
+                    pack_f16x2(offset.x, offset.y),
+                    pack_f16x2(spread, 0.0f),
+                    pack_f16x2(radius.tl, radius.tr),
+                    pack_f16x2(radius.br, radius.bl),
+                },
+                .style = {
+                    pack_header(PrimKind::Shadow, flags, 0, clip_radius),
+                    shadow_color.pack_rgba8(),
+                    0u,
+                    pack_f16x2(0.0f, blur_radius),
+                },
+            };
+        }
         radius = {radius.tl + spread > 0 ? radius.tl + spread : 0, radius.tr + spread > 0 ? radius.tr + spread : 0,
             radius.br + spread > 0 ? radius.br + spread : 0, radius.bl + spread > 0 ? radius.bl + spread : 0};
         const uint8_t flags = (clip_radius != 0.0f) ? PrimFlag_RoundedClip : PrimFlag_None;
@@ -765,15 +822,29 @@ struct alignas(16) Prim {
         Color border_color = {},
         float border_width = 0.0f,
         uint16_t tex_slot = 0,
-        float clip_radius = 0.0f) noexcept
+        float clip_radius = 0.0f,
+        float vibrancy_saturation = 1.0f,
+        float vibrancy_brightness = 1.0f,
+        float vibrancy_noise = 0.0f) noexcept
     {
         const uint8_t all_flags = static_cast<uint8_t>((clip_radius != 0.0f) ? PrimFlag_RoundedClip : PrimFlag_None);
+        uint32_t vib_packed = 0u;
+        if (vibrancy_saturation != 1.0f || vibrancy_brightness != 1.0f || vibrancy_noise > 0.0f) {
+            const auto to_u8 = [](float x) constexpr noexcept -> uint32_t {
+                const float c = !(x > 0.0f) ? 0.0f : ((x > 1.0f) ? 1.0f : x);
+                return static_cast<uint32_t>(c * 255.0f + 0.5f);
+            };
+            vib_packed = to_u8(vibrancy_saturation * (1.0f / 2.5f)) |
+                         (to_u8(vibrancy_brightness * 0.5f) << 8) |
+                         (to_u8(vibrancy_noise * 10.0f) << 16) |
+                         (1u << 24);
+        }
         return Prim{
             .bounds = {rect.x, rect.y, rect.w, rect.h},
             .clip = {clip_rect.x, clip_rect.y, clip_rect.x + clip_rect.w, clip_rect.y + clip_rect.h},
             .payload = {
                 0u,
-                0u,
+                vib_packed,
                 pack_f16x2(radius.tl, radius.tr),
                 pack_f16x2(radius.br, radius.bl),
             },
@@ -1037,68 +1108,68 @@ enum class ThemeId : uint8_t {
 
 struct Theme {
     ThemeId id = ThemeId::Dark;
-    Color bg_canvas = Color::rgb_hex(0x0E1014);
-    Color bg_surface = Color::rgb_hex(0x0F1522);
-    Color bg_elevated = Color::rgb_hex(0x111726);
-    Color bg_chrome = Color::rgb_hex(0x0B101A);
-    Color bg_popup = Color::rgb_hex(0x111827);
-    Color bg_tooltip = Color::rgb_hex(0x0F172A);
-    Color bg_input = Color::rgb_hex(0x0F1420);
-    Color bg_table = Color::rgb_hex(0x090D16);
-    Color bg_node_canvas = Color::rgb_hex(0x090C12);
-    Color surface_control = Color::rgb_hex(0x1E293B);
-    Color surface_hover = Color::rgb_hex(0x334155);
-    Color surface_active = Color::rgb_hex(0x162033);
-    Color surface_disabled = Color::rgb_hex(0x18202C);
-    Color surface_subtle = Color::rgba8(30, 41, 59, 190);
-    Color surface_subtle_hover = Color::rgba8(51, 65, 85, 225);
-    Color surface_subtle_body = Color::rgba8(15, 23, 42, 150);
-    Color surface_selected = Color::rgb_hex(0x1A2942);
-    Color text_primary = Color::white();
-    Color text_secondary = Color::rgb_hex(0xE2E8F0);
-    Color text_body = Color::rgb_hex(0xF1F5F9);
-    Color text_code = Color::rgb_hex(0xCBD5E1);
-    Color text_muted = Color::rgb_hex(0x94A3B8);
-    Color text_disabled = Color::rgb_hex(0x64748B);
-    Color accent = Color::rgb_hex(0x38BDF8);
+    Color bg_canvas = Color::rgb_hex(0x0D0E11);
+    Color bg_surface = Color::rgb_hex(0x14161B);
+    Color bg_elevated = Color::rgb_hex(0x1B1E25);
+    Color bg_chrome = Color::rgb_hex(0x0A0B0E);
+    Color bg_popup = Color::rgb_hex(0x181B22);
+    Color bg_tooltip = Color::rgb_hex(0x1E2129);
+    Color bg_input = Color::rgb_hex(0x101216);
+    Color bg_table = Color::rgb_hex(0x111318);
+    Color bg_node_canvas = Color::rgb_hex(0x0B0C10);
+    Color surface_control = Color::rgb_hex(0x222630);
+    Color surface_hover = Color::rgb_hex(0x2C313E);
+    Color surface_active = Color::rgb_hex(0x1C2029);
+    Color surface_disabled = Color::rgb_hex(0x181B21);
+    Color surface_subtle = Color::rgba8(34, 38, 48, 196);
+    Color surface_subtle_hover = Color::rgba8(48, 54, 68, 224);
+    Color surface_subtle_body = Color::rgba8(18, 20, 26, 175);
+    Color surface_selected = Color::rgb_hex(0x1E2C46);
+    Color text_primary = Color::rgb_hex(0xF4F5F8);
+    Color text_secondary = Color::rgb_hex(0xD4D8E1);
+    Color text_body = Color::rgb_hex(0xE6E8EE);
+    Color text_code = Color::rgb_hex(0xCFD5E2);
+    Color text_muted = Color::rgb_hex(0x8A91A0);
+    Color text_disabled = Color::rgb_hex(0x565C6B);
+    Color accent = Color::rgb_hex(0x5E9EFF);
     Color accent_secondary = Color::rgb_hex(0x818CF8);
-    Color accent_primary = Color::rgb_hex(0x0369A1);
+    Color accent_primary = Color::rgb_hex(0x3B82F6);
     Color focus_ring = Color::rgb_hex(0x60A5FA);
-    Color danger = Color::rgb_hex(0xB91C1C);
-    Color warning = Color::rgb_hex(0xFBBF24);
-    Color border_subtle = Color::rgba8(148, 163, 184, 38);
-    Color border_line = Color::rgba8(148, 163, 184, 34);
-    Color border_input = Color::rgba8(148, 163, 184, 52);
-    Color border_node = Color::rgba8(148, 163, 184, 56);
-    Color border_control = Color::rgb_hex(0x334155);
-    Color border_tooltip = Color::rgb_hex(0x475569);
-    Color selection = Color::rgba8(56, 189, 248, 88);
-    Color selection_hover = Color::rgba8(56, 189, 248, 22);
-    Color zebra_row = Color::rgba8(30, 41, 59, 44);
-    Color active_line = Color::rgba8(148, 163, 184, 16);
-    Color area_fill_top = Color::rgba8(56, 189, 248, 96);
-    Color area_fill_bottom = Color::rgba8(56, 189, 248, 0);
-    Color divider_hover = Color::rgba8(56, 189, 248, 165);
-    Color divider_thumb_hover = Color::rgba8(226, 232, 240, 220);
-    Color grid_minor = Color::rgba8(148, 163, 184, 18);
-    Color grid_major = Color::rgba8(148, 163, 184, 34);
-    Color canvas_border = Color::rgba8(148, 163, 184, 44);
-    Color marquee_fill = Color::rgba(0.28f, 0.56f, 0.96f, 0.16f);
-    Color marquee_border = Color::rgba(0.38f, 0.68f, 1.00f, 0.85f);
-    Color backdrop = Color::rgba8(0, 0, 0, 150);
-    Color shadow = Color::rgba8(0, 0, 0, 130);
-    Color scrollbar_track = Color::rgba8(255, 255, 255, 18);
-    Color scrollbar_thumb = Color::rgba8(148, 163, 184, 125);
-    Color scrollbar_thumb_hover = Color::rgba8(148, 163, 184, 195);
-    Color scrollbar_thumb_drag = Color::rgba8(96, 165, 250, 230);
-    Color syntax_comment = Color::rgb_hex(0x64748B);
-    Color syntax_string = Color::rgb_hex(0xA3BE8C);
-    Color syntax_number = Color::rgb_hex(0xB48EAD);
-    Color syntax_keyword = Color::rgb_hex(0x81A1C1);
-    float radius_small_px = 5.0f;
-    float radius_control_px = 6.0f;
+    Color danger = Color::rgb_hex(0xDC2626);
+    Color warning = Color::rgb_hex(0xF59E0B);
+    Color border_subtle = Color::rgba8(255, 255, 255, 22);
+    Color border_line = Color::rgba8(255, 255, 255, 18);
+    Color border_input = Color::rgba8(255, 255, 255, 32);
+    Color border_node = Color::rgba8(255, 255, 255, 36);
+    Color border_control = Color::rgba8(255, 255, 255, 36);
+    Color border_tooltip = Color::rgba8(255, 255, 255, 42);
+    Color selection = Color::rgba8(94, 158, 255, 84);
+    Color selection_hover = Color::rgba8(94, 158, 255, 26);
+    Color zebra_row = Color::rgba8(255, 255, 255, 8);
+    Color active_line = Color::rgba8(255, 255, 255, 12);
+    Color area_fill_top = Color::rgba8(94, 158, 255, 92);
+    Color area_fill_bottom = Color::rgba8(94, 158, 255, 0);
+    Color divider_hover = Color::rgba8(94, 158, 255, 165);
+    Color divider_thumb_hover = Color::rgba8(244, 245, 248, 220);
+    Color grid_minor = Color::rgba8(255, 255, 255, 12);
+    Color grid_major = Color::rgba8(255, 255, 255, 24);
+    Color canvas_border = Color::rgba8(255, 255, 255, 26);
+    Color marquee_fill = Color::rgba(0.37f, 0.62f, 1.00f, 0.16f);
+    Color marquee_border = Color::rgba(0.37f, 0.62f, 1.00f, 0.85f);
+    Color backdrop = Color::rgba8(0, 0, 0, 155);
+    Color shadow = Color::rgba8(0, 0, 0, 140);
+    Color scrollbar_track = Color::rgba8(0, 0, 0, 0);
+    Color scrollbar_thumb = Color::rgba8(255, 255, 255, 58);
+    Color scrollbar_thumb_hover = Color::rgba8(255, 255, 255, 122);
+    Color scrollbar_thumb_drag = Color::rgba8(255, 255, 255, 180);
+    Color syntax_comment = Color::rgb_hex(0x6E7687);
+    Color syntax_string = Color::rgb_hex(0x98C379);
+    Color syntax_number = Color::rgb_hex(0xC678DD);
+    Color syntax_keyword = Color::rgb_hex(0x61AFEF);
+    float radius_small_px = 6.0f;
+    float radius_control_px = 7.0f;
     float radius_table_px = 8.0f;
-    float radius_input_px = 9.0f;
+    float radius_input_px = 8.0f;
     float radius_panel_px = 10.0f;
     float radius_pill_px = 999.0f;
 
@@ -1266,6 +1337,30 @@ struct SpringSpec {
     static constexpr SpringSpec gentle() noexcept { return {0.50f, 1.0f}; }
 };
 
+enum class EasingKind : uint8_t {
+    Linear = 0,
+    EaseIn = 1,
+    EaseOut = 2,
+    EaseInOut = 3,
+    CubicBezier = 4,
+};
+
+struct EasingSpec {
+    EasingKind kind = EasingKind::EaseOut;
+    float x1 = 0.25f, y1 = 0.1f, x2 = 0.25f, y2 = 1.0f;
+    static constexpr EasingSpec linear() noexcept { return {EasingKind::Linear, 0.0f, 0.0f, 1.0f, 1.0f}; }
+    static constexpr EasingSpec ease_in() noexcept { return {EasingKind::EaseIn, 0.42f, 0.0f, 1.0f, 1.0f}; }
+    static constexpr EasingSpec ease_out() noexcept { return {EasingKind::EaseOut, 0.0f, 0.0f, 0.58f, 1.0f}; }
+    static constexpr EasingSpec ease_in_out() noexcept { return {EasingKind::EaseInOut, 0.42f, 0.0f, 0.58f, 1.0f}; }
+    static constexpr EasingSpec cubic_bezier(float cx1, float cy1, float cx2, float cy2) noexcept {
+        return {EasingKind::CubicBezier, cx1, cy1, cx2, cy2};
+    }
+};
+
+float eval_easing(EasingSpec spec, float t) noexcept;
+float tween(uint32_t id, float target, float duration_sec = 0.22f, EasingSpec spec = EasingSpec::ease_out(), float delay_sec = 0.0f) noexcept;
+float stagger_delay(uint32_t index, float step_sec = 0.04f, float max_delay_sec = 0.40f) noexcept;
+
 // Zero pauses animation time; reduced-motion preference settles springs immediately.
 void set_time_scale(Context* ctx, float scale) noexcept;
 struct LayerDesc {
@@ -1277,6 +1372,7 @@ struct LayerDesc {
     bool animating = false;
     float blur_px = 0.0f;
     bool blend_plus_lighter = false;
+    float rotation_rad = 0.0f;
 };
 void push_layer(const LayerDesc& desc) noexcept;
 void pop_layer() noexcept;
@@ -1303,6 +1399,44 @@ struct BorderBeamStyle {
     Color color = {}, base_color = {};
     float width = 1.5f, angle_rad = 0, sweep_fraction = .25f, glow_px = 0, speed = 1, softness = 1;
     bool beam_active = false, symmetric_dual = false;
+};
+
+struct ShadowLayer {
+    Vec2  offset = {};
+    float blur_px = 0.0f;
+    float spread_px = 0.0f;
+    Color color = {};
+    bool  inset = false;
+};
+
+enum class Elevation : uint8_t {
+    None = 0,
+    Sm = 1,
+    Md = 2,
+    Lg = 3,
+    Xl = 4,
+};
+
+enum class GradientKind : uint8_t {
+    None = 0,
+    Linear = 1,
+    Radial = 2,
+    Conic = 3,
+};
+
+struct GradientStop {
+    Color color = {};
+    float position = 0.0f;
+};
+
+struct GradientDesc {
+    GradientKind kind = GradientKind::None;
+    bool         oklab = true;
+    Vec2         dir = {0.0f, 1.0f};
+    Vec2         center = {0.5f, 0.5f};
+    float        angle_rad = 0.0f;
+    uint8_t      stop_count = 0;
+    GradientStop stops[8] = {};
 };
 
 struct BoxDesc {
@@ -1374,6 +1508,14 @@ struct BoxDesc {
     bool flip_on_overflow = false;
     HitboxBehavior hitbox_behavior = HitboxBehavior::Normal;
     bool stick_to_bottom = false;
+    ShadowLayer shadows[4] = {};
+    uint8_t shadow_count = 0;
+    Elevation elevation = Elevation::None;
+    bool shadow_inset = false;
+    GradientDesc gradient = {};
+    float backdrop_saturation = 1.0f;
+    float backdrop_brightness = 1.0f;
+    float backdrop_noise = 0.0f;
 };
 
 inline constexpr uint16_t kFontSans       = 0u;
@@ -1485,6 +1627,12 @@ struct CollapseDesc {
 bool begin_collapse(const CollapseDesc& desc) noexcept;
 void end_collapse() noexcept;
 
+enum class ImageFit : uint8_t {
+    Fill = 0,
+    Contain = 1,
+    Cover = 2,
+};
+
 struct ImageDesc {
     uint32_t id = 0;
     SDL_GPUTexture* texture = nullptr; // Zero-copy external GPU texture slot
@@ -1500,6 +1648,8 @@ struct ImageDesc {
     float aspect_ratio = 0.0f;
     uint16_t grid_col_span = 1;
     bool continuous_corners = false;
+    ImageFit fit = ImageFit::Fill;
+    Vec2 source_size = {};
 };
 
 struct IconDesc {
@@ -1527,6 +1677,7 @@ struct RectDrawDesc {
     float   softness = 1.0f; // Physical-pixel AA width, minimum 0.5.
     bool continuous_corners = false; // Exponent-4 superellipse corners.
     BorderAlign border_align = BorderAlign::Inside;
+    GradientDesc gradient = {};
 };
 
 struct MeshRectDrawDesc {
@@ -1683,6 +1834,8 @@ struct ImageDrawDesc {
     float           radius = 0.0f;
     bool            foreground = false;
     bool            continuous_corners = false;
+    ImageFit        fit = ImageFit::Fill;
+    Vec2            source_size = {};
 };
 
 struct TextureDesc {
@@ -1693,6 +1846,7 @@ struct TextureDesc {
     bool        srgb = true;
     const char* debug_name = nullptr;
     bool premultiplied_alpha = false;
+    bool generate_mipmaps = false;
 };
 
 struct LoadedTexture {

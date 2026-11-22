@@ -289,6 +289,7 @@ struct HitboxEntry {
     Rect clip_rect = {};
     Vec2 local_scale = {1.0f, 1.0f};
     float visual_opacity = 1.0f;
+    float rotation_rad = 0.0f;
     float clip_radius = 0.0f;
     uint32_t paint_order = 0;
     int16_t z_index = 0;
@@ -2479,7 +2480,17 @@ inline void hitbox_run_hit_test(
         const HitboxEntry& h = hitboxes[idx];
         if (h.behavior == HitboxBehavior::Passthrough) continue;
         if (!hitbox_rounded_contains(h.clip_rect, h.clip_radius, pointer_pos)) continue;
-        if (!h.visual_rect.contains(pointer_pos)) continue;
+        Vec2 local_pt = pointer_pos;
+        if (std::fabs(h.rotation_rad) > 1e-4f) {
+            const float cx = h.visual_rect.x + h.visual_rect.w * 0.5f;
+            const float cy = h.visual_rect.y + h.visual_rect.h * 0.5f;
+            const float px = pointer_pos.x - cx;
+            const float py = pointer_pos.y - cy;
+            const float c = std::cos(h.rotation_rad);
+            const float s = std::sin(h.rotation_rad);
+            local_pt = {cx + c * px + s * py, cy - s * px + c * py};
+        }
+        if (!h.visual_rect.contains(local_pt)) continue;
 
         if (h.is_text_span) {
             if (*out_hovered_span_id == 0u) *out_hovered_span_id = h.id;

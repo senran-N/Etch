@@ -115,6 +115,14 @@ struct ClipShape {
 };
 ETCH_FRAG_STORAGE(13) StructuredBuffer<ClipShape> g_clip_shapes : register(t13, space2);
 
+struct GradientStop {
+    uint  rgba8;
+    float pos;
+    float p0;
+    float p1;
+};
+ETCH_FRAG_STORAGE(14) StructuredBuffer<GradientStop> g_grad_stops : register(t14, space2);
+
 struct VSOut
 {
     float4 position        : SV_Position;
@@ -133,71 +141,11 @@ struct VSOut
     nointerpolation uint2  slug_meta      : TEXCOORD10; // x = band_offset, y = num_hbands | (num_vbands << 16)
 };
 
-// Bitwise IEEE-754 binary16 -> float32 decode for portable SM 6.0 DXIL & Vulkan 1.0 SPIR-V.
-float unpack_f16_bits(uint h)
-{
-    uint sign_bit = (h & 0x8000u) << 16;
-    uint exp_bits = (h >> 10) & 0x1Fu;
-    uint mant_bits = h & 0x03FFu;
-
-    if (exp_bits == 0u)
-    {
-        if (mant_bits == 0u)
-        {
-            return asfloat(sign_bit);
-        }
-        // Normalize subnormal
-        float val = float(mant_bits) * (1.0f / 16777216.0f); // mant * 2^-24
-        return (sign_bit != 0u) ? -val : val;
-    }
-    if (exp_bits == 31u)
-    {
-        uint bits = sign_bit | 0x7F800000u | (mant_bits << 13);
-        return asfloat(bits);
-    }
-    uint f_bits = sign_bit | ((exp_bits + 112u) << 23) | (mant_bits << 13);
-    return asfloat(f_bits);
-}
-
-float2 unpack_f16x2_custom(uint packed)
-{
-    return float2(unpack_f16_bits(packed & 0xFFFFu), unpack_f16_bits((packed >> 16) & 0xFFFFu));
-}
+#include "etch_common.hlsli"
 
 float2 unpack_unorm16x2(uint packed)
 {
     return float2(float(packed & 0xFFFFu), float((packed >> 16) & 0xFFFFu)) * (1.0f / 65535.0f);
-}
-
-float srgb_to_linear_chan(float c)
-{
-    return (c <= 0.04045f) ? (c * (1.0f / 12.92f)) : pow(max((c + 0.055f) * (1.0f / 1.055f), 0.0f), 2.4f);
-}
-
-float4 srgb_to_linear(float4 c)
-{
-    return float4(srgb_to_linear_chan(c.r), srgb_to_linear_chan(c.g), srgb_to_linear_chan(c.b), c.a);
-}
-
-float linear_to_srgb_chan(float c)
-{
-    return (c <= 0.0031308f) ? (c * 12.92f) : (1.055f * pow(max(c, 0.0f), 1.0f / 2.4f) - 0.055f);
-}
-
-float4 linear_to_srgb(float4 c)
-{
-    return float4(linear_to_srgb_chan(c.r), linear_to_srgb_chan(c.g), linear_to_srgb_chan(c.b), c.a);
-}
-
-float4 unpack_rgba8_srgb_to_linear(uint packed)
-{
-    float4 c = float4(
-        float(packed & 0xFFu),
-        float((packed >> 8) & 0xFFu),
-        float((packed >> 16) & 0xFFu),
-        float((packed >> 24) & 0xFFu)
-    ) * (1.0f / 255.0f);
-    return srgb_to_linear(c);
 }
 
 VSOut vs_main(uint vertex_id : SV_VertexID, uint instance_id : SV_InstanceID)
@@ -223,7 +171,7 @@ VSOut vs_main(uint vertex_id : SV_VertexID, uint instance_id : SV_InstanceID)
     }
     else if (kind == ETCH_PRIM_SHADOW)
     {
-        pad = max(bw_soft.y, 1.0f) * 2.0f + 2.0f;
+        pad = ((flags & ETCH_FLAG_LINEAR_GRAD) != 0u) ? 1.0f : (max(bw_soft.y, 1.0f) * 2.0f + 2.0f);
     }
     else if (kind == ETCH_PRIM_PUNCH_HOLE)
     {
@@ -249,7 +197,8 @@ VSOut vs_main(uint vertex_id : SV_VertexID, uint instance_id : SV_InstanceID)
     float2 q_max = p.bounds.xy + p.bounds.zw + pad;
 
     float angle = kind == ETCH_PRIM_ROT_RECT ? bw_soft.y :
-        (kind == ETCH_PRIM_SLUG_GLYPH ? asfloat(p.payload.z) : 0.0f);
+        (kind == ETCH_PRIM_SLUG_GLYPH ? asfloat(p.payload.z) :
+        ((kind == ETCH_PRIM_SHADOW && p.style.z != 0u) ? asfloat(p.style.z) : 0.0f));
     float c = cos(angle), sn = sin(angle);
     if (angle != 0.0f) {
         float2 hs = p.bounds.zw * 0.5f;
@@ -308,6 +257,16 @@ VSOut vs_main(uint vertex_id : SV_VertexID, uint instance_id : SV_InstanceID)
     {
         uv_rect = float4(unpack_f16x2_custom(p.payload.x), unpack_f16x2_custom(p.payload.y));
     }
+    else if (kind == ETCH_PRIM_SHADOW && (flags & ETCH_FLAG_LINEAR_GRAD) != 0u)
+    {
+        grad_dir = unpack_f16x2_custom(p.payload.x);
+        bw_soft.x = unpack_f16x2_custom(p.payload.y).x;
+    }
+    else if ((kind == ETCH_PRIM_RECT || kind == ETCH_PRIM_ROT_RECT) &&
+             (flags & (ETCH_FLAG_LINEAR_GRAD | ETCH_FLAG_RADIAL_GRAD)) == (ETCH_FLAG_LINEAR_GRAD | ETCH_FLAG_RADIAL_GRAD))
+    {
+        grad_dir = unpack_f16x2_custom(p.payload.y);
+    }
     else if (kind != ETCH_PRIM_SLUG_GLYPH && (flags & (ETCH_FLAG_LINEAR_GRAD | ETCH_FLAG_RADIAL_GRAD)) != 0u)
     {
         col1 = unpack_rgba8_srgb_to_linear(kind == ETCH_PRIM_SLUG_FILL ? p.payload.z : p.payload.x);
@@ -352,22 +311,6 @@ uint slug_calc_root_code(float y1, float y2, float y3)
     uint shift = (i2 & 2u) | (i1 & ~2u);
     shift = (i3 & 4u) | (shift & ~4u);
     return (0x2E74u >> shift) & 0x0101u;
-}
-
-// Oklab matrices: Bjorn Ottosson's public-domain reference (see THIRD_PARTY_NOTICES.md).
-float3 mesh_to_lab(float3 rgb) {
-    float3 lms = float3(dot(rgb,float3(.4122214708,.5363325363,.0514459929)),
-        dot(rgb,float3(.2119034982,.6806995451,.1073969566)),dot(rgb,float3(.0883024619,.2817188376,.6299787005)));
-    lms = pow(max(lms,0.0f),1.0f/3.0f);
-    return float3(dot(lms,float3(.2104542553,.7936177850,-.0040720468)),
-        dot(lms,float3(1.9779984951,-2.4285922050,.4505937099)),dot(lms,float3(.0259040371,.7827717662,-.8086757660)));
-}
-float3 mesh_from_lab(float3 lab) {
-    float3 lms = float3(lab.x+.3963377774*lab.y+.2158037573*lab.z,
-        lab.x-.1055613458*lab.y-.0638541728*lab.z,lab.x-.0894841775*lab.y-1.2914855480*lab.z);
-    lms=lms*lms*lms;
-    return saturate(float3(dot(lms,float3(4.0767416621,-3.3077115913,.2309699292)),
-        dot(lms,float3(-1.2684380046,2.6097574011,-.3413193965)),dot(lms,float3(-.0041960863,-.7034186147,1.7076147010))));
 }
 
 float2 slug_solve_horiz_poly(float4 p12, float2 p3)
@@ -507,22 +450,6 @@ float slug_render_dyn(float2 coord, float2 size, uint offset, uint counts) {
     return slug_render_shared(coord, size, offset, counts, g_dyn_slug_curves, g_dyn_slug_bands);
 }
 
-float sd_rounded_box(float2 p, float2 half_size, float4 radii, bool continuous = false)
-{
-    // radii: x = tl (-x,-y), y = tr (+x,-y), z = br (+x,+y), w = bl (-x,+y)
-    float2 pair = (p.x > 0.0f) ? radii.zy : radii.wx;
-    float r = (p.y > 0.0f) ? pair.x : pair.y;
-    r = max(min(r, min(half_size.x, half_size.y)), 0.0f);
-    float2 q = abs(p) - half_size + r;
-    if (continuous && r > 0.0f) {
-        float2 v = max(q, 0.0f);
-        float n = sqrt(length(v * v));
-        float gradient = n > 1e-4f ? length(v * v * v) / (n * n * n) : 1.0f;
-        return (min(max(q.x, q.y), 0.0f) + n - r) / max(gradient, 1e-4f);
-    }
-    return min(max(q.x, q.y), 0.0f) + length(max(q, 0.0f)) - r;
-}
-
 float2 sd_quadratic_bezier(float2 pos, float2 A, float2 B, float2 C)
 {
     float2 a = B - A;
@@ -578,15 +505,6 @@ float2 sd_quadratic_bezier(float2 pos, float2 A, float2 B, float2 C)
     return float2(sqrt(max(best_d2, 0.0f)), best_t);
 }
 
-float erf_approx(float x)
-{
-    float ax = abs(x);
-    float t = 1.0f / (1.0f + 0.3275911f * ax);
-    float poly = (((((1.061405429f * t - 1.453152027f) * t + 1.421413741f) * t - 0.284496736f) * t + 0.254829592f) * t);
-    float e = 1.0f - poly * exp(-ax * ax);
-    return (x < 0.0f) ? -e : e;
-}
-
 float4 sample_slot(uint slot, float2 uv)
 {
     if (slot == 1u) return g_tex1.SampleLevel(g_smp1, uv, 0.0f);
@@ -600,11 +518,79 @@ float4 sample_slot(uint slot, float2 uv)
     return g_tex0.SampleLevel(g_smp0, uv, 0.0f);
 }
 
+float4 sample_slot_grad(uint slot, float2 uv, float2 ddx_uv, float2 ddy_uv)
+{
+    if (slot == 1u) return g_tex1.SampleGrad(g_smp1, uv, ddx_uv, ddy_uv);
+    if (slot == 2u) return g_tex2.SampleGrad(g_smp2, uv, ddx_uv, ddy_uv);
+    if (slot == 3u) return g_tex3.SampleGrad(g_smp3, uv, ddx_uv, ddy_uv);
+    if (slot == 4u) return g_tex4.SampleGrad(g_smp4, uv, ddx_uv, ddy_uv);
+    if (slot == 5u) return g_tex5.SampleGrad(g_smp5, uv, ddx_uv, ddy_uv);
+    if (slot == 6u) return g_tex6.SampleGrad(g_smp6, uv, ddx_uv, ddy_uv);
+    if (slot == 7u) return g_tex7.SampleGrad(g_smp7, uv, ddx_uv, ddy_uv);
+    if (slot == 8u) return g_tex8.SampleGrad(g_smp8, uv, ddx_uv, ddy_uv);
+    return g_tex0.SampleLevel(g_smp0, uv, 0.0f);
+}
+
 float4 gradient_color(VSOut input, float2 norm_uv) {
     float4 fill_col = input.color0;
     uint flags = input.meta.y;
     bool has_grad = false;
-    if ((flags & ETCH_FLAG_LINEAR_GRAD) != 0u)
+    if ((flags & (ETCH_FLAG_LINEAR_GRAD | ETCH_FLAG_RADIAL_GRAD)) == (ETCH_FLAG_LINEAR_GRAD | ETCH_FLAG_RADIAL_GRAD))
+    {
+        uint meta = input.slug_meta.x;
+        uint stop_off = meta & 0xFFFFu;
+        uint stop_cnt = clamp((meta >> 16) & 0xFu, 2u, 8u);
+        uint grad_kind = (meta >> 20) & 0x3u;
+        bool use_oklab = ((meta >> 22) & 1u) != 0u;
+        float t = 0.0f;
+        if (grad_kind == 1u)
+        {
+            float2 dir = input.grad_params.xy;
+            float dir_len = length(dir);
+            dir = (dir_len > 1e-4f) ? (dir / dir_len) : float2(0.0f, 1.0f);
+            float span = max(0.5f * (abs(dir.x) + abs(dir.y)), 1e-4f);
+            t = saturate(0.5f + dot(norm_uv - 0.5f, dir) / (2.0f * span));
+        }
+        else if (grad_kind == 2u)
+        {
+            t = saturate(length((norm_uv - input.grad_params.xy) * 2.0f));
+        }
+        else if (grad_kind == 3u)
+        {
+            float2 v = norm_uv - input.grad_params.xy;
+            float ang0 = g_grad_stops[stop_off].p0;
+            float a = ((abs(v.x) + abs(v.y)) > 1e-6f ? atan2(v.y, v.x) : 0.0f) - ang0;
+            t = frac(a * (1.0f / 6.28318531f));
+        }
+        GradientStop s_lo = g_grad_stops[stop_off];
+        GradientStop s_hi = s_lo;
+        [loop] for (uint i = 1u; i < stop_cnt; ++i)
+        {
+            GradientStop s_cur = g_grad_stops[stop_off + i];
+            s_hi = s_cur;
+            if (t < s_cur.pos)
+            {
+                break;
+            }
+            s_lo = s_cur;
+        }
+        float4 c_lo = unpack_rgba8_srgb_to_linear(s_lo.rgba8);
+        float4 c_hi = unpack_rgba8_srgb_to_linear(s_hi.rgba8);
+        float denom = s_hi.pos - s_lo.pos;
+        float u = (denom > 1e-6f) ? saturate((t - s_lo.pos) / denom) : ((t < s_lo.pos) ? 0.0f : 1.0f);
+        if (use_oklab)
+        {
+            float3 lab_lo = etch_rgb_to_oklab(c_lo.rgb);
+            float3 lab_hi = etch_rgb_to_oklab(c_hi.rgb);
+            fill_col = float4(etch_oklab_to_rgb(lerp(lab_lo, lab_hi, u)), lerp(c_lo.a, c_hi.a, u));
+        }
+        else
+        {
+            fill_col = lerp(c_lo, c_hi, u);
+        }
+        has_grad = true;
+    }
+    else if ((flags & ETCH_FLAG_LINEAR_GRAD) != 0u)
     {
         float2 dir = input.grad_params.xy;
         float dir_len = length(dir);
@@ -644,7 +630,7 @@ float4 ps_main(VSOut input) : SV_Target0
     float clip_d;
     if ((flags & ETCH_FLAG_ROUNDED_CLIP) != 0u && clip_r != 0.0f)
     {
-        clip_d = sd_rounded_box(clip_rel, clip_half, abs(clip_r).xxxx, clip_r < 0.0f);
+        clip_d = etch_sd_rounded_box(clip_rel, clip_half, abs(clip_r).xxxx, clip_r < 0.0f);
     }
     else
     {
@@ -658,7 +644,7 @@ float4 ps_main(VSOut input) : SV_Target0
         ClipShape shape=g_clip_shapes[clip_index];
         float2 half_shape=shape.bounds.zw*0.5f;
         float2 relative=input.pixel_pos-shape.bounds.xy-half_shape;
-        float distance=sd_rounded_box(relative,half_shape,shape.radii,shape.meta.y!=0u);
+        float distance=etch_sd_rounded_box(relative,half_shape,shape.radii,shape.meta.y!=0u);
         clip_cov=min(clip_cov,saturate(0.5f-distance));
         float2 tb=unpack_f16x2_custom(shape.meta.z),lr=unpack_f16x2_custom(shape.meta.w);
         if(tb.x>0.0f) fade_cov*=smoothstep(0.0f,tb.x,input.pixel_pos.y-shape.bounds.y);
@@ -689,12 +675,12 @@ float4 ps_main(VSOut input) : SV_Target0
     float4 out_pm = float4(0.0f, 0.0f, 0.0f, 0.0f);
 
     if (kind == ETCH_PRIM_PUNCH_HOLE) {
-        float d=sd_rounded_box(p_rel,half_size,input.radii,(flags & ETCH_FLAG_ROUND_CAP)!=0u);
+        float d=etch_sd_rounded_box(p_rel,half_size,input.radii,(flags & ETCH_FLAG_ROUND_CAP)!=0u);
         float coverage=saturate(.5f-d/max(input.grad_params.w,.5f))*input.color0.a;
         out_pm=float4(0.0f,0.0f,0.0f,coverage);
     }
     else if (kind == ETCH_PRIM_BORDER_BEAM) {
-        float d=sd_rounded_box(p_rel,half_size,input.radii,(flags & ETCH_FLAG_ROUND_CAP)!=0u);
+        float d=etch_sd_rounded_box(p_rel,half_size,input.radii,(flags & ETCH_FLAG_ROUND_CAP)!=0u);
         float width=input.uv_rect.z;
         float softness=max(input.grad_params.y,.5f);
         float outer=saturate(.5f-d/softness);
@@ -719,21 +705,21 @@ float4 ps_main(VSOut input) : SV_Target0
         if(input.grad_params.y!=0.0f) uv=saturate(uv+.12f*sin(uv.yx*3.14159265f+input.grad_params.y));
         float4 tl=input.color0, tr=input.border_color, br=input.color1, bl=input.uv_rect;
         bool lab=(flags & 1u)!=0u;
-        if(lab) {tl.rgb=mesh_to_lab(tl.rgb);tr.rgb=mesh_to_lab(tr.rgb);br.rgb=mesh_to_lab(br.rgb);bl.rgb=mesh_to_lab(bl.rgb);}
+        if(lab) {tl.rgb=etch_rgb_to_oklab(tl.rgb);tr.rgb=etch_rgb_to_oklab(tr.rgb);br.rgb=etch_rgb_to_oklab(br.rgb);bl.rgb=etch_rgb_to_oklab(bl.rgb);}
         float4 col=lerp(lerp(tl,tr,uv.x),lerp(bl,br,uv.x),uv.y);
-        if(lab) col.rgb=mesh_from_lab(col.rgb);
+        if(lab) col.rgb=etch_oklab_to_rgb(col.rgb);
         if(input.grad_params.x>0.0f) {
             float ign=frac(52.9829189f*frac(dot(input.pixel_pos,float2(.06711056f,.00583715f))));
             float4 encoded=linear_to_srgb(col);
             encoded.rgb=saturate(encoded.rgb+(ign-.5f)*input.grad_params.x);
             col=srgb_to_linear(encoded);
         }
-        float d=sd_rounded_box(p_rel,half_size,input.radii,(flags & ETCH_FLAG_ROUND_CAP)!=0u);
+        float d=etch_sd_rounded_box(p_rel,half_size,input.radii,(flags & ETCH_FLAG_ROUND_CAP)!=0u);
         out_pm=float4(col.rgb,1.0f)*(col.a*saturate(.5f-d));
     }
     else if (kind == ETCH_PRIM_RECT || kind == ETCH_PRIM_ROT_RECT)
     {
-        float d = sd_rounded_box(p_local, half_size, input.radii, (flags & ETCH_FLAG_ROUND_CAP) != 0u);
+        float d = etch_sd_rounded_box(p_local, half_size, input.radii, (flags & ETCH_FLAG_ROUND_CAP) != 0u);
 
         float4 fill_col = gradient_color(input, (p_local + half_size) / size);
 
@@ -750,14 +736,24 @@ float4 ps_main(VSOut input) : SV_Target0
     }
     else if (kind == ETCH_PRIM_SHADOW)
     {
-        float blur       = max(input.grad_params.w, 1.0f);
-        float sigma      = max(blur * 0.5f, 0.5f);
-        float inv_s2     = 1.0f / max(sigma * 1.41421356f, 0.5f);
-        float d          = sd_rounded_box(p_rel, half_size, input.radii, (flags & ETCH_FLAG_ROUND_CAP) != 0u);
-        float edge_cov   = 0.5f * (1.0f - erf_approx(d * inv_s2));
-        float size_atten = erf_approx(half_size.x * inv_s2) * erf_approx(half_size.y * inv_s2);
-        float shadow_cov = saturate(edge_cov * size_atten);
-        out_pm           = float4(input.color0.rgb, 1.0f) * (input.color0.a * shadow_cov);
+        float blur   = max(input.grad_params.w, 1.0f);
+        float sigma  = max(blur * 0.5f, 0.5f);
+        float inv_s2 = 1.0f / max(sigma * 1.41421356f, 0.5f);
+        bool continuous = (flags & ETCH_FLAG_ROUND_CAP) != 0u;
+        if ((flags & ETCH_FLAG_LINEAR_GRAD) != 0u)
+        {
+            float shadow_cov = etch_eval_inset_shadow_cov(
+                p_local, half_size, input.radii, input.grad_params.xy, input.grad_params.z, inv_s2, continuous);
+            out_pm = float4(input.color0.rgb, 1.0f) * (input.color0.a * shadow_cov);
+        }
+        else
+        {
+            float d          = etch_sd_rounded_box(p_local, half_size, input.radii, continuous);
+            float edge_cov   = 0.5f * (1.0f - erf_approx(d * inv_s2));
+            float size_atten = erf_approx(half_size.x * inv_s2) * erf_approx(half_size.y * inv_s2);
+            float shadow_cov = saturate(edge_cov * size_atten);
+            out_pm           = float4(input.color0.rgb, 1.0f) * (input.color0.a * shadow_cov);
+        }
     }
     else if (kind == ETCH_PRIM_GLYPH)
     {
@@ -855,9 +851,10 @@ float4 ps_main(VSOut input) : SV_Target0
     {
         float2 norm_uv = clamp((input.pixel_pos - input.bounds.xy) / size, 0.0f, 1.0f);
         float2 uv      = lerp(input.uv_rect.xy, input.uv_rect.zw, norm_uv);
-        float4 texel   = sample_slot(tex_slot, uv);
+        float2 uv_span = input.uv_rect.zw - input.uv_rect.xy;
+        float4 texel   = sample_slot_grad(tex_slot, uv, float2(uv_span.x / size.x, 0.0f), float2(0.0f, uv_span.y / size.y));
 
-        float d         = sd_rounded_box(p_rel, half_size, input.radii, (flags & ETCH_FLAG_LINEAR_GRAD) != 0u);
+        float d         = etch_sd_rounded_box(p_rel, half_size, input.radii, (flags & ETCH_FLAG_LINEAR_GRAD) != 0u);
         float border_w  = input.grad_params.z;
         float softness  = input.grad_params.w;
         float inv_aa    = 1.0f / max(softness, 0.5f);
@@ -882,20 +879,40 @@ float4 ps_main(VSOut input) : SV_Target0
     {
         float2 backdrop_uv = saturate(input.pixel_pos * input.uv_rect.xy);
         float4 blur_lin    = sample_slot(tex_slot, backdrop_uv);
+        uint   vib         = input.slug_meta.y;
+        float  noise_amp   = 0.0f;
+        if ((vib >> 24) != 0u)
+        {
+            float sat    = float(vib & 0xFFu) * (2.5f / 255.0f);
+            float bright = float((vib >> 8) & 0xFFu) * (2.0f / 255.0f);
+            noise_amp    = float((vib >> 16) & 0xFFu) * (0.10f / 255.0f);
+            if (blur_lin.a > 1e-4f)
+            {
+                float3 rgb   = blur_lin.rgb / blur_lin.a;
+                float  luma  = dot(rgb, float3(0.2126f, 0.7152f, 0.0722f));
+                rgb          = max(lerp(luma.xxx, rgb, sat) * bright, float3(0.0f, 0.0f, 0.0f));
+                blur_lin.rgb = rgb * blur_lin.a;
+            }
+        }
         // Porter-Duff straight tint OVER premultiplied backdrop preserves alpha on transparent windows.
         float4 tint_pm     = float4(input.color0.rgb * input.color0.a, input.color0.a);
         float4 glass_pm    = tint_pm + blur_lin * (1.0f - input.color0.a);
 
-        // Apply +-0.5/255 IGN dithering in straight sRGB space, then re-premultiply.
+        // Apply optional vibrancy micro-grain and +-0.5/255 IGN dithering in straight sRGB space, then re-premultiply.
         if (glass_pm.a > 1e-4f)
         {
             float4 straight_srgb = linear_to_srgb(float4(saturate(glass_pm.rgb / glass_pm.a), 1.0f));
+            if (noise_amp > 0.0f)
+            {
+                float ign2        = frac(52.9829189f * frac(dot(input.pixel_pos + float2(17.0f, 31.0f), float2(0.06711056f, 0.00583715f))));
+                straight_srgb.rgb = saturate(straight_srgb.rgb + (ign2 - 0.5f) * noise_amp);
+            }
             float  ign           = frac(52.9829189f * frac(dot(input.pixel_pos, float2(0.06711056f, 0.00583715f))));
             straight_srgb.rgb    = saturate(straight_srgb.rgb + (ign - 0.5f) * (1.0f / 255.0f));
             glass_pm.rgb         = srgb_to_linear(straight_srgb).rgb * glass_pm.a;
         }
 
-        float d         = sd_rounded_box(p_rel, half_size, input.radii, (flags & ETCH_FLAG_ROUND_CAP) != 0u);
+        float d         = etch_sd_rounded_box(p_rel, half_size, input.radii, (flags & ETCH_FLAG_ROUND_CAP) != 0u);
         float border_w  = input.grad_params.z;
         float softness  = input.grad_params.w;
         float inv_aa    = 1.0f / max(softness, 0.5f);

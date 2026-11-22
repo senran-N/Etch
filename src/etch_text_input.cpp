@@ -2144,13 +2144,14 @@ void emit_text_input_command(
             inner_clip, dpi, desc.multiline, false, &gpx, &gpy);
     }
 
-    if(desc.multiline && ws) {
-        const ScrollbarGeom sb=compute_vscrollbar_geom(ws);
-        if(sb.visible) {
-            const Theme& thm=active_theme(ctx);
-            const bool held=ctx->active_ui->active_id==id_index(desc.id,kScrollbarYTag);
-            const Rect thumb={sb.thumb.x*dpi,sb.thumb.y*dpi,sb.thumb.w*dpi,sb.thumb.h*dpi};
-            push_prim(ctx,Prim::make_rect(thumb,outer_clip.rect,held?thm.scrollbar_thumb_drag:thm.scrollbar_thumb,Corners::all(thumb.w*.5f)));
+    if (desc.multiline && ws) {
+        const ScrollbarGeom sb = compute_vscrollbar_geom(ws);
+        if (sb.visible) {
+            const Theme& thm = active_theme(ctx);
+            emit_scrollbar_overlay(
+                ctx, desc.id, sb, false, outer_clip,
+                thm.scrollbar_track, thm.scrollbar_thumb,
+                thm.scrollbar_thumb_hover, thm.scrollbar_thumb_drag, dpi);
         }
     }
     // 3. Emit SDF caret

@@ -38,7 +38,8 @@ void emit_vector_icon_quad(
             std::fabs(ln->resolved_scale.x - 1.0f) > 1e-4f ||
             std::fabs(ln->resolved_scale.y - 1.0f) > 1e-4f ||
             std::fabs(ln->resolved_offset_px.x) > 1e-4f ||
-            std::fabs(ln->resolved_offset_px.y) > 1e-4f;
+            std::fabs(ln->resolved_offset_px.y) > 1e-4f ||
+            std::fabs(ln->resolved_rotation_rad) > 1e-4f;
     }
     const bool snap_icon = allow_snap && (angle_rad == 0.0f) && ctx->active_ui->pixel_snap && !layer_blocks_snap;
     const float qx = target_px.x + 0.5f * (target_px.w - w);
@@ -506,7 +507,10 @@ void emit_draw_list_command(
     const Vec2 origin = { box_px.x, box_px.y };
     const auto* previous_layer=ctx->active_render_layer;
     for (const DrawCmdNode* node = head; node != nullptr; node = node->next) {
-        ctx->active_render_layer=node->layer;
+        ctx->active_render_layer = node->layer;
+        if (ctx->active_render_layer) {
+            resolve_layer_chain(ctx, ctx->active_render_layer, dpi);
+        }
         const float scale = node->world_scale * dpi;
         switch (node->kind) {
             case DrawCmdKind::Callback: {
@@ -572,8 +576,15 @@ void emit_draw_list_command(
                 Corners rad_px = scale_corners(rd.radius, scale);
                 const float bw_px = rd.border_width * scale;
                 align_border_bounds(&r_px,&rad_px,bw_px,rd.border_align);
+                const bool want_multi_grad = (rd.gradient.kind != GradientKind::None) && (rd.gradient.stop_count >= 2u);
                 const bool has_grad = (rd.fill_end.pack_rgba8() != 0u) || rd.radial_gradient;
-                if (std::fabs(rd.angle_rad) > 1e-5f) {
+                if (want_multi_grad) {
+                    push_prim(
+                        ctx,
+                        make_multistop_or_fallback_rect_prim(
+                            ctx, r_px, clip, rd.gradient, rd.fill, rad_px, rd.border_color, bw_px,
+                            rd.continuous_corners, rd.softness, rd.angle_rad));
+                } else if (std::fabs(rd.angle_rad) > 1e-5f) {
                     push_prim(ctx, continuous_prim(Prim::make_rotated_rect(r_px, clip.rect, rd.fill, rd.angle_rad,
                         rad_px, rd.border_color, bw_px, rd.fill_end, rd.gradient_dir, rd.radial_gradient, clip.radius), rd.continuous_corners));
                 } else if (has_grad) {
@@ -755,9 +766,11 @@ void emit_draw_list_command(
                     .w = im.rect.w * scale,
                     .h = im.rect.h * scale,
                 };
-                if (ctx->active_ui->pixel_snap) target_px = snap_pixel_rect(target_px);
                 Vec2 uv_min = { im.uv_rect.x, im.uv_rect.y };
                 Vec2 uv_max = { im.uv_rect.x + im.uv_rect.w, im.uv_rect.y + im.uv_rect.h };
+                apply_image_fit(ctx, im.fit, im.source_size, im.sprite_id, &target_px, &uv_min, &uv_max);
+                const bool layer_rot = ctx->active_render_layer && std::fabs(ctx->active_render_layer->resolved_rotation_rad) > 1e-4f;
+                if (ctx->active_ui->pixel_snap && !layer_rot) target_px = snap_pixel_rect(target_px);
                 if (im.sprite_id != kInvalidSprite && !resolve_sprite_uv_rect(ctx, im.sprite_id, uv_min, uv_max, &uv_min, &uv_max)) break;
                 const uint8_t img_flags = static_cast<uint8_t>(
                     ((im.sprite_id != kInvalidSprite || surface_texture_premultiplied(ctx, im.texture)) ? PrimFlag_Premultiplied : PrimFlag_None) |
@@ -1356,7 +1369,9 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
     ctx->active_ui->active_vlist_count = 0;
     ++ctx->arena_epoch;
     shape_cache_begin_frame(ctx);
-    ctx->clip_shape_count=1;ctx->render_clip_index=0;
+    ctx->clip_shape_count = 1u;
+    ctx->grad_stop_count = 1u;
+    ctx->render_clip_index = 0u;
     ctx->dyn_slug_curve_count = 0;
     ctx->dyn_slug_band_count = 0;
     ctx->prim_count = 0u;
@@ -1967,6 +1982,18 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
     layout_begin(ctx->active_ui->layout, logical_w, logical_h);
 }
 
+static void resolve_gradient_theme_colors(GradientDesc* g, const Theme& thm) noexcept {
+    if (g->kind == GradientKind::None) {
+        return;
+    }
+    const uint8_t gc = g->stop_count < 8u ? g->stop_count : 8u;
+    for (uint8_t gi = 0u; gi < gc; ++gi) {
+        g->stops[gi].color = resolve_theme_color(
+            g->stops[gi].color,
+            gi == 0u ? thm.bg_surface : thm.bg_elevated);
+    }
+}
+
 void begin_box(const BoxDesc& desc_in) noexcept {
     Context* ctx = current_context();
     if (!ctx || !ctx->in_frame) {
@@ -1995,6 +2022,10 @@ void begin_box(const BoxDesc& desc_in) noexcept {
     desc.opacity=std::fmin(1.f,std::fmax(0.f,desc.opacity));
     if(!std::isfinite(desc.hover_scale) || desc.hover_scale<=0) desc.hover_scale=1;
     if(!std::isfinite(desc.press_scale) || desc.press_scale<=0) desc.press_scale=1;
+    desc.backdrop_saturation = std::isfinite(desc.backdrop_saturation) ? clamp_range(desc.backdrop_saturation, 0.0f, 2.5f) : 1.0f;
+    desc.backdrop_brightness = std::isfinite(desc.backdrop_brightness) ? clamp_range(desc.backdrop_brightness, 0.0f, 2.0f) : 1.0f;
+    desc.backdrop_noise = std::isfinite(desc.backdrop_noise) ? clamp_range(desc.backdrop_noise, 0.0f, 0.1f) : 0.0f;
+    if (desc.shadow_count > 4u) desc.shadow_count = 4u;
     if (wscale != 1.0f) {
         desc.width = scale_sizing(desc.width, wscale);
         desc.height = scale_sizing(desc.height, wscale);
@@ -2018,6 +2049,12 @@ void begin_box(const BoxDesc& desc_in) noexcept {
         desc.shadow_spread *= wscale;
         desc.shadow_offset.x *= wscale;
         desc.shadow_offset.y *= wscale;
+        for (uint8_t si = 0u; si < desc.shadow_count; ++si) {
+            desc.shadows[si].blur_px *= wscale;
+            desc.shadows[si].spread_px *= wscale;
+            desc.shadows[si].offset.x *= wscale;
+            desc.shadows[si].offset.y *= wscale;
+        }
         desc.floating_offset.x *= wscale;
         desc.floating_offset.y *= wscale;
     }
@@ -2081,6 +2118,10 @@ void begin_box(const BoxDesc& desc_in) noexcept {
     eff_desc.background_end = resolve_theme_color(eff_desc.background_end, thm.bg_elevated);
     eff_desc.border_color = resolve_theme_color(eff_desc.border_color, thm.border_subtle);
     eff_desc.shadow_color = resolve_theme_color(eff_desc.shadow_color, thm.shadow);
+    for (uint8_t si = 0u; si < eff_desc.shadow_count; ++si) {
+        eff_desc.shadows[si].color = resolve_theme_color(eff_desc.shadows[si].color, thm.shadow);
+    }
+    resolve_gradient_theme_colors(&eff_desc.gradient, thm);
     eff_desc.radius = resolve_theme_corners(eff_desc.radius, Corners::all(thm.radius_panel_px));
 
     if(box_ws && (desc.hover_background.a || desc.hover_border_color.a || desc.hover_scale!=1 || desc.press_scale!=1)) {
@@ -2098,11 +2139,18 @@ void begin_box(const BoxDesc& desc_in) noexcept {
     const bool has_border = (eff_desc.border_color.a > 0u &&
         (eff_desc.border_width > 0.0f || has_border_sides(eff_desc))) || has_beam;
     const bool has_scrollbar = is_scroll && eff_desc.show_scrollbar;
+    const bool has_multi_grad = (eff_desc.gradient.kind != GradientKind::None) && (eff_desc.gradient.stop_count >= 2u);
+    const bool has_single_shadow = eff_desc.shadow_inset
+        ? inset_shadow_active(eff_desc.shadow_color, eff_desc.shadow_blur, eff_desc.shadow_spread, eff_desc.shadow_offset)
+        : (eff_desc.shadow_color.a > 0u && std::isfinite(eff_desc.shadow_blur) && eff_desc.shadow_blur > 0.0f);
+    const bool has_multi_shadow = (eff_desc.shadow_count > 0u) || (eff_desc.elevation != Elevation::None);
     const bool has_visual =
         eff_desc.background.a > 0u ||
         eff_desc.background_end.a > 0u ||
         eff_desc.radial_gradient ||
-        (eff_desc.shadow_color.a > 0u && eff_desc.shadow_blur > 0.0f) ||
+        has_multi_grad ||
+        has_single_shadow ||
+        has_multi_shadow ||
         eff_desc.backdrop_blur > 0.0f ||
         has_border || focus_ring;
 
@@ -2110,7 +2158,7 @@ void begin_box(const BoxDesc& desc_in) noexcept {
         SubtreeMeta* sm = ctx->active_ui->subtree_stack[ctx->active_ui->subtree_depth - 1u].meta;
         if (sm) {
             if (desc.id != 0u) sm->has_interactive = true;
-            if (eff_desc.attach_to != AttachTo::None || eff_desc.backdrop_blur > 0.0f ||
+            if (eff_desc.attach_to != AttachTo::None || eff_desc.backdrop_blur > 0.0f || has_multi_grad ||
                 eff_desc.opacity < 1.0f || eff_desc.animate_layout || eff_desc.hero_id != 0u || is_scroll)
             {
                 sm->tainted = true;
@@ -2652,6 +2700,14 @@ void draw_rect(const RectDrawDesc& desc) noexcept {
         eff.fill_end = resolve_theme_color(eff.fill_end, thm.bg_elevated);
         eff.border_color = resolve_theme_color(eff.border_color, thm.border_subtle);
         eff.radius = resolve_theme_corners(eff.radius, Corners::all(thm.radius_panel_px));
+        resolve_gradient_theme_colors(&eff.gradient, thm);
+        if (eff.gradient.kind != GradientKind::None && eff.gradient.stop_count >= 2u &&
+            ctx->active_ui->subtree_depth > 0u)
+        {
+            if (SubtreeMeta* sm = ctx->active_ui->subtree_stack[ctx->active_ui->subtree_depth - 1u].meta) {
+                sm->tainted = true;
+            }
+        }
         node->kind = DrawCmdKind::Rect;
         node->rect = eff;
     }

@@ -1007,6 +1007,169 @@ static bool test_versioned_c_abi(EtchContext* ctx) {
     return true;
 }
 
+static bool test_v027_c_abi(EtchContext* ctx) {
+    const EtchShadowLayer sl = etch_shadow_layer_default();
+    if (sl.offset.x != 0.0f || sl.offset.y != 0.0f || sl.blur_px != 0.0f ||
+        sl.spread_px != 0.0f || sl.color.a != 0u || sl.inset) {
+        return false;
+    }
+
+    const EtchGradientDesc gd = etch_gradient_desc_default();
+    if (gd.kind != ETCH_GRADIENT_NONE || !gd.oklab ||
+        gd.dir.x != 0.0f || gd.dir.y != 1.0f ||
+        gd.center.x != 0.5f || gd.center.y != 0.5f ||
+        gd.angle_rad != 0.0f || gd.stop_count != 0u) {
+        return false;
+    }
+
+    const EtchEasingSpec el = etch_easing_linear();
+    const EtchEasingSpec ei = etch_easing_in();
+    const EtchEasingSpec eo = etch_easing_out();
+    const EtchEasingSpec eio = etch_easing_in_out();
+    const EtchEasingSpec ecb = etch_easing_cubic_bezier(0.22f, 1.0f, 0.36f, 1.0f);
+    if (el.kind != ETCH_EASING_LINEAR || ei.kind != ETCH_EASING_IN ||
+        eo.kind != ETCH_EASING_OUT || eio.kind != ETCH_EASING_IN_OUT ||
+        ecb.kind != ETCH_EASING_CUBIC_BEZIER) {
+        return false;
+    }
+    if (etch_eval_easing(el, 0.0f) != 0.0f || etch_eval_easing(el, 1.0f) != 1.0f ||
+        etch_eval_easing(ei, 0.5f) >= 0.5f || etch_eval_easing(eo, 0.5f) <= 0.5f ||
+        etch_eval_easing(eio, 0.25f) >= 0.25f || etch_eval_easing(eio, 0.75f) <= 0.75f ||
+        etch_eval_easing(ecb, 0.5f) <= 0.7f) {
+        return false;
+    }
+
+    const float sd0 = etch_stagger_delay(0u, 0.05f, 0.12f);
+    const float sd3 = etch_stagger_delay(3u, 0.05f, 0.12f);
+    if (sd0 != 0.0f || sd3 < 0.119f || sd3 > 0.121f) {
+        return false;
+    }
+
+    const EtchLayerDesc ld = etch_layer_desc_default();
+    const EtchTextureDesc td = etch_texture_desc_default();
+    const EtchImageDesc imd = etch_image_desc_default();
+    const EtchImageDrawDesc imdd = etch_image_draw_desc_default();
+    const EtchRectDrawDesc rdd = etch_rect_draw_desc_default();
+    const EtchBoxDesc bd = etch_box_desc_default();
+    if (ld.rotation_rad != 0.0f || td.generate_mipmaps ||
+        imd.fit != ETCH_IMAGE_FIT_FILL || imd.source_size.x != 0.0f || imd.source_size.y != 0.0f ||
+        imdd.fit != ETCH_IMAGE_FIT_FILL || imdd.source_size.x != 0.0f || imdd.source_size.y != 0.0f ||
+        rdd.gradient.kind != ETCH_GRADIENT_NONE || rdd.gradient.stop_count != 0u ||
+        bd.backdrop_saturation != 1.0f || bd.backdrop_brightness != 1.0f || bd.backdrop_noise != 0.0f ||
+        bd.shadow_count != 0u || bd.elevation != ETCH_ELEVATION_NONE || bd.shadow_inset ||
+        bd.gradient.kind != ETCH_GRADIENT_NONE || bd.reserved_v026_pad != 0u) {
+        return false;
+    }
+
+    /* Exercise etch_tween across frames until settled. */
+    {
+        const uint32_t tw_id = etch_id("c_v027_tween");
+        EtchFrameDesc tf = etch_frame_desc_default();
+        tf.viewport_w = 240u;
+        tf.viewport_h = 120u;
+        tf.dt_seconds = 0.0f;
+        etch_begin_frame(ctx, &tf);
+        const float v0 = etch_tween(tw_id, 0.0f, 0.2f, eio, 0.05f);
+        etch_end_frame(ctx);
+        if (v0 < -1e-4f || v0 > 1e-4f) {
+            return false;
+        }
+        tf.dt_seconds = 0.02f;
+        float v_last = 0.0f;
+        for (int step = 0; step < 20; ++step) {
+            etch_begin_frame(ctx, &tf);
+            v_last = etch_tween(tw_id, 100.0f, 0.2f, eio, 0.05f);
+            etch_end_frame(ctx);
+            if (v_last < -1e-4f || v_last > 100.001f) {
+                return false;
+            }
+        }
+        if (v_last < 99.99f || v_last > 100.01f || etch_frame_stats(ctx).active_animations != 0u) {
+            return false;
+        }
+    }
+
+    /* Backward-compatible v0.26.0 EtchBoxDesc with 0xFF trailing bytes from reserved_v026_pad onward. */
+    {
+        const uint32_t legacy_id = etch_id("c_v26_compat_box");
+        EtchBoxDesc legacy_box = etch_box_desc_default();
+        legacy_box.struct_size = (uint32_t)offsetof(EtchBoxDesc, reserved_v026_pad);
+        legacy_box.id = legacy_id;
+        legacy_box.width = etch_sizing_fixed(120.0f);
+        legacy_box.height = etch_sizing_fixed(48.0f);
+        legacy_box.background = etch_rgb_hex(0x3B82F6u, 255u);
+        memset(((unsigned char*)&legacy_box) + offsetof(EtchBoxDesc, reserved_v026_pad),
+               0xFF, sizeof(legacy_box) - offsetof(EtchBoxDesc, reserved_v026_pad));
+
+        EtchFrameDesc lf = etch_frame_desc_default();
+        lf.viewport_w = 320u;
+        lf.viewport_h = 160u;
+        etch_begin_frame(ctx, &lf);
+        etch_box(&legacy_box);
+        etch_end_frame(ctx);
+
+        const EtchRect lb = etch_element_bounds(legacy_id);
+        EtchPrim prim0;
+        memset(&prim0, 0, sizeof(prim0));
+        if (lb.w != 120.0f || lb.h != 48.0f ||
+            etch_frame_prim_count(ctx) != 1u ||
+            !etch_get_frame_prim(ctx, 0u, &prim0)) {
+            return false;
+        }
+        const uint32_t kind = prim0.style.x & 0xFu;
+        const uint32_t flags = (prim0.style.x >> 4) & 0x3Fu;
+        if (kind != (uint32_t)ETCH_PRIM_RECT ||
+            (flags & (uint32_t)(ETCH_PRIM_FLAG_LINEAR_GRAD | ETCH_PRIM_FLAG_RADIAL_GRAD)) != 0u) {
+            return false;
+        }
+    }
+
+    /* Exercise live C99 elevation, multi-stop gradient, and rotated layer descriptors. */
+    {
+        EtchFrameDesc vf = etch_frame_desc_default();
+        vf.viewport_w = 320u;
+        vf.viewport_h = 160u;
+        etch_begin_frame(ctx, &vf);
+
+        EtchLayerDesc rot_layer = etch_layer_desc_default();
+        rot_layer.rotation_rad = 0.25f;
+        etch_push_layer(&rot_layer);
+
+        EtchBoxDesc card = etch_box_desc_default();
+        card.id = etch_id("c_v027_card");
+        card.width = etch_sizing_fixed(140.0f);
+        card.height = etch_sizing_fixed(64.0f);
+        card.elevation = ETCH_ELEVATION_MD;
+        card.gradient = etch_gradient_desc_default();
+        card.gradient.kind = ETCH_GRADIENT_LINEAR;
+        card.gradient.dir = etch_vec2(1.0f, 0.0f);
+        card.gradient.stop_count = 3u;
+        card.gradient.stops[0].color = etch_rgb_hex(0xEF4444u, 255u);
+        card.gradient.stops[0].position = 0.0f;
+        card.gradient.stops[1].color = etch_rgb_hex(0x10B981u, 255u);
+        card.gradient.stops[1].position = 0.5f;
+        card.gradient.stops[2].color = etch_rgb_hex(0x3B82F6u, 255u);
+        card.gradient.stops[2].position = 1.0f;
+        etch_begin_box(&card);
+
+        EtchRectDrawDesc gr = etch_rect_draw_desc_default();
+        gr.rect = etch_rect(8.0f, 8.0f, 40.0f, 40.0f);
+        gr.gradient = card.gradient;
+        gr.gradient.kind = ETCH_GRADIENT_RADIAL;
+        etch_draw_rect(&gr);
+
+        etch_end_box();
+        etch_pop_layer();
+        etch_end_frame(ctx);
+
+        if (etch_frame_prim_count(ctx) < 2u) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
 int main(void) {
     if (!test_abi_and_arena()) {
         fprintf(stderr, "c99_abi_smoke: test_abi_and_arena failed\n");
@@ -1192,7 +1355,9 @@ int main(void) {
         etch_window_chrome_desc_default().backdrop==ETCH_BACKDROP_OPAQUE;
     const bool ok_abi = test_versioned_c_abi(ctx);
     if (!ok_abi) fprintf(stderr, "c99_abi_smoke: test_versioned_c_abi failed\n");
-    const bool ok_release = ok_abi && test_release_api(ctx);
+    const bool ok_v027 = ok_abi && test_v027_c_abi(ctx);
+    if (!ok_v027) fprintf(stderr, "c99_abi_smoke: test_v027_c_abi failed\n");
+    const bool ok_release = ok_v027 && test_release_api(ctx);
     if (!ok_release) fprintf(stderr, "c99_abi_smoke: Etch %s public API failed\n", ETCH_VERSION_STRING);
     const bool ok_layout = ok_release && ok_material_defaults && ok_closure && ok_numerals && test_layout_widgets_and_a11y(ctx);
     const bool ok_editor = test_text_buffer_and_code_editor(ctx);
