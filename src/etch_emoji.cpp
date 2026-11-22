@@ -253,6 +253,7 @@ void remap_subpixel_prims_scale(Prim* prims, uint32_t count, float sx, float sy)
 }
 
 bool ensure_subpixel_atlas(Context* ctx, uint32_t w, uint32_t h, uint32_t* out_x, uint32_t* out_y) noexcept {
+    if (!ctx || !out_x || !out_y || w == 0u || h == 0u) return false;
     auto& a = ctx->atlas;
     constexpr uint32_t kSubpixelInit = 512u;
     constexpr uint32_t kSubpixelMax = 4096u;
@@ -261,6 +262,7 @@ bool ensure_subpixel_atlas(Context* ctx, uint32_t w, uint32_t h, uint32_t* out_x
         if (!a.subpixel_pixels) return false;
         a.subpixel_w = kSubpixelInit;
         a.subpixel_h = kSubpixelInit;
+        a.subpixel_shelf_x0 = 1u;
         a.subpixel_shelf_x = 1u;
         a.subpixel_shelf_y = 1u;
         a.subpixel_shelf_h = 0u;
@@ -270,13 +272,15 @@ bool ensure_subpixel_atlas(Context* ctx, uint32_t w, uint32_t h, uint32_t* out_x
     }
     const uint32_t pad_w = w + 1u;
     const uint32_t pad_h = h + 1u;
-    for (int attempt = 0; attempt < 2; ++attempt) {
+    for (int attempt = 0; attempt < 3; ++attempt) {
         if (a.subpixel_shelf_x + pad_w > a.subpixel_w) {
-            a.subpixel_shelf_x = 1u;
+            a.subpixel_shelf_x = (a.subpixel_shelf_x0 > 0u) ? a.subpixel_shelf_x0 : 1u;
             a.subpixel_shelf_y += a.subpixel_shelf_h + 1u;
             a.subpixel_shelf_h = 0u;
         }
-        if (a.subpixel_shelf_y + pad_h <= a.subpixel_h) {
+        if (a.subpixel_shelf_x + pad_w <= a.subpixel_w &&
+            a.subpixel_shelf_y + pad_h <= a.subpixel_h)
+        {
             *out_x = a.subpixel_shelf_x;
             *out_y = a.subpixel_shelf_y;
             a.subpixel_shelf_x += pad_w;
@@ -285,9 +289,9 @@ bool ensure_subpixel_atlas(Context* ctx, uint32_t w, uint32_t h, uint32_t* out_x
         }
         const uint32_t old_w = a.subpixel_w, old_h = a.subpixel_h;
         uint32_t next_w = old_w, next_h = old_h;
-        if (next_w <= next_h && next_w < kSubpixelMax) next_w *= 2u;
-        else if (next_h < kSubpixelMax) next_h *= 2u;
+        if (next_h <= next_w && next_h < kSubpixelMax) next_h *= 2u;
         else if (next_w < kSubpixelMax) next_w *= 2u;
+        else if (next_h < kSubpixelMax) next_h *= 2u;
         else return false;
         auto* next_px = static_cast<uint8_t*>(std::calloc(size_t(next_w) * next_h * 4u, 1u));
         if (!next_px) return false;
@@ -300,6 +304,19 @@ bool ensure_subpixel_atlas(Context* ctx, uint32_t w, uint32_t h, uint32_t* out_x
         a.subpixel_pixels = next_px;
         a.subpixel_w = next_w;
         a.subpixel_h = next_h;
+        if (next_h > old_h) {
+            // Fresh bottom half [1..next_w-1, old_h..next_h-1] has 1px gutter below every prior glyph.
+            a.subpixel_shelf_x0 = 1u;
+            a.subpixel_shelf_x = 1u;
+            a.subpixel_shelf_y = old_h;
+            a.subpixel_shelf_h = 0u;
+        } else {
+            // Fresh right half [old_w..next_w-1, 1..next_h-1] has 1px gutter right of every prior glyph.
+            a.subpixel_shelf_x0 = old_w;
+            a.subpixel_shelf_x = old_w;
+            a.subpixel_shelf_y = 1u;
+            a.subpixel_shelf_h = 0u;
+        }
         a.subpixel_dirty = true;
         a.subpixel_dirty_y0 = 0u;
         a.subpixel_dirty_y1 = next_h;
@@ -416,71 +433,108 @@ EmojiBitmapEntry get_or_cache_hinted_glyph(Context* ctx, uint16_t slot_idx, uint
     entry.ppem = ppem_half;
     IDWriteFactory* factory = ensure_dwrite_factory(&a);
     IDWriteFontFace* face = ensure_dwrite_face(&a, &s);
-    if (factory && face) {
-        const float em_size = (static_cast<float>(ppem_half) * 0.5f) * s.scale_1px * static_cast<float>(s.upem);
-        const UINT16 gid16 = static_cast<UINT16>(glyph_id);
-        const FLOAT adv0 = 0.0f;
-        const DWRITE_GLYPH_OFFSET off0 = {0.0f, 0.0f};
-        DWRITE_GLYPH_RUN run{};
-        run.fontFace = face;
-        run.fontEmSize = em_size;
-        run.glyphCount = 1;
-        run.glyphIndices = &gid16;
-        run.glyphAdvances = &adv0;
-        run.glyphOffsets = &off0;
-        run.isSideways = FALSE;
-        run.bidiLevel = 0;
+    if (!factory || !face) {
+        return {};
+    }
+    const float em_size = (static_cast<float>(ppem_half) * 0.5f) * s.scale_1px * static_cast<float>(s.upem);
+    const UINT16 gid16 = static_cast<UINT16>(glyph_id);
+    const FLOAT adv0 = 0.0f;
+    const DWRITE_GLYPH_OFFSET off0 = {0.0f, 0.0f};
+    DWRITE_GLYPH_RUN run{};
+    run.fontFace = face;
+    run.fontEmSize = em_size;
+    run.glyphCount = 1;
+    run.glyphIndices = &gid16;
+    run.glyphAdvances = &adv0;
+    run.glyphOffsets = &off0;
+    run.isSideways = FALSE;
+    run.bidiLevel = 0;
 
-        const FLOAT origin_x = static_cast<FLOAT>(phase2) * 0.25f;
-        IDWriteGlyphRunAnalysis* analysis = nullptr;
-        const HRESULT hr = factory->CreateGlyphRunAnalysis(
-            &run, 1.0f, nullptr, DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC,
-            DWRITE_MEASURING_MODE_NATURAL, origin_x, 0.0f, &analysis);
-        if (SUCCEEDED(hr) && analysis) {
-            RECT rc{};
-            if (SUCCEEDED(analysis->GetAlphaTextureBounds(DWRITE_TEXTURE_CLEARTYPE_3x1, &rc)) &&
-                rc.right > rc.left && rc.bottom > rc.top)
-            {
-                const uint32_t w = static_cast<uint32_t>(rc.right - rc.left);
-                const uint32_t h = static_cast<uint32_t>(rc.bottom - rc.top);
-                if (w <= 128u && h <= 128u) {
-                    const size_t rgb_bytes = size_t(w) * size_t(h) * 3u;
-                    const size_t mark = ctx->frame_arena.mark();
-                    auto* rgb = ctx->frame_arena.alloc_uninit<uint8_t>(rgb_bytes);
-                    uint32_t tx = 0u, ty = 0u;
-                    if (rgb &&
-                        SUCCEEDED(analysis->CreateAlphaTexture(DWRITE_TEXTURE_CLEARTYPE_3x1, &rc, rgb, static_cast<UINT32>(rgb_bytes))) &&
-                        ensure_subpixel_atlas(ctx, w, h, &tx, &ty))
-                    {
-                        for (uint32_t row = 0u; row < h; ++row) {
-                            const uint8_t* src_row = rgb + size_t(row) * w * 3u;
-                            uint8_t* dst_row = a.subpixel_pixels + (size_t(ty + row) * a.subpixel_w + tx) * 4u;
-                            for (uint32_t col = 0u; col < w; ++col) {
-                                const uint8_t cr = src_row[col * 3u + 0u];
-                                const uint8_t cg = src_row[col * 3u + 1u];
-                                const uint8_t cb = src_row[col * 3u + 2u];
-                                dst_row[col * 4u + 0u] = cr;
-                                dst_row[col * 4u + 1u] = cg;
-                                dst_row[col * 4u + 2u] = cb;
-                                dst_row[col * 4u + 3u] = static_cast<uint8_t>((uint32_t(cr) + uint32_t(cg) + uint32_t(cb) + 1u) / 3u);
-                            }
-                        }
-                        a.subpixel_dirty = true;
-                        if (ty < a.subpixel_dirty_y0) a.subpixel_dirty_y0 = ty;
-                        if (ty + h > a.subpixel_dirty_y1) a.subpixel_dirty_y1 = ty + h;
-                        entry.tile_x = tx;
-                        entry.tile_y = ty;
-                        entry.width_px = w;
-                        entry.height_px = h;
-                        entry.bearing_x = static_cast<float>(rc.left);
-                        entry.bearing_y_top = static_cast<float>(-rc.top);
-                        entry.has_bitmap = true;
-                    }
-                    ctx->frame_arena.rewind(mark);
-                }
-            }
-            analysis->Release();
+    const FLOAT origin_x = static_cast<FLOAT>(phase2) * 0.25f;
+    IDWriteGlyphRunAnalysis* analysis = nullptr;
+    const HRESULT hr = factory->CreateGlyphRunAnalysis(
+        &run, 1.0f, nullptr, DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC,
+        DWRITE_MEASURING_MODE_NATURAL, origin_x, 0.0f, &analysis);
+    if (FAILED(hr) || !analysis) {
+        return {};
+    }
+
+    RECT rc{};
+    const HRESULT bounds_hr = analysis->GetAlphaTextureBounds(DWRITE_TEXTURE_CLEARTYPE_3x1, &rc);
+    if (FAILED(bounds_hr)) {
+        analysis->Release();
+        return {};
+    }
+    if (rc.right <= rc.left || rc.bottom <= rc.top) {
+        // DirectWrite genuinely reports an empty glyph rect (e.g., space/control char): safe to cache negative.
+        analysis->Release();
+        a.hinted_glyphs[idx] = entry;
+        ++a.hinted_count;
+        return entry;
+    }
+
+    const uint32_t w = static_cast<uint32_t>(rc.right - rc.left);
+    const uint32_t h = static_cast<uint32_t>(rc.bottom - rc.top);
+    if (w > 128u || h > 128u) {
+        analysis->Release();
+        return {};
+    }
+
+    const size_t rgb_bytes = size_t(w) * size_t(h) * 3u;
+    uint8_t stack_rgb[4096];
+    uint8_t* rgb = nullptr;
+    size_t arena_mark = 0u;
+    bool used_arena = false;
+    bool used_heap = false;
+    if (rgb_bytes <= sizeof(stack_rgb)) {
+        rgb = stack_rgb;
+    } else {
+        arena_mark = ctx->frame_arena.mark();
+        rgb = ctx->frame_arena.alloc_uninit<uint8_t>(rgb_bytes);
+        if (rgb) {
+            used_arena = true;
+        } else {
+            rgb = static_cast<uint8_t*>(std::malloc(rgb_bytes));
+            used_heap = (rgb != nullptr);
         }
+    }
+
+    uint32_t tx = 0u, ty = 0u;
+    if (rgb &&
+        SUCCEEDED(analysis->CreateAlphaTexture(DWRITE_TEXTURE_CLEARTYPE_3x1, &rc, rgb, static_cast<UINT32>(rgb_bytes))) &&
+        ensure_subpixel_atlas(ctx, w, h, &tx, &ty))
+    {
+        for (uint32_t row = 0u; row < h; ++row) {
+            const uint8_t* src_row = rgb + size_t(row) * w * 3u;
+            uint8_t* dst_row = a.subpixel_pixels + (size_t(ty + row) * a.subpixel_w + tx) * 4u;
+            for (uint32_t col = 0u; col < w; ++col) {
+                const uint8_t cr = src_row[col * 3u + 0u];
+                const uint8_t cg = src_row[col * 3u + 1u];
+                const uint8_t cb = src_row[col * 3u + 2u];
+                dst_row[col * 4u + 0u] = cr;
+                dst_row[col * 4u + 1u] = cg;
+                dst_row[col * 4u + 2u] = cb;
+                dst_row[col * 4u + 3u] = static_cast<uint8_t>((uint32_t(cr) + uint32_t(cg) + uint32_t(cb) + 1u) / 3u);
+            }
+        }
+        a.subpixel_dirty = true;
+        if (ty < a.subpixel_dirty_y0) a.subpixel_dirty_y0 = ty;
+        if (ty + h > a.subpixel_dirty_y1) a.subpixel_dirty_y1 = ty + h;
+        entry.tile_x = tx;
+        entry.tile_y = ty;
+        entry.width_px = w;
+        entry.height_px = h;
+        entry.bearing_x = static_cast<float>(rc.left);
+        entry.bearing_y_top = static_cast<float>(-rc.top);
+        entry.has_bitmap = true;
+    }
+    if (used_arena) ctx->frame_arena.rewind(arena_mark);
+    if (used_heap) std::free(rgb);
+    analysis->Release();
+
+    // Never poison a.hinted_glyphs on transient allocation/rasterization/atlas failure.
+    if (!entry.has_bitmap) {
+        return {};
     }
     a.hinted_glyphs[idx] = entry;
     ++a.hinted_count;

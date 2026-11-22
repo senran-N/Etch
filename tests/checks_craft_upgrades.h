@@ -971,6 +971,10 @@ static bool verify_craft_upgrades() noexcept {
         check(scroll_stuck_to_bottom(vl_id), __LINE__);
     }
 
+    // 9. Frame-arena exhaustion: SubpixelText pipeline classification, glyph cache non-poisoning,
+    //    and ensure_subpixel_atlas 512x512 -> 512x1024 -> 1024x1024 -> 1024x2048 growth invariants
+    check(verify_arena_exhausted_glyph_pipeline_and_caches(), __LINE__);
+
     destroy_context(ctx);
     set_current_context(nullptr);
     return ok;

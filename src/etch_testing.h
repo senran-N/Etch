@@ -6,6 +6,7 @@ namespace etch {
 
 bool verify_text_undo_ring() noexcept;
 bool verify_caret_deadline() noexcept;
+bool verify_arena_exhausted_glyph_pipeline_and_caches() noexcept;
 
 void inject_drop_file(Context* ctx, Str utf8_path, SDL_Window* window = nullptr) noexcept;
 void inject_drop_text(Context* ctx, Str utf8_text, SDL_Window* window = nullptr) noexcept;

@@ -2411,20 +2411,63 @@ void optimize_render_batches(Context* ctx) noexcept {
                                ctx->prim_count <= 4000000u;
 
     const size_t opt_mark = ctx->frame_arena.mark();
+    bool items_heap = false;
     OptPrimItem* items = ctx->frame_arena.alloc_uninit<OptPrimItem>(ctx->prim_count);
     if (!items) {
-        // Arena exhausted: copy logical batches verbatim into gpu_prims/gpu_batches.
-        std::memcpy(ctx->gpu_prims, ctx->prims, size_t(ctx->prim_count) * sizeof(Prim));
-        for (uint32_t i = 0u; i < ctx->prim_count; ++i) ctx->gpu_prim_depths[i] = i;
+        items = static_cast<OptPrimItem*>(std::malloc(size_t(ctx->prim_count) * sizeof(OptPrimItem)));
+        items_heap = (items != nullptr);
+    }
+    auto make_opt_item = [&](const DrawBatch& sb, uint32_t pi) noexcept -> OptPrimItem {
+        const Prim& p = ctx->prims[pi];
+        const GpuPipelineKind pipe = classify_prim_pipeline(p, sb.is_punch_hole, sb.is_additive, allow_early_z);
+        const uint32_t tex_slot = (p.style.x >> 10) & 0xFu;
+        const PrimKind kind = static_cast<PrimKind>(p.style.x & 0xFu);
+        SDL_GPUTexture* ext1 = (tex_slot > 0u && tex_slot <= sb.ext_count) ? sb.ext_textures[tex_slot - 1u] : nullptr;
+        SDL_GPUTexture* ext2 = (kind == PrimKind::LayerBlur && p.payload.y > 0u && p.payload.y <= sb.ext_count)
+            ? sb.ext_textures[p.payload.y - 1u] : nullptr;
+        const uint32_t blend_rgb = (pipe == GpuPipelineKind::SubpixelText) ? (p.style.y & 0x00FFFFFFu) : 0u;
+        const uint64_t state_key = (static_cast<uint64_t>(pipe) << 32) | static_cast<uint64_t>(blend_rgb);
+        float x0 = 0.0f, y0 = 0.0f, x1 = 0.0f, y1 = 0.0f;
+        compute_prim_screen_aabb(p, &x0, &y0, &x1, &y1);
+        return OptPrimItem{
+            .orig_idx = pi,
+            .x0 = x0, .y0 = y0, .x1 = x1, .y1 = y1,
+            .state_key = state_key,
+            .blend_rgb = blend_rgb,
+            .pipe = pipe,
+            .ext1 = ext1,
+            .ext2 = ext2,
+        };
+    };
+    if (!items) {
+        // Extreme OS OOM fallback: still classify every primitive in-place so SubpixelText
+        // glyphs are never misrouted into Uber with tex_slot == 0.
+        uint32_t out_prim_cursor = 0u;
+        uint32_t next_split = 0u;
         for (uint32_t b = 0u; b < ctx->batch_count; ++b) {
-            if (ctx->batches[b].prim_count == 0u) continue;
-            if (!ensure_batch_cap_array(&ctx->gpu_batches, &ctx->gpu_batch_cap, ctx->gpu_batch_count)) break;
-            ctx->gpu_batches[ctx->gpu_batch_count++] = ctx->batches[b];
+            const DrawBatch& sb = ctx->batches[b];
+            const uint32_t end_p = sb.first_prim + sb.prim_count;
+            for (uint32_t pi = sb.first_prim; pi < end_p && pi < ctx->prim_count; ++pi) {
+                bool split_boundary = false;
+                while (next_split < ctx->blur_split_count && ctx->blur_splits[next_split].split_prim <= pi) {
+                    BlurSplit mapped = ctx->blur_splits[next_split];
+                    mapped.split_batch = ctx->gpu_batch_count;
+                    mapped.split_prim = out_prim_cursor;
+                    ctx->gpu_blur_splits[ctx->gpu_blur_split_count++] = mapped;
+                    ++next_split;
+                    split_boundary = true;
+                }
+                const OptPrimItem it = make_opt_item(sb, pi);
+                (void)append_gpu_opt_prim(ctx, &out_prim_cursor, it, split_boundary);
+            }
         }
-        for (uint32_t s = 0u; s < ctx->blur_split_count; ++s) {
-            ctx->gpu_blur_splits[s] = ctx->blur_splits[s];
+        while (next_split < ctx->blur_split_count) {
+            BlurSplit mapped = ctx->blur_splits[next_split];
+            mapped.split_batch = ctx->gpu_batch_count;
+            mapped.split_prim = out_prim_cursor;
+            ctx->gpu_blur_splits[ctx->gpu_blur_split_count++] = mapped;
+            ++next_split;
         }
-        ctx->gpu_blur_split_count = ctx->blur_split_count;
         ctx->frame_arena.rewind(opt_mark);
         return;
     }
@@ -2435,27 +2478,9 @@ void optimize_render_batches(Context* ctx) noexcept {
         const DrawBatch& sb = ctx->batches[b];
         const uint32_t end_p = sb.first_prim + sb.prim_count;
         for (uint32_t pi = sb.first_prim; pi < end_p && pi < ctx->prim_count; ++pi) {
-            const Prim& p = ctx->prims[pi];
-            const GpuPipelineKind pipe = classify_prim_pipeline(p, sb.is_punch_hole, sb.is_additive, allow_early_z);
-            const uint32_t tex_slot = (p.style.x >> 10) & 0xFu;
-            const PrimKind kind = static_cast<PrimKind>(p.style.x & 0xFu);
-            SDL_GPUTexture* ext1 = (tex_slot > 0u && tex_slot <= sb.ext_count) ? sb.ext_textures[tex_slot - 1u] : nullptr;
-            SDL_GPUTexture* ext2 = (kind == PrimKind::LayerBlur && p.payload.y > 0u && p.payload.y <= sb.ext_count)
-                ? sb.ext_textures[p.payload.y - 1u] : nullptr;
-            const uint32_t blend_rgb = (pipe == GpuPipelineKind::SubpixelText) ? (p.style.y & 0x00FFFFFFu) : 0u;
-            const uint64_t state_key = (static_cast<uint64_t>(pipe) << 32) | static_cast<uint64_t>(blend_rgb);
-            float x0 = 0.0f, y0 = 0.0f, x1 = 0.0f, y1 = 0.0f;
-            compute_prim_screen_aabb(p, &x0, &y0, &x1, &y1);
-            items[item_count++] = OptPrimItem{
-                .orig_idx = pi,
-                .x0 = x0, .y0 = y0, .x1 = x1, .y1 = y1,
-                .state_key = state_key,
-                .blend_rgb = blend_rgb,
-                .pipe = pipe,
-                .ext1 = ext1,
-                .ext2 = ext2,
-            };
-            if (pipe == GpuPipelineKind::QuadOpaque) ++opaque_count;
+            const OptPrimItem it = make_opt_item(sb, pi);
+            items[item_count++] = it;
+            if (it.pipe == GpuPipelineKind::QuadOpaque) ++opaque_count;
         }
     }
 
@@ -2481,6 +2506,7 @@ void optimize_render_batches(Context* ctx) noexcept {
         if (rem_count > 0u) {
             emit_spatial_segment(ctx, items, rem_count, &out_prim_cursor, true);
         }
+        if (items_heap) std::free(items);
         ctx->frame_arena.rewind(opt_mark);
         return;
     }
@@ -2523,6 +2549,7 @@ void optimize_render_batches(Context* ctx) noexcept {
         ++next_split;
     }
 
+    if (items_heap) std::free(items);
     ctx->frame_arena.rewind(opt_mark);
 }
 
@@ -3135,6 +3162,221 @@ void rebuild_gpu_batches_for_test(Context* ctx) noexcept {
     if (!ctx) return;
     optimize_render_batches(ctx);
     ctx->stats.draw_call_count = ctx->gpu_batch_count;
+}
+
+bool verify_arena_exhausted_glyph_pipeline_and_caches() noexcept {
+    // 1. Exhausted frame_arena during optimize_render_batches must still classify PrimKind::Glyph
+    //    into GpuPipelineKind::SubpixelText (never Uber with tex_slot == 0).
+    {
+        Context* ctx = create_context({.headless = true});
+        if (!ctx) return false;
+        Context* prev_ctx = current_context();
+        set_current_context(ctx);
+        set_hinted_small_text(ctx, true);
+
+        begin_frame(ctx, {.viewport_w = 400, .viewport_h = 200, .dpi_scale = 1.0f});
+        begin_box({.axis = Axis::Col, .width = Sizing::fixed(400), .height = Sizing::fixed(200),
+                   .background = Color::rgb_hex(0x16181D)});
+        text(str_lit("Hello World 12345 small text"), {.color = Color::rgb_hex(0xE8ECF4), .font_size_px = 14.0f});
+        end_box();
+        end_frame(ctx);
+
+        // Ensure at least one hinted PrimKind::Glyph (tex_slot == 0) exists on all platforms.
+        bool has_hinted_glyph = false;
+        for (uint32_t i = 0u; i < ctx->prim_count; ++i) {
+            const Prim& p = ctx->prims[i];
+            if (static_cast<PrimKind>(p.style.x & 0xFu) == PrimKind::Glyph &&
+                ((p.style.x >> 10) & 0xFu) == 0u)
+            {
+                has_hinted_glyph = true;
+                break;
+            }
+        }
+        if (!has_hinted_glyph) {
+            const Prim synthetic = Prim::make_glyph(
+                Rect{10.0f, 10.0f, 8.0f, 12.0f},
+                Rect{0.0f, 0.0f, 400.0f, 200.0f},
+                Color::rgb_hex(0xE8ECF4),
+                Vec2{0.01f, 0.01f},
+                Vec2{0.03f, 0.04f},
+                0u,
+                0.0f,
+                PrimFlag_StemDarken);
+            push_prim(ctx, synthetic, nullptr);
+        }
+
+        // Exhaust frame_arena completely before running optimize_render_batches.
+        const size_t saved_offset = ctx->frame_arena.offset;
+        ctx->frame_arena.offset = ctx->frame_arena.capacity;
+        optimize_render_batches(ctx);
+        ctx->frame_arena.offset = saved_offset;
+
+        uint32_t subpixel_glyphs = 0u;
+        uint32_t misrouted_uber_glyphs = 0u;
+        uint32_t total_gpu_prims = 0u;
+        for (uint32_t b = 0u; b < ctx->gpu_batch_count; ++b) {
+            const DrawBatch& gb = ctx->gpu_batches[b];
+            total_gpu_prims += gb.prim_count;
+            for (uint32_t k = 0u; k < gb.prim_count; ++k) {
+                const Prim& gp = ctx->gpu_prims[gb.first_prim + k];
+                const PrimKind kind = static_cast<PrimKind>(gp.style.x & 0xFu);
+                const uint32_t tex_slot = (gp.style.x >> 10) & 0xFu;
+                if (kind == PrimKind::Glyph && tex_slot == 0u) {
+                    if (gb.pipeline == GpuPipelineKind::SubpixelText) {
+                        ++subpixel_glyphs;
+                    } else if (gb.pipeline == GpuPipelineKind::Uber) {
+                        ++misrouted_uber_glyphs;
+                    }
+                }
+            }
+        }
+        destroy_context(ctx);
+        set_current_context(prev_ctx);
+        if (subpixel_glyphs == 0u || misrouted_uber_glyphs != 0u || total_gpu_prims == 0u) {
+            return false;
+        }
+    }
+
+    // 2. Exhausted frame_arena during get_or_cache_hinted_glyph & slug_get_glyph must still produce
+    //    valid glyphs and never poison caches on transient failure.
+    {
+        Context* ctx = create_context({.headless = true});
+        if (!ctx) return false;
+        Context* prev_ctx = current_context();
+        set_current_context(ctx);
+
+        const FontSlot& fs = ctx->atlas.slots[kFontSans];
+        if (!fs.loaded || !fs.has_outlines) {
+            destroy_context(ctx);
+            set_current_context(prev_ctx);
+            return false;
+        }
+        const int gid_w = stbtt_FindGlyphIndex(&fs.font_info, 'W');
+        const int gid_m = stbtt_FindGlyphIndex(&fs.font_info, 'M');
+        const int gid_g = stbtt_FindGlyphIndex(&fs.font_info, 'g');
+        const int gid_sp = stbtt_FindGlyphIndex(&fs.font_info, ' ');
+        if (gid_w <= 0 || gid_m <= 0 || gid_g <= 0 || gid_sp <= 0) {
+            destroy_context(ctx);
+            set_current_context(prev_ctx);
+            return false;
+        }
+
+        const size_t saved_offset = ctx->frame_arena.offset;
+        ctx->frame_arena.offset = ctx->frame_arena.capacity;
+
+        // Slug glyph compilation with 100% exhausted frame_arena must succeed via stack buffer.
+        const SlugGlyphEntry ge = slug_get_glyph(&ctx->atlas, kFontSans, static_cast<uint32_t>(gid_w));
+        if (!ge.has_outline || ge.num_hbands == 0u || ge.num_vbands == 0u) {
+            ctx->frame_arena.offset = saved_offset;
+            destroy_context(ctx);
+            set_current_context(prev_ctx);
+            return false;
+        }
+
+#if defined(_WIN32)
+        // Hinted DirectWrite glyph with 100% exhausted frame_arena must succeed via stack buffer.
+        const EmojiBitmapEntry he_m = get_or_cache_hinted_glyph(ctx, kFontSans, static_cast<uint32_t>(gid_m), 14.0f, 0u);
+        if (!he_m.has_bitmap || he_m.width_px == 0u || he_m.height_px == 0u) {
+            ctx->frame_arena.offset = saved_offset;
+            destroy_context(ctx);
+            set_current_context(prev_ctx);
+            return false;
+        }
+        // Space glyph genuinely reports empty bounds and may cache negative safely.
+        const EmojiBitmapEntry he_sp = get_or_cache_hinted_glyph(ctx, kFontSans, static_cast<uint32_t>(gid_sp), 14.0f, 0u);
+        if (he_sp.has_bitmap || he_sp.key == 0u) {
+            ctx->frame_arena.offset = saved_offset;
+            destroy_context(ctx);
+            set_current_context(prev_ctx);
+            return false;
+        }
+        // Transient atlas failure must NOT poison a.hinted_glyphs so a subsequent lookup succeeds.
+        auto& a = ctx->atlas;
+        const uint32_t sv_w = a.subpixel_w, sv_h = a.subpixel_h;
+        const uint32_t sv_x0 = a.subpixel_shelf_x0, sv_x = a.subpixel_shelf_x, sv_y = a.subpixel_shelf_y, sv_sh = a.subpixel_shelf_h;
+        a.subpixel_w = 4096u;
+        a.subpixel_h = 4096u;
+        a.subpixel_shelf_x0 = 4096u;
+        a.subpixel_shelf_x = 4096u;
+        a.subpixel_shelf_y = 4096u;
+        a.subpixel_shelf_h = 0u;
+        const EmojiBitmapEntry he_fail = get_or_cache_hinted_glyph(ctx, kFontSans, static_cast<uint32_t>(gid_g), 14.0f, 0u);
+        a.subpixel_w = sv_w;
+        a.subpixel_h = sv_h;
+        a.subpixel_shelf_x0 = sv_x0;
+        a.subpixel_shelf_x = sv_x;
+        a.subpixel_shelf_y = sv_y;
+        a.subpixel_shelf_h = sv_sh;
+        if (he_fail.has_bitmap) {
+            ctx->frame_arena.offset = saved_offset;
+            destroy_context(ctx);
+            set_current_context(prev_ctx);
+            return false;
+        }
+        const EmojiBitmapEntry he_retry = get_or_cache_hinted_glyph(ctx, kFontSans, static_cast<uint32_t>(gid_g), 14.0f, 0u);
+        if (!he_retry.has_bitmap || he_retry.width_px == 0u || he_retry.height_px == 0u) {
+            ctx->frame_arena.offset = saved_offset;
+            destroy_context(ctx);
+            set_current_context(prev_ctx);
+            return false;
+        }
+#endif
+
+        ctx->frame_arena.offset = saved_offset;
+        destroy_context(ctx);
+        set_current_context(prev_ctx);
+    }
+
+    // 3. ensure_subpixel_atlas crossing 512x512 -> 512x1024 -> 1024x1024 -> 1024x2048 must never
+    //    drop boundary-triggering glyphs or overlap any allocated tile.
+    {
+        Context* ctx = create_context({.headless = true});
+        if (!ctx) return false;
+        auto& a = ctx->atlas;
+        constexpr uint32_t kTileW = 20u;
+        constexpr uint32_t kTileH = 20u;
+        bool saw_512x512 = false;
+        bool saw_512x1024 = false;
+        bool saw_1024x1024 = false;
+        bool saw_1024x2048 = false;
+        bool ok = true;
+        for (uint32_t n = 0u; n < 4000u; ++n) {
+            uint32_t tx = 0u, ty = 0u;
+            if (!ensure_subpixel_atlas(ctx, kTileW, kTileH, &tx, &ty)) {
+                ok = false;
+                break;
+            }
+            if (tx + kTileW > a.subpixel_w || ty + kTileH > a.subpixel_h) {
+                ok = false;
+                break;
+            }
+            // Verify zero overlap with any prior tile, then mark sentinel alpha.
+            for (uint32_t row = 0u; row < kTileH && ok; ++row) {
+                uint8_t* dst = a.subpixel_pixels + (size_t(ty + row) * a.subpixel_w + tx) * 4u;
+                for (uint32_t col = 0u; col < kTileW; ++col) {
+                    if (dst[col * 4u + 3u] != 0u) {
+                        ok = false;
+                        break;
+                    }
+                    dst[col * 4u + 3u] = 0xA5u;
+                }
+            }
+            if (!ok) break;
+            if (a.subpixel_w == 512u && a.subpixel_h == 512u) saw_512x512 = true;
+            else if (a.subpixel_w == 512u && a.subpixel_h == 1024u) saw_512x1024 = true;
+            else if (a.subpixel_w == 1024u && a.subpixel_h == 1024u) saw_1024x1024 = true;
+            else if (a.subpixel_w == 1024u && a.subpixel_h == 2048u) {
+                saw_1024x2048 = true;
+                break;
+            }
+        }
+        destroy_context(ctx);
+        if (!ok || !saw_512x512 || !saw_512x1024 || !saw_1024x1024 || !saw_1024x2048) {
+            return false;
+        }
+    }
+
+    return true;
 }
 
 } // namespace etch

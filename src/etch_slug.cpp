@@ -822,7 +822,7 @@ CompiledSlugShape compile_slug_contours(
         return out;
     }
 
-    const size_t scratch_mark = atlas->scratch->mark();
+    const size_t scratch_mark = atlas->scratch ? atlas->scratch->mark() : 0u;
     SlugCurveGpu*& curves = dynamic ? dynamic->dyn_slug_curves : atlas->slug_curves;
     uint32_t& curve_count = dynamic ? dynamic->dyn_slug_curve_count : atlas->slug_curve_count;
     uint32_t& curve_cap = dynamic ? dynamic->dyn_slug_curve_cap : atlas->slug_curve_cap;
@@ -837,10 +837,22 @@ CompiledSlugShape compile_slug_contours(
         float min_x, min_y, max_x, max_y;
         uint32_t p1_xy, p2_xy, p3_xy;
     };
-    DecodedCurve* dec = atlas->scratch->alloc_uninit<DecodedCurve>(raw_count);
+    DecodedCurve stack_dec[kStackRawCap];
+    DecodedCurve* dec = nullptr;
+    bool dec_heap = false;
+    if (raw_count <= kStackRawCap) {
+        dec = stack_dec;
+    } else {
+        dec = atlas->scratch ? atlas->scratch->alloc_uninit<DecodedCurve>(raw_count) : nullptr;
+        if (!dec) {
+            dec = static_cast<DecodedCurve*>(std::malloc(size_t(raw_count) * sizeof(DecodedCurve)));
+            dec_heap = (dec != nullptr);
+        }
+    }
     uint32_t kept = 0u;
 
     if (!dec) {
+        if (atlas->scratch) atlas->scratch->rewind(scratch_mark);
         return out;
     }
 
@@ -891,7 +903,18 @@ CompiledSlugShape compile_slug_contours(
         const uint32_t num_hb = nb;
         const uint32_t num_vb = nb;
 
-        SlugCurveSortItem* sort_buf = atlas->scratch->alloc_uninit<SlugCurveSortItem>(kept);
+        SlugCurveSortItem stack_sort[kStackRawCap];
+        SlugCurveSortItem* sort_buf = nullptr;
+        bool sort_heap = false;
+        if (kept <= kStackRawCap) {
+            sort_buf = stack_sort;
+        } else {
+            sort_buf = atlas->scratch ? atlas->scratch->alloc_uninit<SlugCurveSortItem>(kept) : nullptr;
+            if (!sort_buf) {
+                sort_buf = static_cast<SlugCurveSortItem*>(std::malloc(size_t(kept) * sizeof(SlugCurveSortItem)));
+                sort_heap = (sort_buf != nullptr);
+            }
+        }
 
         // Conservative worst-case band storage: headers + (nb + nb) * kept
         const uint32_t worst_bands = num_hb + num_vb + (num_hb + num_vb) * kept;
@@ -947,9 +970,11 @@ CompiledSlugShape compile_slug_contours(
             out.num_vbands = static_cast<uint16_t>(num_vb);
             out.has_outline = true;
         }
+        if (sort_heap) std::free(sort_buf);
 
     }
-    atlas->scratch->rewind(scratch_mark);
+    if (dec_heap) std::free(dec);
+    if (atlas->scratch) atlas->scratch->rewind(scratch_mark);
     return out;
 }
 
@@ -989,22 +1014,36 @@ SlugGlyphEntry slug_get_glyph(FontAtlas* atlas, uint16_t slot_idx, uint32_t glyp
         return entry;
     }
 
-    const size_t raw_mark = atlas->scratch->mark();
+    const size_t raw_mark = atlas->scratch ? atlas->scratch->mark() : 0u;
     SlugRawCurve stack_raw[kStackRawCap];
     SlugRawCurve* raw = stack_raw;
     uint32_t raw_cap = kStackRawCap;
     uint32_t raw_count = 0u;
+    bool raw_heap = false;
+    bool raw_oom = false;
 
     auto push_raw = [&](SlugRawCurve c) noexcept -> bool {
         if (raw_count >= raw_cap) {
             const uint32_t new_cap = raw_cap * 2u;
-            SlugRawCurve* next = atlas->scratch->alloc_uninit<SlugRawCurve>(new_cap);
+            SlugRawCurve* next = (!raw_heap && atlas->scratch)
+                ? atlas->scratch->alloc_uninit<SlugRawCurve>(new_cap)
+                : nullptr;
+            bool next_heap = false;
             if (!next) {
-                return false;
+                next = static_cast<SlugRawCurve*>(std::malloc(size_t(new_cap) * sizeof(SlugRawCurve)));
+                if (!next) {
+                    raw_oom = true;
+                    return false;
+                }
+                next_heap = true;
             }
             std::memcpy(next, raw, size_t(raw_count) * sizeof(SlugRawCurve));
+            if (raw_heap) {
+                std::free(raw);
+            }
             raw = next;
             raw_cap = new_cap;
+            raw_heap = next_heap;
         }
         raw[raw_count++] = c;
         return true;
@@ -1083,7 +1122,9 @@ SlugGlyphEntry slug_get_glyph(FontAtlas* atlas, uint16_t slot_idx, uint32_t glyp
 
     const float span_x = max_x - min_x;
     const float span_y = max_y - min_y;
-    const CompiledSlugShape compiled = compile_slug_contours(atlas, raw, raw_count, min_x, min_y, span_x, span_y);
+    const CompiledSlugShape compiled = raw_oom
+        ? CompiledSlugShape{}
+        : compile_slug_contours(atlas, raw, raw_count, min_x, min_y, span_x, span_y);
     if (compiled.has_outline) {
         entry.min_x_em = min_x;
         entry.min_y_em = min_y;
@@ -1094,7 +1135,13 @@ SlugGlyphEntry slug_get_glyph(FontAtlas* atlas, uint16_t slot_idx, uint32_t glyp
         entry.num_vbands = compiled.num_vbands;
         entry.has_outline = true;
     }
-    atlas->scratch->rewind(raw_mark);
+    if (raw_heap) std::free(raw);
+    if (atlas->scratch) atlas->scratch->rewind(raw_mark);
+
+    // Never poison atlas->slug_glyphs on a transient compile/allocation failure.
+    if (raw_oom || (raw_count > 0u && span_x >= 1e-3f && span_y >= 1e-3f && !compiled.has_outline)) {
+        return entry;
+    }
 
     if ((atlas->slug_glyph_count + 1u) * 4u >= atlas->slug_glyph_cap * 3u && slug_glyph_rehash(atlas)) {
         const uint32_t nmask = atlas->slug_glyph_cap - 1u;
@@ -1123,16 +1170,39 @@ uint16_t pick_fallback_slot_for_cluster(
     const char* utf8,
     uint32_t len) noexcept
 {
+    if (len == 0u) return primary_slot;
     const char* p = utf8;
     const char* end = utf8 + len;
-    uint32_t* cps = atlas->scratch->alloc_uninit<uint32_t>(len);
-    if (!cps) return primary_slot;
+    uint32_t stack_cps[64];
+    uint32_t* cps = nullptr;
+    size_t cp_mark = 0u;
+    bool cp_arena = false;
+    bool cp_heap = false;
+    if (len <= 64u) {
+        cps = stack_cps;
+    } else {
+        if (atlas->scratch) {
+            cp_mark = atlas->scratch->mark();
+            cps = atlas->scratch->alloc_uninit<uint32_t>(len);
+            cp_arena = (cps != nullptr);
+        }
+        if (!cps) {
+            cps = static_cast<uint32_t*>(std::malloc(size_t(len) * sizeof(uint32_t)));
+            cp_heap = (cps != nullptr);
+        }
+        if (!cps) return primary_slot;
+    }
+    auto finish = [&](uint16_t res) noexcept -> uint16_t {
+        if (cp_arena) atlas->scratch->rewind(cp_mark);
+        if (cp_heap) std::free(cps);
+        return res;
+    };
     uint32_t cp_count = 0u;
     while (p < end) {
         cps[cp_count++] = next_utf8_codepoint(p, end);
     }
     if (cp_count == 0u) {
-        return primary_slot;
+        return finish(primary_slot);
     }
     bool emoji = false, text_presentation = false;
     for (uint32_t i=0;i<cp_count;++i) { const uint32_t cp=cps[i]; if(cp==0xFE0E)text_presentation=true; if(cp==0xFE0F||cp==0x20E3||cp>=0x1F000||(cp>=0x2600&&cp<=0x27BF))emoji=true; }
@@ -1143,7 +1213,7 @@ uint16_t pick_fallback_slot_for_cluster(
             if(!slot.has_color_emoji)continue;
             bool covers=true; hb_codepoint_t glyph=0;
             for(uint32_t i=0;i<cp_count;++i) if(cps[i]!=0xFE0F&&cps[i]!=0x200D&&!hb_font_get_nominal_glyph(slot.hb_font,cps[i],&glyph)){covers=false;break;}
-            if(covers)return idx;
+            if(covers)return finish(idx);
         }
     }
     hb_codepoint_t dummy = 0u;
@@ -1175,13 +1245,13 @@ uint16_t pick_fallback_slot_for_cluster(
                 }
             }
             if (covers_all) {
-                return s;
+                return finish(s);
             }
         }
         for (uint32_t pi = 0u; pi < pref_count; ++pi) {
             const uint16_t s = pref_chain[pi];
             if (hb_font_get_nominal_glyph(atlas->slots[s].hb_font, cps[0], &dummy)) {
-                return s;
+                return finish(s);
             }
         }
     }
@@ -1214,13 +1284,13 @@ uint16_t pick_fallback_slot_for_cluster(
         return kInvalidFont;
     };
     const uint16_t found = search_loaded_fallbacks();
-    if (found != kInvalidFont) return found;
+    if (found != kInvalidFont) return finish(found);
     if (!atlas->emoji_fallback_probed) {
         ensure_emoji_fallback_loaded(atlas);
         const uint16_t found_emoji = search_loaded_fallbacks();
-        if (found_emoji != kInvalidFont) return found_emoji;
+        if (found_emoji != kInvalidFont) return finish(found_emoji);
     }
-    return primary_slot;
+    return finish(primary_slot);
 }
 
 std::span<const ShapedGlyph> store_shaped_glyphs(

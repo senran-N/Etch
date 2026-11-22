@@ -326,7 +326,7 @@ struct FontAtlas {
     SDL_GPUTexture* subpixel_gpu_tex = nullptr;
     uint32_t subpixel_w = 0, subpixel_h = 0, subpixel_gpu_w = 0, subpixel_gpu_h = 0;
     uint32_t subpixel_dirty_y0 = UINT32_MAX, subpixel_dirty_y1 = 0;
-    uint32_t subpixel_shelf_x = 0, subpixel_shelf_y = 2, subpixel_shelf_h = 0;
+    uint32_t subpixel_shelf_x0 = 1, subpixel_shelf_x = 0, subpixel_shelf_y = 2, subpixel_shelf_h = 0;
     bool subpixel_dirty = false;
     void* dwrite_factory = nullptr;
     void* dwrite_module = nullptr;
