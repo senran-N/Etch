@@ -266,12 +266,15 @@ etch_configure_orthodox_cpp(etch)
 if (NOT ETCH_UNITY_BUILD)
     set_source_files_properties(src/etch_unity.cpp PROPERTIES COMPILE_DEFINITIONS ETCH_MODULAR_BUILD=1)
 endif ()
+set(_etch_shader_inc_dirs "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders_gen")
+if (ETCH_GENERATED_SHADER_HEADERS)
+    list(PREPEND _etch_shader_inc_dirs "${ETCH_SHADER_OUT_DIR}")
+endif ()
 target_include_directories(etch
     PUBLIC "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
            "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
-    PRIVATE "${ETCH_SHADER_OUT_DIR}"
+    PRIVATE ${_etch_shader_inc_dirs}
             "${CMAKE_CURRENT_SOURCE_DIR}/src"
-            "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders_gen"
             "${CMAKE_CURRENT_SOURCE_DIR}/third_party"
             ${ETCH_HB_INCLUDE_DIRS})
 target_link_libraries(etch PUBLIC SDL3::SDL3 PRIVATE ${ETCH_HB_LIB_TARGET})
@@ -382,7 +385,7 @@ if (ETCH_BUILD_TESTS)
     endif ()
     etch_configure_orthodox_cpp(etch_tests)
     target_link_libraries(etch_tests PRIVATE etch)
-    target_include_directories(etch_tests PRIVATE "${ETCH_SHADER_OUT_DIR}" src src/shaders_gen tests)
+    target_include_directories(etch_tests PRIVATE ${_etch_shader_inc_dirs} src tests)
     if (TARGET etch_shaders)
         add_dependencies(etch_tests etch_shaders)
     endif ()
