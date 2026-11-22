@@ -1365,6 +1365,7 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
     ctx->filter_prim_count = 0u;
     ctx->filter_batch_count = 0u;
     ctx->filter_group_count = 0u;
+    maybe_gc_hinted_atlas(ctx);
     ctx->active_filter_group = nullptr;
     ctx->layer_has_bg_prims = true;
     ctx->blur_dirty_valid = false;

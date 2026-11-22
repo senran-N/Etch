@@ -4,6 +4,26 @@ All notable changes to Etch are documented here. This file follows
 [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html).
 
+## [0.26.0] - 2026-11-22
+
+- Default small hinted text (<= 24 px) to single-channel `R8_UNORM` 4x X-phase grayscale
+  atlas (`GrayscaleText` pipeline with polarity-calibrated stem darkening), collapsing
+  multi-color UI text into a single draw call across all colors while cutting glyph atlas
+  VRAM by 4x and adding cross-platform `stb_truetype` subpixel rasterization fallback;
+  retain hardware 3-channel ClearType RGB subpixel text as explicit opt-in via
+  `ContextDesc::lcd_subpixel_text` and `set_lcd_subpixel_text` / `lcd_subpixel_text`
+  (plus pure C99 ABI parity `etch_set_lcd_subpixel_text` / `etch_lcd_subpixel_text`).
+- Add bounded hinted glyph atlas memory with steady 1024x1024 cap, safe single-frame
+  2048x1024 burst, and start-of-frame LRU cache reclamation with `uv_epoch` subtree
+  invalidation so long-running desktop sessions stay bounded in VRAM.
+- Prefer low-power integrated GPU adapters by default via `SDL_CreateGPUDeviceWithProperties`
+  (`SDL_PROP_GPU_DEVICE_CREATE_PREFERLOWPOWER_BOOLEAN = true`) with explicit discrete-GPU
+  opt-in via `ContextDesc::prefer_high_performance_gpu` (`EtchContextDesc::prefer_high_performance_gpu`).
+- Shrink default RAM/VRAM footprint: lazy shader & PSO compilation on first use, lean
+  initial reserves (`max_prims_per_frame = 2048`, `frame_arena_bytes = 1 MiB`, 4x leaner
+  `ShapeCache` and Slug storage caps), ring-slice GPU upload transfers, and automatic idle
+  release for transient atlas transfer buffers, depth targets, and blur render targets.
+
 ## [0.25.0] - 2026-11-22
 
 - Replace the monolithic GPU ubershader path with specialized lightweight pipelines

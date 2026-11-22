@@ -1156,7 +1156,33 @@ int main(void) {
             return 1;
         }
     }
-    const bool ok_material_defaults=ok_v22_c99 && ok_v24_c99 && surface.max_fps==60 && surface.spirv.entrypoint!=NULL &&
+    const EtchContextDesc def_ctx = etch_context_desc_default();
+    /* Verify v0.25.0-sized EtchContextDesc with dirty trailing padding bytes safely defaults v0.26 fields. */
+    bool ok_v25_compat = false;
+    {
+        EtchContextDesc legacy_ctx = etch_context_desc_default();
+        legacy_ctx.headless = true;
+        legacy_ctx.struct_size = (uint32_t)offsetof(EtchContextDesc, reserved_v025_pad);
+        memset(((unsigned char*)&legacy_ctx) + offsetof(EtchContextDesc, reserved_v025_pad),
+               0xFF, sizeof(legacy_ctx) - offsetof(EtchContextDesc, reserved_v025_pad));
+        EtchContext* lctx = etch_create_context(&legacy_ctx);
+        if (lctx) {
+            ok_v25_compat = !etch_lcd_subpixel_text(lctx);
+            etch_destroy_context(lctx);
+            etch_set_current_context(ctx);
+        }
+    }
+    const bool ok_v26_ctx = ok_v25_compat && def_ctx.max_prims_per_frame == 2048u &&
+        def_ctx.frame_arena_bytes == (1024u * 1024u) &&
+        def_ctx.reserved_v025_pad == 0u &&
+        !def_ctx.prefer_high_performance_gpu &&
+        !def_ctx.lcd_subpixel_text &&
+        !etch_lcd_subpixel_text(ctx);
+    etch_set_lcd_subpixel_text(ctx, true);
+    const bool ok_v26_lcd_on = etch_lcd_subpixel_text(ctx);
+    etch_set_lcd_subpixel_text(ctx, false);
+    const bool ok_v26_lcd = ok_v26_ctx && ok_v26_lcd_on && !etch_lcd_subpixel_text(ctx);
+    const bool ok_material_defaults=ok_v22_c99 && ok_v24_c99 && ok_v26_lcd && surface.max_fps==60 && surface.spirv.entrypoint!=NULL &&
         surface.num_samplers==0u && !surface.sampler_mirror_repeat &&
         eval.width==1 && eval.enabled && eval.textures[0]==NULL && cell.width==1 && sheet.snap_count==3 &&
         v21_layer.blur_px==0.0f && !v21_layer.blend_plus_lighter &&

@@ -247,6 +247,7 @@ ShaderSurfaceId create_shader_surface(Context* ctx, const ShaderSurfaceCreateDes
         format, SDL_GPU_SHADERSTAGE_FRAGMENT, desc.num_samplers, 0, 0, 1, 0};
     SDL_GPUShader* shader = SDL_CreateGPUShader(ctx->device, &info);
     if (!shader) return 0;
+    if (!ensure_kawase_shaders(ctx)) { SDL_ReleaseGPUShader(ctx->device, shader); return 0; }
     SDL_GPUGraphicsPipeline* pipe = create_graphics_pipeline(ctx->device, ctx->kawase_vs_shader, shader,
         SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT, BlendMode::Opaque);
     if (!pipe) { SDL_ReleaseGPUShader(ctx->device, shader); return 0; }

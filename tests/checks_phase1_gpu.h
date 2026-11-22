@@ -15,7 +15,7 @@ inline bool verify_phase1_gpu() noexcept {
     };
     const char* path = "phase1-gpu-check.png";
 
-    // 1. Multi-pipeline dispatch, over(fill, border) compositing, ClearType RGB subpixel & TextClip.
+    // 1. Multi-pipeline dispatch, over(fill, border) compositing, single-DC R8_UNORM text, opt-in LCD RGB & TextClip.
     {
         begin_frame(c, {.viewport_w = 420, .viewport_h = 200});
         begin_box({.width = Sizing::fixed(420), .height = Sizing::fixed(200), .background = Color::rgb_hex(0x10141A)});
@@ -23,10 +23,15 @@ inline bool verify_phase1_gpu() noexcept {
         draw_rect({.rect = {10, 10, 60, 60}, .fill = Color::rgb_hex(0x1020D0)});
         // QuadAlpha with opaque white fill + 50% red border: border must blend over fill -> bright pink, not darkened gray.
         draw_rect({.rect = {80, 10, 60, 60}, .fill = Color::white(), .radius = Corners::all(8), .border_color = Color::rgba8(255, 0, 0, 128), .border_width = 8});
-        // 14px axis-aligned white text -> ClearType 3-channel RGB SubpixelText on _WIN32.
-        draw_text({.text = str_lit("ClearType RGB Subpixel 012345"), .pos = {10, 90}, .size = 14, .color = Color::white()});
+        // 14px axis-aligned multi-color text -> default single-DC R8_UNORM GrayscaleText (all colors merge into 1 DC).
+        draw_text({.text = str_lit("R8 Grayscale Text 012345"), .pos = {10, 90}, .size = 14, .color = Color::white()});
         // 14px text clipped by max_width_px -> PrimFlag_TextClip in etch_subpixel.hlsl.
         draw_text({.text = str_lit("WWWWWWWWWWWWWWWWWWWW"), .pos = {10, 125}, .size = 14, .color = Color::white(), .max_width_px = 42.0f});
+        // Additional distinct text colors in the same frame to verify 1-DC coalescing.
+        draw_text({.text = str_lit("Cyan"), .pos = {10, 155}, .size = 14, .color = Color::rgb_hex(0x38BDF8)});
+        draw_text({.text = str_lit("Amber"), .pos = {70, 155}, .size = 14, .color = Color::rgb_hex(0xF59E0B)});
+        draw_text({.text = str_lit("Emerald"), .pos = {140, 155}, .size = 14, .color = Color::rgb_hex(0x10B981)});
+        draw_text({.text = str_lit("Rose"), .pos = {220, 155}, .size = 14, .color = Color::rgb_hex(0xF43F5E)});
         // 32px large text -> Slug GPU Bezier pipeline (Uber).
         draw_text({.text = str_lit("Slug"), .pos = {170, 10}, .size = 32, .color = Color::rgb_hex(0x38BDF8)});
         end_box();
@@ -39,10 +44,10 @@ inline bool verify_phase1_gpu() noexcept {
             else if (kind == uint32_t(PrimKind::Glyph)) ++subpixel_count;
         }
         check(slug_count >= 4u, __LINE__);
-#if defined(_WIN32)
-        check(subpixel_count >= 20u, __LINE__);
-#endif
+        check(subpixel_count >= 35u, __LINE__);
         check(render_headless_png(c, 420, 200, path, Color::black()), __LINE__);
+        // Default R8_UNORM text collapses all 5 text colors into 1 text DC (+ QuadOpaque + QuadAlpha + Uber = <= 4 DC).
+        check(frame_stats(c).draw_call_count <= 4u, __LINE__);
         if (SDL_Surface* surf = SDL_LoadPNG(path)) {
             Uint8 r = 0, g = 0, b = 0, a = 0;
             // Opaque blue rect
@@ -57,20 +62,17 @@ inline bool verify_phase1_gpu() noexcept {
                 for (int x = 170; x < 260; ++x)
                     if (SDL_ReadSurfacePixel(surf, x, y, &r, &g, &b, &a) && b > 180) ++slug_ink;
             check(slug_ink > 100u, __LINE__);
-            // Subpixel text ink & 3-channel RGB fringe on Windows
-            uint32_t sub_ink = 0u, sub_rgb_edges = 0u;
+            // Default R8 grayscale text: crisp ink with neutral white edges (no RGB fringing)
+            uint32_t gray_ink = 0u, gray_fringe = 0u;
             for (int y = 86; y < 114; ++y) {
                 for (int x = 10; x < 260; ++x) {
                     if (SDL_ReadSurfacePixel(surf, x, y, &r, &g, &b, &a)) {
-                        if (r > 120 || g > 120 || b > 120) ++sub_ink;
-                        if (std::abs(int(r) - int(b)) > 20) ++sub_rgb_edges;
+                        if (r > 120 || g > 120 || b > 120) ++gray_ink;
+                        if (std::abs(int(r) - int(b)) > 20) ++gray_fringe;
                     }
                 }
             }
-            check(sub_ink > 80u, __LINE__);
-#if defined(_WIN32)
-            check(sub_rgb_edges > 20u, __LINE__);
-#endif
+            check(gray_ink > 80u && gray_fringe == 0u, __LINE__);
             // TextClip: ink inside [10, 54], zero ink in [62, 220]
             uint32_t clip_in = 0u, clip_out = 0u;
             for (int y = 122; y < 148; ++y) {
@@ -84,6 +86,36 @@ inline bool verify_phase1_gpu() noexcept {
         } else {
             check(false, __LINE__);
         }
+
+#if defined(_WIN32)
+        // Explicit opt-in 3-channel ClearType RGB subpixel mode on Windows.
+        set_lcd_subpixel_text(c, true);
+        check(lcd_subpixel_text(c), __LINE__);
+        begin_frame(c, {.viewport_w = 320, .viewport_h = 80});
+        begin_box({.width = Sizing::fixed(320), .height = Sizing::fixed(80), .background = Color::rgb_hex(0x10141A)});
+        draw_text({.text = str_lit("ClearType RGB Subpixel 012345"), .pos = {10, 24}, .size = 14, .color = Color::white()});
+        end_box();
+        end_frame(c);
+        check(render_headless_png(c, 320, 80, path, Color::black()), __LINE__);
+        if (SDL_Surface* surf = SDL_LoadPNG(path)) {
+            Uint8 r = 0, g = 0, b = 0, a = 0;
+            uint32_t sub_ink = 0u, sub_rgb_edges = 0u;
+            for (int y = 20; y < 48; ++y) {
+                for (int x = 10; x < 260; ++x) {
+                    if (SDL_ReadSurfacePixel(surf, x, y, &r, &g, &b, &a)) {
+                        if (r > 120 || g > 120 || b > 120) ++sub_ink;
+                        if (std::abs(int(r) - int(b)) > 20) ++sub_rgb_edges;
+                    }
+                }
+            }
+            check(sub_ink > 80u && sub_rgb_edges > 20u, __LINE__);
+            SDL_DestroySurface(surf);
+        } else {
+            check(false, __LINE__);
+        }
+        set_lcd_subpixel_text(c, false);
+        check(!lcd_subpixel_text(c), __LINE__);
+#endif
     }
 
     // 2. Early-Z front-to-back opaque occlusion correctness.

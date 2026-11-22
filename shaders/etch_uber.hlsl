@@ -24,8 +24,9 @@
 #define ETCH_FLAG_STEM_DARKEN   (1u << 4)
 #define ETCH_FLAG_ROUND_CAP     (1u << 5)
 
-#define ETCH_GLOBAL_USE_DEPTH   (1u << 30)
-#define ETCH_GLOBAL_MANUAL_SRGB (1u << 31)
+#define ETCH_GLOBAL_GRAYSCALE_TEXT (1u << 28)
+#define ETCH_GLOBAL_USE_DEPTH      (1u << 30)
+#define ETCH_GLOBAL_MANUAL_SRGB    (1u << 31)
 
 // Strictly 64 bytes matching etch::Prim in src/etch.h (zero float3 members).
 struct Prim
@@ -334,7 +335,7 @@ VSOut vs_main(uint vertex_id : SV_VertexID, uint instance_id : SV_InstanceID)
     o.border_color = unpack_rgba8_srgb_to_linear(p.style.z);
     o.uv_rect      = uv_rect;
     o.grad_params  = float4(grad_dir.x, grad_dir.y, bw_soft.x, bw_soft.y);
-    o.meta         = uint4(kind, flags | (g_flags & ETCH_GLOBAL_MANUAL_SRGB), tex_slot, asuint(clip_r));
+    o.meta         = uint4(kind, flags | (g_flags & (ETCH_GLOBAL_MANUAL_SRGB | ETCH_GLOBAL_GRAYSCALE_TEXT)), tex_slot, asuint(clip_r));
     if ((kind == ETCH_PRIM_SLUG_GLYPH || kind == ETCH_PRIM_GLYPH || kind == ETCH_PRIM_TEXTURE) && (flags & ETCH_FLAG_ROUND_CAP) != 0u)
         o.grad_params = float4(asfloat(p.style.z), asfloat(p.style.w), 0.0f, 1.0f);
     if (kind == ETCH_PRIM_MESH_GRAD) o.grad_params = float4(bw_soft, 0.0f, 0.0f);
@@ -762,7 +763,8 @@ float4 ps_main(VSOut input) : SV_Target0
     {
         float2 norm_uv = saturate((input.pixel_pos - input.bounds.xy) / size);
         float2 uv      = lerp(input.uv_rect.xy, input.uv_rect.zw, norm_uv);
-        float  cov     = sample_slot(tex_slot, uv).a;
+        float4 gs      = sample_slot(tex_slot, uv);
+        float  cov     = ((flags & ETCH_GLOBAL_GRAYSCALE_TEXT) != 0u) ? gs.r : gs.a;
         float4 glyph_col = input.color0;
         if ((flags & ETCH_FLAG_LINEAR_GRAD) != 0u)
         {
@@ -771,13 +773,13 @@ float4 ps_main(VSOut input) : SV_Target0
             float x1_rel = max(input.radii.w, x0_rel + 0.5f);
             glyph_col = lerp(input.color0, input.border_color, smoothstep(x0_rel, x1_rel, rel_x));
         }
-        if ((flags & ETCH_FLAG_STEM_DARKEN) != 0u)
+        if ((flags & ETCH_FLAG_STEM_DARKEN) != 0u && cov > 0.0f)
         {
-            float lin_luma   = saturate(dot(glyph_col.rgb, float3(0.2126f, 0.7152f, 0.0722f)));
-            float srgb_luma  = pow(lin_luma, 1.0f / 2.2f);
-            float dark_boost = saturate(1.0f - 2.0f * srgb_luma) * 0.24f;
-            float light_trim = saturate(2.0f * srgb_luma - 1.0f) * 0.12f;
-            cov = lerp(cov, cov * (2.0f - cov), dark_boost);
+            float lin_luma    = saturate(dot(glyph_col.rgb, float3(0.2126f, 0.7152f, 0.0722f)));
+            float srgb_luma   = pow(lin_luma, 1.0f / 2.2f);
+            float dark_factor = saturate(1.0f - 2.0f * srgb_luma);
+            float light_trim  = saturate(2.0f * srgb_luma - 1.0f) * 0.16f;
+            cov = lerp(cov, pow(cov, 0.74f), dark_factor * 0.85f);
             cov = lerp(cov, cov * cov, light_trim);
         }
         out_pm = float4(glyph_col.rgb, 1.0f) * (glyph_col.a * cov);

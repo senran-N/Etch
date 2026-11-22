@@ -256,9 +256,12 @@ bool ensure_subpixel_atlas(Context* ctx, uint32_t w, uint32_t h, uint32_t* out_x
     if (!ctx || !out_x || !out_y || w == 0u || h == 0u) return false;
     auto& a = ctx->atlas;
     constexpr uint32_t kSubpixelInit = 512u;
-    constexpr uint32_t kSubpixelMax = 4096u;
+    constexpr uint32_t kSubpixelSteadyCap = 1024u;
+    constexpr uint32_t kSubpixelBurstMaxW = 2048u;
+    constexpr uint32_t kSubpixelBurstMaxH = 1024u;
+    const uint32_t bpp = a.subpixel_is_r8 ? 1u : 4u;
     if (!a.subpixel_pixels) {
-        a.subpixel_pixels = static_cast<uint8_t*>(std::calloc(size_t(kSubpixelInit) * kSubpixelInit * 4u, 1u));
+        a.subpixel_pixels = static_cast<uint8_t*>(std::calloc(size_t(kSubpixelInit) * kSubpixelInit * bpp, 1u));
         if (!a.subpixel_pixels) return false;
         a.subpixel_w = kSubpixelInit;
         a.subpixel_h = kSubpixelInit;
@@ -272,7 +275,7 @@ bool ensure_subpixel_atlas(Context* ctx, uint32_t w, uint32_t h, uint32_t* out_x
     }
     const uint32_t pad_w = w + 1u;
     const uint32_t pad_h = h + 1u;
-    for (int attempt = 0; attempt < 3; ++attempt) {
+    for (int attempt = 0; attempt < 4; ++attempt) {
         if (a.subpixel_shelf_x + pad_w > a.subpixel_w) {
             a.subpixel_shelf_x = (a.subpixel_shelf_x0 > 0u) ? a.subpixel_shelf_x0 : 1u;
             a.subpixel_shelf_y += a.subpixel_shelf_h + 1u;
@@ -285,33 +288,43 @@ bool ensure_subpixel_atlas(Context* ctx, uint32_t w, uint32_t h, uint32_t* out_x
             *out_y = a.subpixel_shelf_y;
             a.subpixel_shelf_x += pad_w;
             if (pad_h > a.subpixel_shelf_h) a.subpixel_shelf_h = pad_h;
+            if (a.subpixel_w > kSubpixelSteadyCap || a.subpixel_h > kSubpixelSteadyCap ||
+                (a.subpixel_w >= kSubpixelSteadyCap && a.subpixel_h >= kSubpixelSteadyCap &&
+                 a.subpixel_shelf_y >= 900u))
+            {
+                a.hinted_gc_pending = true;
+            }
             return true;
         }
         const uint32_t old_w = a.subpixel_w, old_h = a.subpixel_h;
         uint32_t next_w = old_w, next_h = old_h;
-        if (next_h <= next_w && next_h < kSubpixelMax) next_h *= 2u;
-        else if (next_w < kSubpixelMax) next_w *= 2u;
-        else if (next_h < kSubpixelMax) next_h *= 2u;
-        else return false;
-        auto* next_px = static_cast<uint8_t*>(std::calloc(size_t(next_w) * next_h * 4u, 1u));
+        if (next_h <= next_w && next_h < kSubpixelBurstMaxH) next_h *= 2u;
+        else if (next_w < kSubpixelBurstMaxW) next_w *= 2u;
+        else if (next_h < kSubpixelBurstMaxH) next_h *= 2u;
+        else {
+            a.hinted_gc_pending = true;
+            return false;
+        }
+        auto* next_px = static_cast<uint8_t*>(std::calloc(size_t(next_w) * next_h * bpp, 1u));
         if (!next_px) return false;
         for (uint32_t row = 0u; row < old_h; ++row) {
-            std::memcpy(next_px + size_t(row) * next_w * 4u,
-                        a.subpixel_pixels + size_t(row) * old_w * 4u,
-                        size_t(old_w) * 4u);
+            std::memcpy(next_px + size_t(row) * next_w * bpp,
+                        a.subpixel_pixels + size_t(row) * old_w * bpp,
+                        size_t(old_w) * bpp);
         }
         std::free(a.subpixel_pixels);
         a.subpixel_pixels = next_px;
         a.subpixel_w = next_w;
         a.subpixel_h = next_h;
+        if (next_w > kSubpixelSteadyCap || next_h > kSubpixelSteadyCap) {
+            a.hinted_gc_pending = true;
+        }
         if (next_h > old_h) {
-            // Fresh bottom half [1..next_w-1, old_h..next_h-1] has 1px gutter below every prior glyph.
             a.subpixel_shelf_x0 = 1u;
             a.subpixel_shelf_x = 1u;
             a.subpixel_shelf_y = old_h;
             a.subpixel_shelf_h = 0u;
         } else {
-            // Fresh right half [old_w..next_w-1, 1..next_h-1] has 1px gutter right of every prior glyph.
             a.subpixel_shelf_x0 = old_w;
             a.subpixel_shelf_x = old_w;
             a.subpixel_shelf_y = 1u;
@@ -329,6 +342,33 @@ bool ensure_subpixel_atlas(Context* ctx, uint32_t w, uint32_t h, uint32_t* out_x
         remap_subpixel_prims_scale(ctx->filter_prims, ctx->filter_prim_count, sx, sy);
     }
     return false;
+}
+
+void reset_hinted_atlas_cache(FontAtlas* a) noexcept {
+    if (!a) return;
+    if (a->hinted_glyphs && a->hinted_cap > 0u) {
+        std::memset(a->hinted_glyphs, 0, size_t(a->hinted_cap) * sizeof(EmojiBitmapEntry));
+    }
+    a->hinted_count = 0u;
+    std::free(a->subpixel_pixels);
+    a->subpixel_pixels = nullptr;
+    a->subpixel_w = 0u;
+    a->subpixel_h = 0u;
+    a->subpixel_shelf_x0 = 1u;
+    a->subpixel_shelf_x = 0u;
+    a->subpixel_shelf_y = 2u;
+    a->subpixel_shelf_h = 0u;
+    a->subpixel_dirty = false;
+    a->subpixel_dirty_y0 = UINT32_MAX;
+    a->subpixel_dirty_y1 = 0u;
+    a->hinted_gc_pending = false;
+    ++a->uv_epoch;
+}
+
+void maybe_gc_hinted_atlas(Context* ctx) noexcept {
+    if (!ctx || !ctx->atlas.hinted_gc_pending || ctx->prim_count != 0u || ctx->filter_prim_count != 0u) return;
+    ctx->atlas.subpixel_is_r8 = !ctx->atlas.lcd_subpixel_text;
+    reset_hinted_atlas_cache(&ctx->atlas);
 }
 
 void evict_font_slot_hinted_glyphs(FontAtlas* a, uint16_t slot_idx) noexcept {
@@ -409,16 +449,16 @@ IDWriteFontFace* ensure_dwrite_face(FontAtlas* a, FontSlot* slot) noexcept {
 #endif
 
 EmojiBitmapEntry get_or_cache_hinted_glyph(Context* ctx, uint16_t slot_idx, uint32_t glyph_id, float phys_px, uint8_t x_phase = 0u) noexcept {
-#if defined(_WIN32)
     if (!ctx || slot_idx >= kMaxFontSlots || glyph_id > 0xFFFFu || phys_px < 6.0f || phys_px > 24.5f) return {};
     auto& a = ctx->atlas;
     auto& s = a.slots[slot_idx];
-    if (!s.loaded || !s.has_outlines || s.font_file_path[0] == '\0') return {};
+    if (!s.loaded || !s.has_outlines) return {};
     const uint32_t ppem_half = static_cast<uint32_t>(std::round(phys_px * 2.0f));
     if (ppem_half < 12u || ppem_half > 50u) return {};
     const uint32_t phase2 = uint32_t(x_phase & 3u);
     const uint64_t key = (uint64_t(slot_idx + 1u) << 56) | (uint64_t(s.generation) << 48) |
                          (uint64_t(ppem_half) << 34) | (uint64_t(phase2) << 32) | uint64_t(glyph_id);
+    const uint32_t cur_frame = ctx->active_ui ? ctx->active_ui->frame_index : 0u;
     if (!a.hinted_cap || (a.hinted_count + 1u) * 4u > a.hinted_cap * 3u) {
         if (!hinted_rehash(&a)) return {};
     }
@@ -426,11 +466,18 @@ EmojiBitmapEntry get_or_cache_hinted_glyph(Context* ctx, uint16_t slot_idx, uint
     while (a.hinted_glyphs[idx].key && a.hinted_glyphs[idx].key != key) {
         idx = (idx + 1u) & (a.hinted_cap - 1u);
     }
-    if (a.hinted_glyphs[idx].key) return a.hinted_glyphs[idx];
+    if (a.hinted_glyphs[idx].key) {
+        a.hinted_glyphs[idx].last_used_frame = cur_frame;
+        return a.hinted_glyphs[idx];
+    }
 
     EmojiBitmapEntry entry{};
     entry.key = key;
     entry.ppem = ppem_half;
+    entry.last_used_frame = cur_frame;
+
+#if defined(_WIN32)
+    if (s.font_file_path[0] == '\0') return {};
     IDWriteFactory* factory = ensure_dwrite_factory(&a);
     IDWriteFontFace* face = ensure_dwrite_face(&a, &s);
     if (!factory || !face) {
@@ -466,7 +513,6 @@ EmojiBitmapEntry get_or_cache_hinted_glyph(Context* ctx, uint16_t slot_idx, uint
         return {};
     }
     if (rc.right <= rc.left || rc.bottom <= rc.top) {
-        // DirectWrite genuinely reports an empty glyph rect (e.g., space/control char): safe to cache negative.
         analysis->Release();
         a.hinted_glyphs[idx] = entry;
         ++a.hinted_count;
@@ -504,17 +550,30 @@ EmojiBitmapEntry get_or_cache_hinted_glyph(Context* ctx, uint16_t slot_idx, uint
         SUCCEEDED(analysis->CreateAlphaTexture(DWRITE_TEXTURE_CLEARTYPE_3x1, &rc, rgb, static_cast<UINT32>(rgb_bytes))) &&
         ensure_subpixel_atlas(ctx, w, h, &tx, &ty))
     {
-        for (uint32_t row = 0u; row < h; ++row) {
-            const uint8_t* src_row = rgb + size_t(row) * w * 3u;
-            uint8_t* dst_row = a.subpixel_pixels + (size_t(ty + row) * a.subpixel_w + tx) * 4u;
-            for (uint32_t col = 0u; col < w; ++col) {
-                const uint8_t cr = src_row[col * 3u + 0u];
-                const uint8_t cg = src_row[col * 3u + 1u];
-                const uint8_t cb = src_row[col * 3u + 2u];
-                dst_row[col * 4u + 0u] = cr;
-                dst_row[col * 4u + 1u] = cg;
-                dst_row[col * 4u + 2u] = cb;
-                dst_row[col * 4u + 3u] = static_cast<uint8_t>((uint32_t(cr) + uint32_t(cg) + uint32_t(cb) + 1u) / 3u);
+        if (a.subpixel_is_r8) {
+            for (uint32_t row = 0u; row < h; ++row) {
+                const uint8_t* src_row = rgb + size_t(row) * w * 3u;
+                uint8_t* dst_row = a.subpixel_pixels + size_t(ty + row) * a.subpixel_w + tx;
+                for (uint32_t col = 0u; col < w; ++col) {
+                    const uint32_t cr = src_row[col * 3u + 0u];
+                    const uint32_t cg = src_row[col * 3u + 1u];
+                    const uint32_t cb = src_row[col * 3u + 2u];
+                    dst_row[col] = static_cast<uint8_t>((cr * 77u + cg * 150u + cb * 29u + 128u) >> 8);
+                }
+            }
+        } else {
+            for (uint32_t row = 0u; row < h; ++row) {
+                const uint8_t* src_row = rgb + size_t(row) * w * 3u;
+                uint8_t* dst_row = a.subpixel_pixels + (size_t(ty + row) * a.subpixel_w + tx) * 4u;
+                for (uint32_t col = 0u; col < w; ++col) {
+                    const uint8_t cr = src_row[col * 3u + 0u];
+                    const uint8_t cg = src_row[col * 3u + 1u];
+                    const uint8_t cb = src_row[col * 3u + 2u];
+                    dst_row[col * 4u + 0u] = cr;
+                    dst_row[col * 4u + 1u] = cg;
+                    dst_row[col * 4u + 2u] = cb;
+                    dst_row[col * 4u + 3u] = static_cast<uint8_t>((uint32_t(cr) + uint32_t(cg) + uint32_t(cb) + 1u) / 3u);
+                }
             }
         }
         a.subpixel_dirty = true;
@@ -532,7 +591,6 @@ EmojiBitmapEntry get_or_cache_hinted_glyph(Context* ctx, uint16_t slot_idx, uint
     if (used_heap) std::free(rgb);
     analysis->Release();
 
-    // Never poison a.hinted_glyphs on transient allocation/rasterization/atlas failure.
     if (!entry.has_bitmap) {
         return {};
     }
@@ -540,8 +598,39 @@ EmojiBitmapEntry get_or_cache_hinted_glyph(Context* ctx, uint16_t slot_idx, uint
     ++a.hinted_count;
     return entry;
 #else
-    (void)ctx; (void)slot_idx; (void)glyph_id; (void)phys_px; (void)x_phase;
-    return {};
+    if (!a.subpixel_is_r8) return {};
+    const float scale = (static_cast<float>(ppem_half) * 0.5f) * s.scale_1px;
+    const float shift_x = static_cast<float>(phase2) * 0.25f;
+    int ix0 = 0, iy0 = 0, ix1 = 0, iy1 = 0;
+    stbtt_GetGlyphBitmapBoxSubpixel(&s.font_info, static_cast<int>(glyph_id), scale, scale, shift_x, 0.0f, &ix0, &iy0, &ix1, &iy1);
+    if (ix1 <= ix0 || iy1 <= iy0) {
+        a.hinted_glyphs[idx] = entry;
+        ++a.hinted_count;
+        return entry;
+    }
+    const uint32_t w = static_cast<uint32_t>(ix1 - ix0);
+    const uint32_t h = static_cast<uint32_t>(iy1 - iy0);
+    if (w > 128u || h > 128u) return {};
+    uint32_t tx = 0u, ty = 0u;
+    if (!ensure_subpixel_atlas(ctx, w, h, &tx, &ty)) return {};
+    stbtt_MakeGlyphBitmapSubpixel(
+        &s.font_info,
+        a.subpixel_pixels + size_t(ty) * a.subpixel_w + tx,
+        static_cast<int>(w), static_cast<int>(h), static_cast<int>(a.subpixel_w),
+        scale, scale, shift_x, 0.0f, static_cast<int>(glyph_id));
+    a.subpixel_dirty = true;
+    if (ty < a.subpixel_dirty_y0) a.subpixel_dirty_y0 = ty;
+    if (ty + h > a.subpixel_dirty_y1) a.subpixel_dirty_y1 = ty + h;
+    entry.tile_x = tx;
+    entry.tile_y = ty;
+    entry.width_px = w;
+    entry.height_px = h;
+    entry.bearing_x = static_cast<float>(ix0);
+    entry.bearing_y_top = static_cast<float>(-iy0);
+    entry.has_bitmap = true;
+    a.hinted_glyphs[idx] = entry;
+    ++a.hinted_count;
+    return entry;
 #endif
 }
 } // namespace
@@ -556,5 +645,23 @@ void set_hinted_small_text(Context* ctx, bool enabled) noexcept {
 
 bool hinted_small_text(const Context* ctx) noexcept {
     return ctx ? ctx->atlas.hinted_small_text : false;
+}
+
+void set_lcd_subpixel_text(Context* ctx, bool enabled) noexcept {
+    if (!ctx) return;
+    if (ctx->atlas.lcd_subpixel_text != enabled) {
+        ctx->atlas.lcd_subpixel_text = enabled;
+        if (!ctx->in_frame && ctx->prim_count == 0u && ctx->filter_prim_count == 0u) {
+            ctx->atlas.subpixel_is_r8 = !enabled;
+            reset_hinted_atlas_cache(&ctx->atlas);
+        } else {
+            ctx->atlas.hinted_gc_pending = true;
+        }
+        request_redraw(ctx);
+    }
+}
+
+bool lcd_subpixel_text(const Context* ctx) noexcept {
+    return ctx ? ctx->atlas.lcd_subpixel_text : false;
 }
 } // namespace etch

@@ -422,7 +422,8 @@ ETCH_API EtchContextDesc etch_context_desc_default(void) {
     return {static_cast<uint32_t>(sizeof(EtchContextDesc)),
             d.max_layout_elements, d.window, d.frame_arena_bytes, d.max_prims_per_frame,
             d.font_path, d.font_size_px, d.enable_gpu_debug, d.headless, d.gpu_driver,
-            nullptr, nullptr, d.enable_os_a11y, d.respect_reduced_motion};
+            nullptr, nullptr, d.enable_os_a11y, d.respect_reduced_motion, 0u,
+            d.prefer_high_performance_gpu, d.lcd_subpixel_text};
 }
 
 ETCH_API EtchFrameDesc etch_frame_desc_default(void) {
@@ -914,7 +915,8 @@ ETCH_API EtchContext* etch_create_context(const EtchContextDesc* desc) {
         cpp_desc = {d->max_layout_elements, d->window, d->frame_arena_bytes,
                     d->max_prims_per_frame, d->font_path, d->font_size_px,
                     d->enable_gpu_debug, d->headless, d->gpu_driver,
-                    nullptr, nullptr, d->enable_os_a11y, d->respect_reduced_motion};
+                    nullptr, nullptr, d->enable_os_a11y, d->respect_reduced_motion,
+                    d->prefer_high_performance_gpu, d->lcd_subpixel_text};
     }
     etch::Context* ctx = etch::create_context(cpp_desc);
     if (ctx && d && d->on_window_refresh) {
@@ -957,6 +959,12 @@ ETCH_API void etch_set_hinted_small_text(EtchContext* ctx, bool enabled) {
 }
 ETCH_API bool etch_hinted_small_text(const EtchContext* ctx) {
     return etch::hinted_small_text(to_ctx(ctx));
+}
+ETCH_API void etch_set_lcd_subpixel_text(EtchContext* ctx, bool enabled) {
+    etch::set_lcd_subpixel_text(to_ctx(ctx), enabled);
+}
+ETCH_API bool etch_lcd_subpixel_text(const EtchContext* ctx) {
+    return etch::lcd_subpixel_text(to_ctx(ctx));
 }
 ETCH_API bool etch_is_font_loaded(const EtchContext* ctx, uint16_t font_id) {
     return etch::is_font_loaded(to_ctx(ctx), font_id);

@@ -12,7 +12,7 @@
 #include <type_traits>
 
 #define ETCH_VERSION_MAJOR 0
-#define ETCH_VERSION_MINOR 25
+#define ETCH_VERSION_MINOR 26
 #define ETCH_VERSION_PATCH 0
 #define ETCH_VERSION_STR_DETAIL(x) #x
 #define ETCH_VERSION_STR(x) ETCH_VERSION_STR_DETAIL(x)
@@ -982,9 +982,9 @@ using WindowRefreshFn = void (*)(Context* ctx, SDL_Window* window, float dt_seco
 struct ContextDesc {
     uint32_t max_layout_elements = 16384u;
     SDL_Window* window = nullptr;
-    size_t frame_arena_bytes = 4u * 1024u * 1024u;
+    size_t frame_arena_bytes = 1024u * 1024u;
     // Initial reserve, clamped [64..4194304]; doubles on demand up to 4194304 prims.
-    uint32_t max_prims_per_frame = 65536u;
+    uint32_t max_prims_per_frame = 2048u;
     const char* font_path = nullptr;
     float font_size_px = 16.0f;
     bool enable_gpu_debug = false;
@@ -995,6 +995,11 @@ struct ContextDesc {
     void* refresh_user_data = nullptr;
     bool enable_os_a11y = true;
     bool respect_reduced_motion = true;
+    // Default false: prefer low-power integrated GPU to minimize driver commit and battery draw.
+    bool prefer_high_performance_gpu = false;
+    // Default false: single-channel R8_UNORM 4x X-phase grayscale hinted text (1 draw call across all colors).
+    // Set true to opt into 3-channel ClearType RGB LCD subpixel blending on 1.0x standard RGB LCD displays.
+    bool lcd_subpixel_text = false;
 };
 
 enum KeyMod : uint16_t {
@@ -2274,6 +2279,9 @@ float font_scale_adjust(const Context* ctx, uint16_t font_id) noexcept;
 // Larger sizes, rotated runs, and zoomed canvas layers remain pure-GPU Slug vector outlines.
 void set_hinted_small_text(Context* ctx, bool enabled) noexcept;
 bool hinted_small_text(const Context* ctx) noexcept;
+// Opt-in 3-channel RGB LCD subpixel text (default false: single-channel R8_UNORM grayscale for 1-DC batching & 1/4 VRAM).
+void set_lcd_subpixel_text(Context* ctx, bool enabled) noexcept;
+bool lcd_subpixel_text(const Context* ctx) noexcept;
 
 // Zero-atlas SVG path -> Slug vector icon compiler
 enum class StrokeCap : uint8_t { Butt = 0, Round = 1, Square = 2 };

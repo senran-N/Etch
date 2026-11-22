@@ -21,9 +21,9 @@ inline constexpr uint32_t kMaxCollapsibleDepth = 32u;
 inline constexpr uint32_t kAtlasSize = 16u;
 inline constexpr uint32_t kSlugGlyphTableCapacity = 4096u;
 inline constexpr uint32_t kMaxSlugBands = 8u;
-inline constexpr uint32_t kInitialSlugCurveCap = 4096u;
-inline constexpr uint32_t kInitialSlugBandCap = 8192u;
-inline constexpr uint32_t kDefaultStateCapacity = 1024u;
+inline constexpr uint32_t kInitialSlugCurveCap = 1024u;
+inline constexpr uint32_t kInitialSlugBandCap = 2048u;
+inline constexpr uint32_t kDefaultStateCapacity = 256u;
 inline constexpr uint32_t kMaxClipDepth = 64u;
 inline constexpr uint32_t kMaxCachedPipelines = 4u;
 inline constexpr uint32_t kMaxSplitDepth = 32u;
@@ -292,6 +292,7 @@ struct EmojiBitmapEntry {
     uint64_t key = 0;
     uint32_t sprite_id = kInvalidSprite, ppem = 0, width_px = 0, height_px = 0;
     uint32_t tile_x = 0, tile_y = 0;
+    uint32_t last_used_frame = 0;
     float bearing_x = 0, bearing_y_top = 0;
     bool has_bitmap = false;
 };
@@ -321,17 +322,23 @@ struct FontAtlas {
     uint32_t emoji_cap = 0, emoji_count = 0;
     EmojiBitmapEntry* hinted_glyphs = nullptr;
     uint32_t hinted_cap = 0, hinted_count = 0;
-    // Dedicated linear R8G8B8A8_UNORM atlas for 3-channel LCD ClearType RGB subpixel coverage.
+    // Dedicated linear hinted glyph atlas: R8_UNORM grayscale (default, 1-DC across all colors)
+    // or R8G8B8A8_UNORM 3-channel ClearType RGB LCD (explicit opt-in via set_lcd_subpixel_text).
     uint8_t* subpixel_pixels = nullptr;
     SDL_GPUTexture* subpixel_gpu_tex = nullptr;
     uint32_t subpixel_w = 0, subpixel_h = 0, subpixel_gpu_w = 0, subpixel_gpu_h = 0;
     uint32_t subpixel_dirty_y0 = UINT32_MAX, subpixel_dirty_y1 = 0;
     uint32_t subpixel_shelf_x0 = 1, subpixel_shelf_x = 0, subpixel_shelf_y = 2, subpixel_shelf_h = 0;
+    uint32_t subpixel_clean_frames = 0;
     bool subpixel_dirty = false;
+    bool subpixel_is_r8 = true;
+    bool subpixel_gpu_is_r8 = true;
+    bool hinted_gc_pending = false;
     void* dwrite_factory = nullptr;
     void* dwrite_module = nullptr;
     bool dwrite_probed = false;
     bool hinted_small_text = false;
+    bool lcd_subpixel_text = false;
 
     FontSlot          slots[kMaxFontSlots] = {};
     uint16_t          fallback_order[kMaxFontSlots] = {};
@@ -357,6 +364,7 @@ enum class GpuPipelineKind : uint8_t {
     SubpixelText = 3,
     UberPunch = 4,
     UberAdditive = 5,
+    GrayscaleText = 6,
 };
 
 struct DrawBatch {
@@ -870,6 +878,8 @@ struct WindowUiState {
     SDL_GPUTexture* blur_pong_tex = nullptr;
     uint32_t blur_rt_w = 0;
     uint32_t blur_rt_h = 0;
+    uint32_t blur_idle_frames = 0;
+    uint32_t depth_idle_frames = 0;
     FilterSliceTargets filter_slices[kMaxFilterSlices] = {};
     uint32_t filter_rt_w = 0;
     uint32_t filter_rt_h = 0;
@@ -1152,9 +1162,9 @@ struct Context {
         uint32_t         text_used = 0;
     };
     struct ShapeCache {
-        static constexpr uint32_t kEntryCap = 2048u;
-        static constexpr uint32_t kGlyphCap = 32768u;
-        static constexpr uint32_t kTextCap  = 131072u;
+        static constexpr uint32_t kEntryCap = 512u;
+        static constexpr uint32_t kGlyphCap = 8192u;
+        static constexpr uint32_t kTextCap  = 32768u;
         ShapeCacheBank banks[2] = {};
         uint32_t       active_bank = 0;
         uint32_t       font_revision = 0;
@@ -1201,7 +1211,9 @@ struct Context {
     // GPU objects
     char gpu_driver[32] = {};
     bool enable_gpu_debug = false;
+    bool prefer_high_performance_gpu = false;
     bool gpu_init_failed = false;
+    SDL_GPUShaderFormat      gpu_shader_fmt = SDL_GPU_SHADERFORMAT_INVALID;
     SDL_GPUDevice*           device = nullptr;
     SDL_Window*              window = nullptr;
     ClaimedWindowSlot** claimed_windows = nullptr;
@@ -1237,6 +1249,10 @@ struct Context {
     uint32_t                 subpixel_pipeline_count = 0;
     CachedPipeline           subpixel_depth_pipelines[kMaxCachedPipelines] = {};
     uint32_t                 subpixel_depth_pipeline_count = 0;
+    CachedPipeline           grayscale_text_pipelines[kMaxCachedPipelines] = {};
+    uint32_t                 grayscale_text_pipeline_count = 0;
+    CachedPipeline           grayscale_text_depth_pipelines[kMaxCachedPipelines] = {};
+    uint32_t                 grayscale_text_depth_pipeline_count = 0;
     CachedPipeline punch_pipelines[kMaxCachedPipelines] = {};
     uint32_t punch_pipeline_count = 0;
     CachedPipeline additive_pipelines[kMaxCachedPipelines] = {};
@@ -1250,13 +1266,16 @@ struct Context {
     uint32_t                 present_pipeline_count = 0;
     uint32_t prim_gpu_cap = 0;
     uint32_t prim_tbuf_cap = 0;
+    uint32_t prim_tbuf_cursor = 0;
     SDL_GPUBuffer*           prim_gpu_buf = nullptr;
     SDL_GPUTransferBuffer*   prim_transfer_buf = nullptr;
     SDL_GPUBuffer*           prim_depth_gpu_buf = nullptr;
     SDL_GPUTransferBuffer*   prim_depth_transfer_buf = nullptr;
     uint32_t                 prim_depth_gpu_cap = 0;
     uint32_t                 prim_depth_tbuf_cap = 0;
+    uint32_t                 prim_depth_tbuf_cursor = 0;
     SDL_GPUTransferBuffer*   atlas_transfer_buf = nullptr;
+    uint32_t                 atlas_clean_frames = 0;
     SDL_GPUTransferBuffer*   subpixel_transfer_buf = nullptr;
     uint32_t                 subpixel_tbuf_size = 0;
     SDL_GPUCommandBuffer*    texture_upload_cmd = nullptr;

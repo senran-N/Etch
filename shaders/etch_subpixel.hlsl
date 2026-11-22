@@ -8,8 +8,9 @@
 #define ETCH_FLAG_STEM_DARKEN   (1u << 4)
 #define ETCH_FLAG_TEXT_CLIP     (1u << 5)
 
-#define ETCH_GLOBAL_USE_DEPTH   (1u << 30)
-#define ETCH_GLOBAL_MANUAL_SRGB (1u << 31)
+#define ETCH_GLOBAL_GRAYSCALE_TEXT (1u << 28)
+#define ETCH_GLOBAL_USE_DEPTH      (1u << 30)
+#define ETCH_GLOBAL_MANUAL_SRGB    (1u << 31)
 
 struct Prim
 {
@@ -71,6 +72,7 @@ struct VSOut
     nointerpolation float4 clip      : TEXCOORD2;
     nointerpolation float4 text_clip : TEXCOORD3; // x = min_x, y = max_x, z = text_alpha, w = srgb_luma
     nointerpolation uint4  meta      : TEXCOORD4; // x = flags, y = clip_index, z = asuint(clip_r), w = 0
+    nointerpolation float4 text_color: TEXCOORD5; // linear rgb, straight a (for single-DC R8_UNORM grayscale text)
 };
 
 float unpack_f16_bits(uint h)
@@ -101,6 +103,16 @@ float2 unpack_unorm16x2(uint packed)
 float srgb_to_linear_chan(float c)
 {
     return (c <= 0.04045f) ? (c * (1.0f / 12.92f)) : pow(max((c + 0.055f) * (1.0f / 1.055f), 0.0f), 2.4f);
+}
+
+float linear_to_srgb_chan(float c)
+{
+    return (c <= 0.0031308f) ? (c * 12.92f) : (1.055f * pow(max(c, 0.0f), 1.0f / 2.4f) - 0.055f);
+}
+
+float3 linear_to_srgb3(float3 c)
+{
+    return float3(linear_to_srgb_chan(c.r), linear_to_srgb_chan(c.g), linear_to_srgb_chan(c.b));
 }
 
 float sd_rounded_box(float2 p, float2 b, float4 r, bool continuous)
@@ -153,9 +165,11 @@ VSOut vs_main(uint vertex_id : SV_VertexID, uint instance_id : SV_InstanceID)
         float((p.style.y >> 16) & 0xFFu),
         float((p.style.y >> 24) & 0xFFu)
     ) * (1.0f / 255.0f);
-    float lin_luma = saturate(dot(
-        float3(srgb_to_linear_chan(col_srgb.r), srgb_to_linear_chan(col_srgb.g), srgb_to_linear_chan(col_srgb.b)),
-        float3(0.2126f, 0.7152f, 0.0722f)));
+    float3 col_lin = float3(
+        srgb_to_linear_chan(col_srgb.r),
+        srgb_to_linear_chan(col_srgb.g),
+        srgb_to_linear_chan(col_srgb.b));
+    float lin_luma = saturate(dot(col_lin, float3(0.2126f, 0.7152f, 0.0722f)));
     float srgb_luma = pow(lin_luma, 1.0f / 2.2f);
 
     float z = ((g_flags & ETCH_GLOBAL_USE_DEPTH) != 0u)
@@ -169,11 +183,12 @@ VSOut vs_main(uint vertex_id : SV_VertexID, uint instance_id : SV_InstanceID)
         z,
         1.0f
     );
-    o.pixel_pos = px;
-    o.uv        = lerp(uv0, uv1, norm_uv);
-    o.clip      = p.clip;
-    o.text_clip = float4(asfloat(p.style.z), asfloat(p.style.w), col_srgb.a, srgb_luma);
-    o.meta      = uint4(flags | (g_flags & ETCH_GLOBAL_MANUAL_SRGB), clip_idx, asuint(clip_r), 0u);
+    o.pixel_pos  = px;
+    o.uv         = lerp(uv0, uv1, norm_uv);
+    o.clip       = p.clip;
+    o.text_clip  = float4(asfloat(p.style.z), asfloat(p.style.w), col_srgb.a, srgb_luma);
+    o.meta       = uint4(flags | (g_flags & (ETCH_GLOBAL_MANUAL_SRGB | ETCH_GLOBAL_GRAYSCALE_TEXT)), clip_idx, asuint(clip_r), 0u);
+    o.text_color = float4(col_lin, col_srgb.a);
     return o;
 }
 
@@ -220,12 +235,33 @@ float4 ps_main(VSOut input) : SV_Target0
     }
     if (clip_cov <= 0.0f) return float4(0.0f, 0.0f, 0.0f, 0.0f);
 
-    float4 cov = g_subpixel_atlas.Sample(g_subpixel_smp, input.uv);
+    float4 tex_sample = g_subpixel_atlas.Sample(g_subpixel_smp, input.uv);
+    if ((flags & ETCH_GLOBAL_GRAYSCALE_TEXT) != 0u)
+    {
+        float cov = tex_sample.r;
+        if ((flags & ETCH_FLAG_STEM_DARKEN) != 0u && cov > 0.0f)
+        {
+            float srgb_luma = input.text_clip.w;
+            // Polarity-calibrated stem darkening: prevents thin/spindly dark-on-light text in linear blending
+            // and gently trims light-on-dark halo bloat.
+            float dark_factor = saturate(1.0f - 2.0f * srgb_luma);
+            float light_trim = saturate(2.0f * srgb_luma - 1.0f) * 0.16f;
+            cov = lerp(cov, pow(cov, 0.74f), dark_factor * 0.85f);
+            cov = lerp(cov, cov * cov, light_trim);
+        }
+        float a = saturate(cov * input.text_color.a * clip_cov);
+        float3 rgb = ((flags & ETCH_GLOBAL_MANUAL_SRGB) != 0u)
+            ? linear_to_srgb3(saturate(input.text_color.rgb))
+            : input.text_color.rgb;
+        return float4(rgb * a, a);
+    }
+
+    float4 cov = tex_sample;
     if ((flags & ETCH_FLAG_STEM_DARKEN) != 0u)
     {
         float srgb_luma = input.text_clip.w;
-        float dark_boost = saturate(1.0f - 2.0f * srgb_luma) * 0.22f;
-        float light_trim = saturate(2.0f * srgb_luma - 1.0f) * 0.12f;
+        float dark_boost = saturate(1.0f - 2.0f * srgb_luma) * 0.36f;
+        float light_trim = saturate(2.0f * srgb_luma - 1.0f) * 0.16f;
         cov = lerp(cov, cov * (2.0f - cov), dark_boost);
         cov = lerp(cov, cov * cov, light_trim);
     }

@@ -8,7 +8,7 @@
 
 #ifndef ETCH_VERSION_MAJOR
 #define ETCH_VERSION_MAJOR 0
-#define ETCH_VERSION_MINOR 25
+#define ETCH_VERSION_MINOR 26
 #define ETCH_VERSION_PATCH 0
 #define ETCH_VERSION_STR_DETAIL(x) #x
 #define ETCH_VERSION_STR(x) ETCH_VERSION_STR_DETAIL(x)
@@ -737,6 +737,9 @@ typedef struct EtchContextDesc {
     void* refresh_user_data;
     bool enable_os_a11y;
     bool respect_reduced_motion;
+    size_t reserved_v025_pad;
+    bool prefer_high_performance_gpu;
+    bool lcd_subpixel_text;
 } EtchContextDesc;
 
 typedef struct EtchTheme {
@@ -2081,6 +2084,8 @@ ETCH_API bool etch_set_font_scale_adjust(EtchContext* ctx, uint16_t font_id, flo
 ETCH_API float etch_font_scale_adjust(const EtchContext* ctx, uint16_t font_id);
 ETCH_API void etch_set_hinted_small_text(EtchContext* ctx, bool enabled);
 ETCH_API bool etch_hinted_small_text(const EtchContext* ctx);
+ETCH_API void etch_set_lcd_subpixel_text(EtchContext* ctx, bool enabled);
+ETCH_API bool etch_lcd_subpixel_text(const EtchContext* ctx);
 
 typedef enum EtchStrokeCap {
     ETCH_STROKE_CAP_BUTT = 0, ETCH_STROKE_CAP_ROUND = 1, ETCH_STROKE_CAP_SQUARE = 2
