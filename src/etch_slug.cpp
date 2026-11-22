@@ -181,6 +181,19 @@ uint16_t resolve_font_slot_idx(FontAtlas* atlas, uint16_t font_id) noexcept {
     return kInvalidFont;
 }
 
+float scaled_font_span_px(Context* ctx, uint16_t font_id, float logical_font_px) noexcept {
+    if (ctx && ctx->atlas.font_valid) {
+        const uint16_t slot_idx = resolve_font_slot_idx(&ctx->atlas, font_id);
+        if (slot_idx != kInvalidFont) {
+            const FontSlot& slot = ctx->atlas.slots[slot_idx];
+            if (std::fabs(slot.scale_adjust - 1.0f) > 1e-6f) {
+                return (slot.ascent_em + std::abs(slot.descent_em)) * logical_font_px;
+            }
+        }
+    }
+    return logical_font_px;
+}
+
 uint16_t resolve_target_font_slot(const FontAtlas* atlas, uint16_t slot_hint) noexcept {
     if (slot_hint < kMaxFontSlots) {
         return slot_hint;
@@ -257,6 +270,47 @@ SlugColrLayers slug_get_colr_layers(const FontSlot& s, uint32_t glyph) noexcept 
     const uint32_t first=ot_u16(p+2),count=ot_u16(p+4);
     return first+count<=s.colr_num_layers ? SlugColrLayers{first,count} : SlugColrLayers{};
 }
+void update_font_slot_scaled_metrics(FontSlot* slot, uint16_t slot_idx) noexcept {
+    slot->ascent_em = static_cast<float>(slot->font_ascent) * slot->scale_1px;
+    slot->descent_em = static_cast<float>(slot->font_descent) * slot->scale_1px;
+    slot->line_height_em = static_cast<float>(slot->font_ascent - slot->font_descent + slot->font_line_gap) * slot->scale_1px;
+    slot->bullet_advance_em = static_cast<float>(hb_font_get_glyph_h_advance(slot->hb_font, slot->bullet_glyph_id)) * slot->scale_1px;
+
+    hb_codepoint_t sp_gid = 0u;
+    if (hb_font_get_nominal_glyph(slot->hb_font, static_cast<hb_codepoint_t>(' '), &sp_gid)) {
+        slot->space_advance_em = static_cast<float>(hb_font_get_glyph_h_advance(slot->hb_font, sp_gid)) * slot->scale_1px;
+    } else {
+        slot->space_advance_em = static_cast<float>(slot->upem) * 0.35f * slot->scale_1px;
+    }
+
+    uint32_t mh = 2166136261u;
+    mh = fnv1a_32_step(mh, &slot_idx, sizeof(slot_idx));
+    mh = fnv1a_32_step(mh, &slot->generation, sizeof(slot->generation));
+    mh = fnv1a_32_step(mh, &slot->upem, sizeof(slot->upem));
+    mh = fnv1a_32_step(mh, &slot->font_ascent, sizeof(slot->font_ascent));
+    mh = fnv1a_32_step(mh, &slot->font_descent, sizeof(slot->font_descent));
+    mh = fnv1a_32_step(mh, &slot->font_line_gap, sizeof(slot->font_line_gap));
+    mh = fnv1a_32_step(mh, &slot->space_advance_em, sizeof(slot->space_advance_em));
+    mh = fnv1a_32_step(mh, &slot->scale_adjust, sizeof(slot->scale_adjust));
+    mh = fnv1a_32_step(mh, &slot->preferred_fallback, sizeof(slot->preferred_fallback));
+    if (slot->tabular_numbers) {
+        mh ^= 0x746E756Du;
+    }
+    slot->metric_hash = mh;
+}
+
+void mark_font_redraw(Context* ctx) noexcept {
+    ctx->headless_ui.redraw_budget = 2u;
+    if (ctx->active_ui) {
+        ctx->active_ui->redraw_budget = 2u;
+    }
+    for (uint32_t i = 0u; i < ctx->claimed_window_cap; ++i) {
+        if (ctx->claimed_windows[i]) {
+            ctx->claimed_windows[i]->ui.redraw_budget = 2u;
+        }
+    }
+}
+
 bool init_font_slot_from_owned_bytes(
     FontAtlas* atlas,
     uint16_t slot_idx,
@@ -310,9 +364,9 @@ bool init_font_slot_from_owned_bytes(
         next.scale_1px=1.0f/float(next.font_ascent-next.font_descent);
     }
     if(next.scale_1px<=0)next.scale_1px=1.0f/float(upem);
-    next.ascent_em=float(next.font_ascent)*next.scale_1px;
-    next.descent_em=float(next.font_descent)*next.scale_1px;
-    next.line_height_em=float(next.font_ascent-next.font_descent+next.font_line_gap)*next.scale_1px;
+    next.base_scale_1px = next.scale_1px;
+    next.scale_adjust = 1.0f;
+    next.preferred_fallback = kInvalidFont;
     next.source_hash = source_hash;
     next.loaded = true;
 
@@ -321,14 +375,6 @@ bool init_font_slot_from_owned_bytes(
         hb_font_get_nominal_glyph(font, static_cast<hb_codepoint_t>('*'), &gid);
     }
     next.bullet_glyph_id = gid;
-    next.bullet_advance_em = static_cast<float>(hb_font_get_glyph_h_advance(font, gid)) * next.scale_1px;
-
-    hb_codepoint_t sp_gid = 0u;
-    if (hb_font_get_nominal_glyph(font, static_cast<hb_codepoint_t>(' '), &sp_gid)) {
-        next.space_advance_em = static_cast<float>(hb_font_get_glyph_h_advance(font, sp_gid)) * next.scale_1px;
-    } else {
-        next.space_advance_em = static_cast<float>(upem) * 0.35f * next.scale_1px;
-    }
 
     FontSlot* dst = &atlas->slots[slot_idx];
     const uint8_t prev_gen = dst->generation;
@@ -343,16 +389,7 @@ bool init_font_slot_from_owned_bytes(
         atlas->slug_glyph_count = 0u;
     }
     next.generation = (prev_gen == 255u) ? 1u : static_cast<uint8_t>(prev_gen + 1u);
-
-    uint32_t mh = 2166136261u;
-    mh = fnv1a_32_step(mh, &slot_idx, sizeof(slot_idx));
-    mh = fnv1a_32_step(mh, &next.generation, sizeof(next.generation));
-    mh = fnv1a_32_step(mh, &upem, sizeof(upem));
-    mh = fnv1a_32_step(mh, &next.font_ascent, sizeof(next.font_ascent));
-    mh = fnv1a_32_step(mh, &next.font_descent, sizeof(next.font_descent));
-    mh = fnv1a_32_step(mh, &next.font_line_gap, sizeof(next.font_line_gap));
-    mh = fnv1a_32_step(mh, &next.space_advance_em, sizeof(next.space_advance_em));
-    next.metric_hash = mh;
+    update_font_slot_scaled_metrics(&next, slot_idx);
 
     *dst = next;
     ensure_fallback_registered(atlas, slot_idx);
@@ -1110,6 +1147,44 @@ uint16_t pick_fallback_slot_for_cluster(
         }
     }
     hb_codepoint_t dummy = 0u;
+    if (!(emoji && !text_presentation)) {
+        uint16_t pref_chain[4] = {};
+        uint32_t pref_count = 0u;
+        uint16_t cur = atlas->slots[primary_slot].preferred_fallback;
+        while (pref_count < 4u && cur < kMaxFontSlots && cur != primary_slot) {
+            bool seen = false;
+            for (uint32_t pi = 0u; pi < pref_count; ++pi) {
+                if (pref_chain[pi] == cur) {
+                    seen = true;
+                    break;
+                }
+            }
+            if (seen || !atlas->slots[cur].loaded) {
+                break;
+            }
+            pref_chain[pref_count++] = cur;
+            cur = atlas->slots[cur].preferred_fallback;
+        }
+        for (uint32_t pi = 0u; pi < pref_count; ++pi) {
+            const uint16_t s = pref_chain[pi];
+            bool covers_all = true;
+            for (uint32_t ci = 0u; ci < cp_count; ++ci) {
+                if (!hb_font_get_nominal_glyph(atlas->slots[s].hb_font, cps[ci], &dummy)) {
+                    covers_all = false;
+                    break;
+                }
+            }
+            if (covers_all) {
+                return s;
+            }
+        }
+        for (uint32_t pi = 0u; pi < pref_count; ++pi) {
+            const uint16_t s = pref_chain[pi];
+            if (hb_font_get_nominal_glyph(atlas->slots[s].hb_font, cps[0], &dummy)) {
+                return s;
+            }
+        }
+    }
     auto search_loaded_fallbacks = [&]() noexcept -> uint16_t {
         for (uint32_t fi = 0u; fi < atlas->fallback_count; ++fi) {
             const uint16_t s = atlas->fallback_order[fi];
@@ -1753,10 +1828,54 @@ bool set_font_tabular_numbers(Context* ctx, uint16_t font_id, bool enabled) noex
     slot.tabular_numbers = enabled;
     slot.metric_hash ^= 0x746E756Du;
     ++ctx->atlas.font_revision;
-    ctx->headless_ui.redraw_budget = 2;
-    for (uint32_t i = 0; i < ctx->claimed_window_cap; ++i)
-        if (ctx->claimed_windows[i]) ctx->claimed_windows[i]->ui.redraw_budget = 2;
+    mark_font_redraw(ctx);
     return true;
+}
+
+bool set_font_fallback(Context* ctx, uint16_t primary_font_id, uint16_t fallback_font_id) noexcept {
+    if (!ctx || !is_font_loaded(ctx, primary_font_id)) {
+        return false;
+    }
+    if (fallback_font_id != kInvalidFont) {
+        if (fallback_font_id == primary_font_id || !is_font_loaded(ctx, fallback_font_id)) {
+            return false;
+        }
+    }
+    FontSlot& slot = ctx->atlas.slots[primary_font_id];
+    if (slot.preferred_fallback == fallback_font_id) {
+        return true;
+    }
+    slot.preferred_fallback = fallback_font_id;
+    update_font_slot_scaled_metrics(&slot, primary_font_id);
+    ++ctx->atlas.font_revision;
+    mark_font_redraw(ctx);
+    return true;
+}
+
+bool set_font_scale_adjust(Context* ctx, uint16_t font_id, float scale_factor) noexcept {
+    if (!ctx || !std::isfinite(scale_factor) || !is_font_loaded(ctx, font_id)) {
+        return false;
+    }
+    const float clamped = (scale_factor < 0.5f) ? 0.5f : ((scale_factor > 2.0f) ? 2.0f : scale_factor);
+    FontSlot& slot = ctx->atlas.slots[font_id];
+    if (slot.scale_adjust == clamped) {
+        return true;
+    }
+    slot.scale_adjust = clamped;
+    slot.scale_1px = slot.base_scale_1px * clamped;
+    update_font_slot_scaled_metrics(&slot, font_id);
+    evict_font_slot_emoji_bitmaps(&ctx->atlas, font_id);
+    evict_font_slot_hinted_glyphs(&ctx->atlas, font_id);
+    ++ctx->atlas.font_revision;
+    mark_font_redraw(ctx);
+    return true;
+}
+
+float font_scale_adjust(const Context* ctx, uint16_t font_id) noexcept {
+    if (!ctx || font_id >= kMaxFontSlots || !ctx->atlas.slots[font_id].loaded) {
+        return 1.0f;
+    }
+    return ctx->atlas.slots[font_id].scale_adjust;
 }
 
 bool is_font_loaded(const Context* ctx, uint16_t font_id) noexcept {
@@ -1934,9 +2053,10 @@ static SlugRawCurve* decode_vector_path(Context* ctx, Str svg_path_d,
     bool has_quad_ctrl = false;
     bool has_cubic_ctrl = false;
     bool subpath_has_segments = false;
+    bool subpath_open = false;
 
     auto close_subpath = [&](bool is_explicit) noexcept {
-        if (subpath_has_segments) {
+        if (subpath_has_segments || (is_explicit && stroke_subpath && subpath_open)) {
             if (stroke_subpath) {
                 const Vec2 start = map_svg(subpath_start);
                 complete = complete && valid_stroke_point(start) && valid_stroke_point(map_svg(cur));
@@ -1947,12 +2067,13 @@ static SlugRawCurve* decode_vector_path(Context* ctx, Str svg_path_d,
             }
             subpath_has_segments = false;
         }
+        subpath_open = false;
         cur = subpath_start;
     };
 
     for (const PathCmd& c : commands) {
         switch (c.verb) {
-            case PathVerb::MoveTo: close_subpath(false); cur = c.p1; subpath_start = cur; break;
+            case PathVerb::MoveTo: close_subpath(false); cur = c.p1; subpath_start = cur; subpath_open = true; break;
             case PathVerb::LineTo: emit_line(cur, c.p1); cur = c.p1; subpath_has_segments = true; break;
             case PathVerb::QuadTo: emit_quad(cur, c.p1, c.p2); cur = c.p2; subpath_has_segments = true; break;
             case PathVerb::CubicTo: emit_cubic(cur, c.p1, c.p2, c.p3); cur = c.p3; subpath_has_segments = true; break;
@@ -1998,6 +2119,7 @@ static SlugRawCurve* decode_vector_path(Context* ctx, Str svg_path_d,
                 close_subpath(false);
                 cur = rel ? Vec2{ cur.x + x, cur.y + y } : Vec2{ x, y };
                 subpath_start = cur;
+                subpath_open = true;
                 has_quad_ctrl = false;
                 has_cubic_ctrl = false;
                 cmd = rel ? 'l' : 'L';
@@ -2294,17 +2416,22 @@ void stroke_subpath(void* data, std::span<const SlugRawCurve> source, Vec2 start
         if (denom > 1e-5f) {
             const Vec2 bisector = (u + v) / denom;
             const float ratio_sq = stroke_dot(bisector, bisector);
+            const bool shallow_round = (turn > 0.0f && desc.join == StrokeJoin::Round &&
+                                        turn <= 0.08f && cosine >= 0.995f);
             if ((turn <= 0.0f && ratio_sq <= 16.0f) ||
+                shallow_round ||
                 (turn > 0.0f && desc.join == StrokeJoin::Miter && ratio_sq <= desc.miter_limit * desc.miter_limit)) {
                 line(b + bisector * half);
                 return;
             }
         }
         line(b + u * half);
-        if (desc.join == StrokeJoin::Round && (turn > 1e-6f || (denom <= 1e-5f && turn == 0.0f)))
-            arc(b, u, v, turn == 0.0f ? pi : std::atan2(turn, cosine));
-        else
+        if (desc.join == StrokeJoin::Round && (turn > 1e-6f || denom <= 1e-5f)) {
+            const float sweep = (denom <= 1e-5f) ? pi : std::atan2(turn, cosine);
+            arc(b, u, v, sweep);
+        } else {
             line(b + v * half);
+        }
     };
 
     const auto trim = [&](Vec2 a, Vec2 b) noexcept {
@@ -2389,34 +2516,31 @@ void stroke_subpath(void* data, std::span<const SlugRawCurve> source, Vec2 start
 
 } // namespace
 
-static uint16_t register_vector_icon(Context* ctx, Str svg_path_d, Vec4 view_box,
-    uint16_t slot_hint, const SvgStrokeDesc* stroke) noexcept
-{
-    if (!ctx || !svg_path_d.chars || svg_path_d.length == 0u ||
-        !std::isfinite(view_box.x) || !std::isfinite(view_box.y) ||
-        !std::isfinite(view_box.z) || !std::isfinite(view_box.w) ||
-        view_box.z <= 1e-3f || view_box.w <= 1e-3f ||
-        (stroke && (stroke->stroke_width >= std::fmin(std::fmin(view_box.z, view_box.w) * 32768.0f, 1e16f) ||
-                    (slot_hint != kInvalidIcon && slot_hint >= kMaxVectorIcons))))
-    {
-        return kInvalidIcon;
-    }
+static bool validate_svg_stroke_desc(const SvgStrokeDesc& desc, Vec4 view_box) noexcept {
+    return std::isfinite(desc.stroke_width) && desc.stroke_width > 0.0f &&
+           desc.stroke_width < std::fmin(std::fmin(view_box.z, view_box.w) * 32768.0f, 1e16f) &&
+           std::isfinite(desc.miter_limit) && desc.miter_limit >= 1.0f &&
+           desc.cap <= StrokeCap::Square && desc.join <= StrokeJoin::Bevel;
+}
 
-    uint16_t slot = kInvalidIcon;
-    if (slot_hint < kMaxVectorIcons) {
-        slot = slot_hint;
-    } else {
-        for (uint16_t i = 0u; i < kMaxVectorIcons; ++i) {
-            if (!ctx->atlas.icons[i].loaded) {
-                slot = i;
-                break;
-            }
+static uint16_t allocate_vector_icon_slot(Context* ctx, uint16_t slot_hint) noexcept {
+    if (slot_hint != kInvalidIcon) {
+        return (slot_hint < kMaxVectorIcons) ? slot_hint : kInvalidIcon;
+    }
+    for (uint16_t i = 0u; i < kMaxVectorIcons; ++i) {
+        if (!ctx->atlas.icons[i].loaded) {
+            return i;
         }
     }
-    if (slot == kInvalidIcon) {
-        return kInvalidIcon;
-    }
+    return kInvalidIcon;
+}
 
+static CompiledSlugShape compile_vector_icon_layer(
+    Context* ctx,
+    Str svg_path_d,
+    Vec4 view_box,
+    const SvgStrokeDesc* stroke) noexcept
+{
     const size_t mark = ctx->frame_arena.mark();
     uint32_t raw_count = 0;
     const SlugRawCurve* raw = nullptr;
@@ -2441,34 +2565,140 @@ static uint16_t register_vector_icon(Context* ctx, Str svg_path_d, Vec4 view_box
         view_box.z,
         view_box.w);
     ctx->frame_arena.rewind(mark);
+    return compiled;
+}
 
-    if (!compiled.has_outline) {
+static void mark_icon_registry_dirty(Context* ctx) noexcept {
+    ctx->headless_ui.redraw_budget = 2u;
+    for (uint32_t i = 0; i < ctx->claimed_window_cap; ++i) {
+        if (ctx->claimed_windows[i]) ctx->claimed_windows[i]->ui.redraw_budget = 2u;
+    }
+}
+
+uint16_t register_svg_layered_icon(
+    Context* ctx,
+    std::span<const SvgIconLayer> layers,
+    Vec4 view_box,
+    uint16_t slot_hint) noexcept
+{
+    if (!ctx || layers.empty() || layers.size() > kMaxVectorIconLayers ||
+        !std::isfinite(view_box.x) || !std::isfinite(view_box.y) ||
+        !std::isfinite(view_box.z) || !std::isfinite(view_box.w) ||
+        view_box.z <= 1e-3f || view_box.w <= 1e-3f)
+    {
         return kInvalidIcon;
     }
 
-    ctx->atlas.icons[slot] = VectorIconEntry{
-        .band_offset = compiled.band_offset,
-        .num_hbands = compiled.num_hbands,
-        .num_vbands = compiled.num_vbands,
-        .view_size = Vec2{ view_box.z, view_box.w },
-        .loaded = true,
-        .has_outline = true,
-    };
-    ctx->headless_ui.redraw_budget = 2u;
-        for (uint32_t i = 0; i < ctx->claimed_window_cap; ++i)
-            if (ctx->claimed_windows[i]) ctx->claimed_windows[i]->ui.redraw_budget = 2u;
+    for (const SvgIconLayer& layer : layers) {
+        if (!layer.path_d.chars || layer.path_d.length == 0u ||
+            layer.color_slot > 1u ||
+            !std::isfinite(layer.opacity) || layer.opacity < 0.0f)
+        {
+            return kInvalidIcon;
+        }
+        if (layer.stroked && !validate_svg_stroke_desc(layer.stroke, view_box)) {
+            return kInvalidIcon;
+        }
+    }
+
+    const uint16_t slot = allocate_vector_icon_slot(ctx, slot_hint);
+    if (slot == kInvalidIcon) {
+        return kInvalidIcon;
+    }
+
+    const uint32_t saved_curves = ctx->atlas.slug_curve_count;
+    const uint32_t saved_bands = ctx->atlas.slug_band_count;
+
+    VectorIconEntry entry = {};
+    entry.view_size = Vec2{ view_box.z, view_box.w };
+    for (size_t i = 0; i < layers.size(); ++i) {
+        const SvgIconLayer& layer = layers[i];
+        const CompiledSlugShape compiled = compile_vector_icon_layer(
+            ctx,
+            layer.path_d,
+            view_box,
+            layer.stroked ? &layer.stroke : nullptr);
+        if (!compiled.has_outline) {
+            ctx->atlas.slug_curve_count = saved_curves;
+            ctx->atlas.slug_band_count = saved_bands;
+            return kInvalidIcon;
+        }
+        entry.layers[i] = VectorIconLayer{
+            .band_offset = compiled.band_offset,
+            .num_hbands = compiled.num_hbands,
+            .num_vbands = compiled.num_vbands,
+            .color_slot = layer.color_slot,
+            .has_outline = true,
+            .opacity = std::fmin(1.0f, layer.opacity),
+        };
+    }
+    entry.layer_count = static_cast<uint8_t>(layers.size());
+    entry.loaded = true;
+    ctx->atlas.icons[slot] = entry;
+    mark_icon_registry_dirty(ctx);
     return slot;
 }
 
+uint16_t register_svg_duotone_icon(
+    Context* ctx,
+    Str fill_path_d,
+    Str stroke_path_d,
+    const SvgStrokeDesc& stroke_desc,
+    float fill_opacity) noexcept
+{
+    if (!ctx || !std::isfinite(fill_opacity) || fill_opacity < 0.0f) {
+        return kInvalidIcon;
+    }
+    SvgIconLayer layers[2] = {};
+    uint32_t count = 0;
+    if (fill_path_d.chars && fill_path_d.length > 0u) {
+        layers[count++] = SvgIconLayer{
+            .path_d = fill_path_d,
+            .stroked = false,
+            .stroke = {},
+            .color_slot = 1u,
+            .opacity = std::fmin(1.0f, fill_opacity),
+        };
+    }
+    if (stroke_path_d.chars && stroke_path_d.length > 0u) {
+        layers[count++] = SvgIconLayer{
+            .path_d = stroke_path_d,
+            .stroked = true,
+            .stroke = stroke_desc,
+            .color_slot = 0u,
+            .opacity = 1.0f,
+        };
+    }
+    if (count == 0u) {
+        return kInvalidIcon;
+    }
+    return register_svg_layered_icon(
+        ctx,
+        std::span<const SvgIconLayer>(layers, count),
+        stroke_desc.view_box,
+        stroke_desc.slot_hint);
+}
+
 uint16_t register_svg_icon(Context* ctx, Str path, Vec4 view_box, uint16_t slot_hint) noexcept {
-    return register_vector_icon(ctx, path, view_box, slot_hint, nullptr);
+    const SvgIconLayer layer = {
+        .path_d = path,
+        .stroked = false,
+        .stroke = {},
+        .color_slot = 0u,
+        .opacity = 1.0f,
+    };
+    return register_svg_layered_icon(ctx, std::span<const SvgIconLayer>(&layer, 1u), view_box, slot_hint);
 }
 
 uint16_t register_svg_stroke_icon(Context* ctx, Str path, const SvgStrokeDesc& desc) noexcept {
-    if (!std::isfinite(desc.stroke_width) || desc.stroke_width <= 0.0f ||
-        !std::isfinite(desc.miter_limit) || desc.miter_limit < 1.0f ||
-        desc.cap > StrokeCap::Square || desc.join > StrokeJoin::Bevel) return kInvalidIcon;
-    return register_vector_icon(ctx, path, desc.view_box, desc.slot_hint, &desc);
+    const SvgIconLayer layer = {
+        .path_d = path,
+        .stroked = true,
+        .stroke = desc,
+        .color_slot = 0u,
+        .opacity = 1.0f,
+    };
+    return register_svg_layered_icon(ctx, std::span<const SvgIconLayer>(&layer, 1u), desc.view_box, desc.slot_hint);
 }
 
 bool is_icon_loaded(const Context* ctx, uint16_t icon_id) noexcept {

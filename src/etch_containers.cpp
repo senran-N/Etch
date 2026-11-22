@@ -7,8 +7,14 @@ SplitResult begin_split(const SplitDesc& desc) noexcept {
     Context* ctx = current_context();
     const float fallback_ratio = clamp_range(desc.default_ratio, 0.02f, 0.98f);
     if (!ctx || !ctx->in_frame || desc.id == 0u || ctx->active_ui->split_depth >= kMaxSplitDepth ||
-        !std::isfinite(desc.default_ratio) || !std::isfinite(desc.divider_size_px) || !std::isfinite(desc.divider_hit_px) ||
-        !std::isfinite(desc.keyboard_step_px) || desc.keyboard_step_px<0 || !std::isfinite(desc.min_first_px) || !std::isfinite(desc.min_second_px) || desc.min_first_px<0 || desc.min_second_px<0) {
+        !std::isfinite(desc.default_ratio) || !std::isfinite(desc.divider_size_px) || desc.divider_size_px < 0.0f ||
+        !std::isfinite(desc.divider_hit_px) || desc.divider_hit_px < 0.0f ||
+        !std::isfinite(desc.keyboard_step_px) || desc.keyboard_step_px < 0.0f ||
+        !std::isfinite(desc.min_first_px) || !std::isfinite(desc.min_second_px) ||
+        desc.min_first_px < 0.0f || desc.min_second_px < 0.0f ||
+        !std::isfinite(desc.default_extent_px) || desc.default_extent_px < 0.0f ||
+        !std::isfinite(desc.hover_highlight_px) || desc.hover_highlight_px < 0.0f ||
+        desc.sizing > SplitSizing::SecondFixedPx) {
         return SplitResult{ .ratio = fallback_ratio, .dragging = false };
     }
 
@@ -29,83 +35,201 @@ SplitResult begin_split(const SplitDesc& desc) noexcept {
         ws_split->split_initialized = true;
     }
 
-    const float div_sz = (desc.divider_size_px > 1.0f) ? desc.divider_size_px : 1.0f;
+    const float div_sz = std::fmax(0.0f, desc.divider_size_px);
     const float total_span = (desc.axis == Axis::Row) ? ws_split->last_box_logical.w : ws_split->last_box_logical.h;
     const float avail = total_span - div_sz;
     const bool dragging_div = (ctx->active_ui->active_id == div_id);
     const bool hovered_div = (ctx->active_ui->active_id == 0u) && pointer_over_id(ctx->active_ui, div_id);
+    const bool is_fixed_mode = (desc.sizing != SplitSizing::Ratio);
 
-    if (ws_div->pressed_this_frame) {
-        if (ctx->active_ui->last_mouse_clicks >= 2u) {
-            ws_split->split_ratio = fallback_ratio;
-            ws_split->split_grab_offset = 0.0f;
-            request_redraw(ctx);
-        } else if (avail > 1.0f) {
+    float eff_extent = 0.0f;
+    if (is_fixed_mode) {
+        const bool is_first = (desc.sizing == SplitSizing::FirstFixedPx);
+        const float fallback_ext = (desc.default_extent_px > 0.0f)
+            ? desc.default_extent_px
+            : ((avail > 1.0f)
+                ? (is_first ? (avail * fallback_ratio) : (avail * (1.0f - fallback_ratio)))
+                : std::fmax(is_first ? desc.min_first_px : desc.min_second_px, 240.0f));
+        if (desc.extent_px) {
+            if (!ws_split->split_extent_initialized) {
+                ws_split->split_extent_px = (std::isfinite(*desc.extent_px) && *desc.extent_px > 0.0f)
+                    ? *desc.extent_px : fallback_ext;
+                ws_split->split_extent_initialized = true;
+            } else if (std::isfinite(*desc.extent_px)) {
+                ws_split->split_extent_px = *desc.extent_px;
+            }
+        } else if (!ws_split->split_extent_initialized) {
+            ws_split->split_extent_px = fallback_ext;
+            ws_split->split_extent_initialized = true;
+        }
+
+        float min_ext = is_first ? desc.min_first_px : desc.min_second_px;
+        float max_ext = 1e6f;
+        if (avail > 1.0f) {
+            max_ext = std::fmax(0.0f, avail - (is_first ? desc.min_second_px : desc.min_first_px));
+            if (min_ext > max_ext) {
+                const float mid = clamp_range(0.5f * (min_ext + max_ext), 0.0f, avail);
+                min_ext = mid;
+                max_ext = mid;
+            }
+        }
+
+        const float cur_eff = clamp_range(ws_split->split_extent_px, min_ext, max_ext);
+        bool extent_mutated = false;
+
+        if (ws_div->pressed_this_frame) {
+            if (ctx->active_ui->last_mouse_clicks >= 2u) {
+                ws_split->split_extent_px = clamp_range(fallback_ext, min_ext, max_ext);
+                ws_split->split_grab_offset = 0.0f;
+                extent_mutated = true;
+                request_redraw(ctx);
+            } else if (avail > 1.0f) {
+                const float origin = (desc.axis == Axis::Row) ? ws_split->last_box_logical.x : ws_split->last_box_logical.y;
+                const float ptr_axis = (desc.axis == Axis::Row) ? ctx->active_ui->pointer_pos.x : ctx->active_ui->pointer_pos.y;
+                const float div_start = origin + (is_first ? cur_eff : (avail - cur_eff));
+                ws_split->split_grab_offset = ptr_axis - div_start;
+            }
+        } else if (dragging_div && ctx->active_ui->prev_pointer_down && avail > 1.0f) {
             const float origin = (desc.axis == Axis::Row) ? ws_split->last_box_logical.x : ws_split->last_box_logical.y;
             const float ptr_axis = (desc.axis == Axis::Row) ? ctx->active_ui->pointer_pos.x : ctx->active_ui->pointer_pos.y;
-            const float div_start = origin + avail * ws_split->split_ratio;
-            ws_split->split_grab_offset = ptr_axis - div_start;
+            const float new_first = (ptr_axis - ws_split->split_grab_offset) - origin;
+            const float new_ext = is_first ? new_first : (avail - new_first);
+            ws_split->split_extent_px = clamp_range(new_ext, min_ext, max_ext);
+            extent_mutated = true;
+            request_redraw(ctx);
         }
-    } else if (dragging_div && ctx->active_ui->prev_pointer_down && avail > 1.0f) {
-        const float origin = (desc.axis == Axis::Row) ? ws_split->last_box_logical.x : ws_split->last_box_logical.y;
-        const float ptr_axis = (desc.axis == Axis::Row) ? ctx->active_ui->pointer_pos.x : ctx->active_ui->pointer_pos.y;
-        const float new_first = (ptr_axis - ws_split->split_grab_offset) - origin;
-        ws_split->split_ratio = clamp_range(new_first / avail, 0.0f, 1.0f);
-        request_redraw(ctx);
-    }
 
-    PendingA11yAction action={};
-    while(a11y_take_any(div_id,140u,&action)) {
-        const float step=avail>1 ? desc.keyboard_step_px/avail : .01f;
-        if(action.action==A11yAction::SetValue) ws_split->split_ratio=action.number;
-        else ws_split->split_ratio+=action.action==A11yAction::Increment ? step : -step;
-        request_redraw(ctx);
-    }
-
-    if(focused(div_id) && avail>1) {
-        float delta=0;
-        if(key_pressed(desc.axis==Axis::Row ? SDLK_LEFT : SDLK_UP,true)) delta=-desc.keyboard_step_px;
-        if(key_pressed(desc.axis==Axis::Row ? SDLK_RIGHT : SDLK_DOWN,true)) delta=desc.keyboard_step_px;
-        if(delta!=0) {ws_split->split_ratio+=delta/avail;request_redraw(ctx);}
-        if(key_pressed(SDLK_HOME)) ws_split->split_ratio=0;
-        if(key_pressed(SDLK_END)) ws_split->split_ratio=1;
-    }
-
-    if (avail > 1.0f) {
-        float min_r = desc.min_first_px / avail;
-        float max_r = 1.0f - (desc.min_second_px / avail);
-        if (min_r > max_r) {
-            const float mid = 0.5f * (min_r + max_r);
-            min_r = mid;
-            max_r = mid;
+        PendingA11yAction action = {};
+        while (a11y_take_any(div_id, 140u, &action)) {
+            if (action.action == A11yAction::SetValue && avail > 1.0f) {
+                const float r = clamp_range(action.number, 0.0f, 1.0f);
+                ws_split->split_extent_px = clamp_range(is_first ? (r * avail) : ((1.0f - r) * avail), min_ext, max_ext);
+            } else {
+                const float dir = (action.action == A11yAction::Increment) ? 1.0f : -1.0f;
+                ws_split->split_extent_px = clamp_range(ws_split->split_extent_px + (is_first ? dir : -dir) * desc.keyboard_step_px, min_ext, max_ext);
+            }
+            extent_mutated = true;
+            request_redraw(ctx);
         }
-        ws_split->split_ratio = clamp_range(
-            ws_split->split_ratio,
-            clamp_range(min_r, 0.0f, 1.0f),
-            clamp_range(max_r, 0.0f, 1.0f));
+
+        if (focused(div_id)) {
+            float delta = 0.0f;
+            if (key_pressed(desc.axis == Axis::Row ? SDLK_LEFT : SDLK_UP, true)) delta = -desc.keyboard_step_px;
+            if (key_pressed(desc.axis == Axis::Row ? SDLK_RIGHT : SDLK_DOWN, true)) delta = desc.keyboard_step_px;
+            if (delta != 0.0f) {
+                ws_split->split_extent_px = clamp_range(ws_split->split_extent_px + (is_first ? delta : -delta), min_ext, max_ext);
+                extent_mutated = true;
+                request_redraw(ctx);
+            }
+            if (key_pressed(SDLK_HOME)) {
+                ws_split->split_extent_px = is_first ? min_ext : max_ext;
+                extent_mutated = true;
+                request_redraw(ctx);
+            }
+            if (key_pressed(SDLK_END)) {
+                ws_split->split_extent_px = is_first ? max_ext : min_ext;
+                extent_mutated = true;
+                request_redraw(ctx);
+            }
+        }
+
+        eff_extent = clamp_range(ws_split->split_extent_px, min_ext, max_ext);
+        if (desc.extent_px && (extent_mutated || !std::isfinite(*desc.extent_px) || *desc.extent_px <= 0.0f)) {
+            *desc.extent_px = ws_split->split_extent_px;
+        }
+        if (avail > 1.0f) {
+            ws_split->split_ratio = clamp_range(is_first ? (eff_extent / avail) : ((avail - eff_extent) / avail), 0.0f, 1.0f);
+        }
     } else {
-        ws_split->split_ratio = clamp_range(ws_split->split_ratio, 0.02f, 0.98f);
+        if (ws_div->pressed_this_frame) {
+            if (ctx->active_ui->last_mouse_clicks >= 2u) {
+                ws_split->split_ratio = fallback_ratio;
+                ws_split->split_grab_offset = 0.0f;
+                request_redraw(ctx);
+            } else if (avail > 1.0f) {
+                const float origin = (desc.axis == Axis::Row) ? ws_split->last_box_logical.x : ws_split->last_box_logical.y;
+                const float ptr_axis = (desc.axis == Axis::Row) ? ctx->active_ui->pointer_pos.x : ctx->active_ui->pointer_pos.y;
+                const float div_start = origin + avail * ws_split->split_ratio;
+                ws_split->split_grab_offset = ptr_axis - div_start;
+            }
+        } else if (dragging_div && ctx->active_ui->prev_pointer_down && avail > 1.0f) {
+            const float origin = (desc.axis == Axis::Row) ? ws_split->last_box_logical.x : ws_split->last_box_logical.y;
+            const float ptr_axis = (desc.axis == Axis::Row) ? ctx->active_ui->pointer_pos.x : ctx->active_ui->pointer_pos.y;
+            const float new_first = (ptr_axis - ws_split->split_grab_offset) - origin;
+            ws_split->split_ratio = clamp_range(new_first / avail, 0.0f, 1.0f);
+            request_redraw(ctx);
+        }
+
+        PendingA11yAction action={};
+        while(a11y_take_any(div_id,140u,&action)) {
+            const float step=avail>1 ? desc.keyboard_step_px/avail : .01f;
+            if(action.action==A11yAction::SetValue) ws_split->split_ratio=action.number;
+            else ws_split->split_ratio+=action.action==A11yAction::Increment ? step : -step;
+            request_redraw(ctx);
+        }
+
+        if(focused(div_id) && avail>1) {
+            float delta=0;
+            if(key_pressed(desc.axis==Axis::Row ? SDLK_LEFT : SDLK_UP,true)) delta=-desc.keyboard_step_px;
+            if(key_pressed(desc.axis==Axis::Row ? SDLK_RIGHT : SDLK_DOWN,true)) delta=desc.keyboard_step_px;
+            if(delta!=0) {ws_split->split_ratio+=delta/avail;request_redraw(ctx);}
+            if(key_pressed(SDLK_HOME)) ws_split->split_ratio=0;
+            if(key_pressed(SDLK_END)) ws_split->split_ratio=1;
+        }
+
+        if (avail > 1.0f) {
+            float min_r = desc.min_first_px / avail;
+            float max_r = 1.0f - (desc.min_second_px / avail);
+            if (min_r > max_r) {
+                const float mid = 0.5f * (min_r + max_r);
+                min_r = mid;
+                max_r = mid;
+            }
+            ws_split->split_ratio = clamp_range(
+                ws_split->split_ratio,
+                clamp_range(min_r, 0.0f, 1.0f),
+                clamp_range(max_r, 0.0f, 1.0f));
+        } else {
+            ws_split->split_ratio = clamp_range(ws_split->split_ratio, 0.02f, 0.98f);
+        }
     }
 
     if (dragging_div || hovered_div) {
         ctx->active_ui->desired_cursor = (desc.axis == Axis::Row) ? Cursor::ResizeEW : Cursor::ResizeNS;
     }
 
+    advance_motion(ctx, &ws_div->hover_t, &ws_div->hover_vel, (hovered_div || dragging_div) ? 1.0f : 0.0f, SpringSpec::snappy());
+    advance_motion(ctx, &ws_div->press_t, &ws_div->press_vel, dragging_div ? 1.0f : 0.0f, SpringSpec::snappy());
+
     const Theme& thm = active_theme(ctx);
     const float ratio = ws_split->split_ratio;
+    const Color grip_idle = resolve_theme_color(desc.grip_color, thm.scrollbar_thumb);
+    const Color grip_hover = desc.grip_color.is_theme_auto()
+        ? thm.divider_thumb_hover
+        : Color::lerp_oklab(grip_idle, thm.text_primary, 0.35f);
+    const Color grip_active = desc.grip_color.is_theme_auto()
+        ? thm.text_primary
+        : thm.accent;
     ctx->active_ui->split_stack[ctx->active_ui->split_depth++] = SplitStackEntry{
         .id = desc.id,
         .axis = desc.axis,
+        .sizing = desc.sizing,
         .ratio = ratio,
+        .extent_px = eff_extent,
         .divider_size_px = div_sz,
-        .divider_hit_px = std::fmax(div_sz,desc.divider_hit_px),
+        .divider_hit_px = std::fmax(div_sz, desc.divider_hit_px),
         .min_first_px = desc.min_first_px,
         .min_second_px = desc.min_second_px,
         .divider_color = resolve_theme_color(desc.divider_color, thm.border_subtle),
         .divider_hover_color = resolve_theme_color(desc.divider_hover_color, thm.divider_hover),
         .divider_active_color = resolve_theme_color(desc.divider_active_color, thm.accent),
-        .grip_hover_color = thm.divider_thumb_hover,
-        .grip_idle_color = thm.scrollbar_thumb,
+        .grip_hover_color = grip_hover,
+        .grip_idle_color = grip_idle,
+        .grip_active_color = grip_active,
+        .show_grip = desc.show_grip,
+        .hover_highlight_px = desc.hover_highlight_px,
+        .hover_t = clamp_range(ws_div->hover_t, 0.0f, 1.0f),
+        .active_t = clamp_range(ws_div->press_t, 0.0f, 1.0f),
         .in_second = false,
     };
 
@@ -116,12 +240,16 @@ SplitResult begin_split(const SplitDesc& desc) noexcept {
         .height = desc.height,
     });
 
-    if (LayoutNode* open_n = layout_engine_open_node(ctx->active_ui->layout)) {
-        open_n->cfg.percent_after_fixed = true;
-        open_n->cfg.percent_min_first = desc.min_first_px;
-        open_n->cfg.percent_min_second = desc.min_second_px;
+    if (desc.sizing == SplitSizing::Ratio) {
+        if (LayoutNode* open_n = layout_engine_open_node(ctx->active_ui->layout)) {
+            open_n->cfg.percent_after_fixed = true;
+            open_n->cfg.percent_min_first = desc.min_first_px;
+            open_n->cfg.percent_min_second = desc.min_second_px;
+        }
     }
-    const Sizing first_primary = Sizing::percent(ratio);
+    const Sizing first_primary = (desc.sizing == SplitSizing::Ratio)
+        ? Sizing::percent(ratio)
+        : ((desc.sizing == SplitSizing::FirstFixedPx) ? Sizing::fixed(eff_extent) : Sizing::grow());
     begin_box(BoxDesc{
         .axis = Axis::Col,
         .width = (desc.axis == Axis::Row) ? first_primary : Sizing::grow(),
@@ -150,14 +278,18 @@ void split_second() noexcept {
     end_box();
 
     const uint32_t div_id = id_index(se.id, kSplitDividerTag);
-    const bool dragging_div = (ctx->active_ui->active_id == div_id);
-    const bool hovered_div = (ctx->active_ui->active_id == 0u) && pointer_over_id(ctx->active_ui, div_id);
-    const Color div_col = dragging_div
-        ? se.divider_active_color
-        : (hovered_div ? se.divider_hover_color : se.divider_color);
-    const Color grip_col = dragging_div
-        ? Color::white()
-        : (hovered_div ? se.grip_hover_color : se.grip_idle_color);
+    const Color hover_div_col = (se.hover_t > 0.001f)
+        ? Color::lerp_oklab(se.divider_color, se.divider_hover_color, se.hover_t)
+        : se.divider_color;
+    const Color div_col = (se.active_t > 0.001f)
+        ? Color::lerp_oklab(hover_div_col, se.divider_active_color, se.active_t)
+        : hover_div_col;
+    const Color hover_grip_col = (se.hover_t > 0.001f)
+        ? Color::lerp_oklab(se.grip_idle_color, se.grip_hover_color, se.hover_t)
+        : se.grip_idle_color;
+    const Color grip_col = (se.active_t > 0.001f)
+        ? Color::lerp_oklab(hover_grip_col, se.grip_active_color, se.active_t)
+        : hover_grip_col;
 
     begin_box(BoxDesc{
         .axis = se.axis,
@@ -165,24 +297,52 @@ void split_second() noexcept {
         .height = (se.axis == Axis::Col) ? Sizing::fixed(se.divider_size_px) : Sizing::grow(),
         .align_x = AlignX::Center,
         .align_y = AlignY::Center,
-        .background = div_col,
+        .background = (se.divider_size_px > 0.0f) ? div_col : Color{},
     });
-    box({.id=div_id,.width=se.axis==Axis::Row ? Sizing::fixed(se.divider_hit_px) : Sizing::grow(),
+    begin_box({.id=div_id,.width=se.axis==Axis::Row ? Sizing::fixed(se.divider_hit_px) : Sizing::grow(),
         .height=se.axis==Axis::Col ? Sizing::fixed(se.divider_hit_px) : Sizing::grow(),.focusable=true,
         .attach_to=AttachTo::Parent,.anchor_element=Anchor::Center,.anchor_parent=Anchor::Center,.z_index=2,.clip_to_parent=false});
+    if (se.hover_highlight_px > 0.0f && (se.hover_t > 0.001f || se.active_t > 0.001f)) {
+        struct SplitHighlightData {
+            Axis axis;
+            float thickness;
+            Color color;
+        };
+        if (auto* hd = ctx->frame_arena.alloc<SplitHighlightData>()) {
+            const float alpha_t = clamp_range(std::fmax(se.hover_t, se.active_t), 0.0f, 1.0f);
+            Color hc = (se.active_t > 0.001f)
+                ? Color::lerp_oklab(se.divider_hover_color, se.divider_active_color, se.active_t)
+                : se.divider_hover_color;
+            hc.a = static_cast<uint8_t>(std::round(static_cast<float>(hc.a) * alpha_t));
+            *hd = SplitHighlightData{ se.axis, se.hover_highlight_px, hc };
+            draw_after_layout([](Rect local, void* ud) noexcept {
+                const auto& h = *static_cast<const SplitHighlightData*>(ud);
+                const Rect bar = (h.axis == Axis::Row)
+                    ? Rect{ 0.5f * (local.w - h.thickness), 0.0f, h.thickness, local.h }
+                    : Rect{ 0.0f, 0.5f * (local.h - h.thickness), local.w, h.thickness };
+                draw_rect({ .rect = bar, .fill = h.color });
+            }, hd);
+        }
+    }
+    end_box();
     a11y_semantic(div_id,A11yRole::Slider,str_lit("Pane divider"),0,141u,se.ratio,0,1);
-    box(BoxDesc{
-        .width = Sizing::fixed((se.axis == Axis::Row) ? std::fmin(2.0f,se.divider_size_px) : 28.0f),
-        .height = Sizing::fixed((se.axis == Axis::Col) ? std::fmin(2.0f,se.divider_size_px) : 28.0f),
-        .background = grip_col,
-        .radius = Corners::all(1.0f),
-    });
+    if (se.show_grip && se.divider_size_px >= 2.0f) {
+        box(BoxDesc{
+            .width = Sizing::fixed((se.axis == Axis::Row) ? std::fmin(2.0f,se.divider_size_px) : 28.0f),
+            .height = Sizing::fixed((se.axis == Axis::Col) ? std::fmin(2.0f,se.divider_size_px) : 28.0f),
+            .background = grip_col,
+            .radius = Corners::all(1.0f),
+        });
+    }
     end_box();
 
+    const Sizing second_primary = (se.sizing == SplitSizing::SecondFixedPx)
+        ? Sizing::fixed(se.extent_px)
+        : Sizing::grow();
     begin_box(BoxDesc{
         .axis = Axis::Col,
-        .width = Sizing::grow(),
-        .height = Sizing::grow(),
+        .width = (se.axis == Axis::Row) ? second_primary : Sizing::grow(),
+        .height = (se.axis == Axis::Col) ? second_primary : Sizing::grow(),
         .clip_children = true,
     });
     begin_box(BoxDesc{
@@ -1127,6 +1287,7 @@ void canvas_wire(const CanvasWireDesc& desc) noexcept {
     cw->thickness_world = desc.thickness_world;
     cw->glow_world = desc.glow_world;
     cw->tangent_bias = desc.tangent_bias;
+    cw->axis = (desc.axis == Axis::Col) ? Axis::Col : Axis::Row;
     extra->layer = ctx->active_ui->current_layer;
     extra->kind = CustomCmdKind::CanvasWire;
     extra->canvas_wire = cw;
@@ -2054,6 +2215,76 @@ void end_collapsible() noexcept {
     if (!ctx || !ctx->in_frame || !ctx->active_ui->collapsible_depth) return;
     --ctx->active_ui->collapsible_depth;
     end_box(); end_box(); end_box();
+}
+
+bool begin_collapse(const CollapseDesc& d) noexcept {
+    Context* ctx = current_context();
+    if (!ctx || !ctx->in_frame || !d.id || ctx->active_ui->collapse_depth >= kMaxCollapsibleDepth) {
+        return false;
+    }
+    WidgetState* ws = state_map_get_or_insert(&ctx->active_ui->states, d.id, ctx->active_ui->frame_index);
+    if (!ws) {
+        return false;
+    }
+    const bool open = d.open;
+    float content_h = ws->collapsible_content_h;
+    const uint32_t content_id = id_index(d.id, 0xC014u);
+    const LayoutScrollData sc = layout_engine_scroll_data(ctx->active_ui->layout, d.id);
+    if (sc.found && sc.content_dim.y > 0.5f) {
+        content_h = sc.content_dim.y;
+    } else if (element_bounds(content_id).h > 0.5f) {
+        content_h = element_bounds(content_id).h;
+    }
+    ws->collapsible_content_h = content_h;
+
+    // spring/begin_box may rehash StateMap: keep only local values afterwards.
+    const float t = clamp_range(spring(id_index(d.id, 0xC012u), open ? 1.0f : 0.0f, d.spring), 0.0f, 1.0f);
+    const bool visible = open || t > 0.001f;
+    if (!visible) {
+        return false;
+    }
+
+    Sizing clip_sizing = Sizing::fit();
+    if (!(open && t >= 0.999f)) {
+        clip_sizing = Sizing::fixed(content_h > 0.5f ? content_h * t : 0.0f);
+        if (content_h <= 0.5f) {
+            request_redraw(ctx);
+        }
+    }
+    begin_box({
+        .id = d.id,
+        .axis = Axis::Col,
+        .width = d.width,
+        .height = clip_sizing,
+        .clip_children = true,
+    });
+    const bool push_fade = d.fade_content && t < 0.999f;
+    if (push_fade) {
+        push_layer({ .opacity = t, .animating = true });
+    }
+    begin_box({
+        .id = content_id,
+        .axis = Axis::Col,
+        .width = (d.width.kind == SizingKind::Fit) ? Sizing::fit() : Sizing::grow(),
+        .height = Sizing::fit(),
+    });
+    const uint32_t depth = ctx->active_ui->collapse_depth++;
+    ctx->active_ui->collapse_pushed_layer[depth] = push_fade;
+    return true;
+}
+
+void end_collapse() noexcept {
+    Context* ctx = current_context();
+    if (!ctx || !ctx->in_frame || !ctx->active_ui->collapse_depth) {
+        return;
+    }
+    const uint32_t depth = --ctx->active_ui->collapse_depth;
+    end_box();
+    if (ctx->active_ui->collapse_pushed_layer[depth]) {
+        pop_layer();
+        ctx->active_ui->collapse_pushed_layer[depth] = false;
+    }
+    end_box();
 }
 
 static void update_selectable_text_pointer(Context* ctx, WidgetState* ws, std::span<const LayoutCmd> cmds) noexcept {

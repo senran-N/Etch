@@ -1102,6 +1102,7 @@ struct Theme {
     static Theme high_contrast() noexcept;
     static Theme industrial() noexcept;
     static Theme from_seed(Color seed, bool dark_mode = true, float chroma_scale = 1.0f) noexcept;
+    static Theme lerp_oklab(const Theme& a, const Theme& b, float t) noexcept;
     Color on_primary = Color::white();
     Color on_error = Color::white();
 };
@@ -1367,6 +1368,7 @@ struct BoxDesc {
     uint16_t grid_row_span = 1;
     bool flip_on_overflow = false;
     HitboxBehavior hitbox_behavior = HitboxBehavior::Normal;
+    bool stick_to_bottom = false;
 };
 
 inline constexpr uint16_t kFontSans       = 0u;
@@ -1468,6 +1470,16 @@ void end_collapsible() noexcept;
 bool is_collapsible_open(uint32_t element_id) noexcept;
 void set_collapsible_open(uint32_t element_id, bool open) noexcept;
 
+struct CollapseDesc {
+    uint32_t id = 0;
+    bool open = false;
+    SpringSpec spring = {};
+    bool fade_content = true;
+    Sizing width = Sizing::grow();
+};
+bool begin_collapse(const CollapseDesc& desc) noexcept;
+void end_collapse() noexcept;
+
 struct ImageDesc {
     uint32_t id = 0;
     SDL_GPUTexture* texture = nullptr; // Zero-copy external GPU texture slot
@@ -1490,6 +1502,10 @@ struct IconDesc {
     uint16_t icon_id = kInvalidIcon;
     float size_px = 16.0f;
     Color color = Color::theme_auto();
+    float rotation_rad = 0.0f;
+    float scale = 1.0f;
+    float opacity = 1.0f;
+    Color secondary_color = Color::theme_auto();
 };
 
 struct RectDrawDesc {
@@ -1833,6 +1849,12 @@ struct TextInputDesc {
     Color ghost_color = Color::theme_auto();
     bool accept_ghost_on_tab = false;
     bool submit_on_enter = false; // When multiline: bare Enter submits; Shift/Alt+Enter inserts newline.
+    Color hover_border_color = Color::theme_auto();
+    float focus_glow_blur = 10.0f;
+    uint16_t leading_icon_id = kInvalidIcon;
+    Color leading_icon_color = Color::theme_auto();
+    bool continuous_corners = true;
+    bool disabled = false;
 };
 
 struct TextInputResult {
@@ -1867,6 +1889,8 @@ struct ToggleSwitchDesc {
     float track_width_px = 38; float track_height_px = 20; float font_size_px = 13;
     uint16_t font_id = kFontSans; Color on_color = Color::theme_auto();
     Color off_color = Color::theme_auto();
+    Color thumb_color = Color::theme_auto();
+    Color border_color = Color::theme_auto();
 };
 struct ProgressBarDesc {
     uint32_t id = 0; float fraction = 0; Str overlay_text = {};
@@ -1883,10 +1907,17 @@ struct TabBarDesc {
 };
 struct TabItemDesc { uint32_t id = 0; Str label = {}; uint16_t icon_id = kInvalidIcon; bool closable = false; bool disabled = false; };
 struct TabItemResult { bool selected = false; bool clicked = false; bool closed = false; };
+enum class SliderStyle : uint8_t { Track = 0, CompactBar = 1 };
 struct SliderDesc {
     uint32_t id = 0; Str label = {}; float* value = nullptr; float min_value = 0; float max_value = 1;
     float step = 0; const char* format = "%.2f"; Sizing width = Sizing::grow(); float height_px = 26; bool disabled = false;
     Color background = Color::theme_auto(); Color fill_color = Color::theme_auto(); Color text_color = Color::theme_auto();
+    SliderStyle style = SliderStyle::Track;
+    Color track_color = Color::theme_auto();
+    Color thumb_color = Color::theme_auto();
+    float track_height_px = 4.0f;
+    float thumb_size_px = 14.0f;
+    bool show_value = true;
 };
 struct DragValueDesc {
     uint32_t id = 0; Str label = {}; float* value = nullptr; float min_value = -1e9f; float max_value = 1e9f;
@@ -1904,6 +1935,7 @@ struct ComboBoxDesc {
     uint32_t id = 0; Str label = {}; int* selected_index = nullptr; std::span<const Str> items = {};
     Sizing width = Sizing::grow(); float height_px = 28; float max_popup_height_px = 220; bool disabled = false;
     Color background = Color::theme_auto(); Color hover_bg = Color::theme_auto(); Color text_color = Color::theme_auto();
+    Color border_color = Color::theme_auto(); Color focus_border_color = Color::theme_auto(); float border_width = 1.0f;
 };
 struct PopupDesc {
     uint32_t id = 0; uint32_t trigger_id = 0; Sizing width = Sizing::fixed(220); Sizing height = Sizing::fit();
@@ -1911,6 +1943,8 @@ struct PopupDesc {
     Color background = Color::theme_auto(); Color border_color = Color::theme_auto();
     Corners radius = Corners::theme_auto(); int16_t z_index = 200;
     bool attach_to_trigger = false; bool match_trigger_width = false; bool scroll_y = true;
+    float backdrop_blur = 0.0f; float shadow_blur = 20.0f; Color shadow_color = Color::theme_auto();
+    bool flip_on_overflow = true;
 };
 struct MenuBarDesc { uint32_t id = 0; Sizing width = Sizing::grow(); float height_px = 28; Color background = Color::theme_auto(); };
 struct MenuDesc { uint32_t id = 0; Str label = {}; bool disabled = false; };
@@ -1946,6 +1980,8 @@ void end_menu() noexcept;
 bool menu_item(const MenuItemDesc& desc) noexcept;
 void menu_separator() noexcept;
 
+enum class SplitSizing : uint8_t { Ratio = 0, FirstFixedPx = 1, SecondFixedPx = 2 };
+
 struct SplitDesc {
     uint32_t id = 0;
     Axis axis = Axis::Row; // Row = Left|Right (ResizeEW), Col = Top/Bottom (ResizeNS)
@@ -1960,6 +1996,12 @@ struct SplitDesc {
     Color divider_active_color = Color::theme_auto();
     float divider_hit_px = 8.0f; // Hit target is independent of divider_size_px.
     float keyboard_step_px = 8.0f;
+    SplitSizing sizing = SplitSizing::Ratio;
+    float* extent_px = nullptr;
+    float default_extent_px = 0.0f;
+    bool show_grip = true;
+    Color grip_color = Color::theme_auto();
+    float hover_highlight_px = 0.0f;
 };
 
 struct SplitResult {
@@ -2153,6 +2195,7 @@ struct CanvasWireDesc {
     float glow_world = 0.0f;
     float tangent_bias = 0.45f;
     int16_t z_index = 0;
+    Axis axis = Axis::Row;
 };
 
 struct CanvasNodeDesc {
@@ -2222,6 +2265,11 @@ uint16_t load_font_memory(
 bool is_font_loaded(const Context* ctx, uint16_t font_id) noexcept;
 // Configure a loaded font outside a frame; applies to measurement and all text APIs.
 bool set_font_tabular_numbers(Context* ctx, uint16_t font_id, bool enabled) noexcept;
+// Set per-slot preferred fallback font (checked before global fallback order; kInvalidFont clears).
+bool set_font_fallback(Context* ctx, uint16_t primary_font_id, uint16_t fallback_font_id) noexcept;
+// Optical font size multiplier (like CSS @font-face size-adjust), clamped to [0.5, 2.0]. Default 1.0.
+bool set_font_scale_adjust(Context* ctx, uint16_t font_id, float scale_factor) noexcept;
+float font_scale_adjust(const Context* ctx, uint16_t font_id) noexcept;
 // Optional platform-native hinted bitmap glyph cache for small UI text (<= 22px physical).
 // Larger sizes, rotated runs, and zoomed canvas layers remain pure-GPU Slug vector outlines.
 void set_hinted_small_text(Context* ctx, bool enabled) noexcept;
@@ -2240,12 +2288,42 @@ struct SvgStrokeDesc {
     uint16_t slot_hint = kInvalidIcon;
 };
 
+struct SvgIconLayer {
+    Str path_d = {};
+    bool stroked = false;
+    SvgStrokeDesc stroke = {};
+    uint8_t color_slot = 0; // 0 = primary, 1 = secondary
+    float opacity = 1.0f;
+};
+
 uint16_t register_svg_stroke_icon(Context* ctx, Str svg_path_d, const SvgStrokeDesc& desc = {}) noexcept;
 uint16_t register_svg_icon(
     Context* ctx,
     Str svg_path_d,
     Vec4 view_box = {0.0f, 0.0f, 24.0f, 24.0f},
     uint16_t slot_hint = kInvalidIcon) noexcept;
+uint16_t register_svg_layered_icon(
+    Context* ctx,
+    std::span<const SvgIconLayer> layers,
+    Vec4 view_box = {0.0f, 0.0f, 24.0f, 24.0f},
+    uint16_t slot_hint = kInvalidIcon) noexcept;
+inline uint16_t register_svg_layered_icon(
+    Context* ctx,
+    std::initializer_list<SvgIconLayer> layers,
+    Vec4 view_box = {0.0f, 0.0f, 24.0f, 24.0f},
+    uint16_t slot_hint = kInvalidIcon) noexcept {
+    return register_svg_layered_icon(
+        ctx,
+        std::span<const SvgIconLayer>(layers.begin(), layers.size()),
+        view_box,
+        slot_hint);
+}
+uint16_t register_svg_duotone_icon(
+    Context* ctx,
+    Str fill_path_d,
+    Str stroke_path_d,
+    const SvgStrokeDesc& stroke_desc = {},
+    float fill_opacity = 0.22f) noexcept;
 bool is_icon_loaded(const Context* ctx, uint16_t icon_id) noexcept;
 
 void process_event(Context* ctx, const SDL_Event& event) noexcept;
@@ -2565,14 +2643,20 @@ bool is_dragging_payload(uint32_t kind_hash = 0) noexcept;
 bool peek_drag_payload(DragPayloadView* out_view, uint32_t kind_hash = 0) noexcept;
 bool accept_drag_payload(uint32_t target_id, uint32_t kind_hash, DragPayloadView* out_view) noexcept;
 
-// Analytic damped spring animator & inertial scroll container control
+// Analytic damped spring animator, DPI/hairline metrics & inertial scroll container control
+float dpi_scale(const Context* ctx = nullptr) noexcept;
+float hairline_px(const Context* ctx = nullptr) noexcept;
 float spring(uint32_t anim_id, float target, SpringSpec spec = {}) noexcept;
 float spring(uint32_t anim_id, float target, float initial_value, SpringSpec spec = {}) noexcept;
 Vec2 spring_vec2(uint32_t anim_id, Vec2 target, SpringSpec spec = {}) noexcept;
+Color spring_color(uint32_t anim_id, Color target, SpringSpec spec = {}) noexcept;
+float spring_angle(uint32_t anim_id, float target_rad, SpringSpec spec = {}) noexcept;
 Vec2 scroll_delta() noexcept;
 Vec2 scroll_max(uint32_t element_id) noexcept;
 Vec2 scroll_offset(uint32_t element_id) noexcept;
 void set_scroll_offset(uint32_t element_id, Vec2 offset, bool stop_momentum = true) noexcept;
+bool scroll_stuck_to_bottom(uint32_t element_id) noexcept;
+void set_scroll_stuck_to_bottom(uint32_t element_id, bool stuck) noexcept;
 
 // Resizable Split Pane
 SplitResult begin_split(const SplitDesc& desc) noexcept;
@@ -2618,6 +2702,14 @@ struct CollapsibleScope {
 #define ETCH_COLLAPSIBLE(...) \
     if (::etch::CollapsibleScope ETCH_CONCAT(_etch_col_, __LINE__) = {::etch::begin_collapsible(__VA_ARGS__)}; \
         ETCH_CONCAT(_etch_col_, __LINE__).result.visible)
+
+struct CollapseScope {
+    bool visible = false;
+    ~CollapseScope() noexcept { if (visible) end_collapse(); }
+};
+#define ETCH_COLLAPSE(...) \
+    if (::etch::CollapseScope ETCH_CONCAT(_etch_collapse_, __LINE__) = {::etch::begin_collapse(__VA_ARGS__)}; \
+        ETCH_CONCAT(_etch_collapse_, __LINE__).visible)
 
 struct BoxScope {
     bool active = true;

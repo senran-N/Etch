@@ -8,13 +8,18 @@ void emit_vector_icon_quad(
     uint16_t icon_id,
     Rect target_px,
     Color color,
-    const ClipEntry& clip, float angle_rad) noexcept
+    const ClipEntry& clip,
+    float angle_rad,
+    Color secondary_color,
+    float opacity,
+    bool allow_snap) noexcept
 {
-    if (icon_id >= kMaxVectorIcons || color.a == 0u || target_px.w <= 0.0f || target_px.h <= 0.0f) {
+    if (icon_id >= kMaxVectorIcons || target_px.w <= 0.0f || target_px.h <= 0.0f ||
+        !std::isfinite(opacity) || opacity <= 0.0f) {
         return;
     }
     const VectorIconEntry& ic = ctx->atlas.icons[icon_id];
-    if (!ic.loaded || !ic.has_outline || ic.view_size.x <= 0.0f || ic.view_size.y <= 0.0f) {
+    if (!ic.loaded || ic.layer_count == 0u || ic.view_size.x <= 0.0f || ic.view_size.y <= 0.0f) {
         return;
     }
     const float sx = target_px.w / ic.view_size.x;
@@ -22,24 +27,57 @@ void emit_vector_icon_quad(
     const float s = (sx < sy) ? sx : sy;
     const float w = ic.view_size.x * s;
     const float h = ic.view_size.y * s;
-    const bool snap_icon = angle_rad == 0.0f && ctx->active_ui->pixel_snap &&
-        !(ctx->active_render_layer && ctx->active_render_layer->resolved_animating);
+
+    float layer_scale_max = 1.0f;
+    bool layer_blocks_snap = false;
+    if (ctx->active_render_layer) {
+        resolve_layer_chain(ctx, ctx->active_render_layer, ctx->active_ui->dpi_scale);
+        const VisualLayerNode* ln = ctx->active_render_layer;
+        layer_scale_max = std::fmax(std::fabs(ln->resolved_scale.x), std::fabs(ln->resolved_scale.y));
+        layer_blocks_snap = ln->resolved_animating ||
+            std::fabs(ln->resolved_scale.x - 1.0f) > 1e-4f ||
+            std::fabs(ln->resolved_scale.y - 1.0f) > 1e-4f ||
+            std::fabs(ln->resolved_offset_px.x) > 1e-4f ||
+            std::fabs(ln->resolved_offset_px.y) > 1e-4f;
+    }
+    const bool snap_icon = allow_snap && (angle_rad == 0.0f) && ctx->active_ui->pixel_snap && !layer_blocks_snap;
     const float qx = target_px.x + 0.5f * (target_px.w - w);
     const float qy = target_px.y + 0.5f * (target_px.h - h);
     const Rect quad = snap_icon
         ? Rect{ std::round(qx), std::round(qy), std::fmax(1.0f, std::round(w)), std::fmax(1.0f, std::round(h)) }
         : Rect{ qx, qy, w, h };
-    push_prim(
-        ctx,
-        Prim::make_slug_glyph(
-            quad,
-            clip.rect,
-            color,
-            ic.band_offset,
-            ic.num_hbands,
-            ic.num_vbands,
-            clip.radius,
-            PrimFlag_None, angle_rad));
+
+    const float physical_size = std::fmin(quad.w, quad.h) * layer_scale_max;
+    const uint8_t stem_flag = (physical_size < 28.0f) ? PrimFlag_StemDarken : PrimFlag_None;
+    const float eff_opacity = std::fmin(1.0f, std::fmax(0.0f, opacity));
+
+    for (uint8_t li = 0u; li < ic.layer_count; ++li) {
+        const VectorIconLayer& layer = ic.layers[li];
+        if (!layer.has_outline || layer.opacity <= 0.0f) {
+            continue;
+        }
+        Color layer_col = (layer.color_slot == 1u && !secondary_color.is_theme_auto()) ? secondary_color : color;
+        const float total_alpha = eff_opacity * layer.opacity;
+        if (total_alpha < 0.9999f) {
+            const float scaled_a = static_cast<float>(layer_col.a) * total_alpha;
+            layer_col.a = static_cast<uint8_t>(std::fmin(255.0f, std::fmax(0.0f, std::round(scaled_a))));
+        }
+        if (layer_col.a == 0u) {
+            continue;
+        }
+        push_prim(
+            ctx,
+            Prim::make_slug_glyph(
+                quad,
+                clip.rect,
+                layer_col,
+                layer.band_offset,
+                layer.num_hbands,
+                layer.num_vbands,
+                clip.radius,
+                stem_flag,
+                angle_rad));
+    }
 }
 
 DrawCmdNode* append_open_box_draw_cmd(Context* ctx, bool foreground) noexcept {
@@ -503,6 +541,26 @@ void emit_draw_list_command(
                 break;
             }
             case DrawCmdKind::Fill: emit_vector_fill(ctx, node->fill_cmd, origin, scale, clip); break;
+            case DrawCmdKind::Shadow: {
+                const ShadowDrawCmd& sd = node->shadow_cmd;
+                if (sd.color.a > 0u && sd.blur > 0.0f) {
+                    const Rect r_px = {
+                        .x = origin.x + (sd.rect.x + sd.offset.x) * scale,
+                        .y = origin.y + (sd.rect.y + sd.offset.y) * scale,
+                        .w = sd.rect.w * scale,
+                        .h = sd.rect.h * scale,
+                    };
+                    const float blur_px = sd.blur * scale;
+                    push_prim(
+                        ctx,
+                        continuous_prim(
+                            Prim::make_shadow(r_px, clip.rect, sd.color, scale_corners(sd.radius, scale), blur_px, clip.radius),
+                            sd.continuous_corners),
+                        nullptr,
+                        2.0f * blur_px + 2.0f);
+                }
+                break;
+            }
             case DrawCmdKind::Rect: {
                 const RectDrawDesc& rd = node->rect;
                 Rect r_px = {
@@ -1774,14 +1832,28 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
                         target_scroll->scroll_pos.x = clamp_range(target_scroll->scroll_pos.x - scroll.x * 48.0f, 0.0f, target_scroll->scroll_max.x);
                     }
                     if (target_scroll->is_scroll_y) {
+                        if (scroll.y > 0.0f) {
+                            target_scroll->scroll_stuck_bottom = false;
+                        }
                         target_scroll->scroll_pos.y = clamp_range(target_scroll->scroll_pos.y - scroll.y * 48.0f, 0.0f, target_scroll->scroll_max.y);
+                        if (scroll.y < 0.0f && target_scroll->scroll_pos.y >= target_scroll->scroll_max.y - 2.0f) {
+                            target_scroll->scroll_stuck_bottom = true;
+                        }
                     }
                 } else {
                     if (target_scroll->is_scroll_x) {
                         target_scroll->scroll_vel.x += (-scroll.x) * 560.0f;
                     }
                     if (target_scroll->is_scroll_y) {
+                        if (scroll.y > 0.0f) {
+                            target_scroll->scroll_stuck_bottom = false;
+                        }
                         target_scroll->scroll_vel.y += (-scroll.y) * 560.0f;
+                        if (scroll.y < 0.0f && target_scroll->scroll_vel.y >= -1.0f &&
+                            target_scroll->scroll_pos.y >= target_scroll->scroll_max.y - 2.0f)
+                        {
+                            target_scroll->scroll_stuck_bottom = true;
+                        }
                     }
                 }
             }
@@ -1820,14 +1892,28 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
                         fallback_scroll->scroll_pos.x = clamp_range(fallback_scroll->scroll_pos.x - scroll.x * 48.0f, 0.0f, fallback_scroll->scroll_max.x);
                     }
                     if (fallback_scroll->is_scroll_y) {
+                        if (scroll.y > 0.0f) {
+                            fallback_scroll->scroll_stuck_bottom = false;
+                        }
                         fallback_scroll->scroll_pos.y = clamp_range(fallback_scroll->scroll_pos.y - scroll.y * 48.0f, 0.0f, fallback_scroll->scroll_max.y);
+                        if (scroll.y < 0.0f && fallback_scroll->scroll_pos.y >= fallback_scroll->scroll_max.y - 2.0f) {
+                            fallback_scroll->scroll_stuck_bottom = true;
+                        }
                     }
                 } else {
                     if (fallback_scroll->is_scroll_x) {
                         fallback_scroll->scroll_vel.x += (-scroll.x) * 560.0f;
                     }
                     if (fallback_scroll->is_scroll_y) {
+                        if (scroll.y > 0.0f) {
+                            fallback_scroll->scroll_stuck_bottom = false;
+                        }
                         fallback_scroll->scroll_vel.y += (-scroll.y) * 560.0f;
+                        if (scroll.y < 0.0f && fallback_scroll->scroll_vel.y >= -1.0f &&
+                            fallback_scroll->scroll_pos.y >= fallback_scroll->scroll_max.y - 2.0f)
+                        {
+                            fallback_scroll->scroll_stuck_bottom = true;
+                        }
                     }
                 }
             }
@@ -1850,7 +1936,13 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
                 moving |= step_scroll_axis(&ws.scroll_pos.x, &ws.scroll_vel.x, ws.scroll_max.x, decay, step_factor);
             }
             if (ws.is_scroll_y) {
+                const float vel_before = ws.scroll_vel.y;
                 moving |= step_scroll_axis(&ws.scroll_pos.y, &ws.scroll_vel.y, ws.scroll_max.y, decay, step_factor);
+                if (vel_before > 0.0f && ws.scroll_vel.y >= -1.0f &&
+                    ws.scroll_pos.y >= ws.scroll_max.y - 2.0f)
+                {
+                    ws.scroll_stuck_bottom = true;
+                }
             }
             if (ws.is_virtual_list) {
                 moving |= step_scroll_axis_d(
@@ -1941,6 +2033,10 @@ void begin_box(const BoxDesc& desc_in) noexcept {
             box_ws->show_scrollbar = desc.show_scrollbar;
             box_ws->is_scroll_x = desc.scroll_x;
             box_ws->is_scroll_y = desc.scroll_y;
+            if (desc.scroll_y && desc.stick_to_bottom && !box_ws->scroll_stick_initialized) {
+                box_ws->scroll_stuck_bottom = true;
+                box_ws->scroll_stick_initialized = true;
+            }
             box_ws->is_text_input_writable = false;
             box_ws->owner_canvas_id = (ctx->active_ui->canvas_depth > 0u)
                 ? ctx->active_ui->canvas_stack[ctx->active_ui->canvas_depth - 1u].id
@@ -1965,8 +2061,16 @@ void begin_box(const BoxDesc& desc_in) noexcept {
         float direction = 0.0f;
         while(a11y_take_any(desc.id,12u,&sc_cmd)) direction += (sc_cmd.action==A11yAction::Increment)?1.0f:-1.0f;
         if(direction != 0.0f) {
-            if(desc.scroll_y)box_ws->scroll_pos.y=clamp_range(box_ws->scroll_pos.y+direction*40,0,box_ws->scroll_max.y);
-            else box_ws->scroll_pos.x=clamp_range(box_ws->scroll_pos.x+direction*40,0,box_ws->scroll_max.x);
+            if(desc.scroll_y) {
+                box_ws->scroll_pos.y=clamp_range(box_ws->scroll_pos.y+direction*40,0,box_ws->scroll_max.y);
+                if (direction < 0.0f) {
+                    box_ws->scroll_stuck_bottom = false;
+                } else if (box_ws->scroll_max.y <= 0.5f || box_ws->scroll_pos.y >= box_ws->scroll_max.y - 2.0f) {
+                    box_ws->scroll_stuck_bottom = true;
+                }
+            } else {
+                box_ws->scroll_pos.x=clamp_range(box_ws->scroll_pos.x+direction*40,0,box_ws->scroll_max.x);
+            }
             request_redraw(ctx);
         }
     }
@@ -2110,6 +2214,10 @@ void begin_box(const BoxDesc& desc_in) noexcept {
         decl.scroll_x = desc.scroll_x;
         decl.scroll_y = desc.scroll_y;
         if (is_scroll && box_ws) {
+            if (desc.scroll_y && desc.stick_to_bottom && box_ws->scroll_stuck_bottom) {
+                box_ws->scroll_pos.y = box_ws->scroll_max.y;
+                box_ws->scroll_vel.y = 0.0f;
+            }
             decl.child_offset = Vec2{ -box_ws->scroll_pos.x, -box_ws->scroll_pos.y };
         }
     }
@@ -2496,6 +2604,9 @@ void icon(const IconDesc& desc_in) noexcept {
     const float wscale = current_world_scale(ctx);
     IconDesc desc = desc_in;
     desc.color = resolve_theme_color(desc.color, active_theme(ctx).text_primary);
+    desc.rotation_rad = std::isfinite(desc.rotation_rad) ? desc.rotation_rad : 0.0f;
+    desc.scale = std::isfinite(desc.scale) ? std::fmax(0.0f, desc.scale) : 1.0f;
+    desc.opacity = std::isfinite(desc.opacity) ? std::fmin(1.0f, std::fmax(0.0f, desc.opacity)) : 1.0f;
     const float layout_sz = ((desc.size_px > 0.0f) ? desc.size_px : 16.0f) * wscale;
 
     if (desc.id != 0u) {
@@ -2542,6 +2653,32 @@ void draw_rect(const RectDrawDesc& desc) noexcept {
         eff.radius = resolve_theme_corners(eff.radius, Corners::all(thm.radius_panel_px));
         node->kind = DrawCmdKind::Rect;
         node->rect = eff;
+    }
+}
+
+void draw_shadow_internal(
+    Rect rect,
+    Corners radius,
+    Color color,
+    float blur,
+    Vec2 offset = {},
+    bool foreground = false,
+    bool continuous_corners = false) noexcept
+{
+    if (rect.w <= 0.0f || rect.h <= 0.0f || color.a == 0u || !std::isfinite(blur) || blur <= 0.0f) {
+        return;
+    }
+    Context* ctx = current_context();
+    if (DrawCmdNode* node = append_open_box_draw_cmd(ctx, foreground)) {
+        node->kind = DrawCmdKind::Shadow;
+        node->shadow_cmd = ShadowDrawCmd{
+            .rect = rect,
+            .radius = radius,
+            .color = color,
+            .blur = blur,
+            .offset = offset,
+            .continuous_corners = continuous_corners,
+        };
     }
 }
 
@@ -2925,7 +3062,7 @@ WindowHit evaluate_window_hit(const Context* ctx, Vec2 logical_pos, SDL_Window* 
         w = win_sz.x;
         h = win_sz.y;
         const SDL_WindowFlags wflags = SDL_GetWindowFlags(target);
-        maximized = (wflags & SDL_WINDOW_MAXIMIZED) != 0u;
+        maximized = ((wflags & SDL_WINDOW_MAXIMIZED) != 0u) || win32_is_zoomed(target);
         fullscreen = (wflags & SDL_WINDOW_FULLSCREEN) != 0u;
     } else {
         const float dpi = (ui->dpi_scale > 0.0f) ? ui->dpi_scale : 1.0f;
@@ -2995,6 +3132,7 @@ void maximize_window(SDL_Window* window) noexcept {
     SDL_Window* target = window ? window : (ctx ? ctx->active_window : nullptr);
     if (target && (!ctx || !ctx->headless)) {
         SDL_MaximizeWindow(target);
+        win32_maximize_window(target);
         if (ctx) {
             request_redraw(ctx);
         }
@@ -3006,6 +3144,7 @@ void restore_window(SDL_Window* window) noexcept {
     SDL_Window* target = window ? window : (ctx ? ctx->active_window : nullptr);
     if (target && (!ctx || !ctx->headless)) {
         SDL_RestoreWindow(target);
+        win32_restore_window(target);
         if (ctx) {
             request_redraw(ctx);
         }
@@ -3018,7 +3157,7 @@ bool is_window_maximized(const Context* ctx_arg, SDL_Window* window) noexcept {
     if (!target || (ctx && ctx->headless)) {
         return false;
     }
-    return (SDL_GetWindowFlags(target) & SDL_WINDOW_MAXIMIZED) != 0u;
+    return ((SDL_GetWindowFlags(target) & SDL_WINDOW_MAXIMIZED) != 0u) || win32_is_zoomed(target);
 }
 
 bool is_window_minimized(const Context* ctx_arg, SDL_Window* window) noexcept {
@@ -3336,15 +3475,22 @@ static TextInputResult text_input_impl(const TextInputDesc& desc_in, const void*
     }
     const Theme& thm = active_theme(ctx);
     TextInputDesc desc = desc_in;
-    desc.text_color = resolve_theme_color(desc.text_color, thm.text_body);
+    desc.text_color = resolve_theme_color(desc.text_color, desc.disabled ? thm.text_disabled : thm.text_body);
     desc.placeholder_color = resolve_theme_color(desc.placeholder_color, thm.text_disabled);
     desc.ghost_color = resolve_theme_color(desc.ghost_color, thm.text_disabled);
     desc.selection_color = resolve_theme_color(desc.selection_color, thm.selection);
     desc.caret_color = resolve_theme_color(desc.caret_color, thm.accent);
     desc.composition_color = resolve_theme_color(desc.composition_color, thm.warning);
-    desc.background = resolve_theme_color(desc.background, thm.bg_input);
+    desc.background = resolve_theme_color(desc.background, desc.disabled ? thm.surface_disabled : thm.bg_input);
     desc.border_color = resolve_theme_color(desc.border_color, thm.border_input);
     desc.focus_border_color = resolve_theme_color(desc.focus_border_color, thm.accent);
+    desc.hover_border_color = resolve_theme_color(
+        desc.hover_border_color,
+        Color::lerp_oklab(desc.border_color, desc.focus_border_color, 0.35f));
+    desc.leading_icon_color = resolve_theme_color(
+        desc.leading_icon_color,
+        desc.disabled ? thm.text_disabled : thm.text_muted);
+    desc.focus_glow_blur = std::isfinite(desc.focus_glow_blur) ? std::fmax(0.0f, desc.focus_glow_blur) : 10.0f;
     desc.radius = resolve_theme_corners(desc.radius, Corners::all(thm.radius_input_px));
 
     WidgetState* ws = nullptr;
@@ -3352,7 +3498,7 @@ static TextInputResult text_input_impl(const TextInputDesc& desc_in, const void*
         ws = state_map_get_or_insert(&ctx->active_ui->states, desc.id, ctx->active_ui->frame_index);
         if (ws) {
             ws->is_user_element = true;
-            ws->is_focusable = true;
+            ws->is_focusable = !desc.disabled;
             ws->focus_scope = ctx->active_ui->modal_scope && focus_scope_contains(*ctx->active_ui, ctx->active_ui->modal_scope) ? ctx->active_ui->modal_scope : ctx->active_ui->focus_scope;
             ws->is_scroll_x = false;
             ws->is_scroll_y = false;
@@ -3360,7 +3506,12 @@ static TextInputResult text_input_impl(const TextInputDesc& desc_in, const void*
                 ? ctx->active_ui->canvas_stack[ctx->active_ui->canvas_depth - 1u].id
                 : 0u;
         }
-        if (reserve_focus(ctx->active_ui)) {
+        if (desc.disabled) {
+            if (ctx->active_ui->focus_id == desc.id) {
+                ctx->active_ui->focus_id = 0u;
+                clear_ime_composition(ctx);
+            }
+        } else if (reserve_focus(ctx->active_ui)) {
             ctx->active_ui->focus_order[ctx->active_ui->focus_count++] = desc.id;
             if (ctx->active_ui->modal_needs_focus && focus_scope_contains(*ctx->active_ui, ctx->active_ui->modal_scope)) {
                 ctx->active_ui->focus_id = desc.id;
@@ -3373,7 +3524,7 @@ static TextInputResult text_input_impl(const TextInputDesc& desc_in, const void*
     char* buf = desc.buffer;
     const uint32_t cap = desc.capacity;
     uint32_t len = 0u;
-    const bool writable = (buf != nullptr && cap > 1u && !desc.read_only);
+    const bool writable = (buf != nullptr && cap > 1u && !desc.read_only && !desc.disabled);
     if (ws) {
         ws->edit_text_buffer = nullptr;
         ws->is_text_input_writable = writable;
@@ -3422,15 +3573,29 @@ static TextInputResult text_input_impl(const TextInputDesc& desc_in, const void*
 
     const uint32_t clear_id=id_index(desc.id,0xED1701u);
     const bool show_clear=desc.clear_button && writable && len>0;
-    uint32_t menu_key=text_input_menu(desc,len,cursor!=anchor);
+    uint32_t menu_key=desc.disabled ? 0u : text_input_menu(desc,len,cursor!=anchor);
     ws=desc.id ? state_map_find(&ctx->active_ui->states,desc.id) : nullptr;
     if (show_clear && (clicked(clear_id) || a11y_take(clear_id,A11yAction::Press))) { request_focus(desc.id);anchor=0;cursor=len;menu_key=SDLK_DELETE; }
+    const float orig_pad_left = desc.padding.left;
+    const bool has_leading_icon = (desc.leading_icon_id != kInvalidIcon && is_icon_loaded(ctx, desc.leading_icon_id));
+    if (has_leading_icon) {
+        const float icon_sz = std::fmax(12.0f, std::fmin((desc.font_size_px > 0.0f ? desc.font_size_px : 14.0f), 18.0f));
+        desc.padding.left += icon_sz + 8.0f;
+    }
     if (show_clear) desc.padding.right += 24;
-    bool is_focused = (desc.id != 0u && ctx->active_ui->focus_id == desc.id &&
+    bool is_focused = !desc.disabled && (desc.id != 0u && ctx->active_ui->focus_id == desc.id &&
         (!ctx->active_ui->modal_scope || focus_scope_contains(*ctx->active_ui, ctx->active_ui->modal_scope)));
-    const bool is_hovered = (desc.id != 0u && pointer_over_id(ctx->active_ui, desc.id));
-    if (is_hovered || (desc.id != 0u && ctx->active_ui->active_id == desc.id)) {
+    const bool is_hovered = !desc.disabled && (desc.id != 0u && pointer_over_id(ctx->active_ui, desc.id));
+    if (!desc.disabled && (is_hovered || (desc.id != 0u && ctx->active_ui->active_id == desc.id))) {
         set_cursor(Cursor::IBeam);
+    }
+    if (ws) {
+        if (desc.disabled || is_focused) {
+            ws->hover_t = 0.0f;
+            ws->hover_vel = 0.0f;
+        } else {
+            advance_motion(ctx, &ws->hover_t, &ws->hover_vel, is_hovered ? 1.0f : 0.0f, SpringSpec::snappy());
+        }
     }
 
     if (is_focused && !desc.read_only) {
@@ -3445,9 +3610,9 @@ static TextInputResult text_input_impl(const TextInputDesc& desc_in, const void*
         ? ((ws && ws->edit_wrap_width > 0.0f)
             ? ws->edit_wrap_width
             : ((ws && ws->last_box_logical.w > 0.0f)
-                ? text_input_wrap_width(desc, compute_text_inner_geom(ws->last_box_logical, desc))
+                ? text_input_wrap_width(desc, compute_text_inner_geom(ctx, ws->last_box_logical, desc))
                 : ((desc.width.kind == SizingKind::Fixed && desc.width.value > 0.0f)
-                    ? text_input_wrap_width(desc, compute_text_inner_geom(Rect{ 0.0f, 0.0f, desc.width.value, 100.0f }, desc))
+                    ? text_input_wrap_width(desc, compute_text_inner_geom(ctx, Rect{ 0.0f, 0.0f, desc.width.value, 100.0f }, desc))
                     : 0.0f)))
         : 0.0f;
     if (ws && active_wrap_w <= 0.0f) {
@@ -3455,8 +3620,8 @@ static TextInputResult text_input_impl(const TextInputDesc& desc_in, const void*
     }
 
     // Pointer click / double-word / triple-line / drag selection
-    if (ws && ws->last_box_logical.w > 0.0f && desc.id != 0u) {
-        const TextInnerGeom prev_geom = compute_text_inner_geom(ws->last_box_logical, desc);
+    if (!desc.disabled && ws && ws->last_box_logical.w > 0.0f && desc.id != 0u) {
+        const TextInnerGeom prev_geom = compute_text_inner_geom(ctx, ws->last_box_logical, desc);
         const float ptr_wrap_w = (active_wrap_w > 0.0f) ? active_wrap_w : text_input_wrap_width(desc, prev_geom);
         const float local_x = ctx->active_ui->pointer_pos.x - prev_geom.origin_x +
             ((ptr_wrap_w > 0.0f) ? 0.0f : ws->edit_scroll_x);
@@ -3876,7 +4041,7 @@ static TextInputResult text_input_impl(const TextInputDesc& desc_in, const void*
     if (!is_focused && ctx->active_ui->ime_focused_id==desc.id) ctx->active_ui->ime_focused_id=0;
     const bool composing = is_focused && !desc.read_only && !desc.password && ctx->active_ui->ime_comp_len > 0u;
     if (is_focused && ws && ws->last_box_logical.w > 0.0f && !desc.read_only && !desc.password) {
-        const TextInnerGeom pre_geom = compute_text_inner_geom(ws->last_box_logical, desc);
+        const TextInnerGeom pre_geom = compute_text_inner_geom(ctx, ws->last_box_logical, desc);
         update_text_scroll_and_ime(
             ctx, ws, desc, pre_geom, committed_slice, cursor, true, composing, nullptr, nullptr);
     }
@@ -3925,6 +4090,8 @@ static TextInputResult text_input_impl(const TextInputDesc& desc_in, const void*
         ti_extra->cursor_byte = cursor;
         ti_extra->sel_anchor_byte = anchor;
         ti_extra->is_focused = is_focused;
+        ti_extra->hover_t = ws ? clamp_range(ws->hover_t, 0.0f, 1.0f) : 0.0f;
+        ti_extra->leading_icon_pad_left = orig_pad_left;
         extra->desc.id = desc.id;
         extra->text_input = ti_extra;
     }
@@ -3947,12 +4114,23 @@ static TextInputResult text_input_impl(const TextInputDesc& desc_in, const void*
             ctx->active_ui->subtree_stack[ctx->active_ui->subtree_depth - 1u].meta->tainted = true;
         }
         if (show_clear) {
+            const bool ch = hovered(clear_id);
+            const bool cp = pressed(clear_id);
+            const float ht = spring(id_index(clear_id, 0xC1EA01u), ch ? 1.0f : 0.0f, SpringSpec::snappy());
+            const float htc = clamp_range(ht, 0.0f, 1.0f);
+            const Color pill_bg = cp
+                ? thm.surface_active
+                : (htc > 0.001f
+                    ? Color::rgba8(thm.surface_hover.r, thm.surface_hover.g, thm.surface_hover.b,
+                                   static_cast<uint8_t>(std::round(180.0f * htc)))
+                    : Color{});
             begin_box({.id=clear_id,.width=Sizing::fixed(20),.height=Sizing::fixed(20),.align_y=AlignY::Center,
-                .attach_to=AttachTo::Parent,.anchor_element=Anchor::CenterRight,.anchor_parent=Anchor::CenterRight,.floating_offset={-4,0}});
-            if (hovered(clear_id)) set_cursor(Cursor::Hand);
-            const Color color=desc.text_color;
-            draw_line({.from={6,6},.to={14,14},.color=color,.thickness=1.5f});
-            draw_line({.from={14,6},.to={6,14},.color=color,.thickness=1.5f});
+                .background=pill_bg,.radius=Corners::all(10.0f),
+                .attach_to=AttachTo::Parent,.anchor_element=Anchor::CenterRight,.anchor_parent=Anchor::CenterRight,.floating_offset={-6,0}});
+            if (ch) set_cursor(Cursor::Hand);
+            const Color x_col = Color::lerp_oklab(thm.text_muted, desc.text_color, (ch || cp) ? 1.0f : htc);
+            draw_line({.from={6.5f,6.5f},.to={13.5f,13.5f},.color=x_col,.thickness=1.5f});
+            draw_line({.from={13.5f,6.5f},.to={6.5f,13.5f},.color=x_col,.thickness=1.5f});
             a11y_semantic(clear_id,A11yRole::Button,str_lit("Clear"),0,3u);
             end_box();
         }
@@ -3966,7 +4144,9 @@ static TextInputResult text_input_impl(const TextInputDesc& desc_in, const void*
         char* bullets=ctx->frame_arena.alloc<char>(size_t(count)*3+1);
         if(bullets) {for(uint32_t i=0;i<count;++i)std::memcpy(bullets+i*3,"\xE2\x80\xA2",3);semantic_value={bullets,count*3};} else semantic_value={};
     }
-    a11y_emit(ctx,desc.id ? desc.id : semantic_id,A11yRole::TextInput,{},semantic_value,(desc.password?A11yState_Password:0u)|(desc.read_only?A11yState_ReadOnly:0u)|(desc.multiline?A11yState_Multiline:0u),1u|(writable?128u:0u));
+    a11y_emit(ctx,desc.id ? desc.id : semantic_id,A11yRole::TextInput,{},semantic_value,
+        (desc.password?A11yState_Password:0u)|(desc.read_only?A11yState_ReadOnly:0u)|(desc.multiline?A11yState_Multiline:0u)|(desc.disabled?A11yState_Disabled:0u),
+        desc.disabled ? 0u : (1u|(writable?128u:0u)));
     return TextInputResult{
         .changed = changed,
         .submitted = submitted,
@@ -4519,6 +4699,19 @@ std::span<const Str> dropped_files() noexcept {
     return std::span<const Str>(ctx->active_ui->frame_drops, ctx->active_ui->frame_drop_count);
 }
 
+float dpi_scale(const Context* ctx_arg) noexcept {
+    const Context* ctx = ctx_arg ? ctx_arg : current_context();
+    if (!ctx) {
+        return 1.0f;
+    }
+    const WindowUiState* ui = ctx->active_ui ? ctx->active_ui : &ctx->headless_ui;
+    return (ui && std::isfinite(ui->dpi_scale) && ui->dpi_scale > 0.0f) ? ui->dpi_scale : 1.0f;
+}
+
+float hairline_px(const Context* ctx_arg) noexcept {
+    return 1.0f / dpi_scale(ctx_arg);
+}
+
 float spring(uint32_t anim_id, float target, SpringSpec spec) noexcept {
     return spring(anim_id, target, target, spec);
 }
@@ -4553,6 +4746,53 @@ Vec2 spring_vec2(uint32_t anim_id, Vec2 target, SpringSpec spec) noexcept {
         .x = spring(id_index(anim_id, 0x58u), target.x, spec),
         .y = spring(id_index(anim_id, 0x59u), target.y, spec),
     };
+}
+
+Color spring_color(uint32_t anim_id, Color target, SpringSpec spec) noexcept {
+    Context* ctx = current_context();
+    if (!ctx || anim_id == 0u) {
+        return target;
+    }
+    const Vec4 tgt = color_to_oklab_internal(target);
+    const float L = spring(id_index(anim_id, 0xC01001u), tgt.x, spec);
+    const float a = spring(id_index(anim_id, 0xC01002u), tgt.y, spec);
+    const float b = spring(id_index(anim_id, 0xC01003u), tgt.z, spec);
+    const float alpha = spring(id_index(anim_id, 0xC01004u), tgt.w, spec);
+    if (L == tgt.x && a == tgt.y && b == tgt.z && alpha == tgt.w) {
+        return target;
+    }
+    return color_from_oklab_internal(Vec4{ L, a, b, alpha });
+}
+
+float spring_angle(uint32_t anim_id, float target_rad, SpringSpec spec) noexcept {
+    Context* ctx = current_context();
+    if (!std::isfinite(target_rad)) {
+        return 0.0f;
+    }
+    if (!ctx || anim_id == 0u) {
+        return target_rad;
+    }
+    spec = valid_spring_spec(spec);
+    WidgetState* ws = state_map_get_or_insert(&ctx->active_ui->states, anim_id, ctx->active_ui->frame_index);
+    if (!ws) {
+        return target_rad;
+    }
+    if (!ws->spring_initialized) {
+        ws->spring_pos = target_rad;
+        ws->spring_vel = 0.0f;
+        ws->spring_initialized = true;
+        return ws->spring_pos;
+    }
+    constexpr float kPi = 3.14159265358979323846f;
+    constexpr float kTwoPi = 6.28318530717958647692f;
+    float diff = std::fmod(target_rad - ws->spring_pos, kTwoPi);
+    if (diff > kPi)  diff -= kTwoPi;
+    if (diff < -kPi) diff += kTwoPi;
+    const float unwrapped_target = ws->spring_pos + diff;
+    if (!advance_motion(ctx, &ws->spring_pos, &ws->spring_vel, unwrapped_target, spec)) {
+        ws->spring_pos = target_rad;
+    }
+    return ws->spring_pos;
 }
 
 Vec2 scroll_delta() noexcept {
@@ -4595,8 +4835,47 @@ void set_scroll_offset(uint32_t element_id, Vec2 offset, bool stop_momentum) noe
             (ws->scroll_max.x > 0.0f) ? clamp_range(offset.x, 0.0f, ws->scroll_max.x) : ((offset.x > 0.0f) ? offset.x : 0.0f),
             (ws->scroll_max.y > 0.0f) ? clamp_range(offset.y, 0.0f, ws->scroll_max.y) : ((offset.y > 0.0f) ? offset.y : 0.0f),
         };
+        ws->scroll_stick_initialized = true;
+        ws->scroll_stuck_bottom = (ws->scroll_max.y <= 0.5f) || (ws->scroll_pos.y >= ws->scroll_max.y - 2.0f);
         if (stop_momentum) {
             ws->scroll_vel = {};
+        }
+        request_redraw(ctx);
+    }
+}
+
+bool scroll_stuck_to_bottom(uint32_t element_id) noexcept {
+    const Context* ctx = current_context();
+    if (!ctx || element_id == 0u) {
+        return false;
+    }
+    const WidgetState* ws = state_map_find(&ctx->active_ui->states, element_id);
+    if (!ws) {
+        return false;
+    }
+    if (ws->is_virtual_list) {
+        return ws->vlist_stuck_bottom;
+    }
+    return (ws->is_scroll_y || ws->scroll_stick_initialized) ? ws->scroll_stuck_bottom : false;
+}
+
+void set_scroll_stuck_to_bottom(uint32_t element_id, bool stuck) noexcept {
+    Context* ctx = current_context();
+    if (!ctx || element_id == 0u) {
+        return;
+    }
+    if (WidgetState* ws = state_map_get_or_insert(&ctx->active_ui->states, element_id, ctx->active_ui->frame_index)) {
+        ws->is_user_element = true;
+        ws->scroll_stick_initialized = true;
+        ws->scroll_stuck_bottom = stuck;
+        ws->vlist_stick_initialized = true;
+        ws->vlist_stuck_bottom = stuck;
+        if (stuck) {
+            ws->scroll_pos.y = ws->scroll_max.y;
+            ws->scroll_vel.y = 0.0f;
+            ws->vscroll_pos_y = ws->vscroll_max_y;
+            ws->vscroll_vel_y = 0.0;
+            ws->vlist_pending_scroll = false;
         }
         request_redraw(ctx);
     }

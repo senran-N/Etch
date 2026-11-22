@@ -343,33 +343,59 @@ void cancel_ime_composition(Context* ctx) noexcept {
     }
 }
 
+float text_input_line_height_logical(Context* ctx, const TextInputDesc& desc) noexcept {
+    const float font_px = (desc.font_size_px > 0.0f) ? desc.font_size_px : 14.0f;
+    return scaled_font_span_px(ctx, desc.font_id, font_px);
+}
+
+float text_input_line_advance_logical(Context* ctx, const TextInputDesc& desc) noexcept {
+    const float line_h = text_input_line_height_logical(ctx, desc);
+    return desc.multiline ? std::floor(line_h * 1.35f + 0.5f) : line_h;
+}
+
 struct TextInnerGeom {
     Rect  clip_logical = {};
     float origin_x = 0.0f;
     float origin_y = 0.0f;
+    float font_px = 14.0f;
     float line_h = 14.0f;
     float line_adv = 14.0f;
 };
 
-TextInnerGeom compute_text_inner_geom(Rect box_logical, const TextInputDesc& desc) noexcept {
-    const float base_px = (desc.font_size_px > 0.0f) ? desc.font_size_px : 14.0f;
-    const float line_adv = desc.multiline ? std::floor(base_px * 1.35f + 0.5f) : base_px;
+TextInnerGeom compute_text_inner_geom(Context* ctx, Rect box_logical, const TextInputDesc& desc) noexcept {
+    const float font_px = (desc.font_size_px > 0.0f) ? desc.font_size_px : 14.0f;
+    const float line_h = scaled_font_span_px(ctx, desc.font_id, font_px);
+    const float line_adv = desc.multiline ? std::floor(line_h * 1.35f + 0.5f) : line_h;
     const float ix = box_logical.x + desc.padding.left;
     const float iy = box_logical.y + desc.padding.top;
     const float iw = (box_logical.w > desc.padding.left + desc.padding.right)
         ? (box_logical.w - desc.padding.left - desc.padding.right) : 0.0f;
     const float ih = (box_logical.h > desc.padding.top + desc.padding.bottom)
         ? (box_logical.h - desc.padding.top - desc.padding.bottom) : 0.0f;
+    const bool has_scale_adjust = (line_h != font_px);
     const float oy = desc.multiline
         ? iy
-        : (iy + 0.5f * ((ih > base_px) ? (ih - base_px) : 0.0f));
+        : (ih > line_h
+            ? (iy + 0.5f * (ih - line_h))
+            : (has_scale_adjust ? std::fmax(box_logical.y + 1.0f, iy + 0.5f * (ih - line_h)) : iy));
     const float clip_pad_top = (desc.padding.top > 2.0f) ? 2.0f : desc.padding.top;
     const float clip_pad_bot = (desc.padding.bottom > 3.0f) ? 3.0f : desc.padding.bottom;
+    float clip_y0 = iy - clip_pad_top;
+    float clip_y1 = iy + ih + clip_pad_bot;
+    if (!desc.multiline && has_scale_adjust && line_h > ih) {
+        const float box_inner_y0 = box_logical.y + 1.0f;
+        const float box_inner_y1 = box_logical.y + box_logical.h - 1.0f;
+        if (box_inner_y1 > box_inner_y0) {
+            clip_y0 = std::fmin(clip_y0, std::fmax(box_inner_y0, oy - 1.0f));
+            clip_y1 = std::fmax(clip_y1, std::fmin(box_inner_y1, oy + line_h + 1.0f));
+        }
+    }
     return TextInnerGeom{
-        .clip_logical = Rect{ ix, iy - clip_pad_top, iw, ih + clip_pad_top + clip_pad_bot },
+        .clip_logical = Rect{ ix, clip_y0, iw, clip_y1 - clip_y0 },
         .origin_x = ix,
         .origin_y = oy,
-        .line_h = base_px,
+        .font_px = font_px,
+        .line_h = line_h,
         .line_adv = line_adv,
     };
 }
@@ -861,7 +887,7 @@ TextVisualPos text_byte_to_visual(
     bool wrap_affinity = false) noexcept
 {
     const float base_px = (desc.font_size_px > 0.0f) ? desc.font_size_px : 14.0f;
-    const float line_adv = desc.multiline ? std::floor(base_px * 1.35f + 0.5f) : base_px;
+    const float line_adv = text_input_line_advance_logical(ctx, desc);
     TextVisualPos out = {};
     if (!text.chars || text.length == 0u) {
         return out;
@@ -937,7 +963,7 @@ uint32_t visual_point_to_byte(
         return 0u;
     }
     const float base_px = (desc.font_size_px > 0.0f) ? desc.font_size_px : 14.0f;
-    const float line_adv = desc.multiline ? std::floor(base_px * 1.35f + 0.5f) : base_px;
+    const float line_adv = text_input_line_advance_logical(ctx, desc);
     const uint32_t target_line = desc.multiline
         ? static_cast<uint32_t>((local_y > 0.0f) ? std::floor(local_y / line_adv) : 0.0f)
         : 0u;
@@ -1050,8 +1076,7 @@ void move_caret_vertical(
     if (ws->edit_preferred_x < 0.0f) {
         ws->edit_preferred_x = cur.x;
     }
-    const float base_px = (desc.font_size_px > 0.0f) ? desc.font_size_px : 14.0f;
-    const float line_adv = std::floor(base_px * 1.35f + 0.5f);
+    const float line_adv = text_input_line_advance_logical(ctx, desc);
     const TextVisualPos total_end = text_byte_to_visual(ctx, desc, text, text.length, wrap_w, false);
 
     if (delta < 0) {
@@ -1111,7 +1136,8 @@ void measure_text_content_and_ime(
     bool wrap_affinity = false) noexcept
 {
     const float base_px = (desc.font_size_px > 0.0f) ? desc.font_size_px : 14.0f;
-    const float line_adv = desc.multiline ? std::floor(base_px * 1.35f + 0.5f) : base_px;
+    const float line_h = text_input_line_height_logical(ctx, desc);
+    const float line_adv = desc.multiline ? std::floor(line_h * 1.35f + 0.5f) : line_h;
     const char* s = committed.chars ? committed.chars : "";
     const uint32_t len = committed.length;
     const uint32_t c_byte = utf8_clamp_boundary(s, len, cursor_byte);
@@ -1321,7 +1347,7 @@ void measure_text_content_and_ime(
     }
 
     if (out_total_w) *out_total_w = max_w;
-    if (out_total_h) *out_total_h = pen_y + base_px;
+    if (out_total_h) *out_total_h = pen_y + line_h;
     if (out_comp_x) *out_comp_x = cx;
     if (out_comp_y) *out_comp_y = cy;
     if (out_comp_w) *out_comp_w = cw;
@@ -1627,25 +1653,43 @@ void emit_text_input_command(
         ws->last_box_logical = box_logical;
     }
 
-    const TextInnerGeom geom = compute_text_inner_geom(box_logical, desc);
+    const TextInnerGeom geom = compute_text_inner_geom(ctx, box_logical, desc);
     const Corners rad_px = scale_corners(desc.radius, dpi);
     const bool is_focused = ti->is_focused;
     const bool composing = is_focused && !desc.read_only && !desc.password && ctx->active_ui->ime_comp_len > 0u;
 
-    if (is_focused && desc.focus_border_color.a > 0u) {
+    if (is_focused && desc.focus_border_color.a > 0u && desc.focus_glow_blur > 0.0f) {
         const Color glow_col = Color::rgba8(desc.focus_border_color.r, desc.focus_border_color.g, desc.focus_border_color.b, 80u);
+        const float glow_blur_px = desc.focus_glow_blur * dpi;
         push_prim(
             ctx,
-            Prim::make_shadow(box_px, outer_clip.rect, glow_col, rad_px, 10.0f * dpi, outer_clip.radius),
+            continuous_prim(Prim::make_shadow(box_px, outer_clip.rect, glow_col, rad_px, glow_blur_px, outer_clip.radius), desc.continuous_corners),
             nullptr,
-            20.0f * dpi + 2.0f);
+            2.0f * glow_blur_px + 2.0f);
     }
 
-    const Color border_col = is_focused ? desc.focus_border_color : desc.border_color;
+    const Color resting_border = (ti->hover_t > 0.001f && desc.hover_border_color.a > 0u)
+        ? Color::lerp_oklab(desc.border_color, desc.hover_border_color, ti->hover_t)
+        : desc.border_color;
+    const Color border_col = is_focused ? desc.focus_border_color : resting_border;
     const float border_w = (is_focused ? desc.focus_border_width : desc.border_width) * dpi;
     push_prim(
         ctx,
-        Prim::make_rect(box_px, outer_clip.rect, desc.background, rad_px, border_col, border_w, 1.0f, outer_clip.radius));
+        continuous_prim(Prim::make_rect(box_px, outer_clip.rect, desc.background, rad_px, border_col, border_w, 1.0f, outer_clip.radius), desc.continuous_corners));
+
+    if (desc.leading_icon_id != kInvalidIcon && is_icon_loaded(ctx, desc.leading_icon_id)) {
+        const float icon_sz = std::fmax(12.0f, std::fmin((desc.font_size_px > 0.0f ? desc.font_size_px : 14.0f), 18.0f));
+        const float icon_x = box_logical.x + ti->leading_icon_pad_left;
+        const float icon_y = desc.multiline
+            ? (box_logical.y + desc.padding.top + std::fmax(0.0f, (geom.line_h - icon_sz) * 0.5f))
+            : (box_logical.y + (box_logical.h - icon_sz) * 0.5f);
+        emit_vector_icon_quad(
+            ctx,
+            desc.leading_icon_id,
+            Rect{ icon_x * dpi, icon_y * dpi, icon_sz * dpi, icon_sz * dpi },
+            desc.leading_icon_color,
+            outer_clip);
+    }
 
     const float wrap_w = text_input_wrap_width(desc, geom);
     if (ws) {
@@ -1676,7 +1720,7 @@ void emit_text_input_command(
         .radius = 0.0f,
     };
 
-    const float base_px = geom.line_h;
+    const float base_px = geom.font_px;
     const float phys_px = base_px * dpi;
     const uint16_t slot_idx = ctx->atlas.font_valid ? resolve_font_slot_idx(&ctx->atlas, desc.font_id) : kInvalidFont;
     const float ascender_px = (slot_idx != kInvalidFont)

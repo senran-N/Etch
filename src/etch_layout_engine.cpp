@@ -1116,6 +1116,8 @@ inline uint32_t layout_open_text(LayoutEngine* le, Str text, const LayoutTextCon
         const auto& ce = le->text_cache[n->text_cache_idx];
         unwrapped = ce.unwrapped;
         min_w = ce.min_width;
+    } else if (le->measure_text_fn) {
+        unwrapped.y = le->measure_text_fn(Str{}, cfg, le->measure_text_user).y;
     }
     const float line_h = cfg.line_height > 0.0f ? cfg.line_height : unwrapped.y;
     n->text_preferred = unwrapped;

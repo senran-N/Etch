@@ -935,6 +935,7 @@ typedef struct EtchBoxDesc {
     uint16_t grid_row_span;
     bool flip_on_overflow;
     EtchHitboxBehavior hitbox_behavior;
+    bool stick_to_bottom;
 } EtchBoxDesc;
 
 typedef struct EtchTextDesc {
@@ -1024,6 +1025,15 @@ typedef struct EtchCollapsibleResult {
     float anim_t;
 } EtchCollapsibleResult;
 
+typedef struct EtchCollapseDesc {
+    uint32_t struct_size;
+    uint32_t id;
+    bool open;
+    EtchSpringSpec spring;
+    bool fade_content;
+    EtchSizing width;
+} EtchCollapseDesc;
+
 typedef struct EtchImageDesc {
     uint32_t id;
     struct SDL_GPUTexture* texture;
@@ -1046,6 +1056,10 @@ typedef struct EtchIconDesc {
     uint16_t icon_id;
     float size_px;
     EtchColor color;
+    float rotation_rad;
+    float scale;
+    float opacity;
+    EtchColor secondary_color;
 } EtchIconDesc;
 
 typedef struct EtchRectDrawDesc {
@@ -1394,6 +1408,12 @@ typedef struct EtchTextInputDesc {
     EtchColor ghost_color;
     bool accept_ghost_on_tab;
     bool submit_on_enter;
+    EtchColor hover_border_color;
+    float focus_glow_blur;
+    uint16_t leading_icon_id;
+    EtchColor leading_icon_color;
+    bool continuous_corners;
+    bool disabled;
 } EtchTextInputDesc;
 
 typedef struct EtchTextInputResult {
@@ -1447,6 +1467,8 @@ typedef struct EtchToggleSwitchDesc {
     uint16_t font_id;
     EtchColor on_color;
     EtchColor off_color;
+    EtchColor thumb_color;
+    EtchColor border_color;
 } EtchToggleSwitchDesc;
 
 typedef struct EtchProgressBarDesc {
@@ -1490,6 +1512,11 @@ typedef struct EtchTabItemResult {
     bool closed;
 } EtchTabItemResult;
 
+typedef enum EtchSliderStyle {
+    ETCH_SLIDER_TRACK = 0,
+    ETCH_SLIDER_COMPACT_BAR = 1
+} EtchSliderStyle;
+
 typedef struct EtchSliderDesc {
     uint32_t id;
     EtchStr label;
@@ -1504,6 +1531,12 @@ typedef struct EtchSliderDesc {
     EtchColor background;
     EtchColor fill_color;
     EtchColor text_color;
+    EtchSliderStyle style;
+    EtchColor track_color;
+    EtchColor thumb_color;
+    float track_height_px;
+    float thumb_size_px;
+    bool show_value;
 } EtchSliderDesc;
 
 typedef struct EtchDragValueDesc {
@@ -1559,6 +1592,9 @@ typedef struct EtchComboBoxDesc {
     EtchColor background;
     EtchColor hover_bg;
     EtchColor text_color;
+    EtchColor border_color;
+    EtchColor focus_border_color;
+    float border_width;
 } EtchComboBoxDesc;
 
 typedef struct EtchPopupDesc {
@@ -1573,6 +1609,10 @@ typedef struct EtchPopupDesc {
     EtchCorners radius;
     int16_t z_index;
     bool attach_to_trigger, match_trigger_width, scroll_y;
+    float backdrop_blur;
+    float shadow_blur;
+    EtchColor shadow_color;
+    bool flip_on_overflow;
 } EtchPopupDesc;
 
 typedef struct EtchMenuBarDesc {
@@ -1598,6 +1638,12 @@ typedef struct EtchMenuItemDesc {
     bool separator_after;
 } EtchMenuItemDesc;
 
+typedef enum EtchSplitSizing {
+    ETCH_SPLIT_RATIO = 0,
+    ETCH_SPLIT_FIRST_FIXED_PX = 1,
+    ETCH_SPLIT_SECOND_FIXED_PX = 2
+} EtchSplitSizing;
+
 typedef struct EtchSplitDesc {
     uint32_t struct_size;
     uint32_t id;
@@ -1613,6 +1659,12 @@ typedef struct EtchSplitDesc {
     EtchColor divider_active_color;
     float divider_hit_px;
     float keyboard_step_px;
+    EtchSplitSizing sizing;
+    float* extent_px;
+    float default_extent_px;
+    bool show_grip;
+    EtchColor grip_color;
+    float hover_highlight_px;
 } EtchSplitDesc;
 
 typedef struct EtchSplitResult {
@@ -1806,6 +1858,7 @@ typedef struct EtchCanvasWireDesc {
     float glow_world;
     float tangent_bias;
     int16_t z_index;
+    EtchAxis axis;
 } EtchCanvasWireDesc;
 
 typedef struct EtchCanvasNodeDesc {
@@ -1850,6 +1903,7 @@ ETCH_API EtchTextDesc etch_text_desc_default(void);
 ETCH_API EtchTextSpan etch_text_span_default(void);
 ETCH_API EtchRichTextDesc etch_rich_text_desc_default(void);
 ETCH_API EtchCollapsibleDesc etch_collapsible_desc_default(void);
+ETCH_API EtchCollapseDesc etch_collapse_desc_default(void);
 ETCH_API EtchImageDesc etch_image_desc_default(void);
 ETCH_API EtchIconDesc etch_icon_desc_default(void);
 ETCH_API EtchRectDrawDesc etch_rect_draw_desc_default(void);
@@ -1917,6 +1971,7 @@ ETCH_API EtchTheme etch_theme_light(void);
 ETCH_API EtchColor etch_color_oklch(float L, float C, float hue_deg, float alpha);
 ETCH_API EtchColor etch_color_lerp_oklab(EtchColor a, EtchColor b, float t);
 ETCH_API EtchTheme etch_theme_from_seed(EtchColor seed, bool dark_mode, float chroma_scale);
+ETCH_API EtchTheme etch_theme_lerp_oklab(const EtchTheme* a, const EtchTheme* b, float t);
 ETCH_API EtchSpringSpec etch_spring_spec_snappy(void);
 ETCH_API EtchSpringSpec etch_spring_spec_fluid(void);
 ETCH_API EtchSpringSpec etch_spring_spec_bouncy(void);
@@ -2021,6 +2076,9 @@ ETCH_API uint16_t etch_load_font_file(EtchContext* ctx, const char* path, uint16
 ETCH_API uint16_t etch_load_font_memory(EtchContext* ctx, const void* data, size_t size_bytes, uint16_t slot_hint, int32_t face_index);
 ETCH_API bool etch_is_font_loaded(const EtchContext* ctx, uint16_t font_id);
 ETCH_API bool etch_set_font_tabular_numbers(EtchContext* ctx, uint16_t font_id, bool enabled);
+ETCH_API bool etch_set_font_fallback(EtchContext* ctx, uint16_t primary_font_id, uint16_t fallback_font_id);
+ETCH_API bool etch_set_font_scale_adjust(EtchContext* ctx, uint16_t font_id, float scale_factor);
+ETCH_API float etch_font_scale_adjust(const EtchContext* ctx, uint16_t font_id);
 ETCH_API void etch_set_hinted_small_text(EtchContext* ctx, bool enabled);
 ETCH_API bool etch_hinted_small_text(const EtchContext* ctx);
 
@@ -2041,9 +2099,20 @@ typedef struct EtchSvgStrokeDesc {
     uint16_t slot_hint;
 } EtchSvgStrokeDesc;
 
+typedef struct EtchSvgIconLayer {
+    EtchStr path_d;
+    bool stroked;
+    EtchSvgStrokeDesc stroke;
+    uint8_t color_slot;
+    float opacity;
+} EtchSvgIconLayer;
+
 ETCH_API EtchSvgStrokeDesc etch_svg_stroke_desc_default(void);
+ETCH_API EtchSvgIconLayer etch_svg_icon_layer_default(void);
 ETCH_API uint16_t etch_register_svg_stroke_icon(EtchContext* ctx, EtchStr svg_path_d, const EtchSvgStrokeDesc* desc);
 ETCH_API uint16_t etch_register_svg_icon(EtchContext* ctx, EtchStr svg_path_d, EtchVec4 view_box, uint16_t slot_hint);
+ETCH_API uint16_t etch_register_svg_layered_icon(EtchContext* ctx, const EtchSvgIconLayer* layers, uint32_t layer_count, EtchVec4 view_box, uint16_t slot_hint);
+ETCH_API uint16_t etch_register_svg_duotone_icon(EtchContext* ctx, EtchStr fill_path_d, EtchStr stroke_path_d, const EtchSvgStrokeDesc* stroke_desc, float fill_opacity);
 ETCH_API bool etch_is_icon_loaded(const EtchContext* ctx, uint16_t icon_id);
 
 ETCH_API void etch_process_event(EtchContext* ctx, const union SDL_Event* event);
@@ -2112,6 +2181,8 @@ ETCH_API EtchCollapsibleResult etch_begin_collapsible(const EtchCollapsibleDesc*
 ETCH_API void etch_end_collapsible(void);
 ETCH_API bool etch_is_collapsible_open(uint32_t element_id);
 ETCH_API void etch_set_collapsible_open(uint32_t element_id, bool open);
+ETCH_API bool etch_begin_collapse(const EtchCollapseDesc* desc);
+ETCH_API void etch_end_collapse(void);
 ETCH_API void etch_image(const EtchImageDesc* desc);
 ETCH_API void etch_icon(const EtchIconDesc* desc);
 
@@ -2325,13 +2396,19 @@ ETCH_API struct SDL_Window* etch_create_desktop_window(const char* title, float 
 ETCH_API struct SDL_Window* etch_create_desktop_window_on_display(const char* title, float logical_w, float logical_h, uint32_t display_id, uint64_t flags);
 ETCH_API struct SDL_Window* etch_create_desktop_window_at_pointer(const char* title, float logical_w, float logical_h, uint64_t flags);
 ETCH_API bool etch_set_desktop_window_min_size(struct SDL_Window* window, float logical_w, float logical_h);
+ETCH_API float etch_dpi_scale(const EtchContext* ctx);
+ETCH_API float etch_hairline_px(const EtchContext* ctx);
 ETCH_API float etch_spring_from(uint32_t anim_id, float target, float initial_value, EtchSpringSpec spec);
 ETCH_API float etch_spring(uint32_t anim_id, float target, EtchSpringSpec spec);
 ETCH_API EtchVec2 etch_spring_vec2(uint32_t anim_id, EtchVec2 target, EtchSpringSpec spec);
+ETCH_API EtchColor etch_spring_color(uint32_t anim_id, EtchColor target, EtchSpringSpec spec);
+ETCH_API float etch_spring_angle(uint32_t anim_id, float target_rad, EtchSpringSpec spec);
 ETCH_API EtchVec2 etch_scroll_delta(void);
 ETCH_API EtchVec2 etch_scroll_max(uint32_t element_id);
 ETCH_API EtchVec2 etch_scroll_offset(uint32_t element_id);
 ETCH_API void etch_set_scroll_offset(uint32_t element_id, EtchVec2 offset, bool stop_momentum);
+ETCH_API bool etch_scroll_stuck_to_bottom(uint32_t element_id);
+ETCH_API void etch_set_scroll_stuck_to_bottom(uint32_t element_id, bool stuck);
 
 ETCH_API EtchSplitResult etch_begin_split(const EtchSplitDesc* desc);
 ETCH_API void etch_split_second(void);

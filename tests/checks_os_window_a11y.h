@@ -911,8 +911,73 @@ inline bool verify_os_window_a11y_checks() noexcept {
     {
         HWND native=static_cast<HWND>(SDL_GetPointerProperty(SDL_GetWindowProperties(win),SDL_PROP_WINDOW_WIN32_HWND_POINTER,nullptr));
         const float factor=SDL_GetWindowDisplayScale(win)/SDL_GetWindowPixelDensity(win);
-        POINT point={LONG(100*factor),LONG(16*factor)};ClientToScreen(native,&point);
-        check(SendMessageW(native,WM_NCHITTEST,0,MAKELPARAM(point.x,point.y))==HTMAXBUTTON,__LINE__);
+        POINT client_pt={LONG(100*factor),LONG(16*factor)};
+        POINT screen_pt=client_pt;ClientToScreen(native,&screen_pt);
+        const LPARAM screen_lp=MAKELPARAM(screen_pt.x,screen_pt.y);
+        const LPARAM client_lp=MAKELPARAM(client_pt.x,client_pt.y);
+        check(SendMessageW(native,WM_NCHITTEST,0,screen_lp)==HTMAXBUTTON,__LINE__);
+
+        auto pump_win_events=[&]() noexcept {
+            SDL_Event ev={};
+            while(SDL_PollEvent(&ev)) { process_event(wctx,ev); }
+        };
+        auto build_chrome_bar=[&]() noexcept -> bool {
+            begin_window_frame(wctx,win,0);
+            window_drag_region({0,0,480,32});
+            begin_box({.width=Sizing::fixed(480),.height=Sizing::fixed(32)});
+            box({.id=id("chrome.click"),.width=Sizing::fixed(40),.height=Sizing::fixed(32)});
+            box({.id=id("chrome.pass"),.width=Sizing::fixed(40),.height=Sizing::fixed(32),.window_drag_passthrough=true});
+            box({.id=id("chrome.max"),.width=Sizing::fixed(40),.height=Sizing::fixed(32)});
+            window_maximize_button_region(id("chrome.max"));
+            const bool did_click=clicked(id("chrome.max"));
+            end_box();
+            end_window_frame(wctx);
+            return did_click;
+        };
+
+        // Regression A: Same-pump WM_NCMOUSEMOVE -> WM_NCLBUTTONDOWN -> immediate WM_NCMOUSELEAVE
+        // -> WM_CAPTURECHANGED(native) -> WM_LBUTTONUP must preserve the click and fire clicked(chrome.max).
+        pump_win_events();
+        SendMessageW(native,WM_NCMOUSEMOVE,HTMAXBUTTON,screen_lp);
+        SendMessageW(native,WM_NCLBUTTONDOWN,HTMAXBUTTON,screen_lp);
+        SendMessageW(native,WM_NCMOUSELEAVE,0,0);
+        SendMessageW(native,WM_CAPTURECHANGED,0,reinterpret_cast<LPARAM>(native));
+        SendMessageW(native,WM_LBUTTONUP,0,client_lp);
+        pump_win_events();
+        check(build_chrome_bar(),__LINE__);
+
+        // Regression B: Two-frame press + immediate WM_NCMOUSELEAVE + self WM_CAPTURECHANGED(native) + WM_LBUTTONUP.
+        pump_win_events();
+        SendMessageW(native,WM_NCMOUSEMOVE,HTMAXBUTTON,screen_lp);
+        SendMessageW(native,WM_NCLBUTTONDOWN,HTMAXBUTTON,screen_lp);
+        SendMessageW(native,WM_NCMOUSELEAVE,0,0);
+        pump_win_events();
+        begin_window_frame(wctx,win,0);
+        window_drag_region({0,0,480,32});
+        begin_box({.width=Sizing::fixed(480),.height=Sizing::fixed(32)});
+        box({.id=id("chrome.click"),.width=Sizing::fixed(40),.height=Sizing::fixed(32)});
+        box({.id=id("chrome.pass"),.width=Sizing::fixed(40),.height=Sizing::fixed(32),.window_drag_passthrough=true});
+        box({.id=id("chrome.max"),.width=Sizing::fixed(40),.height=Sizing::fixed(32)});
+        window_maximize_button_region(id("chrome.max"));
+        const bool is_down_mid=pressed(id("chrome.max"));
+        end_box();
+        end_window_frame(wctx);
+        check(is_down_mid,__LINE__);
+        SendMessageW(native,WM_CAPTURECHANGED,0,reinterpret_cast<LPARAM>(native));
+        SendMessageW(native,WM_LBUTTONUP,0,client_lp);
+        pump_win_events();
+        check(build_chrome_bar(),__LINE__);
+
+        // Regression C: External WM_CAPTURECHANGED(lparam = 0) aborts press cleanly so release does NOT click.
+        pump_win_events();
+        SendMessageW(native,WM_NCMOUSEMOVE,HTMAXBUTTON,screen_lp);
+        SendMessageW(native,WM_NCLBUTTONDOWN,HTMAXBUTTON,screen_lp);
+        pump_win_events();
+        check(!build_chrome_bar(),__LINE__);
+        SendMessageW(native,WM_CAPTURECHANGED,0,0);
+        SendMessageW(native,WM_LBUTTONUP,0,client_lp);
+        pump_win_events();
+        check(!build_chrome_bar(),__LINE__);
     }
 #endif
 #if defined(_WIN32) && defined(ETCH_ENABLE_OS_A11Y) && ETCH_ENABLE_OS_A11Y
@@ -984,10 +1049,11 @@ inline bool verify_os_window_a11y_checks() noexcept {
         RefreshCheckState rstate = {.ctx = wctx, .expected_win = win};
         set_window_refresh_callback(wctx, refresh_cb, &rstate);
         const SDL_WindowID wid = SDL_GetWindowID(win);
-        auto push_win_ev = [&](Uint32 type) noexcept {
+        auto push_win_ev = [&](Uint32 type, Sint32 data1 = 0) noexcept {
             SDL_Event ev = {};
             ev.type = type;
             ev.window.windowID = wid;
+            ev.window.data1 = data1;
             SDL_PushEvent(&ev);
         };
         push_win_ev(SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED);
@@ -1009,9 +1075,64 @@ inline bool verify_os_window_a11y_checks() noexcept {
         push_win_ev(SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED);
         check(rstate.calls == 2u && needs_window_redraw(wctx, win), __LINE__);
 
+        // Pure window move: EXPOSED(data1=1) with unchanged pixel size & DPI must NOT invoke refresh_cb or bump redraw_budget.
+        for (int i = 0; i < 3; ++i) {
+            begin_window_frame(wctx, win, 0.0f);
+            box({.width = Sizing::fixed(100.0f), .height = Sizing::fixed(40.0f)});
+            end_window_frame(wctx);
+        }
+        check(!needs_window_redraw(wctx, win), __LINE__);
+#if defined(_WIN32) && defined(ETCH_ENABLE_OS_A11Y) && ETCH_ENABLE_OS_A11Y
+        HWND move_hwnd = static_cast<HWND>(SDL_GetPointerProperty(
+            SDL_GetWindowProperties(win), SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr));
+        RECT move_rc = {};
+        if (move_hwnd) {
+            GetWindowRect(move_hwnd, &move_rc);
+            SendMessageW(move_hwnd, WM_ENTERSIZEMOVE, 0, 0);
+            SendMessageW(move_hwnd, WM_MOVING, 0, reinterpret_cast<LPARAM>(&move_rc));
+        }
+#endif
+        push_win_ev(SDL_EVENT_WINDOW_EXPOSED, 1);
+        check(rstate.calls == 2u && !needs_window_redraw(wctx, win), __LINE__);
+
+        // Resize with changed window pixel size + WM_SIZING + EXPOSED(data1=1) MUST invoke refresh_cb live.
+        int orig_w = 0, orig_h = 0;
+        SDL_GetWindowSize(win, &orig_w, &orig_h);
+        if (orig_w > 0 && orig_h > 0) {
+            set_window_refresh_callback(wctx, nullptr, nullptr);
+            SDL_SetWindowSize(win, orig_w + 32, orig_h + 16);
+            SDL_Event resize_drain = {};
+            while (SDL_PollEvent(&resize_drain)) {}
+            set_window_refresh_callback(wctx, refresh_cb, &rstate);
+#if defined(_WIN32) && defined(ETCH_ENABLE_OS_A11Y) && ETCH_ENABLE_OS_A11Y
+            if (move_hwnd) {
+                GetWindowRect(move_hwnd, &move_rc);
+                SendMessageW(move_hwnd, WM_SIZING, WMSZ_BOTTOMRIGHT, reinterpret_cast<LPARAM>(&move_rc));
+            }
+#endif
+            push_win_ev(SDL_EVENT_WINDOW_EXPOSED, 1);
+            check(rstate.calls == 3u && needs_window_redraw(wctx, win), __LINE__);
+            // Subsequent EXPOSED(data1=1) once metrics match must not stall with redundant refresh.
+            push_win_ev(SDL_EVENT_WINDOW_EXPOSED, 1);
+            check(rstate.calls == 3u, __LINE__);
+
+            set_window_refresh_callback(wctx, nullptr, nullptr);
+            SDL_SetWindowSize(win, orig_w, orig_h);
+            while (SDL_PollEvent(&resize_drain)) {}
+            set_window_refresh_callback(wctx, refresh_cb, &rstate);
+        }
+#if defined(_WIN32) && defined(ETCH_ENABLE_OS_A11Y) && ETCH_ENABLE_OS_A11Y
+        if (move_hwnd) {
+            SendMessageW(move_hwnd, WM_EXITSIZEMOVE, 0, 0);
+        }
+#endif
+        const uint32_t calls_before_px = rstate.calls;
+        push_win_ev(SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED);
+        check(rstate.calls == calls_before_px + 1u && needs_window_redraw(wctx, win), __LINE__);
+
         set_window_refresh_callback(wctx, nullptr, nullptr);
         push_win_ev(SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED);
-        check(rstate.calls == 2u, __LINE__);
+        check(rstate.calls == calls_before_px + 1u, __LINE__);
 
         SDL_Event drain = {};
         while (SDL_PollEvent(&drain)) {}

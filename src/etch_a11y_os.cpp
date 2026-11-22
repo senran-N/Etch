@@ -164,6 +164,31 @@ bool SDLCALL etch_sdl_event_watch(void* userdata, SDL_Event* event) noexcept {
     if (!slot || (SDL_GetWindowFlags(win) & SDL_WINDOW_MINIMIZED) != 0u) {
         return true;
     }
+    if (event->type == SDL_EVENT_WINDOW_EXPOSED) {
+        int pw = 0;
+        int ph = 0;
+        bool size_changed = false;
+        if (SDL_GetWindowSizeInPixels(win, &pw, &ph) && pw > 0 && ph > 0) {
+            size_changed = (static_cast<uint32_t>(pw) != slot->ui.viewport_w) ||
+                           (static_cast<uint32_t>(ph) != slot->ui.viewport_h);
+        }
+        float scale = SDL_GetWindowDisplayScale(win);
+        if (scale <= 0.0f) {
+            scale = 1.0f;
+        }
+        if (slot->ui.min_dpi_scale > 0.0f && scale < slot->ui.min_dpi_scale) {
+            scale = slot->ui.min_dpi_scale;
+        }
+        const bool scale_changed = std::fabs(scale - slot->ui.dpi_scale) > 1e-4f;
+        if (!size_changed && !scale_changed) {
+            // Pure Win32 move (in_win32_sizemove && !in_win32_sizing) or unchanged modal-loop timer EXPOSED:
+            // DWM composites the existing swapchain surface at native refresh rate without sync redraw stalls.
+            if (slot->in_win32_sizemove && !slot->in_win32_sizing) {
+                return true;
+            }
+            return true;
+        }
+    }
     sync_window_metrics_from_os(&slot->ui, win);
     if (slot->ui.redraw_budget < 2u) {
         slot->ui.redraw_budget = 2u;
@@ -2741,6 +2766,11 @@ HRESULT STDMETHODCALLTYPE uia_scroll_do(IScrollProvider* This, enum ScrollAmount
             } else {
                 g.v_ws->scroll_pos.y = static_cast<float>(next_y);
                 g.v_ws->scroll_vel.y = 0.0f;
+                if (delta < 0.0) {
+                    g.v_ws->scroll_stuck_bottom = false;
+                } else if (delta > 0.0 && (g.v_max <= 0.5 || next_y >= g.v_max - 2.0)) {
+                    g.v_ws->scroll_stuck_bottom = true;
+                }
             }
             changed = true;
         }
@@ -2782,6 +2812,7 @@ HRESULT STDMETHODCALLTYPE uia_scroll_set_percent(IScrollProvider* This, double h
             } else {
                 g.v_ws->scroll_pos.y = static_cast<float>(target_y);
                 g.v_ws->scroll_vel.y = 0.0f;
+                g.v_ws->scroll_stuck_bottom = (verticalPercent >= 99.9);
             }
             changed = true;
         }

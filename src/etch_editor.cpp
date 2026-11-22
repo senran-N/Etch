@@ -460,7 +460,7 @@ Str editor_slice(Context* ctx, const TextBuffer* b, uint32_t a, uint32_t z) noex
     p[z - a] = 0;
     return { p, z - a };
 }
-float editor_gutter(const CodeEditorDesc& d, uint32_t lines) noexcept {
+float editor_gutter(const CodeEditorDesc& d, uint32_t lines, float eff_font_px) noexcept {
     const float tag_w = (d.line_decorator && d.gutter_tag_width_px > 0.0f) ? d.gutter_tag_width_px : 0.0f;
     if (!d.show_line_numbers && tag_w <= 0.0f) return 0.0f;
     if (d.gutter_width_px > 0.0f) return d.gutter_width_px + tag_w;
@@ -468,7 +468,7 @@ float editor_gutter(const CodeEditorDesc& d, uint32_t lines) noexcept {
     if (d.show_line_numbers) {
         uint32_t digits = 1u;
         while (lines >= 10u) { lines /= 10u; ++digits; }
-        num_w = float(digits) * d.font_size_px * 0.65f + 20.0f;
+        num_w = float(digits) * eff_font_px * 0.65f + 20.0f;
     }
     return num_w + tag_w;
 }
@@ -535,7 +535,8 @@ CodeEditorResult code_editor(const CodeEditorDesc& input) noexcept {
     d.focus_border_color = resolve_theme_color(d.focus_border_color, thm.accent);
     d.radius = resolve_theme_corners(d.radius, Corners::all(thm.radius_control_px));
 
-    const float stride = d.line_height_px > 0.0f ? d.line_height_px : d.font_size_px * 1.5f;
+    const float eff_font_px = scaled_font_span_px(ctx, d.font_id, d.font_size_px);
+    const float stride = d.line_height_px > 0.0f ? d.line_height_px : eff_font_px * 1.5f;
     auto& ui = *ctx->active_ui;
     auto* ws = state_map_get_or_insert(&ui.states, d.id, ui.frame_index);
     if (!ws) return {};
@@ -568,7 +569,7 @@ CodeEditorResult code_editor(const CodeEditorDesc& input) noexcept {
     const bool focus = ui.focus_id == d.id && (!ui.modal_scope || focus_scope_contains(ui, ui.modal_scope));
     bool changed = false;
 
-    const float gutter = editor_gutter(d, tb_lines(b));
+    const float gutter = editor_gutter(d, tb_lines(b), eff_font_px);
     const Rect bounds = ws->last_box_logical;
     const float known_box_h = (bounds.h > 0.0f)
         ? bounds.h

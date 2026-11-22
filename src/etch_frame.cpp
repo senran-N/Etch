@@ -15,6 +15,7 @@ void end_frame(Context* ctx_arg) noexcept {
 
     while (ctx->active_ui->subtree_depth) end_cached_subtree();
     while (ctx->active_ui->collapsible_depth) end_collapsible();
+    while (ctx->active_ui->collapse_depth) end_collapse();
     while (ctx->active_ui->tree_depth) end_tree_node();
     const float dpi = ctx->active_ui->dpi_scale;
     const Rect root_clip = {
@@ -448,7 +449,23 @@ void end_frame(Context* ctx_arg) noexcept {
                     } else if (extra->kind == CustomCmdKind::CanvasWire && extra->canvas_wire) {
                         emit_canvas_wire_command(ctx, extra->canvas_wire, cmd->bounds, cur_clip, dpi);
                     } else if (extra->kind == CustomCmdKind::Icon) {
-                        emit_vector_icon_quad(ctx, extra->icon_desc.icon_id, raw_box_px, extra->icon_desc.color, cur_clip);
+                        const IconDesc& idesc = extra->icon_desc;
+                        const float sc = std::isfinite(idesc.scale) ? idesc.scale : 1.0f;
+                        if (sc > 1e-4f) {
+                            Rect icon_px = raw_box_px;
+                            const bool scaled = std::fabs(sc - 1.0f) > 1e-4f;
+                            if (scaled) {
+                                const float nw = icon_px.w * sc;
+                                const float nh = icon_px.h * sc;
+                                icon_px.x += 0.5f * (icon_px.w - nw);
+                                icon_px.y += 0.5f * (icon_px.h - nh);
+                                icon_px.w = nw;
+                                icon_px.h = nh;
+                            }
+                            const float rot = std::isfinite(idesc.rotation_rad) ? idesc.rotation_rad : 0.0f;
+                            const float op = std::isfinite(idesc.opacity) ? idesc.opacity : 1.0f;
+                            emit_vector_icon_quad(ctx, idesc.icon_id, icon_px, idesc.color, cur_clip, rot, idesc.secondary_color, op, !scaled);
+                        }
                     } else {
                         if (extra->desc.attach_to != AttachTo::None && !extra->desc.pointer_passthrough &&
                             extra->desc.hitbox_behavior != HitboxBehavior::Passthrough &&
@@ -518,7 +535,16 @@ void end_frame(Context* ctx_arg) noexcept {
                                     (sc.content_dim.y > sc.viewport_dim.y) ? (sc.content_dim.y - sc.viewport_dim.y) : 0.0f,
                                 };
                                 ws->scroll_pos.x = clamp_range(ws->scroll_pos.x, 0.0f, ws->scroll_max.x);
-                                ws->scroll_pos.y = clamp_range(ws->scroll_pos.y, 0.0f, ws->scroll_max.y);
+                                if (extra->desc.scroll_y && extra->desc.stick_to_bottom && ws->scroll_stuck_bottom) {
+                                    const float prev_y = ws->scroll_pos.y;
+                                    ws->scroll_pos.y = ws->scroll_max.y;
+                                    if (std::fabs(ws->scroll_pos.y - prev_y) > 0.5f) {
+                                        ws->scroll_vel.y = 0.0f;
+                                        request_redraw(ctx);
+                                    }
+                                } else {
+                                    ws->scroll_pos.y = clamp_range(ws->scroll_pos.y, 0.0f, ws->scroll_max.y);
+                                }
                             } else {
                                 ws->viewport_dim = Vec2{ cmd->bounds.w, cmd->bounds.h };
                                 ws->content_dim = ws->viewport_dim;

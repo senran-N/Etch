@@ -468,9 +468,20 @@ static bool test_containers_and_canvas(EtchContext* ctx) {
         (void)etch_begin_canvas_node(&cnd);
         etch_end_canvas_node();
         EtchCanvasWireDesc cwd = etch_canvas_wire_desc_default();
+        if (cwd.axis != ETCH_AXIS_ROW) {
+            etch_end_canvas();
+            etch_end_box();
+            etch_end_frame(ctx);
+            return false;
+        }
         cwd.from_world = node_pos;
         cwd.to_world = etch_vec2(200.0f, 80.0f);
         etch_canvas_wire(&cwd);
+        EtchCanvasWireDesc cwd_col = etch_canvas_wire_desc_default();
+        cwd_col.from_world = etch_vec2(60.0f, 20.0f);
+        cwd_col.to_world = etch_vec2(60.0f, 120.0f);
+        cwd_col.axis = ETCH_AXIS_COL;
+        etch_canvas_wire(&cwd_col);
         etch_end_canvas();
 
         if (pass == 0u && (tr.slice.total_count != 50u || cs.zoom <= 0.0f)) {
@@ -768,6 +779,17 @@ static bool test_versioned_c_abi(EtchContext* ctx) {
             return false;
         }
 
+        EtchCollapseDesc bad_col = etch_collapse_desc_default();
+        bad_col.struct_size = 2u;
+        bad_col.id = etch_id("abi_bad_col");
+        bad_col.open = true;
+        if (etch_begin_collapse(&bad_col)) {
+            etch_end_collapse();
+            etch_end_box();
+            etch_end_frame(ctx);
+            return false;
+        }
+
         etch_end_box();
         etch_end_frame(ctx);
 
@@ -816,6 +838,172 @@ static bool test_versioned_c_abi(EtchContext* ctx) {
         }
     }
 
+    /* New C99 ABI coverage: layered/duotone icons, collapse, widget craft, split fixed sizing, DPI/motion/theme utilities. */
+    {
+        EtchSvgStrokeDesc sd = etch_svg_stroke_desc_default();
+        const uint16_t duo_id = etch_register_svg_duotone_icon(
+            ctx, ETCH_STR_LIT("M4 4 H20 V20 H4 Z"), ETCH_STR_LIT("M4 4 H20 V20 H4 Z"), &sd, 0.25f);
+        if (duo_id == ETCH_INVALID_ICON || !etch_is_icon_loaded(ctx, duo_id)) return false;
+
+        EtchSvgIconLayer layers[2];
+        layers[0] = etch_svg_icon_layer_default();
+        layers[0].path_d = ETCH_STR_LIT("M2 2 H22 V22 H2 Z");
+        layers[0].color_slot = 1u;
+        layers[0].opacity = 0.30f;
+        layers[1] = etch_svg_icon_layer_default();
+        layers[1].path_d = ETCH_STR_LIT("M12 12 Z");
+        layers[1].stroked = true;
+        layers[1].stroke = sd;
+        layers[1].color_slot = 0u;
+        layers[1].opacity = 1.0f;
+        const uint16_t lay_id = etch_register_svg_layered_icon(ctx, layers, 2u, (EtchVec4){0.0f, 0.0f, 24.0f, 24.0f}, ETCH_INVALID_ICON);
+        if (lay_id == ETCH_INVALID_ICON || !etch_is_icon_loaded(ctx, lay_id)) return false;
+
+        const EtchTheme td = etch_theme_dark();
+        const EtchTheme tl = etch_theme_light();
+        const EtchTheme tm = etch_theme_lerp_oklab(&td, &tl, 0.5f);
+        if (!(tm.bg_canvas.r > td.bg_canvas.r && tm.bg_canvas.r < tl.bg_canvas.r)) return false;
+
+        EtchFrameDesc f = etch_frame_desc_default();
+        f.viewport_w = 500u;
+        f.viewport_h = 300u;
+        f.dpi_scale = 2.0f;
+        f.dt_seconds = 1.0f / 60.0f;
+        etch_begin_frame(ctx, &f);
+        if (etch_dpi_scale(ctx) != 2.0f || etch_hairline_px(ctx) != 0.5f) {
+            etch_end_frame(ctx);
+            return false;
+        }
+        const EtchColor sc = etch_spring_color(etch_id("c_sp_col"), etch_rgba8(100u, 150u, 200u, 255u), etch_spring_spec_snappy());
+        const float sa = etch_spring_angle(etch_id("c_sp_ang"), 1.5f, etch_spring_spec_snappy());
+        if (sc.r != 100u || sc.g != 150u || sc.b != 200u || sa < 1.49f || sa > 1.51f) {
+            etch_end_frame(ctx);
+            return false;
+        }
+
+        EtchIconDesc ic = etch_icon_desc_default();
+        if (ic.rotation_rad != 0.0f || ic.scale != 1.0f || ic.opacity != 1.0f) {
+            etch_end_frame(ctx);
+            return false;
+        }
+        ic.icon_id = duo_id;
+        ic.size_px = 18.0f;
+        ic.rotation_rad = 0.5f;
+        ic.scale = 1.2f;
+        ic.opacity = 0.8f;
+        ic.secondary_color = etch_rgba8(40u, 160u, 240u, 255u);
+        etch_icon(&ic);
+
+        EtchCollapseDesc col = etch_collapse_desc_default();
+        if (col.struct_size != (uint32_t)sizeof(EtchCollapseDesc) || !col.fade_content) {
+            etch_end_frame(ctx);
+            return false;
+        }
+        col.id = etch_id("c_collapse");
+        col.open = true;
+        if (!etch_begin_collapse(&col)) {
+            etch_end_frame(ctx);
+            return false;
+        }
+        EtchBoxDesc col_body = etch_box_desc_default();
+        col_body.height = etch_sizing_fixed(40.0f);
+        etch_box(&col_body);
+        etch_end_collapse();
+
+        float sval = 0.4f;
+        EtchSliderDesc sld = etch_slider_desc_default();
+        if (sld.style != ETCH_SLIDER_TRACK || sld.track_height_px != 4.0f || sld.thumb_size_px != 14.0f || !sld.show_value) {
+            etch_end_frame(ctx);
+            return false;
+        }
+        sld.id = etch_id("c_slider");
+        sld.value = &sval;
+        etch_slider(&sld);
+
+        bool tval = true;
+        EtchToggleSwitchDesc tog = etch_toggle_switch_desc_default();
+        tog.id = etch_id("c_toggle");
+        tog.value = &tval;
+        etch_toggle_switch(&tog);
+
+        EtchComboBoxDesc cbd = etch_combo_box_desc_default();
+        EtchPopupDesc ppd = etch_popup_desc_default();
+        if (cbd.border_width != 1.0f || ppd.shadow_blur != 20.0f || !ppd.flip_on_overflow) {
+            etch_end_frame(ctx);
+            return false;
+        }
+
+        float pane_px = 180.0f;
+        EtchSplitDesc spd = etch_split_desc_default();
+        if (spd.sizing != ETCH_SPLIT_RATIO || !spd.show_grip || spd.hover_highlight_px != 0.0f) {
+            etch_end_frame(ctx);
+            return false;
+        }
+        spd.id = etch_id("c_split_fixed");
+        spd.width = etch_sizing_fixed(480.0f);
+        spd.height = etch_sizing_fixed(100.0f);
+        spd.divider_size_px = 0.0f;
+        spd.sizing = ETCH_SPLIT_SECOND_FIXED_PX;
+        spd.extent_px = &pane_px;
+        spd.default_extent_px = 180.0f;
+        spd.show_grip = false;
+        spd.hover_highlight_px = 2.0f;
+        etch_begin_split(&spd);
+        EtchBoxDesc p1 = etch_box_desc_default();
+        p1.id = etch_id("c_sp_1");
+        p1.width = etch_sizing_grow(0.0f, 0.0f);
+        p1.height = etch_sizing_grow(0.0f, 0.0f);
+        etch_box(&p1);
+        etch_split_second();
+        EtchBoxDesc p2 = etch_box_desc_default();
+        p2.id = etch_id("c_sp_2");
+        p2.width = etch_sizing_grow(0.0f, 0.0f);
+        p2.height = etch_sizing_grow(0.0f, 0.0f);
+        etch_box(&p2);
+        etch_end_split();
+
+        /* Backward-compatible older partial struct_size prefix for EtchSplitDesc & EtchTextInputDesc. */
+        EtchSplitDesc old_sp = etch_split_desc_default();
+        old_sp.struct_size = (uint32_t)offsetof(EtchSplitDesc, sizing);
+        old_sp.id = etch_id("c_split_old_prefix");
+        old_sp.width = etch_sizing_fixed(300.0f);
+        old_sp.height = etch_sizing_fixed(60.0f);
+        old_sp.default_ratio = 0.5f;
+        etch_begin_split(&old_sp);
+        etch_split_second();
+        etch_end_split();
+
+        char old_ti_buf[16] = "v025";
+        EtchTextInputDesc old_ti = etch_text_input_desc_default();
+        old_ti.struct_size = (uint32_t)offsetof(EtchTextInputDesc, hover_border_color);
+        old_ti.id = etch_id("c_ti_old_prefix");
+        old_ti.buffer = old_ti_buf;
+        old_ti.capacity = sizeof(old_ti_buf);
+        if (etch_text_input(&old_ti).byte_length != 4u) {
+            etch_end_frame(ctx);
+            return false;
+        }
+
+        char c_ti_buf[32] = "hello";
+        EtchTextInputDesc tid = etch_text_input_desc_default();
+        if (tid.focus_glow_blur != 10.0f || !tid.continuous_corners || tid.disabled || tid.leading_icon_id != ETCH_INVALID_ICON) {
+            etch_end_frame(ctx);
+            return false;
+        }
+        tid.id = etch_id("c_ti_craft");
+        tid.buffer = c_ti_buf;
+        tid.capacity = sizeof(c_ti_buf);
+        tid.focus_glow_blur = 0.0f;
+        tid.leading_icon_id = duo_id;
+        tid.disabled = true;
+        etch_text_input(&tid);
+
+        etch_end_frame(ctx);
+
+        const EtchRect sp2_r = etch_element_bounds(etch_id("c_sp_2"));
+        if (sp2_r.w < 179.5f || sp2_r.w > 180.5f) return false;
+    }
+
     return true;
 }
 
@@ -844,6 +1032,18 @@ int main(void) {
         !etch_box_desc_default().shrink_height && etch_rect_draw_desc_default().border_align==ETCH_BORDER_INSIDE;
     const bool ok_numerals = etch_set_font_tabular_numbers(ctx, ETCH_FONT_SANS, true) &&
         etch_set_font_tabular_numbers(ctx, ETCH_FONT_SANS, false);
+    const EtchFontMetrics fm_base = etch_font_metrics(ETCH_FONT_SANS, 16.0f);
+    const bool ok_scale_set = etch_font_scale_adjust(ctx, ETCH_FONT_SANS) == 1.0f &&
+        etch_set_font_scale_adjust(ctx, ETCH_FONT_SANS, 1.25f) &&
+        etch_font_scale_adjust(ctx, ETCH_FONT_SANS) == 1.25f;
+    const EtchFontMetrics fm_scaled = etch_font_metrics(ETCH_FONT_SANS, 16.0f);
+    const bool ok_scale_clamp = etch_set_font_scale_adjust(ctx, ETCH_FONT_SANS, 0.1f) &&
+        etch_font_scale_adjust(ctx, ETCH_FONT_SANS) == 0.5f &&
+        etch_set_font_scale_adjust(ctx, ETCH_FONT_SANS, 1.0f) &&
+        etch_font_scale_adjust(ctx, ETCH_FONT_SANS) == 1.0f &&
+        fm_base.line_height > 0.0f &&
+        fm_scaled.line_height > fm_base.line_height * 1.24f &&
+        fm_scaled.line_height < fm_base.line_height * 1.26f;
     const EtchShaderSurfaceCreateDesc surface=etch_shader_surface_create_desc_default();
     const EtchShaderSurfaceEvalDesc eval=etch_shader_surface_eval_desc_default();
     const EtchTerminalCell cell=etch_terminal_cell_default();
@@ -856,7 +1056,11 @@ int main(void) {
     EtchBoxDesc v22_box = etch_box_desc_default();
     v22_box.edge_fade = (EtchPadding){8.0f, 8.0f, 12.0f, 12.0f};
     const uint16_t sys_font = etch_load_system_font(ctx, ETCH_STR_LIT("Segoe UI"), ETCH_FONT_WEIGHT_BOLD, ETCH_INVALID_FONT);
-    const bool ok_v22_c99 = !surface.enable_feedback &&
+    const bool ok_font_fallback = !etch_set_font_fallback(ctx, ETCH_FONT_SANS, ETCH_FONT_SANS) &&
+        !etch_set_font_fallback(ctx, ETCH_FONT_SANS, 50u) &&
+        etch_set_font_fallback(ctx, ETCH_FONT_SANS, sys_font) &&
+        etch_set_font_fallback(ctx, ETCH_FONT_SANS, ETCH_INVALID_FONT);
+    const bool ok_v22_c99 = ok_scale_set && ok_scale_clamp && ok_font_fallback && !surface.enable_feedback &&
         v21_text_draw.shadow_color.a == 0u && v21_text_draw.shadow_offset.x == 0.0f &&
         v21_text_draw.shadow_offset.y == 0.0f && v21_text_draw.shadow_blur == 0.0f &&
         etch_box_desc_default().edge_fade.left == 0.0f && etch_box_desc_default().edge_fade.top == 0.0f &&
@@ -868,7 +1072,65 @@ int main(void) {
         v22_box.justify == ETCH_JUSTIFY_START && v22_box.align_self == ETCH_ALIGN_SELF_AUTO &&
         v22_box.flex_grow == 0.0f && v22_box.flex_shrink == 1.0f && v22_box.grid_row_span == 1u &&
         !v22_box.flip_on_overflow && v22_box.hitbox_behavior == ETCH_HITBOX_NORMAL &&
+        !v22_box.stick_to_bottom &&
         etch_topmost_hovered_id() == 0u && !etch_clicked_without_drag(etch_id("none"), 4.0f);
+    {
+        /* BoxDesc::stick_to_bottom C99 ABI parity + backward-compatible partial struct_size prefix */
+        EtchFrameDesc sf = etch_frame_desc_default();
+        sf.viewport_w = 480; sf.viewport_h = 160;
+        const uint32_t s_id = etch_id("c_stick_box");
+        const uint32_t legacy_id = etch_id("c_stick_legacy");
+        for (int pass = 0; pass < 2; ++pass) {
+            etch_begin_frame(ctx, &sf);
+            EtchBoxDesc sb = etch_box_desc_default();
+            sb.id = s_id;
+            sb.axis = ETCH_AXIS_COL;
+            sb.width = etch_sizing_fixed(200.0f);
+            sb.height = etch_sizing_fixed(80.0f);
+            sb.scroll_y = true;
+            sb.stick_to_bottom = true;
+            etch_begin_box(&sb);
+            for (int r = 0; r < 5; ++r) {
+                EtchBoxDesc row = etch_box_desc_default();
+                row.width = etch_sizing_grow(0.0f, 0.0f);
+                row.height = etch_sizing_fixed(40.0f);
+                etch_box(&row);
+            }
+            etch_end_box();
+
+            EtchBoxDesc old_box = etch_box_desc_default();
+            old_box.struct_size = (uint32_t)offsetof(EtchBoxDesc, stick_to_bottom);
+            old_box.id = legacy_id;
+            old_box.axis = ETCH_AXIS_COL;
+            old_box.width = etch_sizing_fixed(200.0f);
+            old_box.height = etch_sizing_fixed(80.0f);
+            old_box.scroll_y = true;
+            old_box.stick_to_bottom = true; /* Beyond prefix -> must default to false */
+            etch_begin_box(&old_box);
+            for (int r = 0; r < 5; ++r) {
+                EtchBoxDesc row = etch_box_desc_default();
+                row.width = etch_sizing_grow(0.0f, 0.0f);
+                row.height = etch_sizing_fixed(40.0f);
+                etch_box(&row);
+            }
+            etch_end_box();
+            etch_end_frame(ctx);
+        }
+        const float off_y = etch_scroll_offset(s_id).y;
+        const float legacy_y = etch_scroll_offset(legacy_id).y;
+        const bool stuck_ok = etch_scroll_stuck_to_bottom(s_id) && off_y > 119.0f && off_y < 121.0f && legacy_y < 0.5f;
+        etch_set_scroll_stuck_to_bottom(s_id, false);
+        const bool unstick_ok = !etch_scroll_stuck_to_bottom(s_id);
+        etch_set_scroll_offset(s_id, (EtchVec2){0.0f, 10.0f}, true);
+        etch_set_scroll_stuck_to_bottom(s_id, true);
+        const bool restick_ok = etch_scroll_stuck_to_bottom(s_id) && etch_scroll_offset(s_id).y > 119.0f;
+        if (!stuck_ok || !unstick_ok || !restick_ok) {
+            fprintf(stderr, "c99_abi_smoke: stick_to_bottom failed (stuck=%d unstick=%d restick=%d off=%.1f legacy=%.1f)\n",
+                (int)stuck_ok, (int)unstick_ok, (int)restick_ok, off_y, legacy_y);
+            etch_destroy_context(ctx);
+            return 1;
+        }
+    }
     {
         EtchFrameDesc p2f = etch_frame_desc_default();
         p2f.viewport_w = 160; p2f.viewport_h = 80;

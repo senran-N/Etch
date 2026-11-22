@@ -147,4 +147,90 @@ Theme Theme::from_seed(Color seed, bool dark_mode, float chroma_scale) noexcept 
     result.on_error=readable_on(result.danger);
     return result;
 }
+Vec4 color_to_oklab_internal(Color c) noexcept {
+    const auto lab = color_to_lab(c);
+    return {lab.L, lab.a, lab.b, c.a / 255.0f};
+}
+Color color_from_oklab_internal(Vec4 laba) noexcept {
+    return color_from_lab({laba.x, laba.y, laba.z}, laba.w);
+}
+Theme Theme::lerp_oklab(const Theme& a, const Theme& b, float t) noexcept {
+    if (!std::isfinite(t) || t <= 0.0f) return a;
+    if (t >= 1.0f) return b;
+    const auto lc = [t](Color ca, Color cb) noexcept -> Color {
+        return Color::lerp_oklab(ca, cb, t);
+    };
+    const auto lf = [t](float fa, float fb) noexcept -> float {
+        return fa + (fb - fa) * t;
+    };
+    Theme r = {};
+    r.id = (a.id == b.id) ? a.id : ((t < 0.5f) ? a.id : b.id);
+    r.bg_canvas = lc(a.bg_canvas, b.bg_canvas);
+    r.bg_surface = lc(a.bg_surface, b.bg_surface);
+    r.bg_elevated = lc(a.bg_elevated, b.bg_elevated);
+    r.bg_chrome = lc(a.bg_chrome, b.bg_chrome);
+    r.bg_popup = lc(a.bg_popup, b.bg_popup);
+    r.bg_tooltip = lc(a.bg_tooltip, b.bg_tooltip);
+    r.bg_input = lc(a.bg_input, b.bg_input);
+    r.bg_table = lc(a.bg_table, b.bg_table);
+    r.bg_node_canvas = lc(a.bg_node_canvas, b.bg_node_canvas);
+    r.surface_control = lc(a.surface_control, b.surface_control);
+    r.surface_hover = lc(a.surface_hover, b.surface_hover);
+    r.surface_active = lc(a.surface_active, b.surface_active);
+    r.surface_disabled = lc(a.surface_disabled, b.surface_disabled);
+    r.surface_subtle = lc(a.surface_subtle, b.surface_subtle);
+    r.surface_subtle_hover = lc(a.surface_subtle_hover, b.surface_subtle_hover);
+    r.surface_subtle_body = lc(a.surface_subtle_body, b.surface_subtle_body);
+    r.surface_selected = lc(a.surface_selected, b.surface_selected);
+    r.text_primary = lc(a.text_primary, b.text_primary);
+    r.text_secondary = lc(a.text_secondary, b.text_secondary);
+    r.text_body = lc(a.text_body, b.text_body);
+    r.text_code = lc(a.text_code, b.text_code);
+    r.text_muted = lc(a.text_muted, b.text_muted);
+    r.text_disabled = lc(a.text_disabled, b.text_disabled);
+    r.accent = lc(a.accent, b.accent);
+    r.accent_secondary = lc(a.accent_secondary, b.accent_secondary);
+    r.accent_primary = lc(a.accent_primary, b.accent_primary);
+    r.focus_ring = lc(a.focus_ring, b.focus_ring);
+    r.danger = lc(a.danger, b.danger);
+    r.warning = lc(a.warning, b.warning);
+    r.border_subtle = lc(a.border_subtle, b.border_subtle);
+    r.border_line = lc(a.border_line, b.border_line);
+    r.border_input = lc(a.border_input, b.border_input);
+    r.border_node = lc(a.border_node, b.border_node);
+    r.border_control = lc(a.border_control, b.border_control);
+    r.border_tooltip = lc(a.border_tooltip, b.border_tooltip);
+    r.selection = lc(a.selection, b.selection);
+    r.selection_hover = lc(a.selection_hover, b.selection_hover);
+    r.zebra_row = lc(a.zebra_row, b.zebra_row);
+    r.active_line = lc(a.active_line, b.active_line);
+    r.area_fill_top = lc(a.area_fill_top, b.area_fill_top);
+    r.area_fill_bottom = lc(a.area_fill_bottom, b.area_fill_bottom);
+    r.divider_hover = lc(a.divider_hover, b.divider_hover);
+    r.divider_thumb_hover = lc(a.divider_thumb_hover, b.divider_thumb_hover);
+    r.grid_minor = lc(a.grid_minor, b.grid_minor);
+    r.grid_major = lc(a.grid_major, b.grid_major);
+    r.canvas_border = lc(a.canvas_border, b.canvas_border);
+    r.marquee_fill = lc(a.marquee_fill, b.marquee_fill);
+    r.marquee_border = lc(a.marquee_border, b.marquee_border);
+    r.backdrop = lc(a.backdrop, b.backdrop);
+    r.shadow = lc(a.shadow, b.shadow);
+    r.scrollbar_track = lc(a.scrollbar_track, b.scrollbar_track);
+    r.scrollbar_thumb = lc(a.scrollbar_thumb, b.scrollbar_thumb);
+    r.scrollbar_thumb_hover = lc(a.scrollbar_thumb_hover, b.scrollbar_thumb_hover);
+    r.scrollbar_thumb_drag = lc(a.scrollbar_thumb_drag, b.scrollbar_thumb_drag);
+    r.syntax_comment = lc(a.syntax_comment, b.syntax_comment);
+    r.syntax_string = lc(a.syntax_string, b.syntax_string);
+    r.syntax_number = lc(a.syntax_number, b.syntax_number);
+    r.syntax_keyword = lc(a.syntax_keyword, b.syntax_keyword);
+    r.radius_small_px = lf(a.radius_small_px, b.radius_small_px);
+    r.radius_control_px = lf(a.radius_control_px, b.radius_control_px);
+    r.radius_table_px = lf(a.radius_table_px, b.radius_table_px);
+    r.radius_input_px = lf(a.radius_input_px, b.radius_input_px);
+    r.radius_panel_px = lf(a.radius_panel_px, b.radius_panel_px);
+    r.radius_pill_px = lf(a.radius_pill_px, b.radius_pill_px);
+    r.on_primary = lc(a.on_primary, b.on_primary);
+    r.on_error = lc(a.on_error, b.on_error);
+    return r;
+}
 } // namespace etch

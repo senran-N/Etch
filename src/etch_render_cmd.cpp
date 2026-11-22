@@ -461,16 +461,17 @@ Vec2 etch_measure_text(Str text, const LayoutTextConfig& config, void* user_data
     } else {
         const uint16_t font_id = config.font_id;
         const float logical_font_px = config.font_size_px > 0.0f ? config.font_size_px : 16.0f;
+        const float metric_h = scaled_font_span_px(ctx, font_id, logical_font_px);
         const float letter_spacing = config.letter_spacing;
         if (!text.chars || text.length == 0u) {
-            dims = Vec2{ 0.0f, logical_font_px };
+            dims = Vec2{ 0.0f, metric_h };
         } else {
             float width_logical = 0.0f;
             measure_line_segment_x(
                 ctx, font_id, text.chars, text.length, 0u, 0u,
                 logical_font_px, letter_spacing, false, true,
                 nullptr, nullptr, &width_logical);
-            dims = Vec2{ width_logical, logical_font_px };
+            dims = Vec2{ width_logical, metric_h };
         }
     }
     if (ctx) ctx->frame_arena.rewind(arena_mark);
@@ -1437,7 +1438,7 @@ void emit_slug_glyph_quad(Context* ctx, uint16_t slot_idx, uint32_t glyph_id, fl
     const auto& slot=ctx->atlas.slots[slot_idx]; const auto layers=slug_get_colr_layers(slot,glyph_id);
     if (!layers.count) {
         if(slot.has_sbix || slot.has_cbdt) {
-            const auto entry=get_or_cache_bitmap_emoji(ctx,slot_idx,glyph_id,phys_px);
+            const auto entry=get_or_cache_bitmap_emoji(ctx,slot_idx,glyph_id,phys_px * slot.scale_adjust);
             if(entry.has_bitmap && entry.sprite_id!=kInvalidSprite) {
                 const float scale_px=slot.scale_1px*phys_px;
                 const float strike_scale=float(slot.upem)*scale_px/float(entry.ppem);
@@ -1696,7 +1697,9 @@ void emit_selection_line(Context* ctx, const LayoutCmd* cmd, const ClipEntry& cl
 }
 
 void emit_vector_icon_quad(Context* ctx, uint16_t icon_id, Rect target_px, Color color,
-                           const ClipEntry& clip, float angle_rad = 0.0f) noexcept;
+                           const ClipEntry& clip, float angle_rad = 0.0f,
+                           Color secondary_color = Color::theme_auto(),
+                           float opacity = 1.0f, bool allow_snap = true) noexcept;
 
 void emit_rich_text_command(
     Context* ctx,
@@ -2213,6 +2216,7 @@ void apply_scrollbar_drag(WidgetState* ws, float pointer_y, float grab_offset, b
         } else {
             ws->scroll_pos.y = ratio * ws->scroll_max.y;
             ws->scroll_vel.y = 0.0f;
+            ws->scroll_stuck_bottom = (ws->scroll_max.y <= 0.5f) || (ws->scroll_pos.y >= ws->scroll_max.y - 2.0f);
         }
     }
 }
@@ -2292,13 +2296,25 @@ void emit_canvas_wire_command(
     const Vec2 p1_px = (Vec2{ canvas_logical.x, canvas_logical.y } + pan + cw->to_world * zoom) * dpi;
     const float dx = std::fabs(p1_px.x - p0_px.x);
     const float dy = std::fabs(p1_px.y - p0_px.y);
-    const float handle = clamp_range(
-        ((dx > 40.0f * dpi) ? dx : (dy * 0.55f + 40.0f * dpi)) * cw->tangent_bias,
-        24.0f * dpi,
-        260.0f * dpi);
     const Vec2 mid_px = (p0_px + p1_px) * 0.5f;
-    const Vec2 q0_ctrl = { p0_px.x + handle, p0_px.y };
-    const Vec2 q1_ctrl = { p1_px.x - handle, p1_px.y };
+    Vec2 q0_ctrl = {};
+    Vec2 q1_ctrl = {};
+    if (cw->axis == Axis::Col) {
+        const float sign_y = (p1_px.y >= p0_px.y) ? 1.0f : -1.0f;
+        const float handle = clamp_range(
+            ((dy > 16.0f * dpi) ? dy : (dx * 0.45f + 16.0f * dpi)) * cw->tangent_bias,
+            10.0f * dpi,
+            220.0f * dpi);
+        q0_ctrl = { p0_px.x, p0_px.y + sign_y * handle };
+        q1_ctrl = { p1_px.x, p1_px.y - sign_y * handle };
+    } else {
+        const float handle = clamp_range(
+            ((dx > 40.0f * dpi) ? dx : (dy * 0.55f + 40.0f * dpi)) * cw->tangent_bias,
+            24.0f * dpi,
+            260.0f * dpi);
+        q0_ctrl = { p0_px.x + handle, p0_px.y };
+        q1_ctrl = { p1_px.x - handle, p1_px.y };
+    }
     const Color c_mid = Color::lerp(cw->color_start, cw->color_end, 0.5f);
     const float half_w_px = 0.5f * ((cw->thickness_world * zoom > 0.75f) ? (cw->thickness_world * zoom) : 0.75f) * dpi;
     const float glow_px = cw->glow_world * zoom * dpi;

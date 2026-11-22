@@ -36,8 +36,16 @@ const char* desktop_format(const char* fmt) noexcept {
     if (*fmt == '.') { ++fmt; unsigned digits = 0; while (*fmt >= '0' && *fmt <= '9' && digits < 2) { ++fmt; ++digits; } }
     return ((*fmt == 'f' || *fmt == 'g' || *fmt == 'e') && fmt[1] == '\0') ? nullptr : "%.2f";
 }
+struct SliderTrackOpts {
+    Color track_color = Color::theme_auto();
+    Color thumb_color = Color::theme_auto();
+    float track_height_px = 4.0f;
+    float thumb_size_px = 14.0f;
+    bool show_value = true;
+};
 bool desktop_number(uint32_t id, Str label, float* value, float lo, float hi, float step, float speed,
-    const char* format, Sizing width, float height, bool disabled, bool is_slider, Color bg, Color fill, Color fg) noexcept {
+    const char* format, Sizing width, float height, bool disabled, bool is_slider, Color bg, Color fill, Color fg,
+    const SliderTrackOpts* track_opts = nullptr) noexcept {
     auto& ui = *current_context()->active_ui;
     const float before = *value;
     PendingA11yAction command={};
@@ -115,15 +123,126 @@ bool desktop_number(uint32_t id, Str label, float* value, float lo, float hi, fl
             if (key_pressed(SDLK_END)) *value = hi;
         }
     }
-    const Theme& thm = active_theme(current_context());
+    Context* ctx = current_context();
+    const Theme& thm = active_theme(ctx);
     bg = resolve_theme_color(bg, thm.surface_control);
     fill = resolve_theme_color(fill, thm.accent);
-    fg = resolve_theme_color(fg, thm.text_primary);
+    fg = resolve_theme_color(fg, disabled ? thm.text_disabled : thm.text_primary);
+    char number[64]; const char* fallback = desktop_format(format);
+    std::snprintf(number,sizeof(number),fallback ? fallback : format,double(*value));
+
+    if (is_slider && track_opts) {
+        const float track_h = (std::isfinite(track_opts->track_height_px) && track_opts->track_height_px > 0.0f) ? track_opts->track_height_px : 4.0f;
+        const float thumb_sz = (std::isfinite(track_opts->thumb_size_px) && track_opts->thumb_size_px > 0.0f) ? track_opts->thumb_size_px : 14.0f;
+        const Color track_col = resolve_theme_color(track_opts->track_color, thm.surface_control);
+        const Color thumb_base = resolve_theme_color(track_opts->thumb_color, Color::white());
+        const Color thumb_col = disabled ? Color::lerp_oklab(thumb_base, thm.surface_disabled, 0.4f) : thumb_base;
+        const Color val_col = disabled ? thm.text_disabled : thm.text_muted;
+        const bool has_label = (label.chars != nullptr && label.length > 0u);
+        const bool has_header = has_label || track_opts->show_value;
+        const bool hov = !disabled && hovered(id);
+        const bool prs = !disabled && (pressed(id) || active(id));
+        if (hov || prs) set_cursor(Cursor::Hand);
+
+        float ht = 0.0f, pt = 0.0f;
+        if (WidgetState* ws = state_map_get_or_insert(&ctx->active_ui->states, id, ctx->active_ui->frame_index)) {
+            if (disabled) {
+                ws->hover_t = 0.0f; ws->hover_vel = 0.0f;
+                ws->press_t = 0.0f; ws->press_vel = 0.0f;
+            } else {
+                advance_motion(ctx, &ws->hover_t, &ws->hover_vel, (hov || prs) ? 1.0f : 0.0f, SpringSpec::snappy());
+                advance_motion(ctx, &ws->press_t, &ws->press_vel, prs ? 1.0f : 0.0f, SpringSpec::snappy());
+                ht = clamp_range(ws->hover_t, 0.0f, 1.0f);
+                pt = clamp_range(ws->press_t, 0.0f, 1.0f);
+            }
+        }
+        const float thumb_scale = disabled ? 1.0f : (1.0f + 0.12f * ht - 0.16f * pt);
+        const float track_area_h = std::fmax(thumb_sz + 6.0f, 18.0f);
+        const float total_h = has_header ? std::fmax(height, track_area_h + 16.0f) : std::fmax(height, track_area_h);
+
+        begin_box({.id=id,.axis=Axis::Col,.width=width,.height=Sizing::fixed(total_h),.gap=2.0f,.focusable=!disabled});
+        a11y_semantic(id,A11yRole::Slider,label,disabled?A11yState_Disabled:0u,141u,*value,lo,hi);
+        if (has_header) {
+            begin_box({.axis=Axis::Row,.width=Sizing::grow(),.height=Sizing::fixed(14.0f),.align_y=AlignY::Center});
+            if (has_label) desktop_label(label,12,kFontSans,fg);
+            begin_box({.width=Sizing::grow()}); end_box();
+            if (track_opts->show_value) desktop_label(str_cstr(number),11.5f,kFontMono,val_col);
+            end_box();
+        }
+        begin_box({.width=Sizing::grow(),.height=Sizing::grow()});
+        struct TrackPaint {
+            float fraction;
+            float track_h;
+            float thumb_sz;
+            float thumb_scale;
+            Color track_col;
+            Color fill_col;
+            Color thumb_col;
+            Color thumb_border;
+            Color shadow_col;
+            Color focus_col;
+            bool show_focus;
+        };
+        if (auto* paint = ctx->frame_arena.alloc<TrackPaint>()) {
+            Color sh = thm.shadow;
+            sh.a = disabled ? static_cast<uint8_t>(sh.a / 3u) : static_cast<uint8_t>(std::min<uint32_t>(105u, sh.a));
+            Color fc = thm.focus_ring;
+            fc.a = 90u;
+            *paint = TrackPaint{
+                .fraction = clamp_range((*value - lo) / (hi - lo), 0.0f, 1.0f),
+                .track_h = track_h,
+                .thumb_sz = thumb_sz,
+                .thumb_scale = thumb_scale,
+                .track_col = track_col,
+                .fill_col = disabled ? thm.surface_disabled : fill,
+                .thumb_col = thumb_col,
+                .thumb_border = thm.border_subtle,
+                .shadow_col = sh,
+                .focus_col = fc,
+                .show_focus = !disabled && focused(id),
+            };
+            draw_after_layout([](Rect tr, void* data) noexcept {
+                const auto& p = *static_cast<const TrackPaint*>(data);
+                if (tr.w <= 0.0f || tr.h <= 0.0f) return;
+                const float cy = tr.h * 0.5f;
+                const float eff_thumb = p.thumb_sz * p.thumb_scale;
+                const float half_base = p.thumb_sz * 0.5f;
+                const float cx = half_base + p.fraction * std::fmax(0.0f, tr.w - p.thumb_sz);
+                const Corners tr_rad = Corners::all(p.track_h * 0.5f);
+                draw_rect({.rect={0.0f, cy - p.track_h * 0.5f, tr.w, p.track_h}, .fill=p.track_col, .radius=tr_rad});
+                if (cx > 0.5f) {
+                    draw_rect({.rect={0.0f, cy - p.track_h * 0.5f, cx, p.track_h}, .fill=p.fill_col, .radius=tr_rad});
+                }
+                if (p.show_focus) {
+                    const float ring_d = eff_thumb + 6.0f;
+                    draw_rect({
+                        .rect = {cx - ring_d * 0.5f, cy - ring_d * 0.5f, ring_d, ring_d},
+                        .fill = p.focus_col,
+                        .radius = Corners::all(ring_d * 0.5f),
+                    });
+                }
+                const Rect thumb_rect = {cx - eff_thumb * 0.5f, cy - eff_thumb * 0.5f, eff_thumb, eff_thumb};
+                const Corners thumb_rad = Corners::all(eff_thumb * 0.5f);
+                draw_shadow_internal(thumb_rect, thumb_rad, p.shadow_col, 6.0f, Vec2{0.0f, 1.5f});
+                draw_rect({
+                    .rect = thumb_rect,
+                    .fill = p.thumb_col,
+                    .radius = thumb_rad,
+                    .border_color = p.thumb_border,
+                    .border_width = 1.0f,
+                });
+            }, paint);
+        }
+        end_box();
+        end_box();
+        return *value != before;
+    }
+
     begin_box({.id=id,.width=width,.height=Sizing::fixed(height),.padding=Padding::xy(8,0),.gap=8,.align_y=AlignY::Center,
         .background=desktop_bg(id,bg,disabled),.radius=Corners::all(thm.radius_small_px),.focusable=!disabled});
     if (is_slider) {
         struct Paint { float fraction; Color color; };
-        auto* paint=current_context()->frame_arena.alloc<Paint>();
+        auto* paint=ctx->frame_arena.alloc<Paint>();
         if(paint) { *paint={clamp_range((*value-lo)/(hi-lo),0,1),fill};
             draw_after_layout([](Rect r,void* data) noexcept {
                 const auto& p=*static_cast<Paint*>(data);
@@ -133,8 +252,6 @@ bool desktop_number(uint32_t id, Str label, float* value, float lo, float hi, fl
     }
     a11y_semantic(id,is_slider?A11yRole::Slider:A11yRole::SpinButton,label,disabled?A11yState_Disabled:0u,141u,*value,lo,hi);
     desktop_label(label,12,kFontSans,fg);
-    char number[64]; const char* fallback = desktop_format(format);
-    std::snprintf(number,sizeof(number),fallback ? fallback : format,double(*value));
     desktop_label(str_cstr(number),12,kFontMono,fg); end_box();
     return *value != before;
 }
@@ -175,17 +292,48 @@ bool checkbox(const CheckboxDesc& d) noexcept {
 }
 bool toggle_switch(const ToggleSwitchDesc& d) noexcept {
     if (!desktop_frame(d.id) || !d.value || !std::isfinite(d.track_width_px) || !std::isfinite(d.track_height_px) || d.track_height_px < 4 || d.track_width_px < d.track_height_px) return false;
-    const Theme& thm = active_theme(current_context());
+    Context* ctx = current_context();
+    const Theme& thm = active_theme(ctx);
     const Color on_c = resolve_theme_color(d.on_color, thm.accent);
     const Color off_c = resolve_theme_color(d.off_color, thm.surface_hover);
+    const Color thumb_base = resolve_theme_color(d.thumb_color, Color::white());
+    const Color thumb_c = d.disabled ? Color::lerp_oklab(thumb_base, thm.surface_disabled, 0.35f) : thumb_base;
+    const Color off_border = resolve_theme_color(d.border_color, thm.border_subtle);
     const Corners pill = Corners::all(thm.radius_pill_px);
-    const bool change=desktop_activate(d.id,d.disabled); if(change) *d.value=!*d.value;
-    const float t=spring(id_index(d.id,0x2301),*d.value ? 1.f : 0.f);
-    begin_box({.id=d.id,.height=Sizing::fixed(d.track_height_px+8),.gap=8,.align_y=AlignY::Center,.focusable=!d.disabled});
+    const bool change = desktop_activate(d.id, d.disabled);
+    if (change) *d.value = !*d.value;
+    const float t = clamp_range(spring(id_index(d.id, 0x2301u), *d.value ? 1.0f : 0.0f, SpringSpec::snappy()), 0.0f, 1.0f);
+    const bool has_label = (d.label.chars != nullptr && d.label.length > 0u);
+    const Color track_bg = desktop_bg(d.id, Color::lerp_oklab(off_c, on_c, t), d.disabled);
+    float press_t = 0.0f;
+    if (!d.disabled) {
+        if (const WidgetState* ws = state_map_find(&ctx->active_ui->states, d.id)) {
+            press_t = clamp_range(ws->press_t, 0.0f, 1.0f);
+        }
+    }
+    Color track_border = off_border;
+    track_border.a = static_cast<uint8_t>(std::round(static_cast<float>(off_border.a) * (1.0f - t)));
+    const float track_bw = (track_border.a > 0u) ? 1.0f : 0.0f;
+
+    const float pad = 2.0f;
+    const float thumb_d = d.track_height_px - 2.0f * pad;
+    const float max_stretch = std::fmin(2.5f, (d.track_width_px - d.track_height_px) * 0.25f);
+    const float stretch = press_t * max_stretch;
+    const float thumb_w = thumb_d + stretch;
+    const float travel = std::fmax(0.0f, (d.track_width_px - 2.0f * pad) - thumb_w);
+    const Rect thumb_rect = { pad + t * travel, pad, thumb_w, thumb_d };
+    Color sh_col = thm.shadow;
+    sh_col.a = d.disabled ? static_cast<uint8_t>(sh_col.a / 3u) : static_cast<uint8_t>(std::min<uint32_t>(95u, sh_col.a));
+
+    begin_box({.id=d.id,.height=Sizing::fixed(has_label ? (d.track_height_px + 8.0f) : d.track_height_px),.gap=has_label ? 8.0f : 0.0f,.align_y=AlignY::Center,.focusable=!d.disabled});
     a11y_semantic(d.id,A11yRole::Switch,d.label,(d.disabled?A11yState_Disabled:0u)|(*d.value?A11yState_Checked:0u),3u);
-    begin_box({.width=Sizing::fixed(d.track_width_px),.height=Sizing::fixed(d.track_height_px),.background=desktop_bg(d.id,Color::lerp_oklab(off_c,on_c,t),d.disabled),.radius=pill});
-    draw_rect({.rect={2+t*(d.track_width_px-d.track_height_px),2,d.track_height_px-4,d.track_height_px-4},.fill=Color::white(),.radius=pill,.border_color=thm.border_control,.border_width=1});
-    end_box(); desktop_label(d.label,d.font_size_px,d.font_id,d.disabled ? thm.text_disabled : thm.text_primary);end_box();return change;
+    begin_box({.width=Sizing::fixed(d.track_width_px),.height=Sizing::fixed(d.track_height_px),.background=track_bg,.border_color=track_border,.border_width=track_bw,.radius=pill});
+    draw_shadow_internal(thumb_rect, pill, sh_col, 6.0f, Vec2{0.0f, 1.5f});
+    draw_rect({.rect=thumb_rect,.fill=thumb_c,.radius=pill});
+    end_box();
+    if (has_label) desktop_label(d.label,d.font_size_px,d.font_id,d.disabled ? thm.text_disabled : thm.text_primary);
+    end_box();
+    return change;
 }
 void progress_bar(const ProgressBarDesc& d) noexcept {
     if (!current_context() || !current_context()->in_frame || !std::isfinite(d.fraction)) return;
@@ -249,6 +397,16 @@ TabItemResult tab_item(const TabItemDesc& d) noexcept {
 void end_tab_bar() noexcept { if(current_context() && current_context()->active_ui->tab_bar_depth) {--current_context()->active_ui->tab_bar_depth;end_box();} }
 bool slider(const SliderDesc& d) noexcept {
     if(!desktop_frame(d.id) || !d.value || !std::isfinite(*d.value) || !std::isfinite(d.min_value) || !std::isfinite(d.max_value) || d.max_value<=d.min_value || !std::isfinite(d.step) || d.step<0) return false;
+    if (d.style == SliderStyle::Track) {
+        const SliderTrackOpts opts = {
+            .track_color = d.track_color,
+            .thumb_color = d.thumb_color,
+            .track_height_px = d.track_height_px,
+            .thumb_size_px = d.thumb_size_px,
+            .show_value = d.show_value,
+        };
+        return desktop_number(d.id,d.label,d.value,d.min_value,d.max_value,d.step,0,d.format,d.width,d.height_px,d.disabled,true,d.background,d.fill_color,d.text_color,&opts);
+    }
     return desktop_number(d.id,d.label,d.value,d.min_value,d.max_value,d.step,0,d.format,d.width,d.height_px,d.disabled,true,d.background,d.fill_color,d.text_color);
 }
 bool drag_value(const DragValueDesc& d) noexcept {
@@ -298,12 +456,21 @@ bool begin_popup(const PopupDesc& d) noexcept {
     }
     if(pop.opened_frame != ui.frame_index && !over_child && should_close_popover(d.id,d.trigger_id)) {close_popup(d.id);return false;}
     const Theme& thm = active_theme(current_context());
+    const Color sh_col = resolve_theme_color(d.shadow_color, thm.shadow);
+    const float sh_blur = (std::isfinite(d.shadow_blur) && d.shadow_blur > 0.0f) ? d.shadow_blur : 0.0f;
+    const float b_blur = (std::isfinite(d.backdrop_blur) && d.backdrop_blur > 0.0f) ? d.backdrop_blur : 0.0f;
+    const bool attached = d.attach_to_trigger && d.trigger_id != 0u;
     begin_box({.id=d.id,.axis=Axis::Col,.width=d.match_trigger_width && d.trigger_id ? Sizing::percent(1) : d.width,.height=d.height,.padding=d.padding,.gap=d.gap,
         .background=resolve_theme_color(d.background, thm.bg_popup),
         .border_color=resolve_theme_color(d.border_color, thm.border_control),.border_width=1,
-        .radius=resolve_theme_corners(d.radius, Corners::all(thm.radius_control_px)),.scroll_y=d.scroll_y && d.height.kind==SizingKind::Fixed,
-        .attach_to=d.attach_to_trigger && d.trigger_id ? AttachTo::Element : AttachTo::Root,.attach_element_id=d.trigger_id,
-        .anchor_parent=d.attach_to_trigger && d.trigger_id ? Anchor::BottomLeft : Anchor::TopLeft,.floating_offset=d.attach_to_trigger && d.trigger_id ? Vec2{} : pop.anchor,.z_index=d.z_index,.clamp_to_viewport=true});
+        .radius=resolve_theme_corners(d.radius, Corners::all(thm.radius_control_px)),
+        .shadow_color=sh_blur > 0.0f ? sh_col : Color{},
+        .shadow_blur=sh_blur,
+        .shadow_offset=sh_blur > 0.0f ? Vec2{0.0f, 6.0f} : Vec2{},
+        .scroll_y=d.scroll_y && d.height.kind==SizingKind::Fixed,
+        .attach_to=attached ? AttachTo::Element : AttachTo::Root,.attach_element_id=d.trigger_id,
+        .anchor_parent=attached ? Anchor::BottomLeft : Anchor::TopLeft,.floating_offset=attached ? Vec2{} : pop.anchor,.z_index=d.z_index,
+        .backdrop_blur=b_blur,.clamp_to_viewport=true,.flip_on_overflow=d.flip_on_overflow});
     a11y_semantic(d.id,A11yRole::Menu,{},0,64u);
     ui.popup_build_ids[ui.popup_depth++]=d.id;return true;
 }
@@ -360,21 +527,49 @@ bool menu_item(const MenuItemDesc& d) noexcept {
 void menu_separator() noexcept {begin_box({.width=Sizing::grow(),.height=Sizing::fixed(1),.background=active_theme(current_context()).border_control});end_box();}
 bool combo_box(const ComboBoxDesc& d) noexcept {
     if(!desktop_frame(d.id) || !d.selected_index || d.items.empty() || d.items.size()>uint32_t(INT32_MAX) || !std::isfinite(d.max_popup_height_px) || d.max_popup_height_px<40 || d.max_popup_height_px>16384) return false;
-    const Theme& thm = active_theme(current_context());
+    Context* ctx = current_context();
+    const Theme& thm = active_theme(ctx);
     const Color bg = resolve_theme_color(d.background, thm.surface_control);
-    const Color hbg = resolve_theme_color(d.hover_bg, thm.surface_hover);
     const Color fg = resolve_theme_color(d.text_color, thm.text_primary);
+    const Color border_c = resolve_theme_color(d.border_color, thm.border_control);
+    const Color focus_border_c = resolve_theme_color(d.focus_border_color, thm.accent);
+    const float bw = (std::isfinite(d.border_width) && d.border_width >= 0.0f) ? d.border_width : 1.0f;
     const uint32_t pop=id_index(d.id,0x2304);bool changed=false;
+    const bool pop_open_now = !d.disabled && is_popup_open(pop);
+    const float chev_t = clamp_range(spring(id_index(d.id, 0x230Au), pop_open_now ? 1.0f : 0.0f, SpringSpec::snappy()), 0.0f, 1.0f);
+    Color trigger_bg = desktop_bg(d.id, bg, d.disabled);
+    if (!d.disabled && !d.hover_bg.is_theme_auto()) {
+        const WidgetState* ws_cb = state_map_find(&ctx->active_ui->states, d.id);
+        const float ht = ws_cb ? clamp_range(ws_cb->hover_t, 0.0f, 1.0f) : 0.0f;
+        const float pt = ws_cb ? clamp_range(ws_cb->press_t, 0.0f, 1.0f) : 0.0f;
+        trigger_bg = Color::lerp_oklab(bg, d.hover_bg, ht);
+        if (pt > 0.001f) {
+            Color press_overlay = thm.text_primary;
+            press_overlay.a = static_cast<uint8_t>(std::round(25.0f * pt));
+            trigger_bg = Color::blend_over(trigger_bg, press_overlay);
+        }
+    }
+    const bool active_border = !d.disabled && (focused(d.id) || pop_open_now);
     Str label=*d.selected_index>=0 && size_t(*d.selected_index)<d.items.size() ? d.items[size_t(*d.selected_index)] : d.label;
     begin_box({.id=d.id,.width=d.width,.height=Sizing::fixed(d.height_px),.padding=Padding::xy(10,0),.gap=8,.align_y=AlignY::Center,
-        .background=d.disabled ? thm.surface_disabled : pressed(d.id) ? Color::lerp(bg,fg,.20f) : hovered(d.id) ? hbg : bg,.radius=Corners::all(thm.radius_control_px),.focusable=!d.disabled});
+        .background=trigger_bg,.border_color=active_border ? focus_border_c : border_c,.border_width=bw,
+        .radius=Corners::all(thm.radius_control_px),.focusable=!d.disabled});
     a11y_semantic(d.id,A11yRole::ComboBox,d.label,d.disabled?A11yState_Disabled:0u,51u);
-    desktop_label(label,13,kFontSans,d.disabled ? thm.text_disabled : fg);
-    begin_box({.width=Sizing::grow()});end_box();
+    begin_box({.width=Sizing::grow(),.height=Sizing::fit(),.clip_children=true,.shrink_width=true});
+    text(label,{.color=d.disabled ? thm.text_disabled : fg,.font_size_px=13,.font_id=kFontSans,.wrap=false,.ellipsis=true});
+    end_box();
     begin_box({.width=Sizing::fixed(12),.height=Sizing::fixed(12)});
-    const Color arrow=d.disabled ? thm.text_disabled : fg;
-    draw_line({.from={2,4},.to={6,8},.color=arrow,.thickness=1.5f});
-    draw_line({.from={6,8},.to={10,4},.color=arrow,.thickness=1.5f});end_box();end_box();
+    const Color arrow=d.disabled ? thm.text_disabled : thm.text_muted;
+    const float chev_angle = chev_t * 3.14159265f;
+    const float cs = std::cos(chev_angle), sn = std::sin(chev_angle);
+    constexpr Vec2 chev_pts[3] = {{-3.5f, -1.75f}, {0.0f, 1.75f}, {3.5f, -1.75f}};
+    Vec2 rot_pts[3] = {};
+    for (uint32_t i = 0; i < 3; ++i) {
+        rot_pts[i] = {6.0f + chev_pts[i].x * cs - chev_pts[i].y * sn,
+                      6.0f + chev_pts[i].x * sn + chev_pts[i].y * cs};
+    }
+    draw_polyline({.points=rot_pts,.color=arrow,.thickness=1.5f});
+    end_box();end_box();
     if(d.disabled) {if(is_popup_open(pop)) close_popup(pop);return false;}
     PendingA11yAction cb_act={};const bool got_cb=a11y_take_any(d.id,50u,&cb_act);
     bool expanded=is_popup_open(pop);

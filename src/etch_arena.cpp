@@ -75,6 +75,8 @@ struct WidgetState {
     bool show_scrollbar = true;
     bool     is_scroll_x = false;
     bool     is_scroll_y = false;
+    bool     scroll_stuck_bottom = true;
+    bool     scroll_stick_initialized = false;
     Vec2     scroll_pos = {};
     Vec2     scroll_vel = {};
     Vec2     scroll_max = {};
@@ -123,7 +125,9 @@ struct WidgetState {
     bool column_resizing = false;
     // Split Pane state
     bool     split_initialized = false;
+    bool     split_extent_initialized = false;
     float    split_ratio = 0.5f;
+    float    split_extent_px = 0.0f;
     float    split_grab_offset = 0.0f;
 
     // Virtual List state (double-precision scroll prevents float32 ULP degradation past 16.7M px)
@@ -219,6 +223,8 @@ struct FontSlot {
     int32_t        font_ascent = 0;
     int32_t        font_descent = 0;
     int32_t        font_line_gap = 0;
+    float          base_scale_1px = 0.0f;
+    float          scale_adjust = 1.0f;
     float          scale_1px = 0.0f;
     float          ascent_em = 0.8f;
     float          descent_em = 0.2f;
@@ -248,6 +254,7 @@ struct FontSlot {
     float          space_advance_em = 0.28f;
     uint64_t       source_hash = 0;
     uint32_t       metric_hash = 0;
+    uint16_t       preferred_fallback = kInvalidFont;
     uint8_t        generation = 0;
     bool           loaded = false;
     bool tabular_numbers = false;
@@ -257,13 +264,22 @@ struct FontSlot {
     bool           dwrite_probed = false;
 };
 
-struct VectorIconEntry {
+inline constexpr uint32_t kMaxVectorIconLayers = 4u;
+
+struct VectorIconLayer {
     uint32_t band_offset = 0;
     uint16_t num_hbands = 0;
     uint16_t num_vbands = 0;
+    uint8_t  color_slot = 0; // 0 = primary, 1 = secondary
+    bool     has_outline = false;
+    float    opacity = 1.0f;
+};
+
+struct VectorIconEntry {
+    VectorIconLayer layers[kMaxVectorIconLayers] = {};
+    uint8_t  layer_count = 0;
     Vec2     view_size = {24.0f, 24.0f};
     bool     loaded = false;
-    bool     has_outline = false;
 };
 
 struct SpriteSlot {
@@ -374,6 +390,8 @@ struct TextInputExtra {
     uint32_t      cursor_byte = 0;
     uint32_t      sel_anchor_byte = 0;
     bool          is_focused = false;
+    float         hover_t = 0.0f;
+    float         leading_icon_pad_left = 0.0f;
 };
 
 enum class CustomCmdKind : uint8_t {
@@ -399,6 +417,16 @@ enum class DrawCmdKind : uint8_t {
     Mesh = 10,
     Hole = 11,
     Beam = 12,
+    Shadow = 13,
+};
+
+struct ShadowDrawCmd {
+    Rect    rect = {};
+    Corners radius = {};
+    Color   color = {};
+    float   blur = 0.0f;
+    Vec2    offset = {};
+    bool    continuous_corners = false;
 };
 
 struct BoxExtra;
@@ -445,6 +473,7 @@ struct DrawCmdNode {
     float terminal_cell_width = 0;
     ImageDrawDesc image_cmd = {};
     FilledPathDesc fill_cmd = {};
+    ShadowDrawCmd shadow_cmd = {};
     LayoutDrawFn callback = nullptr;
     void* callback_data = nullptr;
     Theme* callback_theme = nullptr;
@@ -472,6 +501,7 @@ struct CanvasWireExtra {
     float    thickness_world = 2.2f;
     float    glow_world = 0.0f;
     float    tangent_bias = 0.45f;
+    Axis     axis = Axis::Row;
 };
 
 struct CodeEditorExtra;
@@ -503,19 +533,26 @@ struct BoxExtra {
 };
 
 struct SplitStackEntry {
-    uint32_t id = 0;
-    Axis     axis = Axis::Row;
-    float    ratio = 0.5f;
-    float    divider_size_px = 6.0f;
-    float    divider_hit_px = 8.0f;
-    float    min_first_px = 120.0f;
-    float    min_second_px = 120.0f;
-    Color    divider_color = {};
-    Color    divider_hover_color = {};
-    Color    divider_active_color = {};
-    Color    grip_hover_color = {};
-    Color    grip_idle_color = {};
-    bool     in_second = false;
+    uint32_t    id = 0;
+    Axis        axis = Axis::Row;
+    SplitSizing sizing = SplitSizing::Ratio;
+    float       ratio = 0.5f;
+    float       extent_px = 0.0f;
+    float       divider_size_px = 6.0f;
+    float       divider_hit_px = 8.0f;
+    float       min_first_px = 120.0f;
+    float       min_second_px = 120.0f;
+    Color       divider_color = {};
+    Color       divider_hover_color = {};
+    Color       divider_active_color = {};
+    Color       grip_hover_color = {};
+    Color       grip_idle_color = {};
+    Color       grip_active_color = {};
+    bool        show_grip = true;
+    float       hover_highlight_px = 0.0f;
+    float       hover_t = 0.0f;
+    float       active_t = 0.0f;
+    bool        in_second = false;
 };
 
 struct CanvasStackEntry {
@@ -630,6 +667,8 @@ struct ScrollbarGeom;
 ScrollbarGeom compute_vscrollbar_geom(const WidgetState*) noexcept;
 void emit_code_editor_command(Context*, const CodeEditorExtra*, Rect, const ClipEntry&, float) noexcept;
 void optimize_render_batches(Context*) noexcept;
+Vec4 color_to_oklab_internal(Color c) noexcept;
+Color color_from_oklab_internal(Vec4 laba) noexcept;
 
 struct ClipStack {
     ClipEntry entries[kMaxClipDepth] = {};
@@ -915,6 +954,8 @@ struct WindowUiState {
     uint32_t table_depth = 0;
     uint32_t tree_depth = 0;
     uint32_t collapsible_depth = 0;
+    uint32_t collapse_depth = 0;
+    bool collapse_pushed_layer[kMaxCollapsibleDepth] = {};
     SplitStackEntry  split_stack[kMaxSplitDepth] = {};
     uint32_t         split_depth = 0;
     CanvasStackEntry canvas_stack[kMaxCanvasDepth] = {};
@@ -1028,6 +1069,14 @@ struct ClaimedWindowSlot {
     uintptr_t native_chrome_style = 0; bool native_frame_applied = false;
     Context* chrome_context = nullptr;
     bool native_max_press = false, native_max_hover = false;
+    bool in_win32_sizemove = false, in_win32_sizing = false;
+    bool dwm_attrs_initialized = false;
+    bool applied_dark = false;
+    uint32_t applied_border_ref = 0xFFFFFFFFu;
+    WindowBackdrop applied_backdrop = WindowBackdrop::Opaque;
+    uint32_t applied_corners = 0xFFFFFFFFu;
+    bool applied_margins_native = false;
+    WindowBackdrop applied_margins_backdrop = WindowBackdrop::Opaque;
     void* os_a11y = nullptr;
     WindowUiState ui = {};
 };
@@ -1687,6 +1736,9 @@ void os_a11y_notify_commit(Context* ctx) noexcept;
 void apply_platform_window_chrome(Context* ctx, ClaimedWindowSlot* slot) noexcept;
 void apply_win32_chrome(Context* ctx, ClaimedWindowSlot* slot) noexcept;
 void detach_win32_chrome(ClaimedWindowSlot* slot) noexcept;
+bool win32_is_zoomed(SDL_Window* window) noexcept;
+void win32_maximize_window(SDL_Window* window) noexcept;
+void win32_restore_window(SDL_Window* window) noexcept;
 bool win32_find_system_font_path(Str family_name, FontWeight weight, char* out_path, size_t out_cap) noexcept;
 void sync_window_event_watch(Context* ctx) noexcept;
 void detach_window_event_watch(Context* ctx) noexcept;

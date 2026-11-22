@@ -320,6 +320,7 @@ inline etch::BoxDesc to_cpp(const EtchBoxDesc& d) noexcept {
     out.grid_row_span = d.grid_row_span ? d.grid_row_span : 1u;
     out.flip_on_overflow = d.flip_on_overflow;
     out.hitbox_behavior = static_cast<etch::HitboxBehavior>(d.hitbox_behavior);
+    out.stick_to_bottom = d.stick_to_bottom;
     return out;
 }
 
@@ -455,7 +456,8 @@ ETCH_API EtchBoxDesc etch_box_desc_default(void) {
             from_cpp(d.border_sides), d.border_dash_px, d.border_gap_px, from_cpp(d.edge_fade),
             static_cast<EtchJustify>(d.justify), static_cast<EtchAlignSelf>(d.align_self),
             d.flex_grow, d.flex_shrink, from_cpp(d.margin), nullptr, 0u, d.grid_row_span,
-            d.flip_on_overflow, static_cast<EtchHitboxBehavior>(d.hitbox_behavior)};
+            d.flip_on_overflow, static_cast<EtchHitboxBehavior>(d.hitbox_behavior),
+            d.stick_to_bottom};
 }
 
 ETCH_API EtchTextDesc etch_text_desc_default(void) {
@@ -492,6 +494,12 @@ ETCH_API EtchCollapsibleDesc etch_collapsible_desc_default(void) {
             from_cpp(d.text_color), from_cpp(d.icon_color), from_cpp(d.spring_spec)};
 }
 
+ETCH_API EtchCollapseDesc etch_collapse_desc_default(void) {
+    const etch::CollapseDesc d{};
+    return {static_cast<uint32_t>(sizeof(EtchCollapseDesc)),
+            d.id, d.open, from_cpp(d.spring), d.fade_content, from_cpp(d.width)};
+}
+
 ETCH_API EtchImageDesc etch_image_desc_default(void) {
     const etch::ImageDesc d{};
     return {d.id, d.texture, d.sprite_id, from_cpp(d.width), from_cpp(d.height),
@@ -501,7 +509,8 @@ ETCH_API EtchImageDesc etch_image_desc_default(void) {
 
 ETCH_API EtchIconDesc etch_icon_desc_default(void) {
     const etch::IconDesc d{};
-    return {d.id, d.icon_id, d.size_px, from_cpp(d.color)};
+    return {d.id, d.icon_id, d.size_px, from_cpp(d.color), d.rotation_rad, d.scale, d.opacity,
+            from_cpp(d.secondary_color)};
 }
 
 ETCH_API EtchRectDrawDesc etch_rect_draw_desc_default(void) {
@@ -619,7 +628,9 @@ ETCH_API EtchTextInputDesc etch_text_input_desc_default(void) {
             from_cpp(d.background), from_cpp(d.border_color), from_cpp(d.focus_border_color),
             d.border_width, d.focus_border_width, from_cpp(d.radius), d.multiline, d.word_wrap,
             d.read_only, d.password, d.context_menu, d.clear_button, d.escape_blurs, d.suppress_popup_keys, nullptr, 0u,
-            from_cpp(d.ghost_text), from_cpp(d.ghost_color), d.accept_ghost_on_tab, d.submit_on_enter};
+            from_cpp(d.ghost_text), from_cpp(d.ghost_color), d.accept_ghost_on_tab, d.submit_on_enter,
+            from_cpp(d.hover_border_color), d.focus_glow_blur, d.leading_icon_id,
+            from_cpp(d.leading_icon_color), d.continuous_corners, d.disabled};
 }
 
 ETCH_API EtchButtonDesc etch_button_desc_default(void) {
@@ -639,7 +650,7 @@ ETCH_API EtchToggleSwitchDesc etch_toggle_switch_desc_default(void) {
     const etch::ToggleSwitchDesc d{};
     return {d.id, from_cpp(d.label), d.value, d.disabled, d.track_width_px,
             d.track_height_px, d.font_size_px, d.font_id, from_cpp(d.on_color),
-            from_cpp(d.off_color)};
+            from_cpp(d.off_color), from_cpp(d.thumb_color), from_cpp(d.border_color)};
 }
 
 ETCH_API EtchProgressBarDesc etch_progress_bar_desc_default(void) {
@@ -665,7 +676,9 @@ ETCH_API EtchSliderDesc etch_slider_desc_default(void) {
     const etch::SliderDesc d{};
     return {d.id, from_cpp(d.label), d.value, d.min_value, d.max_value, d.step, d.format,
             from_cpp(d.width), d.height_px, d.disabled, from_cpp(d.background),
-            from_cpp(d.fill_color), from_cpp(d.text_color)};
+            from_cpp(d.fill_color), from_cpp(d.text_color), static_cast<EtchSliderStyle>(d.style),
+            from_cpp(d.track_color), from_cpp(d.thumb_color), d.track_height_px,
+            d.thumb_size_px, d.show_value};
 }
 
 ETCH_API EtchDragValueDesc etch_drag_value_desc_default(void) {
@@ -691,13 +704,16 @@ ETCH_API EtchComboBoxDesc etch_combo_box_desc_default(void) {
     const etch::ComboBoxDesc d{};
     return {d.id, from_cpp(d.label), d.selected_index, nullptr, 0u, from_cpp(d.width),
             d.height_px, d.max_popup_height_px, d.disabled, from_cpp(d.background),
-            from_cpp(d.hover_bg), from_cpp(d.text_color)};
+            from_cpp(d.hover_bg), from_cpp(d.text_color), from_cpp(d.border_color),
+            from_cpp(d.focus_border_color), d.border_width};
 }
 
 ETCH_API EtchPopupDesc etch_popup_desc_default(void) {
     const etch::PopupDesc d{};
     return {d.id, d.trigger_id, from_cpp(d.width), from_cpp(d.height), from_cpp(d.padding),
-            d.gap, from_cpp(d.background), from_cpp(d.border_color), from_cpp(d.radius), d.z_index,d.attach_to_trigger,d.match_trigger_width,d.scroll_y};
+            d.gap, from_cpp(d.background), from_cpp(d.border_color), from_cpp(d.radius), d.z_index,
+            d.attach_to_trigger, d.match_trigger_width, d.scroll_y, d.backdrop_blur,
+            d.shadow_blur, from_cpp(d.shadow_color), d.flip_on_overflow};
 }
 
 ETCH_API EtchMenuBarDesc etch_menu_bar_desc_default(void) {
@@ -722,7 +738,9 @@ ETCH_API EtchSplitDesc etch_split_desc_default(void) {
             d.id, static_cast<EtchAxis>(d.axis), from_cpp(d.width), from_cpp(d.height),
             d.default_ratio, d.min_first_px, d.min_second_px, d.divider_size_px,
             from_cpp(d.divider_color), from_cpp(d.divider_hover_color),
-            from_cpp(d.divider_active_color), d.divider_hit_px, d.keyboard_step_px};
+            from_cpp(d.divider_active_color), d.divider_hit_px, d.keyboard_step_px,
+            static_cast<EtchSplitSizing>(d.sizing), d.extent_px, d.default_extent_px,
+            d.show_grip, from_cpp(d.grip_color), d.hover_highlight_px};
 }
 
 ETCH_API EtchVirtualListDesc etch_virtual_list_desc_default(void) {
@@ -786,7 +804,7 @@ ETCH_API EtchCanvasWireDesc etch_canvas_wire_desc_default(void) {
     const etch::CanvasWireDesc d{};
     return {from_cpp(d.from_world), from_cpp(d.to_world), from_cpp(d.color_start),
             from_cpp(d.color_end), from_cpp(d.glow_color), d.thickness_world, d.glow_world,
-            d.tangent_bias, d.z_index};
+            d.tangent_bias, d.z_index, static_cast<EtchAxis>(d.axis)};
 }
 
 ETCH_API EtchCanvasNodeDesc etch_canvas_node_desc_default(void) {
@@ -866,6 +884,11 @@ ETCH_API EtchTheme etch_theme_light(void) { return from_cpp(etch::Theme::light()
 ETCH_API EtchColor etch_color_oklch(float L, float C, float hue_deg, float alpha) { return from_cpp(etch::Color::oklch(L,C,hue_deg,alpha)); }
 ETCH_API EtchColor etch_color_lerp_oklab(EtchColor a, EtchColor b, float t) { return from_cpp(etch::Color::lerp_oklab(to_cpp(a),to_cpp(b),t)); }
 ETCH_API EtchTheme etch_theme_from_seed(EtchColor seed, bool dark_mode, float chroma_scale) { return from_cpp(etch::Theme::from_seed(to_cpp(seed),dark_mode,chroma_scale)); }
+ETCH_API EtchTheme etch_theme_lerp_oklab(const EtchTheme* a, const EtchTheme* b, float t) {
+    const etch::Theme ta = a ? to_cpp(*a) : etch::Theme::dark();
+    const etch::Theme tb = b ? to_cpp(*b) : etch::Theme::dark();
+    return from_cpp(etch::Theme::lerp_oklab(ta, tb, t));
+}
 ETCH_API EtchSpringSpec etch_spring_spec_snappy(void) { return from_cpp(etch::SpringSpec::snappy()); }
 ETCH_API EtchSpringSpec etch_spring_spec_fluid(void) { return from_cpp(etch::SpringSpec::fluid()); }
 ETCH_API EtchSpringSpec etch_spring_spec_bouncy(void) { return from_cpp(etch::SpringSpec::bouncy()); }
@@ -920,6 +943,15 @@ ETCH_API uint16_t etch_load_font_memory(EtchContext* ctx, const void* data, size
 ETCH_API bool etch_set_font_tabular_numbers(EtchContext* ctx, uint16_t font_id, bool enabled) {
     return etch::set_font_tabular_numbers(to_ctx(ctx), font_id, enabled);
 }
+ETCH_API bool etch_set_font_fallback(EtchContext* ctx, uint16_t primary_font_id, uint16_t fallback_font_id) {
+    return etch::set_font_fallback(to_ctx(ctx), primary_font_id, fallback_font_id);
+}
+ETCH_API bool etch_set_font_scale_adjust(EtchContext* ctx, uint16_t font_id, float scale_factor) {
+    return etch::set_font_scale_adjust(to_ctx(ctx), font_id, scale_factor);
+}
+ETCH_API float etch_font_scale_adjust(const EtchContext* ctx, uint16_t font_id) {
+    return etch::font_scale_adjust(to_ctx(ctx), font_id);
+}
 ETCH_API void etch_set_hinted_small_text(EtchContext* ctx, bool enabled) {
     etch::set_hinted_small_text(to_ctx(ctx), enabled);
 }
@@ -936,6 +968,11 @@ ETCH_API EtchSvgStrokeDesc etch_svg_stroke_desc_default(void) {
             static_cast<EtchStrokeJoin>(d.join), d.miter_limit, d.slot_hint};
 }
 
+ETCH_API EtchSvgIconLayer etch_svg_icon_layer_default(void) {
+    const etch::SvgIconLayer l{};
+    return {from_cpp(l.path_d), l.stroked, etch_svg_stroke_desc_default(), l.color_slot, l.opacity};
+}
+
 ETCH_API uint16_t etch_register_svg_stroke_icon(EtchContext* ctx, EtchStr path, const EtchSvgStrokeDesc* d) {
     if (!d) return etch::register_svg_stroke_icon(to_ctx(ctx), to_cpp(path));
     if (d->cap < ETCH_STROKE_CAP_BUTT || d->cap > ETCH_STROKE_CAP_SQUARE ||
@@ -947,6 +984,44 @@ ETCH_API uint16_t etch_register_svg_stroke_icon(EtchContext* ctx, EtchStr path, 
 
 ETCH_API uint16_t etch_register_svg_icon(EtchContext* ctx, EtchStr svg_path_d, EtchVec4 view_box, uint16_t slot_hint) {
     return etch::register_svg_icon(to_ctx(ctx), to_cpp(svg_path_d), to_cpp(view_box), slot_hint);
+}
+
+ETCH_API uint16_t etch_register_svg_layered_icon(EtchContext* ctx, const EtchSvgIconLayer* layers, uint32_t layer_count, EtchVec4 view_box, uint16_t slot_hint) {
+    if (!layers || layer_count == 0u || layer_count > 4u) return ETCH_INVALID_ICON;
+    etch::SvgIconLayer cpp_layers[4] = {};
+    for (uint32_t i = 0u; i < layer_count; ++i) {
+        const EtchSvgIconLayer& l = layers[i];
+        if (l.stroked && (l.stroke.cap < ETCH_STROKE_CAP_BUTT || l.stroke.cap > ETCH_STROKE_CAP_SQUARE ||
+                          l.stroke.join < ETCH_STROKE_JOIN_MITER || l.stroke.join > ETCH_STROKE_JOIN_BEVEL)) {
+            return ETCH_INVALID_ICON;
+        }
+        cpp_layers[i] = {
+            to_cpp(l.path_d),
+            l.stroked,
+            {to_cpp(l.stroke.view_box), l.stroke.stroke_width, static_cast<etch::StrokeCap>(l.stroke.cap),
+             static_cast<etch::StrokeJoin>(l.stroke.join), l.stroke.miter_limit, l.stroke.slot_hint},
+            l.color_slot,
+            l.opacity,
+        };
+    }
+    return etch::register_svg_layered_icon(
+        to_ctx(ctx),
+        std::span<const etch::SvgIconLayer>(cpp_layers, layer_count),
+        to_cpp(view_box),
+        slot_hint);
+}
+
+ETCH_API uint16_t etch_register_svg_duotone_icon(EtchContext* ctx, EtchStr fill_path_d, EtchStr stroke_path_d, const EtchSvgStrokeDesc* stroke_desc, float fill_opacity) {
+    etch::SvgStrokeDesc s{};
+    if (stroke_desc) {
+        if (stroke_desc->cap < ETCH_STROKE_CAP_BUTT || stroke_desc->cap > ETCH_STROKE_CAP_SQUARE ||
+            stroke_desc->join < ETCH_STROKE_JOIN_MITER || stroke_desc->join > ETCH_STROKE_JOIN_BEVEL) {
+            return ETCH_INVALID_ICON;
+        }
+        s = {to_cpp(stroke_desc->view_box), stroke_desc->stroke_width, static_cast<etch::StrokeCap>(stroke_desc->cap),
+             static_cast<etch::StrokeJoin>(stroke_desc->join), stroke_desc->miter_limit, stroke_desc->slot_hint};
+    }
+    return etch::register_svg_duotone_icon(to_ctx(ctx), to_cpp(fill_path_d), to_cpp(stroke_path_d), s, fill_opacity);
 }
 
 ETCH_API bool etch_is_icon_loaded(const EtchContext* ctx, uint16_t icon_id) {
@@ -1143,6 +1218,15 @@ ETCH_API void etch_end_collapsible(void) { etch::end_collapsible(); }
 ETCH_API bool etch_is_collapsible_open(uint32_t element_id) { return etch::is_collapsible_open(element_id); }
 ETCH_API void etch_set_collapsible_open(uint32_t element_id, bool open) { etch::set_collapsible_open(element_id, open); }
 
+ETCH_API bool etch_begin_collapse(const EtchCollapseDesc* desc) {
+    if (!desc) return false;
+    EtchCollapseDesc scratch{};
+    const EtchCollapseDesc* d = resolve_c_desc(desc, &scratch, etch_collapse_desc_default);
+    if (!d) return false;
+    return etch::begin_collapse({d->id, d->open, to_cpp(d->spring), d->fade_content, to_cpp(d->width)});
+}
+ETCH_API void etch_end_collapse(void) { etch::end_collapse(); }
+
 ETCH_API void etch_image(const EtchImageDesc* desc) {
     if (!desc) return;
     etch::image({desc->id, desc->texture, desc->sprite_id, to_cpp(desc->width), to_cpp(desc->height),
@@ -1152,7 +1236,8 @@ ETCH_API void etch_image(const EtchImageDesc* desc) {
 }
 ETCH_API void etch_icon(const EtchIconDesc* desc) {
     if (!desc) return;
-    etch::icon({desc->id, desc->icon_id, desc->size_px, to_cpp(desc->color)});
+    etch::icon({desc->id, desc->icon_id, desc->size_px, to_cpp(desc->color),
+                desc->rotation_rad, desc->scale, desc->opacity, to_cpp(desc->secondary_color)});
 }
 
 ETCH_API void etch_draw_rect(const EtchRectDrawDesc* desc) {
@@ -1334,6 +1419,8 @@ ETCH_API EtchTextInputResult etch_text_input(const EtchTextInputDesc* desc) {
         d->word_wrap, d->read_only, d->password, d->context_menu, d->clear_button, d->escape_blurs, d->suppress_popup_keys,
         view_compatible_span<etch::TextInputHighlight>(d->highlights, d->highlights ? d->highlight_count : 0u),
         to_cpp(d->ghost_text), to_cpp(d->ghost_color), d->accept_ghost_on_tab, d->submit_on_enter,
+        to_cpp(d->hover_border_color), d->focus_glow_blur, d->leading_icon_id,
+        to_cpp(d->leading_icon_color), d->continuous_corners, d->disabled,
     });
     return {r.changed, r.submitted, r.focused, r.composing, r.byte_length,
             r.cursor_byte, r.selection_anchor_byte, from_cpp(r.ime_cursor_rect), r.ghost_accepted};
@@ -1544,7 +1631,8 @@ ETCH_API bool etch_toggle_switch(const EtchToggleSwitchDesc* desc) {
     if (!desc) return false;
     return etch::toggle_switch({desc->id, to_cpp(desc->label), desc->value, desc->disabled,
                                 desc->track_width_px, desc->track_height_px, desc->font_size_px,
-                                desc->font_id, to_cpp(desc->on_color), to_cpp(desc->off_color)});
+                                desc->font_id, to_cpp(desc->on_color), to_cpp(desc->off_color),
+                                to_cpp(desc->thumb_color), to_cpp(desc->border_color)});
 }
 ETCH_API void etch_progress_bar(const EtchProgressBarDesc* desc) {
     if (!desc) return;
@@ -1567,10 +1655,13 @@ ETCH_API EtchTabItemResult etch_tab_item(const EtchTabItemDesc* desc) {
 ETCH_API void etch_end_tab_bar(void) { etch::end_tab_bar(); }
 ETCH_API bool etch_slider(const EtchSliderDesc* desc) {
     if (!desc) return false;
+    if (desc->style < ETCH_SLIDER_TRACK || desc->style > ETCH_SLIDER_COMPACT_BAR) return false;
     return etch::slider({desc->id, to_cpp(desc->label), desc->value, desc->min_value, desc->max_value,
                          desc->step, desc->format, to_cpp(desc->width), desc->height_px,
                          desc->disabled, to_cpp(desc->background), to_cpp(desc->fill_color),
-                         to_cpp(desc->text_color)});
+                         to_cpp(desc->text_color), static_cast<etch::SliderStyle>(desc->style),
+                         to_cpp(desc->track_color), to_cpp(desc->thumb_color), desc->track_height_px,
+                         desc->thumb_size_px, desc->show_value});
 }
 ETCH_API bool etch_drag_value(const EtchDragValueDesc* desc) {
     if (!desc) return false;
@@ -1599,7 +1690,8 @@ ETCH_API bool etch_combo_box(const EtchComboBoxDesc* desc) {
                             view_compatible_span<etch::Str>(desc->items, desc->item_count),
                             to_cpp(desc->width), desc->height_px, desc->max_popup_height_px,
                             desc->disabled, to_cpp(desc->background), to_cpp(desc->hover_bg),
-                            to_cpp(desc->text_color)});
+                            to_cpp(desc->text_color), to_cpp(desc->border_color),
+                            to_cpp(desc->focus_border_color), desc->border_width});
 }
 ETCH_API void etch_open_popup(uint32_t popup_id, EtchVec2 anchor_pos) { etch::open_popup(popup_id, to_cpp(anchor_pos)); }
 ETCH_API void etch_close_popup(uint32_t popup_id) { etch::close_popup(popup_id); }
@@ -1608,7 +1700,10 @@ ETCH_API bool etch_begin_popup(const EtchPopupDesc* desc) {
     if (!desc) return false;
     return etch::begin_popup({desc->id, desc->trigger_id, to_cpp(desc->width), to_cpp(desc->height),
                               to_cpp(desc->padding), desc->gap, to_cpp(desc->background),
-                              to_cpp(desc->border_color), to_cpp(desc->radius), desc->z_index,desc->attach_to_trigger,desc->match_trigger_width,desc->scroll_y});
+                              to_cpp(desc->border_color), to_cpp(desc->radius), desc->z_index,
+                              desc->attach_to_trigger, desc->match_trigger_width, desc->scroll_y,
+                              desc->backdrop_blur, desc->shadow_blur, to_cpp(desc->shadow_color),
+                              desc->flip_on_overflow});
 }
 ETCH_API void etch_end_popup(void) { etch::end_popup(); }
 ETCH_API bool etch_begin_context_menu(uint32_t popup_id, uint32_t target_id) { return etch::begin_context_menu(popup_id, target_id); }
@@ -1739,23 +1834,32 @@ ETCH_API struct SDL_Window* etch_create_desktop_window(const char* title, float 
 ETCH_API struct SDL_Window* etch_create_desktop_window_on_display(const char* title,float w,float h,uint32_t display,uint64_t flags) {return etch::create_desktop_window_on_display(title,w,h,display,flags);}
 ETCH_API struct SDL_Window* etch_create_desktop_window_at_pointer(const char* title,float w,float h,uint64_t flags) {return etch::create_desktop_window_at_pointer(title,w,h,flags);}
 ETCH_API bool etch_set_desktop_window_min_size(struct SDL_Window* window,float w,float h) {return etch::set_desktop_window_min_size(window,w,h);}
+ETCH_API float etch_dpi_scale(const EtchContext* ctx) { return etch::dpi_scale(to_ctx(ctx)); }
+ETCH_API float etch_hairline_px(const EtchContext* ctx) { return etch::hairline_px(to_ctx(ctx)); }
 ETCH_API float etch_spring_from(uint32_t anim_id, float target, float initial_value, EtchSpringSpec spec) { return etch::spring(anim_id, target, initial_value, to_cpp(spec)); }
 ETCH_API float etch_spring(uint32_t anim_id, float target, EtchSpringSpec spec) { return etch::spring(anim_id, target, to_cpp(spec)); }
 ETCH_API EtchVec2 etch_spring_vec2(uint32_t anim_id, EtchVec2 target, EtchSpringSpec spec) { return from_cpp(etch::spring_vec2(anim_id, to_cpp(target), to_cpp(spec))); }
+ETCH_API EtchColor etch_spring_color(uint32_t anim_id, EtchColor target, EtchSpringSpec spec) { return from_cpp(etch::spring_color(anim_id, to_cpp(target), to_cpp(spec))); }
+ETCH_API float etch_spring_angle(uint32_t anim_id, float target_rad, EtchSpringSpec spec) { return etch::spring_angle(anim_id, target_rad, to_cpp(spec)); }
 ETCH_API EtchVec2 etch_scroll_delta(void) { return from_cpp(etch::scroll_delta()); }
 ETCH_API EtchVec2 etch_scroll_max(uint32_t element_id) { return from_cpp(etch::scroll_max(element_id)); }
 ETCH_API EtchVec2 etch_scroll_offset(uint32_t element_id) { return from_cpp(etch::scroll_offset(element_id)); }
 ETCH_API void etch_set_scroll_offset(uint32_t element_id, EtchVec2 offset, bool stop_momentum) { etch::set_scroll_offset(element_id, to_cpp(offset), stop_momentum); }
+ETCH_API bool etch_scroll_stuck_to_bottom(uint32_t element_id) { return etch::scroll_stuck_to_bottom(element_id); }
+ETCH_API void etch_set_scroll_stuck_to_bottom(uint32_t element_id, bool stuck) { etch::set_scroll_stuck_to_bottom(element_id, stuck); }
 
 ETCH_API EtchSplitResult etch_begin_split(const EtchSplitDesc* desc) {
     if (!desc) return {};
     EtchSplitDesc scratch{};
     const EtchSplitDesc* d = resolve_c_desc(desc, &scratch, etch_split_desc_default);
     if (!d) return {};
+    if (d->sizing < ETCH_SPLIT_RATIO || d->sizing > ETCH_SPLIT_SECOND_FIXED_PX) return {};
     const etch::SplitResult r = etch::begin_split({
         d->id, static_cast<etch::Axis>(d->axis), to_cpp(d->width), to_cpp(d->height),
         d->default_ratio, d->min_first_px, d->min_second_px, d->divider_size_px,
-        to_cpp(d->divider_color), to_cpp(d->divider_hover_color), to_cpp(d->divider_active_color), d->divider_hit_px, d->keyboard_step_px});
+        to_cpp(d->divider_color), to_cpp(d->divider_hover_color), to_cpp(d->divider_active_color),
+        d->divider_hit_px, d->keyboard_step_px, static_cast<etch::SplitSizing>(d->sizing),
+        d->extent_px, d->default_extent_px, d->show_grip, to_cpp(d->grip_color), d->hover_highlight_px});
     return {r.ratio, r.dragging};
 }
 ETCH_API void etch_split_second(void) { etch::split_second(); }
@@ -1885,7 +1989,8 @@ ETCH_API void etch_canvas_wire(const EtchCanvasWireDesc* desc) {
     if (!desc) return;
     etch::canvas_wire({to_cpp(desc->from_world), to_cpp(desc->to_world), to_cpp(desc->color_start),
                        to_cpp(desc->color_end), to_cpp(desc->glow_color), desc->thickness_world,
-                       desc->glow_world, desc->tangent_bias, desc->z_index});
+                       desc->glow_world, desc->tangent_bias, desc->z_index,
+                       static_cast<etch::Axis>(desc->axis)});
 }
 ETCH_API EtchCanvasNodeResult etch_begin_canvas_node(const EtchCanvasNodeDesc* desc) {
     if (!desc) return {};
