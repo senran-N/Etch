@@ -1441,8 +1441,7 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
     if (std::fabs(dpi - ctx->active_ui->applied_dpi_scale) > 1e-4f) {
         ctx->active_ui->applied_dpi_scale = dpi;
         if (ctx->active_ui->frame_index > 1u && ctx->atlas.hinted_count > 0u) {
-            ctx->atlas.hinted_gc_pending = true;
-            maybe_gc_hinted_atlas(ctx);
+            reset_hinted_atlas_cache(&ctx->atlas);
         }
         ctx->active_ui->applied_ime_rect = {-1, -1, 0, 0};
         ctx->active_ui->applied_ime_cursor = -1;

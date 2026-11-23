@@ -3161,6 +3161,31 @@ Context* create_context(const ContextDesc& desc) noexcept {
 #if defined(_WIN32)
     BOOL animation_enabled=TRUE;
     if(desc.respect_reduced_motion && SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION,0,&animation_enabled,0)) ctx->reduced_motion=!animation_enabled;
+#elif defined(__APPLE__) && defined(__MACH__)
+    if (desc.respect_reduced_motion) {
+        if (Class ws_cls = objc_getClass("NSWorkspace")) {
+            using SharedFn = ::id (*)(Class, SEL);
+            using BoolFn = signed char (*)(::id, SEL);
+            ::id ws = reinterpret_cast<SharedFn>(objc_msgSend)(ws_cls, sel_registerName("sharedWorkspace"));
+            if (ws) {
+                const SEL sel_rm = sel_registerName("accessibilityDisplayShouldReduceMotion");
+                using RespFn = signed char (*)(::id, SEL, SEL);
+                if (reinterpret_cast<RespFn>(objc_msgSend)(ws, sel_registerName("respondsToSelector:"), sel_rm)) {
+                    ctx->reduced_motion = reinterpret_cast<BoolFn>(objc_msgSend)(ws, sel_rm) != 0;
+                }
+            }
+        }
+    }
+#elif defined(__linux__)
+    if (desc.respect_reduced_motion) {
+        const char* gtk_anim = SDL_getenv("GTK_ENABLE_ANIMATIONS");
+        const char* etch_rm = SDL_getenv("ETCH_REDUCED_MOTION");
+        if ((gtk_anim && gtk_anim[0] == '0' && gtk_anim[1] == '\0') ||
+            (etch_rm && (etch_rm[0] == '1' || etch_rm[0] == 't' || etch_rm[0] == 'T')))
+        {
+            ctx->reduced_motion = true;
+        }
+    }
 #endif
     ctx->enable_os_a11y = desc.enable_os_a11y;
     ctx->refresh_fn = desc.on_window_refresh;
@@ -4002,12 +4027,14 @@ bool verify_arena_exhausted_glyph_pipeline_and_caches() noexcept {
         auto& a = ctx->atlas;
         const uint32_t sv_w = a.subpixel_w, sv_h = a.subpixel_h;
         const uint32_t sv_x0 = a.subpixel_shelf_x0, sv_x = a.subpixel_shelf_x, sv_y = a.subpixel_shelf_y, sv_sh = a.subpixel_shelf_h;
+        const uint32_t sv_sc = a.hinted_shelf_count;
         a.subpixel_w = 4096u;
         a.subpixel_h = 4096u;
         a.subpixel_shelf_x0 = 4096u;
         a.subpixel_shelf_x = 4096u;
         a.subpixel_shelf_y = 4096u;
         a.subpixel_shelf_h = 0u;
+        a.hinted_shelf_count = 0u;
         const EmojiBitmapEntry he_fail = get_or_cache_hinted_glyph(ctx, kFontSans, static_cast<uint32_t>(gid_g), 14.0f, 0u);
         a.subpixel_w = sv_w;
         a.subpixel_h = sv_h;
@@ -4015,6 +4042,7 @@ bool verify_arena_exhausted_glyph_pipeline_and_caches() noexcept {
         a.subpixel_shelf_x = sv_x;
         a.subpixel_shelf_y = sv_y;
         a.subpixel_shelf_h = sv_sh;
+        a.hinted_shelf_count = sv_sc;
         a.hinted_gc_pending = false;
         if (he_fail.has_bitmap) {
             ctx->frame_arena.offset = saved_offset;
@@ -4103,8 +4131,142 @@ bool verify_arena_exhausted_glyph_pipeline_and_caches() noexcept {
         if (!ok || !saw_512x512 || !saw_512x1024 || !saw_1024x1024 || !saw_2048x1024 ||
             !gc_reclaimed || !deferred_ok || !switched_next_frame)
         {
+            std::fprintf(stderr, "atlas test3 failed: ok=%d 512=%d 512x1024=%d 1024=%d 2048=%d gc=%d def=%d sw=%d\n",
+                         int(ok), int(saw_512x512), int(saw_512x1024), int(saw_1024x1024), int(saw_2048x1024),
+                         int(gc_reclaimed), int(deferred_ok), int(switched_next_frame));
             return false;
         }
+    }
+
+    // 4. True LRU hinted atlas shelf reclamation, burst hot-glyph compaction, and 1024-entry ShapeCache.
+    {
+        Context* ctx = create_context({.headless = true});
+        if (!ctx) return false;
+        Context* prev_ctx4 = current_context();
+        // Initialize headless active_ui once so frame_index tracking matches real frames.
+        begin_frame(ctx, {.viewport_w = 400, .viewport_h = 200});
+        end_frame(ctx);
+        auto& a = ctx->atlas;
+        auto insert_synthetic = [&](uint64_t key, uint32_t frame, uint8_t sentinel) noexcept -> bool {
+            ctx->active_ui->frame_index = frame;
+            if (!a.hinted_cap || (a.hinted_count + 1u) * 4u > a.hinted_cap * 3u) {
+                if (!hinted_rehash(&a)) return false;
+            }
+            uint32_t tx = 0u, ty = 0u;
+            uint16_t si = UINT16_MAX;
+            if (!ensure_subpixel_atlas(ctx, 24u, 24u, &tx, &ty, &si)) return false;
+            for (uint32_t r = 0u; r < 24u; ++r) {
+                std::memset(a.subpixel_pixels + size_t(ty + r) * a.subpixel_w + tx, sentinel, 24u);
+            }
+            uint32_t idx = uint32_t(hash_u64(key)) & (a.hinted_cap - 1u);
+            while (a.hinted_glyphs[idx].key) idx = (idx + 1u) & (a.hinted_cap - 1u);
+            EmojiBitmapEntry e{};
+            e.key = key;
+            e.tile_x = tx;
+            e.tile_y = ty;
+            e.width_px = 24u;
+            e.height_px = 24u;
+            e.last_used_frame = frame;
+            e.shelf_idx = si;
+            e.has_bitmap = true;
+            a.hinted_glyphs[idx] = e;
+            ++a.hinted_count;
+            return true;
+        };
+        auto find_synthetic = [&](uint64_t key) noexcept -> const EmojiBitmapEntry* {
+            if (!a.hinted_glyphs || !a.hinted_cap) return nullptr;
+            uint32_t idx = uint32_t(hash_u64(key)) & (a.hinted_cap - 1u);
+            while (a.hinted_glyphs[idx].key) {
+                if (a.hinted_glyphs[idx].key == key) return &a.hinted_glyphs[idx];
+                idx = (idx + 1u) & (a.hinted_cap - 1u);
+            }
+            return nullptr;
+        };
+
+        bool ok = true;
+        // Fill steady-state 1024x1024 with cold glyphs (frames 1..5), then hot glyphs (frame 20).
+        for (uint32_t i = 0u; i < 2000u; ++i) {
+            if (!insert_synthetic(0x0100000000000000ULL | uint64_t(i + 1u), 1u + (i / 300u), 0x33u)) {
+                ok = false;
+                break;
+            }
+            if (a.subpixel_w == 1024u && a.subpixel_h == 1024u && a.subpixel_shelf_y >= 880u) break;
+        }
+        constexpr uint32_t kHotCount = 16u;
+        uint32_t hot_x[kHotCount] = {};
+        uint32_t hot_y[kHotCount] = {};
+        for (uint32_t i = 0u; i < kHotCount && ok; ++i) {
+            const uint64_t hk = 0x0200000000000000ULL | uint64_t(i + 1u);
+            ok &= insert_synthetic(hk, 20u, 0x7Au);
+            if (const auto* e = find_synthetic(hk)) {
+                hot_x[i] = e->tile_x;
+                hot_y[i] = e->tile_y;
+            } else {
+                ok = false;
+            }
+        }
+        const uint32_t before_gc_count = a.hinted_count;
+        a.hinted_gc_pending = true;
+        maybe_gc_hinted_atlas(ctx);
+        // Steady-state LRU must keep 1024x1024 alive, evict cold shelves, and keep every hot glyph untouched in place.
+        const bool steady_dim_ok = (a.subpixel_pixels != nullptr && a.subpixel_w == 1024u && a.subpixel_h == 1024u);
+        const bool steady_cnt_ok = (a.hinted_count < before_gc_count && a.hinted_count >= kHotCount);
+        bool steady_hot_ok = true;
+        for (uint32_t i = 0u; i < kHotCount; ++i) {
+            const auto* e = find_synthetic(0x0200000000000000ULL | uint64_t(i + 1u));
+            steady_hot_ok &= (e != nullptr && e->tile_x == hot_x[i] && e->tile_y == hot_y[i] &&
+                              a.subpixel_pixels && a.subpixel_pixels[size_t(e->tile_y) * a.subpixel_w + e->tile_x] == 0x7Au);
+        }
+        // New allocations reuse reclaimed shelves without bursting to 2048x1024.
+        bool reuse_ok = true;
+        for (uint32_t i = 0u; i < 64u && reuse_ok; ++i) {
+            reuse_ok &= insert_synthetic(0x0300000000000000ULL | uint64_t(i + 1u), 21u, 0x55u);
+        }
+        reuse_ok &= (a.subpixel_w == 1024u && a.subpixel_h == 1024u);
+
+        // Now force burst to 2048x1024, add ultra-hot frame-50 glyphs, and verify shrink-back compaction preserves them.
+        for (uint32_t i = 0u; i < 2500u && ok && a.subpixel_w < 2048u; ++i) {
+            ok &= insert_synthetic(0x0400000000000000ULL | uint64_t(i + 1u), 25u, 0x44u);
+        }
+        const bool burst_reached = (a.subpixel_w == 2048u && a.subpixel_h == 1024u && a.hinted_gc_pending);
+        for (uint32_t i = 0u; i < kHotCount && ok; ++i) {
+            ok &= insert_synthetic(0x0500000000000000ULL | uint64_t(i + 1u), 50u, 0xC3u);
+        }
+        const uint32_t burst_count = a.hinted_count;
+        maybe_gc_hinted_atlas(ctx);
+        const bool compact_dim_ok = (a.subpixel_pixels != nullptr && a.subpixel_w == 1024u && a.subpixel_h == 1024u && !a.hinted_gc_pending);
+        const bool compact_cnt_ok = (a.hinted_count < burst_count && a.hinted_count >= kHotCount);
+        bool compact_hot_ok = true;
+        for (uint32_t i = 0u; i < kHotCount; ++i) {
+            const auto* e = find_synthetic(0x0500000000000000ULL | uint64_t(i + 1u));
+            compact_hot_ok &= (e != nullptr && e->tile_x + 24u <= 1024u && e->tile_y + 24u <= 1024u &&
+                               a.subpixel_pixels && a.subpixel_pixels[size_t(e->tile_y) * a.subpixel_w + e->tile_x] == 0xC3u);
+        }
+
+        // Verify ShapeCache handles >512 distinct strings in one frame without saturating a bank.
+        static_assert(Context::ShapeCache::kEntryCap >= 1024u, "ShapeCache bank must support high-density frames");
+        begin_frame(ctx, {.viewport_w = 400, .viewport_h = 200});
+        bool shape_ok = true;
+        for (uint32_t i = 0u; i < 600u && shape_ok; ++i) {
+            char buf[32];
+            const int len = std::snprintf(buf, sizeof(buf), "cell_%04u_val", i);
+            const Vec2 sz = measure_text(Str{buf, static_cast<uint32_t>(len)}, kFontSans, 13.0f);
+            shape_ok &= (sz.x > 0.0f);
+        }
+        const uint32_t sc_entries = ctx->shape_cache.initialized ? ctx->shape_cache.banks[ctx->shape_cache.active_bank].entry_count : 0u;
+        shape_ok &= (sc_entries >= 580u);
+        end_frame(ctx);
+        ok &= steady_dim_ok && steady_cnt_ok && steady_hot_ok && reuse_ok &&
+              burst_reached && compact_dim_ok && compact_cnt_ok && compact_hot_ok && shape_ok;
+        if (!ok) {
+            std::fprintf(stderr, "atlas test4 failed: sdim=%d scnt=%d shot=%d reuse=%d brea=%d cdim=%d ccnt=%d chot=%d shape=%d(n=%u)\n",
+                         int(steady_dim_ok), int(steady_cnt_ok), int(steady_hot_ok), int(reuse_ok),
+                         int(burst_reached), int(compact_dim_ok), int(compact_cnt_ok), int(compact_hot_ok),
+                         int(shape_ok), sc_entries);
+        }
+        destroy_context(ctx);
+        set_current_context(prev_ctx4);
+        if (!ok) return false;
     }
 
     return true;

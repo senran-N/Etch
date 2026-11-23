@@ -142,6 +142,7 @@ inline bool verify_closure_gpu() noexcept {
         ok &= pixel(12,62,0)>240 && pixel(88,62,0)<10 && pixel(88,138,0)>240;
         ok &= pixel(228,80,0)>240 && pixel(284,80,0)<10 && pixel(337,80,0)<10;
         SDL_DestroySurface(surface);
+        std::remove("closure-surfaces.png");
     }
     ok &= flush_texture_uploads(ctx);
     for(auto& texture:textures)destroy_texture(ctx,&texture);

@@ -16,9 +16,9 @@ const BidiBracket* bidi_bracket(uint32_t cp) noexcept {
     return lo < ETCH_COUNTOF(kBidiBrackets) && kBidiBrackets[lo].cp == cp ? &kBidiBrackets[lo] : nullptr;
 }
 
-constexpr uint32_t kShapeCacheEntryCap = 256u;
-constexpr uint32_t kShapeCacheGlyphCap = 2048u;
-constexpr uint32_t kShapeCacheTextCap  = 8192u;
+constexpr uint32_t kShapeCacheEntryCap = Context::ShapeCache::kEntryCap;
+constexpr uint32_t kShapeCacheGlyphCap = Context::ShapeCache::kGlyphCap;
+constexpr uint32_t kShapeCacheTextCap  = Context::ShapeCache::kTextCap;
 
 bool shape_cache_ensure(Context* ctx) noexcept {
     auto& sc = ctx->shape_cache;
@@ -84,7 +84,7 @@ bool shape_cache_find_in_bank(
     if (!b.entries || b.entry_count == 0u) return false;
     constexpr uint32_t mask = kShapeCacheEntryCap - 1u;
     uint32_t idx = static_cast<uint32_t>(hash) & mask;
-    for (uint32_t probe = 0u; probe < 16u; ++probe) {
+    for (uint32_t probe = 0u; probe < 32u; ++probe) {
         const auto& e = b.entries[idx];
         if (!e.used) return false;
         if (e.hash == hash && e.font_slot == slot && e.font_revision == font_rev &&
@@ -118,7 +118,7 @@ std::span<const ShapedGlyph> shape_cache_insert(
     }
     constexpr uint32_t mask = kShapeCacheEntryCap - 1u;
     uint32_t idx = static_cast<uint32_t>(hash) & mask;
-    for (uint32_t probe = 0u; probe < 16u; ++probe) {
+    for (uint32_t probe = 0u; probe < 32u; ++probe) {
         auto& e = b.entries[idx];
         if (!e.used) {
             const uint32_t toff = b.text_used;

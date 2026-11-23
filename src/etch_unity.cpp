@@ -67,10 +67,15 @@
 #    include <windows.h>
 #    include <dwrite.h>
 #else
+#    include <dlfcn.h>
 #    include <fcntl.h>
 #    include <sys/mman.h>
 #    include <sys/stat.h>
 #    include <unistd.h>
+#    if defined(__APPLE__) && defined(__MACH__)
+#        include <objc/message.h>
+#        include <objc/runtime.h>
+#    endif
 #endif
 
 #include "etch_layout_engine.cpp"

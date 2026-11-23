@@ -322,7 +322,12 @@ struct EmojiBitmapEntry {
     uint32_t tile_x = 0, tile_y = 0;
     uint32_t last_used_frame = 0;
     float bearing_x = 0, bearing_y_top = 0;
+    uint16_t shelf_idx = UINT16_MAX;
     bool has_bitmap = false;
+};
+struct HintedShelf {
+    uint16_t x0 = 0, y = 0, max_x = 0, h = 0, cursor_x = 0, live_count = 0;
+    uint32_t last_used_frame = 0;
 };
 struct FontAtlas {
     Arena* scratch = nullptr;
@@ -357,6 +362,9 @@ struct FontAtlas {
     uint32_t subpixel_w = 0, subpixel_h = 0, subpixel_gpu_w = 0, subpixel_gpu_h = 0;
     uint32_t subpixel_dirty_y0 = UINT32_MAX, subpixel_dirty_y1 = 0;
     uint32_t subpixel_shelf_x0 = 1, subpixel_shelf_x = 0, subpixel_shelf_y = 2, subpixel_shelf_h = 0;
+    static constexpr uint32_t kMaxHintedShelves = 256u;
+    HintedShelf hinted_shelves[kMaxHintedShelves] = {};
+    uint32_t hinted_shelf_count = 0;
     uint32_t subpixel_clean_frames = 0;
     bool subpixel_dirty = false;
     bool subpixel_is_r8 = true;
@@ -1270,7 +1278,7 @@ struct Context {
         uint32_t         text_used = 0;
     };
     struct ShapeCache {
-        static constexpr uint32_t kEntryCap = 512u;
+        static constexpr uint32_t kEntryCap = 1024u;
         static constexpr uint32_t kGlyphCap = 8192u;
         static constexpr uint32_t kTextCap  = 32768u;
         ShapeCacheBank banks[2] = {};

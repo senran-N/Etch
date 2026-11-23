@@ -260,7 +260,12 @@ SemiBold probes `seguisb.ttf`. Missing faces render with Sans, and
 `is_font_loaded(ctx, slot)` reports whether the requested face actually loaded.
 Applications can load their own faces into those slots. Automatic allocation
 uses free custom slots from 3 through 63, skipping slots 14, 15, and 16. Etch
-supports up to 64 font slots and 1024 vector icons. Variable-font axis selection is not implemented.
+supports up to 64 font slots and 1024 vector icons. Variable-font axis selection
+is supported via `create_font_variation` (`etch_create_font_variation` in C99)
+with deduplicated axis slots, HarfBuzz outline shaping, and platform hinted
+rasterization (DirectWrite `IDWriteFontFace5`, CoreText, and FreeType via
+`ETCH_USE_FREETYPE=ON` on Linux). The hinted glyph atlas performs shelf-aware
+LRU reclamation in steady state and hot-glyph compaction on burst shrink-back.
 Before starting a frame, call `set_font_tabular_numbers(ctx, font_id, true)` to
 request OpenType `tnum` consistently in measured and rendered text. The font must
 provide the feature; it is not synthesized. Load a separate custom slot if prose
@@ -371,8 +376,10 @@ and visual layers. Captured drags may map points outside the box. Visible bounds
 intersect ancestor clip bounding rectangles; rounded masks and sibling overlap
 still require the host's hit-testing policy. Outputs remain unchanged on failure.
 
-Release candidate scope: Etch 0.18 pairs with Inlay 0.6 using public C++20/C99
-APIs. Windows Vulkan and D3D12 are the local verification targets. Metal and
-Linux Vulkan Wayland/X11 still require real-hardware CI sign-off; this is a
-pre-1.0 release. Idle UI batching/sleep and bounded frame-arena use are covered
-by the CPU/GPU regression suites. Inlay remains a separate optional consumer.
+Release candidate scope: Etch 0.28 pairs with Inlay 0.13 using public C++20/C99
+APIs. Windows Vulkan and D3D12 are the locally verified Tier-1 targets. Metal and
+Linux Vulkan Wayland/X11 backends (including FreeType hinting, Fontconfig/CoreText
+system font lookup, macOS `NSAccessibility` hierarchy, and Linux AT-SPI2 / optional
+AccessKit C bridges) are implemented in-tree and still await real-hardware CI
+sign-off; this is a pre-1.0 release. Idle UI batching/sleep and bounded frame-arena
+use are covered by the CPU/GPU regression suites. Inlay remains a separate optional consumer.

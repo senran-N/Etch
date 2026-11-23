@@ -3922,9 +3922,102 @@ signed char macos_a11y_is_focused(::id self, SEL) noexcept {
     return (n > 0) ? macos_nsstring(buf, static_cast<uint32_t>(n)) : nullptr;
 }
 
+::id macos_find_item_elem(MacOsA11ySlot* mac, uint32_t elem_id) noexcept {
+    if (!mac || elem_id == 0u) return nullptr;
+    for (uint32_t i = 0u; i < mac->item_count; ++i) {
+        if (mac->items[i].element_id == elem_id) return mac->items[i].ns_elem;
+    }
+    return nullptr;
+}
+
 ::id macos_a11y_parent(::id self, SEL) noexcept {
     MacOsA11yItem* item = macos_a11y_get_item(self);
-    return (item && item->slot) ? item->slot->content_view : nullptr;
+    if (!item || !item->slot) return nullptr;
+    const A11yNode* an = macos_a11y_live_node(item);
+    if (an && an->parent_id != 0u) {
+        if (::id parent_elem = macos_find_item_elem(item->slot, an->parent_id)) {
+            return parent_elem;
+        }
+    }
+    return item->slot->content_view;
+}
+
+::id macos_a11y_children(::id self, SEL) noexcept {
+    MacOsA11yItem* item = macos_a11y_get_item(self);
+    const A11yNode* an = macos_a11y_live_node(item);
+    if (!an || !item || !item->slot || !item->slot->ctx || !item->slot->window) return nullptr;
+    const auto span = frame_a11y_nodes(item->slot->ctx, item->slot->window);
+    const uint32_t count = static_cast<uint32_t>(span.size());
+    Class ns_marr = objc_getClass("NSMutableArray");
+    if (!ns_marr) return nullptr;
+    using ArrFn = ::id (*)(Class, SEL);
+    using AddObjFn = void (*)(::id, SEL, ::id);
+    ::id arr = reinterpret_cast<ArrFn>(objc_msgSend)(ns_marr, sel_registerName("array"));
+    if (!arr) return nullptr;
+    for (uint32_t ci = an->first_child_idx; ci < count; ci = span[ci].next_sibling_idx) {
+        if (::id child = macos_find_item_elem(item->slot, span[ci].id)) {
+            reinterpret_cast<AddObjFn>(objc_msgSend)(arr, sel_registerName("addObject:"), child);
+        }
+    }
+    return arr;
+}
+
+::id macos_a11y_min_value(::id self, SEL) noexcept {
+    const A11yNode* an = macos_a11y_live_node(macos_a11y_get_item(self));
+    if (!an || (an->role != A11yRole::Slider && an->role != A11yRole::SpinButton && an->role != A11yRole::ProgressBar)) return nullptr;
+    Class ns_num = objc_getClass("NSNumber");
+    using NumDoubleFn = ::id (*)(Class, SEL, double);
+    return ns_num ? reinterpret_cast<NumDoubleFn>(objc_msgSend)(ns_num, sel_registerName("numberWithDouble:"), static_cast<double>(an->min_value)) : nullptr;
+}
+
+::id macos_a11y_max_value(::id self, SEL) noexcept {
+    const A11yNode* an = macos_a11y_live_node(macos_a11y_get_item(self));
+    if (!an || (an->role != A11yRole::Slider && an->role != A11yRole::SpinButton && an->role != A11yRole::ProgressBar)) return nullptr;
+    Class ns_num = objc_getClass("NSNumber");
+    using NumDoubleFn = ::id (*)(Class, SEL, double);
+    return ns_num ? reinterpret_cast<NumDoubleFn>(objc_msgSend)(ns_num, sel_registerName("numberWithDouble:"), static_cast<double>(an->max_value)) : nullptr;
+}
+
+signed char macos_a11y_is_selected(::id self, SEL) noexcept {
+    const A11yNode* an = macos_a11y_live_node(macos_a11y_get_item(self));
+    return (an && (an->state_flags & A11yState_Selected) != 0u) ? static_cast<signed char>(1) : static_cast<signed char>(0);
+}
+
+void macos_a11y_set_focused(::id self, SEL, signed char focused) noexcept {
+    MacOsA11yItem* item = macos_a11y_get_item(self);
+    if (!focused || !item || !item->slot || !item->slot->ctx || !item->slot->window) return;
+    (void)perform_a11y_action(item->element_id, A11yAction::Focus, 0.0f, {}, item->slot->ctx, item->slot->window);
+}
+
+void macos_a11y_set_value(::id self, SEL, ::id val) noexcept {
+    MacOsA11yItem* item = macos_a11y_get_item(self);
+    if (!val || !item || !item->slot || !item->slot->ctx || !item->slot->window) return;
+    using RespFn = signed char (*)(::id, SEL, SEL);
+    const SEL sel_utf8 = sel_registerName("UTF8String");
+    const SEL sel_dbl = sel_registerName("doubleValue");
+    if (reinterpret_cast<RespFn>(objc_msgSend)(val, sel_registerName("respondsToSelector:"), sel_utf8)) {
+        using Utf8Fn = const char* (*)(::id, SEL);
+        const char* s = reinterpret_cast<Utf8Fn>(objc_msgSend)(val, sel_utf8);
+        if (s) {
+            (void)perform_a11y_action(item->element_id, A11yAction::SetValue, 0.0f, str_cstr(s), item->slot->ctx, item->slot->window);
+        }
+    } else if (reinterpret_cast<RespFn>(objc_msgSend)(val, sel_registerName("respondsToSelector:"), sel_dbl)) {
+        using DblFn = double (*)(::id, SEL);
+        const float num = static_cast<float>(reinterpret_cast<DblFn>(objc_msgSend)(val, sel_dbl));
+        (void)perform_a11y_action(item->element_id, A11yAction::SetValue, num, {}, item->slot->ctx, item->slot->window);
+    }
+}
+
+signed char macos_a11y_perform_inc(::id self, SEL) noexcept {
+    MacOsA11yItem* item = macos_a11y_get_item(self);
+    if (!item || !item->slot || !item->slot->ctx || !item->slot->window) return 0;
+    return perform_a11y_action(item->element_id, A11yAction::Increment, 0.0f, {}, item->slot->ctx, item->slot->window) ? 1 : 0;
+}
+
+signed char macos_a11y_perform_dec(::id self, SEL) noexcept {
+    MacOsA11yItem* item = macos_a11y_get_item(self);
+    if (!item || !item->slot || !item->slot->ctx || !item->slot->window) return 0;
+    return perform_a11y_action(item->element_id, A11yAction::Decrement, 0.0f, {}, item->slot->ctx, item->slot->window) ? 1 : 0;
 }
 
 CGRect macos_a11y_frame(::id self, SEL) noexcept {
@@ -3967,13 +4060,21 @@ bool ensure_macos_a11y_runtime() noexcept {
         class_addMethod(cls, sel_registerName("isAccessibilityElement"), reinterpret_cast<IMP>(macos_a11y_is_elem), "c@:");
         class_addMethod(cls, sel_registerName("isAccessibilityEnabled"), reinterpret_cast<IMP>(macos_a11y_is_enabled), "c@:");
         class_addMethod(cls, sel_registerName("isAccessibilityFocused"), reinterpret_cast<IMP>(macos_a11y_is_focused), "c@:");
+        class_addMethod(cls, sel_registerName("isAccessibilitySelected"), reinterpret_cast<IMP>(macos_a11y_is_selected), "c@:");
         class_addMethod(cls, sel_registerName("accessibilityRole"), reinterpret_cast<IMP>(macos_a11y_role), "@@:");
         class_addMethod(cls, sel_registerName("accessibilityLabel"), reinterpret_cast<IMP>(macos_a11y_label), "@@:");
         class_addMethod(cls, sel_registerName("accessibilityValue"), reinterpret_cast<IMP>(macos_a11y_value), "@@:");
+        class_addMethod(cls, sel_registerName("accessibilityMinValue"), reinterpret_cast<IMP>(macos_a11y_min_value), "@@:");
+        class_addMethod(cls, sel_registerName("accessibilityMaxValue"), reinterpret_cast<IMP>(macos_a11y_max_value), "@@:");
         class_addMethod(cls, sel_registerName("accessibilityIdentifier"), reinterpret_cast<IMP>(macos_a11y_identifier), "@@:");
         class_addMethod(cls, sel_registerName("accessibilityParent"), reinterpret_cast<IMP>(macos_a11y_parent), "@@:");
+        class_addMethod(cls, sel_registerName("accessibilityChildren"), reinterpret_cast<IMP>(macos_a11y_children), "@@:");
+        class_addMethod(cls, sel_registerName("setAccessibilityFocused:"), reinterpret_cast<IMP>(macos_a11y_set_focused), "v@:c");
+        class_addMethod(cls, sel_registerName("setAccessibilityValue:"), reinterpret_cast<IMP>(macos_a11y_set_value), "v@:@");
         class_addMethod(cls, sel_registerName("accessibilityFrame"), reinterpret_cast<IMP>(macos_a11y_frame), "{CGRect={CGPoint=dd}{CGSize=dd}}@:");
         class_addMethod(cls, sel_registerName("accessibilityPerformPress"), reinterpret_cast<IMP>(macos_a11y_perform_press), "c@:");
+        class_addMethod(cls, sel_registerName("accessibilityPerformIncrement"), reinterpret_cast<IMP>(macos_a11y_perform_inc), "c@:");
+        class_addMethod(cls, sel_registerName("accessibilityPerformDecrement"), reinterpret_cast<IMP>(macos_a11y_perform_dec), "c@:");
         objc_registerClassPair(cls);
     }
     g_macos_a11y.elem_cls = cls;
@@ -4066,9 +4167,12 @@ void macos_a11y_notify_commit(Context* ctx, ClaimedWindowSlot* slot) noexcept {
         using InitIdFn = ::id (*)(::id, SEL);
         using SetIdFn = void (*)(::id, SEL, ::id);
         ::id arr = ns_marr ? reinterpret_cast<ArrCapFn>(objc_msgSend)(ns_marr, sel_registerName("arrayWithCapacity:"), count) : nullptr;
+        const uint32_t root_id = (count > 0u) ? span[0].id : 0u;
         for (uint32_t i = 1u; i < count; ++i) {
             const A11yNode& an = span[i];
-            if (an.role == A11yRole::Group && an.label.length == 0u && an.value_text.length == 0u && an.actions_mask == 0u) {
+            if (an.role == A11yRole::Group && an.first_child_idx == 0xFFFFFFFFu &&
+                an.label.length == 0u && an.value_text.length == 0u && an.actions_mask == 0u)
+            {
                 continue;
             }
             ::id obj = reinterpret_cast<AllocClsFn>(objc_msgSend)(g_macos_a11y.elem_cls, sel_registerName("alloc"));
@@ -4080,8 +4184,15 @@ void macos_a11y_notify_commit(Context* ctx, ClaimedWindowSlot* slot) noexcept {
             it.ns_elem = obj;
             it.element_id = an.id;
             objc_setAssociatedObject(obj, &kMacOsA11yAssocKey, reinterpret_cast<::id>(&it), OBJC_ASSOCIATION_ASSIGN);
-            if (arr) {
-                reinterpret_cast<AddObjFn>(objc_msgSend)(arr, sel_registerName("addObject:"), obj);
+        }
+        if (arr) {
+            for (uint32_t i = 0u; i < mac->item_count; ++i) {
+                const A11yNode* an = find_a11y_node(mac->items[i].element_id, ctx, slot->window);
+                if (!an || an->parent_id == 0u || an->parent_id == root_id ||
+                    macos_find_item_elem(mac, an->parent_id) == nullptr)
+                {
+                    reinterpret_cast<AddObjFn>(objc_msgSend)(arr, sel_registerName("addObject:"), mac->items[i].ns_elem);
+                }
             }
         }
         if (mac->content_view && arr) {
@@ -4159,6 +4270,7 @@ struct LinuxDBusApi {
     DBusConnection* (*bus_get)(int, DBusError*);
     DBusConnection* (*conn_open)(const char*, DBusError*);
     int (*bus_register)(DBusConnection*, DBusError*);
+    const char* (*bus_get_unique_name)(DBusConnection*);
     void (*conn_unref)(DBusConnection*);
     int (*conn_send)(DBusConnection*, DBusMessage*, uint32_t*);
     DBusMessage* (*conn_send_block)(DBusConnection*, DBusMessage*, int, DBusError*);
@@ -4171,6 +4283,8 @@ struct LinuxDBusApi {
     DBusMessage* (*msg_new_signal)(const char*, const char*, const char*);
     void (*msg_unref)(DBusMessage*);
     int (*msg_iter_init)(DBusMessage*, DBusMessageIter*);
+    int (*msg_iter_next)(DBusMessageIter*);
+    void (*msg_iter_recurse)(DBusMessageIter*, DBusMessageIter*);
     void (*msg_iter_init_append)(DBusMessage*, DBusMessageIter*);
     int (*msg_iter_append_basic)(DBusMessageIter*, int, const void*);
     int (*msg_iter_open_container)(DBusMessageIter*, int, const char*, DBusMessageIter*);
@@ -4188,6 +4302,7 @@ struct LinuxAtSpiSlot {
     ClaimedWindowSlot* claimed;
     SDL_Window* window;
     DBusConnection* a11y_conn;
+    char unique_name[128];
     uint64_t prev_struct_hash;
     uint32_t prev_focus_id;
     bool has_prev_snapshot;
@@ -4209,6 +4324,7 @@ bool ensure_linux_dbus_api() noexcept {
     g_linux_dbus.bus_get = linux_load_sym<decltype(g_linux_dbus.bus_get)>(g_linux_dbus.so, "dbus_bus_get");
     g_linux_dbus.conn_open = linux_load_sym<decltype(g_linux_dbus.conn_open)>(g_linux_dbus.so, "dbus_connection_open");
     g_linux_dbus.bus_register = linux_load_sym<decltype(g_linux_dbus.bus_register)>(g_linux_dbus.so, "dbus_bus_register");
+    g_linux_dbus.bus_get_unique_name = linux_load_sym<decltype(g_linux_dbus.bus_get_unique_name)>(g_linux_dbus.so, "dbus_bus_get_unique_name");
     g_linux_dbus.conn_unref = linux_load_sym<decltype(g_linux_dbus.conn_unref)>(g_linux_dbus.so, "dbus_connection_unref");
     g_linux_dbus.conn_send = linux_load_sym<decltype(g_linux_dbus.conn_send)>(g_linux_dbus.so, "dbus_connection_send");
     g_linux_dbus.conn_send_block = linux_load_sym<decltype(g_linux_dbus.conn_send_block)>(g_linux_dbus.so, "dbus_connection_send_with_reply_and_block");
@@ -4221,6 +4337,8 @@ bool ensure_linux_dbus_api() noexcept {
     g_linux_dbus.msg_new_signal = linux_load_sym<decltype(g_linux_dbus.msg_new_signal)>(g_linux_dbus.so, "dbus_message_new_signal");
     g_linux_dbus.msg_unref = linux_load_sym<decltype(g_linux_dbus.msg_unref)>(g_linux_dbus.so, "dbus_message_unref");
     g_linux_dbus.msg_iter_init = linux_load_sym<decltype(g_linux_dbus.msg_iter_init)>(g_linux_dbus.so, "dbus_message_iter_init");
+    g_linux_dbus.msg_iter_next = linux_load_sym<decltype(g_linux_dbus.msg_iter_next)>(g_linux_dbus.so, "dbus_message_iter_next");
+    g_linux_dbus.msg_iter_recurse = linux_load_sym<decltype(g_linux_dbus.msg_iter_recurse)>(g_linux_dbus.so, "dbus_message_iter_recurse");
     g_linux_dbus.msg_iter_init_append = linux_load_sym<decltype(g_linux_dbus.msg_iter_init_append)>(g_linux_dbus.so, "dbus_message_iter_init_append");
     g_linux_dbus.msg_iter_append_basic = linux_load_sym<decltype(g_linux_dbus.msg_iter_append_basic)>(g_linux_dbus.so, "dbus_message_iter_append_basic");
     g_linux_dbus.msg_iter_open_container = linux_load_sym<decltype(g_linux_dbus.msg_iter_open_container)>(g_linux_dbus.so, "dbus_message_iter_open_container");
@@ -4231,10 +4349,11 @@ bool ensure_linux_dbus_api() noexcept {
     g_linux_dbus.msg_get_path = linux_load_sym<decltype(g_linux_dbus.msg_get_path)>(g_linux_dbus.so, "dbus_message_get_path");
     g_linux_dbus.ok = (g_linux_dbus.error_init && g_linux_dbus.error_is_set && g_linux_dbus.error_free &&
                        g_linux_dbus.bus_get && g_linux_dbus.conn_open && g_linux_dbus.bus_register &&
-                       g_linux_dbus.conn_unref && g_linux_dbus.conn_send && g_linux_dbus.conn_send_block &&
-                       g_linux_dbus.conn_flush && g_linux_dbus.conn_dispatch && g_linux_dbus.conn_add_filter &&
-                       g_linux_dbus.conn_remove_filter && g_linux_dbus.msg_new_call && g_linux_dbus.msg_new_return &&
-                       g_linux_dbus.msg_new_signal && g_linux_dbus.msg_unref && g_linux_dbus.msg_iter_init &&
+                       g_linux_dbus.bus_get_unique_name && g_linux_dbus.conn_unref && g_linux_dbus.conn_send &&
+                       g_linux_dbus.conn_send_block && g_linux_dbus.conn_flush && g_linux_dbus.conn_dispatch &&
+                       g_linux_dbus.conn_add_filter && g_linux_dbus.conn_remove_filter && g_linux_dbus.msg_new_call &&
+                       g_linux_dbus.msg_new_return && g_linux_dbus.msg_new_signal && g_linux_dbus.msg_unref &&
+                       g_linux_dbus.msg_iter_init && g_linux_dbus.msg_iter_next && g_linux_dbus.msg_iter_recurse &&
                        g_linux_dbus.msg_iter_init_append && g_linux_dbus.msg_iter_append_basic &&
                        g_linux_dbus.msg_iter_open_container && g_linux_dbus.msg_iter_close_container &&
                        g_linux_dbus.msg_iter_get_arg_type && g_linux_dbus.msg_iter_get_basic &&
@@ -4310,25 +4429,418 @@ void linux_atspi_emit_object_signal(
     g_linux_dbus.msg_unref(sig);
 }
 
+const char* etch_to_atspi_role_name(A11yRole role) noexcept {
+    switch (role) {
+        case A11yRole::Window:      return "frame";
+        case A11yRole::Group:       return "panel";
+        case A11yRole::Region:      return "panel";
+        case A11yRole::Toolbar:     return "tool bar";
+        case A11yRole::MenuBar:     return "menu bar";
+        case A11yRole::Menu:        return "menu";
+        case A11yRole::MenuItem:    return "menu item";
+        case A11yRole::TabList:     return "page tab list";
+        case A11yRole::Tab:         return "page tab";
+        case A11yRole::Dialog:      return "dialog";
+        case A11yRole::ScrollArea:  return "scroll pane";
+        case A11yRole::List:        return "list";
+        case A11yRole::ListItem:    return "list item";
+        case A11yRole::Table:       return "table";
+        case A11yRole::Tree:        return "tree";
+        case A11yRole::TreeItem:    return "tree item";
+        case A11yRole::StaticText:  return "label";
+        case A11yRole::Button:      return "push button";
+        case A11yRole::Checkbox:    return "check box";
+        case A11yRole::Switch:      return "toggle button";
+        case A11yRole::Slider:      return "slider";
+        case A11yRole::SpinButton:  return "spin button";
+        case A11yRole::ProgressBar: return "progress bar";
+        case A11yRole::ComboBox:    return "combo box";
+        case A11yRole::TextInput:   return "text";
+        case A11yRole::CodeEditor:  return "text";
+        case A11yRole::Canvas:      return "canvas";
+        case A11yRole::Tooltip:     return "tool tip";
+        default:                    return "invalid";
+    }
+}
+
+void linux_atspi_format_path(char* out, size_t cap, uint32_t elem_id, uint32_t root_id) noexcept {
+    if (elem_id == 0u || elem_id == root_id) {
+        std::snprintf(out, cap, "/org/a11y/atspi/accessible/root");
+    } else {
+        std::snprintf(out, cap, "/org/a11y/atspi/accessible/etch_%08X", elem_id);
+    }
+}
+
+void linux_atspi_append_ref(DBusMessageIter* it, const char* bus_name, const char* obj_path) noexcept {
+    DBusMessageIter st = {};
+    if (g_linux_dbus.msg_iter_open_container(it, 'r', nullptr, &st)) {
+        const char* bn = bus_name ? bus_name : "";
+        const char* op = (obj_path && obj_path[0]) ? obj_path : "/org/a11y/atspi/null";
+        g_linux_dbus.msg_iter_append_basic(&st, 's', &bn);
+        g_linux_dbus.msg_iter_append_basic(&st, 'o', &op);
+        g_linux_dbus.msg_iter_close_container(it, &st);
+    }
+}
+
+void linux_atspi_fill_cstr(Str s, char* buf, size_t cap) noexcept {
+    if (!buf || cap == 0u) return;
+    if (!s.chars || s.length == 0u) {
+        buf[0] = '\0';
+        return;
+    }
+    const size_t n = (s.length < cap - 1u) ? s.length : (cap - 1u);
+    std::memcpy(buf, s.chars, n);
+    buf[n] = '\0';
+}
+
+void linux_atspi_node_extents(SDL_Window* win, const A11yNode& an, int32_t* x, int32_t* y, int32_t* w, int32_t* h, uint32_t coord_type) noexcept {
+    int wx = 0, wy = 0;
+    if (win && coord_type == 0u) { // ATSPI_COORD_TYPE_SCREEN = 0
+        SDL_GetWindowPosition(win, &wx, &wy);
+    }
+    *x = wx + static_cast<int32_t>(std::lround(an.bounds.x));
+    *y = wy + static_cast<int32_t>(std::lround(an.bounds.y));
+    *w = static_cast<int32_t>(std::lround(an.bounds.w));
+    *h = static_cast<int32_t>(std::lround(an.bounds.h));
+}
+
 DBusHandlerResult linux_atspi_filter(DBusConnection* conn, DBusMessage* msg, void* userdata) noexcept {
     auto* ats = static_cast<LinuxAtSpiSlot*>(userdata);
     if (!ats || !ats->ctx || !ats->window || !msg) return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
     const char* path = g_linux_dbus.msg_get_path(msg);
-    constexpr const char* kPrefix = "/org/a11y/atspi/accessible/etch_";
-    constexpr size_t kPrefixLen = 32u;
-    if (!path || std::strncmp(path, kPrefix, kPrefixLen) != 0) return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
+    if (!path) return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
+
+    const auto span = frame_a11y_nodes(ats->ctx, ats->window);
+    const uint32_t count = static_cast<uint32_t>(span.size());
+    const uint32_t root_id = (count > 0u) ? span[0].id : 0u;
     uint32_t elem_id = 0u;
-    if (std::sscanf(path + kPrefixLen, "%X", &elem_id) != 1) return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
+    const bool is_root_path = (std::strcmp(path, "/org/a11y/atspi/accessible/root") == 0);
+    if (is_root_path) {
+        elem_id = root_id;
+    } else {
+        constexpr const char* kPrefix = "/org/a11y/atspi/accessible/etch_";
+        constexpr size_t kPrefixLen = 32u;
+        if (std::strncmp(path, kPrefix, kPrefixLen) != 0) return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
+        if (std::sscanf(path + kPrefixLen, "%X", &elem_id) != 1) return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
+    }
+
+    const A11yNode* an = (elem_id != 0u) ? find_a11y_node(elem_id, ats->ctx, ats->window) : nullptr;
+    auto send_reply = [&](DBusMessage* rep) noexcept {
+        g_linux_dbus.conn_send(conn, rep, nullptr);
+        g_linux_dbus.msg_unref(rep);
+        return DBUS_HANDLER_RESULT_HANDLED;
+    };
+
+    if (g_linux_dbus.msg_is_call(msg, "org.freedesktop.DBus.Properties", "Get")) {
+        DBusMessageIter arg = {};
+        const char* iface = nullptr;
+        const char* prop = nullptr;
+        if (g_linux_dbus.msg_iter_init(msg, &arg) && g_linux_dbus.msg_iter_get_arg_type(&arg) == 's') {
+            g_linux_dbus.msg_iter_get_basic(&arg, &iface);
+            if (g_linux_dbus.msg_iter_next(&arg) && g_linux_dbus.msg_iter_get_arg_type(&arg) == 's') {
+                g_linux_dbus.msg_iter_get_basic(&arg, &prop);
+            }
+        }
+        if (iface && prop) {
+            if (DBusMessage* rep = g_linux_dbus.msg_new_return(msg)) {
+                DBusMessageIter it = {}, var = {};
+                g_linux_dbus.msg_iter_init_append(rep, &it);
+                if (std::strcmp(iface, "org.a11y.atspi.Accessible") == 0) {
+                    if (std::strcmp(prop, "Name") == 0) {
+                        char name_buf[512];
+                        linux_atspi_fill_cstr(an ? an->label : Str{}, name_buf, sizeof(name_buf));
+                        const char* p = name_buf;
+                        if (g_linux_dbus.msg_iter_open_container(&it, 'v', "s", &var)) {
+                            g_linux_dbus.msg_iter_append_basic(&var, 's', &p);
+                            g_linux_dbus.msg_iter_close_container(&it, &var);
+                        }
+                        return send_reply(rep);
+                    }
+                    if (std::strcmp(prop, "Description") == 0 || std::strcmp(prop, "Locale") == 0) {
+                        const char* empty = "";
+                        if (g_linux_dbus.msg_iter_open_container(&it, 'v', "s", &var)) {
+                            g_linux_dbus.msg_iter_append_basic(&var, 's', &empty);
+                            g_linux_dbus.msg_iter_close_container(&it, &var);
+                        }
+                        return send_reply(rep);
+                    }
+                    if (std::strcmp(prop, "ChildCount") == 0) {
+                        int32_t cc = 0;
+                        if (an) {
+                            for (uint32_t ci = an->first_child_idx; ci < count; ci = span[ci].next_sibling_idx) ++cc;
+                        }
+                        if (g_linux_dbus.msg_iter_open_container(&it, 'v', "i", &var)) {
+                            g_linux_dbus.msg_iter_append_basic(&var, 'i', &cc);
+                            g_linux_dbus.msg_iter_close_container(&it, &var);
+                        }
+                        return send_reply(rep);
+                    }
+                    if (std::strcmp(prop, "Parent") == 0) {
+                        char ppath[64] = "/org/a11y/atspi/null";
+                        const char* pbus = "";
+                        if (an && an->parent_id != 0u && elem_id != root_id) {
+                            linux_atspi_format_path(ppath, sizeof(ppath), an->parent_id, root_id);
+                            pbus = ats->unique_name;
+                        }
+                        if (g_linux_dbus.msg_iter_open_container(&it, 'v', "(so)", &var)) {
+                            linux_atspi_append_ref(&var, pbus, ppath);
+                            g_linux_dbus.msg_iter_close_container(&it, &var);
+                        }
+                        return send_reply(rep);
+                    }
+                } else if (std::strcmp(iface, "org.a11y.atspi.Value") == 0) {
+                    double val = 0.0;
+                    if (std::strcmp(prop, "CurrentValue") == 0) val = an ? static_cast<double>(an->value_num) : 0.0;
+                    else if (std::strcmp(prop, "MinimumValue") == 0) val = an ? static_cast<double>(an->min_value) : 0.0;
+                    else if (std::strcmp(prop, "MaximumValue") == 0) val = an ? static_cast<double>(an->max_value) : 0.0;
+                    else if (std::strcmp(prop, "MinimumIncrement") == 0) val = 1.0;
+                    if (g_linux_dbus.msg_iter_open_container(&it, 'v', "d", &var)) {
+                        g_linux_dbus.msg_iter_append_basic(&var, 'd', &val);
+                        g_linux_dbus.msg_iter_close_container(&it, &var);
+                    }
+                    return send_reply(rep);
+                } else if (std::strcmp(iface, "org.a11y.atspi.Text") == 0) {
+                    int32_t v = (std::strcmp(prop, "CharacterCount") == 0 && an) ? static_cast<int32_t>(an->value_text.length) : 0;
+                    if (g_linux_dbus.msg_iter_open_container(&it, 'v', "i", &var)) {
+                        g_linux_dbus.msg_iter_append_basic(&var, 'i', &v);
+                        g_linux_dbus.msg_iter_close_container(&it, &var);
+                    }
+                    return send_reply(rep);
+                }
+                g_linux_dbus.msg_unref(rep);
+            }
+        }
+        return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
+    }
+
+    if (g_linux_dbus.msg_is_call(msg, "org.freedesktop.DBus.Properties", "Set")) {
+        DBusMessageIter arg = {};
+        const char* iface = nullptr;
+        const char* prop = nullptr;
+        if (g_linux_dbus.msg_iter_init(msg, &arg) && g_linux_dbus.msg_iter_get_arg_type(&arg) == 's') {
+            g_linux_dbus.msg_iter_get_basic(&arg, &iface);
+            if (g_linux_dbus.msg_iter_next(&arg) && g_linux_dbus.msg_iter_get_arg_type(&arg) == 's') {
+                g_linux_dbus.msg_iter_get_basic(&arg, &prop);
+                if (iface && prop && std::strcmp(iface, "org.a11y.atspi.Value") == 0 &&
+                    std::strcmp(prop, "CurrentValue") == 0 && g_linux_dbus.msg_iter_next(&arg) &&
+                    g_linux_dbus.msg_iter_get_arg_type(&arg) == 'v')
+                {
+                    DBusMessageIter sub = {};
+                    g_linux_dbus.msg_iter_recurse(&arg, &sub);
+                    if (g_linux_dbus.msg_iter_get_arg_type(&sub) == 'd') {
+                        double val = 0.0;
+                        g_linux_dbus.msg_iter_get_basic(&sub, &val);
+                        (void)perform_a11y_action(elem_id, A11yAction::SetValue, static_cast<float>(val), {}, ats->ctx, ats->window);
+                        if (DBusMessage* rep = g_linux_dbus.msg_new_return(msg)) return send_reply(rep);
+                    }
+                }
+            }
+        }
+        return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
+    }
 
     if (g_linux_dbus.msg_is_call(msg, "org.a11y.atspi.Accessible", "GetRole")) {
-        const A11yNode* an = find_a11y_node(elem_id, ats->ctx, ats->window);
         const uint32_t role = an ? etch_to_atspi_role(an->role) : 0u;
         if (DBusMessage* rep = g_linux_dbus.msg_new_return(msg)) {
             DBusMessageIter it = {};
             g_linux_dbus.msg_iter_init_append(rep, &it);
             g_linux_dbus.msg_iter_append_basic(&it, 'u', &role);
-            g_linux_dbus.conn_send(conn, rep, nullptr);
-            g_linux_dbus.msg_unref(rep);
+            return send_reply(rep);
+        }
+        return DBUS_HANDLER_RESULT_HANDLED;
+    }
+    if (g_linux_dbus.msg_is_call(msg, "org.a11y.atspi.Accessible", "GetRoleName")) {
+        const char* rname = an ? etch_to_atspi_role_name(an->role) : "invalid";
+        if (DBusMessage* rep = g_linux_dbus.msg_new_return(msg)) {
+            DBusMessageIter it = {};
+            g_linux_dbus.msg_iter_init_append(rep, &it);
+            g_linux_dbus.msg_iter_append_basic(&it, 's', &rname);
+            return send_reply(rep);
+        }
+        return DBUS_HANDLER_RESULT_HANDLED;
+    }
+    if (g_linux_dbus.msg_is_call(msg, "org.a11y.atspi.Accessible", "GetChildAtIndex")) {
+        int32_t req_idx = -1;
+        DBusMessageIter arg = {};
+        if (g_linux_dbus.msg_iter_init(msg, &arg) && g_linux_dbus.msg_iter_get_arg_type(&arg) == 'i') {
+            g_linux_dbus.msg_iter_get_basic(&arg, &req_idx);
+        }
+        char cpath[64] = "/org/a11y/atspi/null";
+        const char* cbus = "";
+        if (an && req_idx >= 0) {
+            int32_t cur = 0;
+            for (uint32_t ci = an->first_child_idx; ci < count; ci = span[ci].next_sibling_idx) {
+                if (cur == req_idx) {
+                    linux_atspi_format_path(cpath, sizeof(cpath), span[ci].id, root_id);
+                    cbus = ats->unique_name;
+                    break;
+                }
+                ++cur;
+            }
+        }
+        if (DBusMessage* rep = g_linux_dbus.msg_new_return(msg)) {
+            DBusMessageIter it = {};
+            g_linux_dbus.msg_iter_init_append(rep, &it);
+            linux_atspi_append_ref(&it, cbus, cpath);
+            return send_reply(rep);
+        }
+        return DBUS_HANDLER_RESULT_HANDLED;
+    }
+    if (g_linux_dbus.msg_is_call(msg, "org.a11y.atspi.Accessible", "GetChildren")) {
+        if (DBusMessage* rep = g_linux_dbus.msg_new_return(msg)) {
+            DBusMessageIter it = {}, arr = {};
+            g_linux_dbus.msg_iter_init_append(rep, &it);
+            if (g_linux_dbus.msg_iter_open_container(&it, 'a', "(so)", &arr)) {
+                if (an) {
+                    for (uint32_t ci = an->first_child_idx; ci < count; ci = span[ci].next_sibling_idx) {
+                        char cpath[64];
+                        linux_atspi_format_path(cpath, sizeof(cpath), span[ci].id, root_id);
+                        linux_atspi_append_ref(&arr, ats->unique_name, cpath);
+                    }
+                }
+                g_linux_dbus.msg_iter_close_container(&it, &arr);
+            }
+            return send_reply(rep);
+        }
+        return DBUS_HANDLER_RESULT_HANDLED;
+    }
+    if (g_linux_dbus.msg_is_call(msg, "org.a11y.atspi.Accessible", "GetIndexInParent")) {
+        int32_t idx_in_parent = -1;
+        if (an && an->parent_id != 0u) {
+            if (const A11yNode* parent = find_a11y_node(an->parent_id, ats->ctx, ats->window)) {
+                int32_t cur = 0;
+                for (uint32_t ci = parent->first_child_idx; ci < count; ci = span[ci].next_sibling_idx) {
+                    if (span[ci].id == elem_id) { idx_in_parent = cur; break; }
+                    ++cur;
+                }
+            }
+        }
+        if (DBusMessage* rep = g_linux_dbus.msg_new_return(msg)) {
+            DBusMessageIter it = {};
+            g_linux_dbus.msg_iter_init_append(rep, &it);
+            g_linux_dbus.msg_iter_append_basic(&it, 'i', &idx_in_parent);
+            return send_reply(rep);
+        }
+        return DBUS_HANDLER_RESULT_HANDLED;
+    }
+    if (g_linux_dbus.msg_is_call(msg, "org.a11y.atspi.Accessible", "GetState")) {
+        // AT-SPI2 state bit indices: ENABLED=7, EXPANDED=9, FOCUSABLE=11, FOCUSED=12,
+        // PRESSED=19, SELECTED=22, SENSITIVE=23, SHOWING=24, VISIBLE=28, CHECKED=3 (word0), EDITABLE=6.
+        uint32_t words[2] = {0u, 0u};
+        if (an) {
+            auto set_bit = [&](uint32_t b) noexcept { words[b >> 5] |= (1u << (b & 31u)); };
+            set_bit(24u); // SHOWING
+            set_bit(28u); // VISIBLE
+            if ((an->state_flags & A11yState_Disabled) == 0u) {
+                set_bit(7u);  // ENABLED
+                set_bit(23u); // SENSITIVE
+            }
+            if ((an->actions_mask & a11y_action_bit(A11yAction::Focus)) != 0u) set_bit(11u); // FOCUSABLE
+            if ((an->state_flags & A11yState_Focused) != 0u) set_bit(12u);  // FOCUSED
+            if ((an->state_flags & A11yState_Checked) != 0u) set_bit(3u);   // CHECKED
+            if ((an->state_flags & A11yState_Expanded) != 0u) set_bit(9u);  // EXPANDED
+            if ((an->state_flags & A11yState_Pressed) != 0u) set_bit(19u);  // PRESSED
+            if ((an->state_flags & A11yState_Selected) != 0u) set_bit(22u); // SELECTED
+            if ((an->role == A11yRole::TextInput || an->role == A11yRole::CodeEditor) &&
+                (an->state_flags & A11yState_ReadOnly) == 0u)
+            {
+                set_bit(6u); // EDITABLE
+            }
+        }
+        if (DBusMessage* rep = g_linux_dbus.msg_new_return(msg)) {
+            DBusMessageIter it = {}, arr = {};
+            g_linux_dbus.msg_iter_init_append(rep, &it);
+            if (g_linux_dbus.msg_iter_open_container(&it, 'a', "u", &arr)) {
+                g_linux_dbus.msg_iter_append_basic(&arr, 'u', &words[0]);
+                g_linux_dbus.msg_iter_append_basic(&arr, 'u', &words[1]);
+                g_linux_dbus.msg_iter_close_container(&it, &arr);
+            }
+            return send_reply(rep);
+        }
+        return DBUS_HANDLER_RESULT_HANDLED;
+    }
+    if (g_linux_dbus.msg_is_call(msg, "org.a11y.atspi.Accessible", "GetInterfaces")) {
+        if (DBusMessage* rep = g_linux_dbus.msg_new_return(msg)) {
+            DBusMessageIter it = {}, arr = {};
+            g_linux_dbus.msg_iter_init_append(rep, &it);
+            if (g_linux_dbus.msg_iter_open_container(&it, 'a', "s", &arr)) {
+                const char* i_acc = "org.a11y.atspi.Accessible";
+                const char* i_cmp = "org.a11y.atspi.Component";
+                g_linux_dbus.msg_iter_append_basic(&arr, 's', &i_acc);
+                g_linux_dbus.msg_iter_append_basic(&arr, 's', &i_cmp);
+                if (an && (an->actions_mask & a11y_action_bit(A11yAction::Press)) != 0u) {
+                    const char* i_act = "org.a11y.atspi.Action";
+                    g_linux_dbus.msg_iter_append_basic(&arr, 's', &i_act);
+                }
+                if (an && (an->role == A11yRole::Slider || an->role == A11yRole::SpinButton || an->role == A11yRole::ProgressBar)) {
+                    const char* i_val = "org.a11y.atspi.Value";
+                    g_linux_dbus.msg_iter_append_basic(&arr, 's', &i_val);
+                }
+                if (an && (an->role == A11yRole::TextInput || an->role == A11yRole::CodeEditor || an->role == A11yRole::StaticText)) {
+                    const char* i_txt = "org.a11y.atspi.Text";
+                    g_linux_dbus.msg_iter_append_basic(&arr, 's', &i_txt);
+                }
+                g_linux_dbus.msg_iter_close_container(&it, &arr);
+            }
+            return send_reply(rep);
+        }
+        return DBUS_HANDLER_RESULT_HANDLED;
+    }
+    if (g_linux_dbus.msg_is_call(msg, "org.a11y.atspi.Accessible", "GetApplication")) {
+        if (DBusMessage* rep = g_linux_dbus.msg_new_return(msg)) {
+            DBusMessageIter it = {};
+            g_linux_dbus.msg_iter_init_append(rep, &it);
+            linux_atspi_append_ref(&it, ats->unique_name, "/org/a11y/atspi/accessible/root");
+            return send_reply(rep);
+        }
+        return DBUS_HANDLER_RESULT_HANDLED;
+    }
+    if (g_linux_dbus.msg_is_call(msg, "org.a11y.atspi.Component", "GetExtents")) {
+        uint32_t coord_type = 0u;
+        DBusMessageIter arg = {};
+        if (g_linux_dbus.msg_iter_init(msg, &arg) && g_linux_dbus.msg_iter_get_arg_type(&arg) == 'u') {
+            g_linux_dbus.msg_iter_get_basic(&arg, &coord_type);
+        }
+        int32_t rx = 0, ry = 0, rw = 0, rh = 0;
+        if (an) linux_atspi_node_extents(ats->window, *an, &rx, &ry, &rw, &rh, coord_type);
+        if (DBusMessage* rep = g_linux_dbus.msg_new_return(msg)) {
+            DBusMessageIter it = {}, st = {};
+            g_linux_dbus.msg_iter_init_append(rep, &it);
+            if (g_linux_dbus.msg_iter_open_container(&it, 'r', nullptr, &st)) {
+                g_linux_dbus.msg_iter_append_basic(&st, 'i', &rx);
+                g_linux_dbus.msg_iter_append_basic(&st, 'i', &ry);
+                g_linux_dbus.msg_iter_append_basic(&st, 'i', &rw);
+                g_linux_dbus.msg_iter_append_basic(&st, 'i', &rh);
+                g_linux_dbus.msg_iter_close_container(&it, &st);
+            }
+            return send_reply(rep);
+        }
+        return DBUS_HANDLER_RESULT_HANDLED;
+    }
+    if (g_linux_dbus.msg_is_call(msg, "org.a11y.atspi.Component", "Contains")) {
+        int32_t px = 0, py = 0;
+        uint32_t coord_type = 0u;
+        DBusMessageIter arg = {};
+        if (g_linux_dbus.msg_iter_init(msg, &arg) && g_linux_dbus.msg_iter_get_arg_type(&arg) == 'i') {
+            g_linux_dbus.msg_iter_get_basic(&arg, &px);
+            if (g_linux_dbus.msg_iter_next(&arg) && g_linux_dbus.msg_iter_get_arg_type(&arg) == 'i') {
+                g_linux_dbus.msg_iter_get_basic(&arg, &py);
+                if (g_linux_dbus.msg_iter_next(&arg) && g_linux_dbus.msg_iter_get_arg_type(&arg) == 'u') {
+                    g_linux_dbus.msg_iter_get_basic(&arg, &coord_type);
+                }
+            }
+        }
+        uint32_t inside = 0u;
+        if (an) {
+            int32_t rx = 0, ry = 0, rw = 0, rh = 0;
+            linux_atspi_node_extents(ats->window, *an, &rx, &ry, &rw, &rh, coord_type);
+            inside = (px >= rx && py >= ry && px < rx + rw && py < ry + rh) ? 1u : 0u;
+        }
+        if (DBusMessage* rep = g_linux_dbus.msg_new_return(msg)) {
+            DBusMessageIter it = {};
+            g_linux_dbus.msg_iter_init_append(rep, &it);
+            g_linux_dbus.msg_iter_append_basic(&it, 'b', &inside);
+            return send_reply(rep);
         }
         return DBUS_HANDLER_RESULT_HANDLED;
     }
@@ -4338,8 +4850,27 @@ DBusHandlerResult linux_atspi_filter(DBusConnection* conn, DBusMessage* msg, voi
             DBusMessageIter it = {};
             g_linux_dbus.msg_iter_init_append(rep, &it);
             g_linux_dbus.msg_iter_append_basic(&it, 'b', &ok);
-            g_linux_dbus.conn_send(conn, rep, nullptr);
-            g_linux_dbus.msg_unref(rep);
+            return send_reply(rep);
+        }
+        return DBUS_HANDLER_RESULT_HANDLED;
+    }
+    if (g_linux_dbus.msg_is_call(msg, "org.a11y.atspi.Action", "GetNActions")) {
+        const int32_t nact = (an && (an->actions_mask & a11y_action_bit(A11yAction::Press)) != 0u) ? 1 : 0;
+        if (DBusMessage* rep = g_linux_dbus.msg_new_return(msg)) {
+            DBusMessageIter it = {};
+            g_linux_dbus.msg_iter_init_append(rep, &it);
+            g_linux_dbus.msg_iter_append_basic(&it, 'i', &nact);
+            return send_reply(rep);
+        }
+        return DBUS_HANDLER_RESULT_HANDLED;
+    }
+    if (g_linux_dbus.msg_is_call(msg, "org.a11y.atspi.Action", "GetName")) {
+        const char* act_name = "press";
+        if (DBusMessage* rep = g_linux_dbus.msg_new_return(msg)) {
+            DBusMessageIter it = {};
+            g_linux_dbus.msg_iter_init_append(rep, &it);
+            g_linux_dbus.msg_iter_append_basic(&it, 's', &act_name);
+            return send_reply(rep);
         }
         return DBUS_HANDLER_RESULT_HANDLED;
     }
@@ -4349,8 +4880,36 @@ DBusHandlerResult linux_atspi_filter(DBusConnection* conn, DBusMessage* msg, voi
             DBusMessageIter it = {};
             g_linux_dbus.msg_iter_init_append(rep, &it);
             g_linux_dbus.msg_iter_append_basic(&it, 'b', &ok);
-            g_linux_dbus.conn_send(conn, rep, nullptr);
-            g_linux_dbus.msg_unref(rep);
+            return send_reply(rep);
+        }
+        return DBUS_HANDLER_RESULT_HANDLED;
+    }
+    if (g_linux_dbus.msg_is_call(msg, "org.a11y.atspi.Text", "GetText")) {
+        int32_t start_off = 0, end_off = -1;
+        DBusMessageIter arg = {};
+        if (g_linux_dbus.msg_iter_init(msg, &arg) && g_linux_dbus.msg_iter_get_arg_type(&arg) == 'i') {
+            g_linux_dbus.msg_iter_get_basic(&arg, &start_off);
+            if (g_linux_dbus.msg_iter_next(&arg) && g_linux_dbus.msg_iter_get_arg_type(&arg) == 'i') {
+                g_linux_dbus.msg_iter_get_basic(&arg, &end_off);
+            }
+        }
+        char tbuf[1024] = {};
+        const Str src = an ? ((an->value_text.length > 0u) ? an->value_text : an->label) : Str{};
+        if (src.chars && src.length > 0u) {
+            const uint32_t s0 = (start_off > 0) ? (uint32_t(start_off) < src.length ? uint32_t(start_off) : src.length) : 0u;
+            const uint32_t e0 = (end_off < 0 || uint32_t(end_off) > src.length) ? src.length : uint32_t(end_off);
+            if (e0 > s0) {
+                const uint32_t len = (e0 - s0 < sizeof(tbuf) - 1u) ? (e0 - s0) : static_cast<uint32_t>(sizeof(tbuf) - 1u);
+                std::memcpy(tbuf, src.chars + s0, len);
+                tbuf[len] = '\0';
+            }
+        }
+        const char* out_p = tbuf;
+        if (DBusMessage* rep = g_linux_dbus.msg_new_return(msg)) {
+            DBusMessageIter it = {};
+            g_linux_dbus.msg_iter_init_append(rep, &it);
+            g_linux_dbus.msg_iter_append_basic(&it, 's', &out_p);
+            return send_reply(rep);
         }
         return DBUS_HANDLER_RESULT_HANDLED;
     }
@@ -4407,7 +4966,23 @@ void linux_atspi_attach_window(Context* ctx, ClaimedWindowSlot* slot) noexcept {
     ats->claimed = slot;
     ats->window = slot->window;
     ats->a11y_conn = a11y_conn;
+    if (const char* uname = g_linux_dbus.bus_get_unique_name(a11y_conn)) {
+        std::snprintf(ats->unique_name, sizeof(ats->unique_name), "%s", uname);
+    }
     g_linux_dbus.conn_add_filter(a11y_conn, linux_atspi_filter, ats, nullptr);
+    if (ats->unique_name[0] != '\0') {
+        if (DBusMessage* embed = g_linux_dbus.msg_new_call(
+                "org.a11y.atspi.Registry", "/org/a11y/atspi/registry/root",
+                "org.a11y.atspi.Socket", "Embed"))
+        {
+            DBusMessageIter it = {};
+            g_linux_dbus.msg_iter_init_append(embed, &it);
+            linux_atspi_append_ref(&it, ats->unique_name, "/org/a11y/atspi/accessible/root");
+            g_linux_dbus.conn_send(a11y_conn, embed, nullptr);
+            g_linux_dbus.msg_unref(embed);
+            g_linux_dbus.conn_flush(a11y_conn);
+        }
+    }
     slot->os_a11y = ats;
 }
 

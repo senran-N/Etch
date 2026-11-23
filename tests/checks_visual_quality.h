@@ -135,7 +135,7 @@ inline bool verify_visual_quality_gpu() noexcept {
         ok &= dark_ink>plain_ink;
         SDL_DestroySurface(surface);
     } else ok=false;
-    // Retain this gallery in the out-of-source build directory for visual inspection.
+    std::remove(output);
     if (!ok) std::fprintf(stderr,"visual quality GPU checks failed\n");
     destroy_context(ctx);set_current_context(nullptr);return ok;
 }

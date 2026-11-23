@@ -266,13 +266,33 @@ void remap_subpixel_prims_scale(Prim* prims, uint32_t count, float sx, float sy)
     }
 }
 
-bool ensure_subpixel_atlas(Context* ctx, uint32_t w, uint32_t h, uint32_t* out_x, uint32_t* out_y) noexcept {
+constexpr uint32_t kSubpixelInit = 512u;
+constexpr uint32_t kSubpixelSteadyCap = 1024u;
+constexpr uint32_t kSubpixelBurstMaxW = 2048u;
+constexpr uint32_t kSubpixelBurstMaxH = 1024u;
+
+uint32_t hinted_occupied_shelf_area(const FontAtlas& a) noexcept {
+    uint32_t area = 0u;
+    for (uint32_t i = 0u; i < a.hinted_shelf_count; ++i) {
+        const auto& sh = a.hinted_shelves[i];
+        if (sh.live_count > 0u && sh.max_x > sh.x0) {
+            area += uint32_t(sh.max_x - sh.x0) * uint32_t(sh.h);
+        }
+    }
+    return area;
+}
+
+bool ensure_subpixel_atlas(
+    Context* ctx,
+    uint32_t w,
+    uint32_t h,
+    uint32_t* out_x,
+    uint32_t* out_y,
+    uint16_t* out_shelf = nullptr) noexcept
+{
     if (!ctx || !out_x || !out_y || w == 0u || h == 0u) return false;
     auto& a = ctx->atlas;
-    constexpr uint32_t kSubpixelInit = 512u;
-    constexpr uint32_t kSubpixelSteadyCap = 1024u;
-    constexpr uint32_t kSubpixelBurstMaxW = 2048u;
-    constexpr uint32_t kSubpixelBurstMaxH = 1024u;
+    const uint32_t cur_frame = ctx->active_ui ? ctx->active_ui->frame_index : 0u;
     const uint32_t bpp = a.subpixel_is_r8 ? 1u : 4u;
     if (!a.subpixel_pixels) {
         a.subpixel_pixels = static_cast<uint8_t*>(std::calloc(size_t(kSubpixelInit) * kSubpixelInit * bpp, 1u));
@@ -283,33 +303,105 @@ bool ensure_subpixel_atlas(Context* ctx, uint32_t w, uint32_t h, uint32_t* out_x
         a.subpixel_shelf_x = 1u;
         a.subpixel_shelf_y = 1u;
         a.subpixel_shelf_h = 0u;
+        a.hinted_shelf_count = 0u;
         a.subpixel_dirty = true;
         a.subpixel_dirty_y0 = 0u;
         a.subpixel_dirty_y1 = kSubpixelInit;
     }
     const uint32_t pad_w = w + 1u;
     const uint32_t pad_h = h + 1u;
-    for (int attempt = 0; attempt < 4; ++attempt) {
-        if (a.subpixel_shelf_x + pad_w > a.subpixel_w) {
-            a.subpixel_shelf_x = (a.subpixel_shelf_x0 > 0u) ? a.subpixel_shelf_x0 : 1u;
-            a.subpixel_shelf_y += a.subpixel_shelf_h + 1u;
-            a.subpixel_shelf_h = 0u;
+
+    const auto update_gc_flag = [&]() noexcept {
+        if (a.subpixel_w > kSubpixelSteadyCap || a.subpixel_h > kSubpixelSteadyCap) {
+            a.hinted_gc_pending = true;
+            return;
         }
-        if (a.subpixel_shelf_x + pad_w <= a.subpixel_w &&
-            a.subpixel_shelf_y + pad_h <= a.subpixel_h)
+        if (a.subpixel_w >= kSubpixelSteadyCap && a.subpixel_h >= kSubpixelSteadyCap &&
+            a.subpixel_shelf_y >= 900u)
         {
-            *out_x = a.subpixel_shelf_x;
-            *out_y = a.subpixel_shelf_y;
-            a.subpixel_shelf_x += pad_w;
-            if (pad_h > a.subpixel_shelf_h) a.subpixel_shelf_h = pad_h;
-            if (a.subpixel_w > kSubpixelSteadyCap || a.subpixel_h > kSubpixelSteadyCap ||
-                (a.subpixel_w >= kSubpixelSteadyCap && a.subpixel_h >= kSubpixelSteadyCap &&
-                 a.subpixel_shelf_y >= 900u))
-            {
+            const uint32_t occ = hinted_occupied_shelf_area(a);
+            if (a.hinted_count == 0u || occ >= (kSubpixelSteadyCap * kSubpixelSteadyCap * 85u) / 100u) {
                 a.hinted_gc_pending = true;
             }
+        }
+    };
+
+    for (int attempt = 0; attempt < 4; ++attempt) {
+        // 1. Fit into an existing open or LRU-reclaimed shelf with tight height match.
+        uint32_t best_si = UINT32_MAX;
+        uint32_t best_slack = UINT32_MAX;
+        for (uint32_t i = 0u; i < a.hinted_shelf_count; ++i) {
+            const auto& sh = a.hinted_shelves[i];
+            if (pad_h <= sh.h && uint32_t(sh.cursor_x) + pad_w <= uint32_t(sh.max_x)) {
+                const uint32_t slack = uint32_t(sh.h) - pad_h;
+                if (slack <= 6u && slack < best_slack) {
+                    best_slack = slack;
+                    best_si = i;
+                    if (slack == 0u) break;
+                }
+            }
+        }
+        if (best_si != UINT32_MAX) {
+            auto& sh = a.hinted_shelves[best_si];
+            *out_x = sh.cursor_x;
+            *out_y = sh.y;
+            sh.cursor_x = static_cast<uint16_t>(sh.cursor_x + pad_w);
+            ++sh.live_count;
+            if (cur_frame > sh.last_used_frame) sh.last_used_frame = cur_frame;
+            if (out_shelf) *out_shelf = static_cast<uint16_t>(best_si);
+            update_gc_flag();
             return true;
         }
+
+        // 2. Open a new shelf in the active vertical strip.
+        const uint32_t strip_x0 = (a.subpixel_shelf_x0 > 0u) ? a.subpixel_shelf_x0 : 1u;
+        if (strip_x0 + pad_w <= a.subpixel_w &&
+            a.subpixel_shelf_y + pad_h <= a.subpixel_h &&
+            a.hinted_shelf_count < FontAtlas::kMaxHintedShelves)
+        {
+            const uint32_t si = a.hinted_shelf_count++;
+            auto& sh = a.hinted_shelves[si];
+            sh.x0 = static_cast<uint16_t>(strip_x0);
+            sh.y = static_cast<uint16_t>(a.subpixel_shelf_y);
+            sh.max_x = static_cast<uint16_t>(a.subpixel_w);
+            sh.h = static_cast<uint16_t>(pad_h);
+            sh.cursor_x = static_cast<uint16_t>(strip_x0 + pad_w);
+            sh.live_count = 1u;
+            sh.last_used_frame = cur_frame;
+            a.subpixel_shelf_x = sh.cursor_x;
+            a.subpixel_shelf_y += pad_h + 1u;
+            a.subpixel_shelf_h = pad_h;
+            *out_x = sh.x0;
+            *out_y = sh.y;
+            if (out_shelf) *out_shelf = static_cast<uint16_t>(si);
+            update_gc_flag();
+            return true;
+        }
+
+        // 3. Before growing, fall back to any wider-height open/reclaimed shelf that fits.
+        for (uint32_t i = 0u; i < a.hinted_shelf_count; ++i) {
+            const auto& sh = a.hinted_shelves[i];
+            if (pad_h <= sh.h && uint32_t(sh.cursor_x) + pad_w <= uint32_t(sh.max_x)) {
+                const uint32_t slack = uint32_t(sh.h) - pad_h;
+                if (slack < best_slack) {
+                    best_slack = slack;
+                    best_si = i;
+                }
+            }
+        }
+        if (best_si != UINT32_MAX) {
+            auto& sh = a.hinted_shelves[best_si];
+            *out_x = sh.cursor_x;
+            *out_y = sh.y;
+            sh.cursor_x = static_cast<uint16_t>(sh.cursor_x + pad_w);
+            ++sh.live_count;
+            if (cur_frame > sh.last_used_frame) sh.last_used_frame = cur_frame;
+            if (out_shelf) *out_shelf = static_cast<uint16_t>(best_si);
+            update_gc_flag();
+            return true;
+        }
+
+        // 4. Grow atlas: 512x512 -> 512x1024 -> 1024x1024 -> 2048x1024 burst.
         const uint32_t old_w = a.subpixel_w, old_h = a.subpixel_h;
         uint32_t next_w = old_w, next_h = old_h;
         if (next_h <= next_w && next_h < kSubpixelBurstMaxH) next_h *= 2u;
@@ -372,6 +464,7 @@ void reset_hinted_atlas_cache(FontAtlas* a) noexcept {
     a->subpixel_shelf_x = 0u;
     a->subpixel_shelf_y = 2u;
     a->subpixel_shelf_h = 0u;
+    a->hinted_shelf_count = 0u;
     a->subpixel_dirty = false;
     a->subpixel_dirty_y0 = UINT32_MAX;
     a->subpixel_dirty_y1 = 0u;
@@ -379,30 +472,15 @@ void reset_hinted_atlas_cache(FontAtlas* a) noexcept {
     ++a->uv_epoch;
 }
 
-void maybe_gc_hinted_atlas(Context* ctx) noexcept {
-    if (!ctx || !ctx->atlas.hinted_gc_pending || ctx->prim_count != 0u || ctx->filter_prim_count != 0u) return;
-    ctx->atlas.subpixel_is_r8 = !ctx->atlas.lcd_subpixel_text;
-    reset_hinted_atlas_cache(&ctx->atlas);
-}
-
-void evict_font_slot_hinted_glyphs(FontAtlas* a, uint16_t slot_idx) noexcept {
-    if (!a || !a->hinted_glyphs || !a->hinted_cap || !a->hinted_count) return;
+void hinted_reprobe_table(FontAtlas* a) noexcept {
+    if (!a->hinted_glyphs || !a->hinted_cap || !a->hinted_count) return;
     const uint32_t cap = a->hinted_cap;
     const uint32_t mask = cap - 1u;
     uint32_t orig_empty = cap;
-    for (uint32_t i = 0; i < cap; ++i) {
+    for (uint32_t i = 0u; i < cap; ++i) {
         if (!a->hinted_glyphs[i].key) { orig_empty = i; break; }
     }
-    const uint64_t tag = uint64_t(slot_idx + 1u);
-    bool removed = false;
-    for (uint32_t i = 0; i < cap; ++i) {
-        const EmojiBitmapEntry e = a->hinted_glyphs[i];
-        if (!e.key || (e.key >> 56) != tag) continue;
-        a->hinted_glyphs[i] = {};
-        --a->hinted_count;
-        removed = true;
-    }
-    if (!removed || !a->hinted_count || orig_empty >= cap) return;
+    if (orig_empty >= cap) return;
     for (uint32_t step = 1u; step < cap; ++step) {
         const uint32_t k = (orig_empty + step) & mask;
         const EmojiBitmapEntry e = a->hinted_glyphs[k];
@@ -412,6 +490,290 @@ void evict_font_slot_hinted_glyphs(FontAtlas* a, uint16_t slot_idx) noexcept {
         while (a->hinted_glyphs[j].key) j = (j + 1u) & mask;
         a->hinted_glyphs[j] = e;
     }
+}
+
+void hinted_sort_indices_desc(const EmojiBitmapEntry* tbl, uint32_t* order, uint32_t n) noexcept {
+    auto less_priority = [tbl](uint32_t a_idx, uint32_t b_idx) noexcept {
+        const auto& ea = tbl[a_idx];
+        const auto& eb = tbl[b_idx];
+        if (ea.last_used_frame != eb.last_used_frame) return ea.last_used_frame < eb.last_used_frame;
+        return ea.height_px < eb.height_px;
+    };
+    // In-place min-heap sort so order[0..n) ends sorted from highest priority (hottest) to coldest.
+    auto sift_down = [&](uint32_t root, uint32_t end) noexcept {
+        while (root * 2u + 1u < end) {
+            uint32_t child = root * 2u + 1u;
+            if (child + 1u < end && less_priority(order[child + 1u], order[child])) ++child;
+            if (!less_priority(order[child], order[root])) break;
+            const uint32_t tmp = order[root];
+            order[root] = order[child];
+            order[child] = tmp;
+            root = child;
+        }
+    };
+    if (n < 2u) return;
+    for (uint32_t start = n / 2u; start > 0u; --start) sift_down(start - 1u, n);
+    for (uint32_t end = n; end > 1u; --end) {
+        const uint32_t tmp = order[0];
+        order[0] = order[end - 1u];
+        order[end - 1u] = tmp;
+        sift_down(0u, end - 1u);
+    }
+}
+
+bool compact_hinted_burst_lru(FontAtlas* a) noexcept {
+    const uint32_t bpp = a->subpixel_is_r8 ? 1u : 4u;
+    const uint32_t cap = a->hinted_cap;
+    const uint32_t old_w = a->subpixel_w;
+    if (!a->hinted_glyphs || !cap || !a->hinted_count || !a->subpixel_pixels) return false;
+
+    auto* order = static_cast<uint32_t*>(std::malloc(size_t(a->hinted_count) * sizeof(uint32_t)));
+    auto* new_px = static_cast<uint8_t*>(std::calloc(size_t(kSubpixelSteadyCap) * kSubpixelSteadyCap * bpp, 1u));
+    auto* new_tbl = static_cast<EmojiBitmapEntry*>(std::calloc(cap, sizeof(EmojiBitmapEntry)));
+    if (!order || !new_px || !new_tbl) {
+        std::free(order);
+        std::free(new_px);
+        std::free(new_tbl);
+        return false;
+    }
+
+    uint32_t n = 0u;
+    uint32_t max_frame = 0u;
+    for (uint32_t i = 0u; i < cap; ++i) {
+        if (a->hinted_glyphs[i].key) {
+            if (a->hinted_glyphs[i].last_used_frame > max_frame) max_frame = a->hinted_glyphs[i].last_used_frame;
+            if (n < a->hinted_count) order[n++] = i;
+        }
+    }
+    hinted_sort_indices_desc(a->hinted_glyphs, order, n);
+
+    HintedShelf new_shelves[FontAtlas::kMaxHintedShelves] = {};
+    uint32_t new_shelf_count = 0u;
+    uint32_t next_y = 1u;
+    constexpr uint32_t kCompactTargetY = 768u; // Leave ~25% headroom on steady-state 1024x1024
+    uint32_t kept = 0u;
+    const uint32_t mask = cap - 1u;
+
+    for (uint32_t oi = 0u; oi < n; ++oi) {
+        EmojiBitmapEntry e = a->hinted_glyphs[order[oi]];
+        if (!e.has_bitmap) {
+            if (e.last_used_frame + 1u < max_frame) continue;
+            e.shelf_idx = UINT16_MAX;
+            uint32_t j = uint32_t(hash_u64(e.key)) & mask;
+            while (new_tbl[j].key) j = (j + 1u) & mask;
+            new_tbl[j] = e;
+            ++kept;
+            continue;
+        }
+        const uint32_t pad_w = e.width_px + 1u;
+        const uint32_t pad_h = e.height_px + 1u;
+        uint32_t best_si = UINT32_MAX;
+        uint32_t best_slack = UINT32_MAX;
+        for (uint32_t si = 0u; si < new_shelf_count; ++si) {
+            const auto& sh = new_shelves[si];
+            if (pad_h <= sh.h && uint32_t(sh.cursor_x) + pad_w <= uint32_t(sh.max_x)) {
+                const uint32_t slack = uint32_t(sh.h) - pad_h;
+                if (slack <= 6u && slack < best_slack) {
+                    best_slack = slack;
+                    best_si = si;
+                    if (slack == 0u) break;
+                }
+            }
+        }
+        uint32_t dst_x = 0u, dst_y = 0u;
+        uint16_t dst_si = UINT16_MAX;
+        if (best_si != UINT32_MAX) {
+            auto& sh = new_shelves[best_si];
+            dst_x = sh.cursor_x;
+            dst_y = sh.y;
+            sh.cursor_x = static_cast<uint16_t>(sh.cursor_x + pad_w);
+            ++sh.live_count;
+            if (e.last_used_frame > sh.last_used_frame) sh.last_used_frame = e.last_used_frame;
+            dst_si = static_cast<uint16_t>(best_si);
+        } else if (1u + pad_w <= kSubpixelSteadyCap &&
+                   next_y + pad_h <= kCompactTargetY &&
+                   new_shelf_count < FontAtlas::kMaxHintedShelves)
+        {
+            const uint32_t si = new_shelf_count++;
+            auto& sh = new_shelves[si];
+            sh.x0 = 1u;
+            sh.y = static_cast<uint16_t>(next_y);
+            sh.max_x = static_cast<uint16_t>(kSubpixelSteadyCap);
+            sh.h = static_cast<uint16_t>(pad_h);
+            sh.cursor_x = static_cast<uint16_t>(1u + pad_w);
+            sh.live_count = 1u;
+            sh.last_used_frame = e.last_used_frame;
+            dst_x = 1u;
+            dst_y = next_y;
+            next_y += pad_h + 1u;
+            dst_si = static_cast<uint16_t>(si);
+        } else {
+            continue; // Cold overflow glyph dropped cleanly
+        }
+
+        for (uint32_t row = 0u; row < e.height_px; ++row) {
+            std::memcpy(new_px + (size_t(dst_y + row) * kSubpixelSteadyCap + dst_x) * bpp,
+                        a->subpixel_pixels + (size_t(e.tile_y + row) * old_w + e.tile_x) * bpp,
+                        size_t(e.width_px) * bpp);
+        }
+        e.tile_x = dst_x;
+        e.tile_y = dst_y;
+        e.shelf_idx = dst_si;
+        uint32_t j = uint32_t(hash_u64(e.key)) & mask;
+        while (new_tbl[j].key) j = (j + 1u) & mask;
+        new_tbl[j] = e;
+        ++kept;
+    }
+
+    std::free(order);
+    if (kept == 0u) {
+        std::free(new_px);
+        std::free(new_tbl);
+        return false;
+    }
+
+    std::free(a->subpixel_pixels);
+    std::free(a->hinted_glyphs);
+    a->subpixel_pixels = new_px;
+    a->hinted_glyphs = new_tbl;
+    a->hinted_count = kept;
+    a->subpixel_w = kSubpixelSteadyCap;
+    a->subpixel_h = kSubpixelSteadyCap;
+    a->subpixel_shelf_x0 = 1u;
+    a->subpixel_shelf_x = 1u;
+    a->subpixel_shelf_y = next_y;
+    a->subpixel_shelf_h = 0u;
+    a->hinted_shelf_count = new_shelf_count;
+    std::memcpy(a->hinted_shelves, new_shelves, sizeof(new_shelves));
+    a->subpixel_dirty = true;
+    a->subpixel_dirty_y0 = 0u;
+    a->subpixel_dirty_y1 = next_y > 0u ? next_y : 1u;
+    a->hinted_gc_pending = false;
+    ++a->uv_epoch;
+    return true;
+}
+
+void maybe_gc_hinted_atlas(Context* ctx) noexcept {
+    if (!ctx || !ctx->atlas.hinted_gc_pending || ctx->prim_count != 0u || ctx->filter_prim_count != 0u) return;
+    auto& a = ctx->atlas;
+    const bool mode_changed = (a.subpixel_is_r8 != !a.lcd_subpixel_text);
+    if (mode_changed || a.hinted_count == 0u || !a.subpixel_pixels || a.hinted_shelf_count == 0u) {
+        a.subpixel_is_r8 = !a.lcd_subpixel_text;
+        reset_hinted_atlas_cache(&a);
+        return;
+    }
+
+    // Burst atlas (> 1024x1024): shrink back to 1024x1024 preserving hottest glyphs without re-rasterization.
+    if (a.subpixel_w > kSubpixelSteadyCap || a.subpixel_h > kSubpixelSteadyCap) {
+        if (!compact_hinted_burst_lru(&a)) {
+            reset_hinted_atlas_cache(&a);
+        }
+        return;
+    }
+
+    // Steady-state (<= 1024x1024): evict coldest shelves in-place while preserving all hot shelves untouched.
+    uint32_t max_frame = 0u;
+    uint32_t occupied_area = 0u;
+    for (uint32_t i = 0u; i < a.hinted_shelf_count; ++i) {
+        const auto& sh = a.hinted_shelves[i];
+        if (sh.live_count > 0u) {
+            if (sh.last_used_frame > max_frame) max_frame = sh.last_used_frame;
+            if (sh.max_x > sh.x0) occupied_area += uint32_t(sh.max_x - sh.x0) * uint32_t(sh.h);
+        }
+    }
+
+    uint16_t cand[FontAtlas::kMaxHintedShelves] = {};
+    uint32_t cand_count = 0u;
+    for (uint32_t i = 0u; i < a.hinted_shelf_count; ++i) {
+        const auto& sh = a.hinted_shelves[i];
+        if (sh.live_count > 0u && sh.last_used_frame < max_frame) {
+            cand[cand_count++] = static_cast<uint16_t>(i);
+        }
+    }
+    if (cand_count == 0u) {
+        a.hinted_gc_pending = false;
+        return;
+    }
+
+    // Insertion-sort cold candidate shelves by ascending last_used_frame (oldest first).
+    for (uint32_t i = 1u; i < cand_count; ++i) {
+        const uint16_t idx = cand[i];
+        const uint32_t f = a.hinted_shelves[idx].last_used_frame;
+        uint32_t j = i;
+        while (j > 0u && a.hinted_shelves[cand[j - 1u]].last_used_frame > f) {
+            cand[j] = cand[j - 1u];
+            --j;
+        }
+        cand[j] = idx;
+    }
+
+    const uint32_t target_reclaim = (occupied_area * 35u) / 100u;
+    const uint32_t bpp = a.subpixel_is_r8 ? 1u : 4u;
+    uint64_t evict_mask[4] = {};
+    uint32_t reclaimed_area = 0u;
+    uint32_t dirty_y0 = UINT32_MAX;
+    uint32_t dirty_y1 = 0u;
+    bool evicted_any = false;
+
+    for (uint32_t i = 0u; i < cand_count; ++i) {
+        const uint16_t si = cand[i];
+        auto& sh = a.hinted_shelves[si];
+        evict_mask[si >> 6] |= (1ULL << (si & 63u));
+        evicted_any = true;
+        const uint32_t span_w = (sh.max_x > sh.x0) ? uint32_t(sh.max_x - sh.x0) : 0u;
+        reclaimed_area += span_w * uint32_t(sh.h);
+        if (span_w > 0u && uint32_t(sh.y) + uint32_t(sh.h) <= a.subpixel_h) {
+            for (uint32_t row = 0u; row < sh.h; ++row) {
+                std::memset(a.subpixel_pixels + (size_t(sh.y + row) * a.subpixel_w + sh.x0) * bpp,
+                            0, size_t(span_w) * bpp);
+            }
+            if (sh.y < dirty_y0) dirty_y0 = sh.y;
+            if (uint32_t(sh.y) + uint32_t(sh.h) > dirty_y1) dirty_y1 = uint32_t(sh.y) + uint32_t(sh.h);
+        }
+        sh.cursor_x = sh.x0;
+        sh.live_count = 0u;
+        sh.last_used_frame = 0u;
+        if (reclaimed_area >= target_reclaim) break;
+    }
+
+    if (evicted_any && a.hinted_glyphs && a.hinted_cap > 0u) {
+        for (uint32_t i = 0u; i < a.hinted_cap; ++i) {
+            const auto& e = a.hinted_glyphs[i];
+            if (!e.key || !e.has_bitmap) continue;
+            if (e.shelf_idx < FontAtlas::kMaxHintedShelves &&
+                (evict_mask[e.shelf_idx >> 6] & (1ULL << (e.shelf_idx & 63u))) != 0ULL)
+            {
+                a.hinted_glyphs[i] = {};
+                --a.hinted_count;
+            }
+        }
+        hinted_reprobe_table(&a);
+        if (dirty_y0 < dirty_y1) {
+            a.subpixel_dirty = true;
+            if (dirty_y0 < a.subpixel_dirty_y0) a.subpixel_dirty_y0 = dirty_y0;
+            if (dirty_y1 > a.subpixel_dirty_y1) a.subpixel_dirty_y1 = dirty_y1;
+        }
+        ++a.uv_epoch;
+    }
+    a.hinted_gc_pending = false;
+}
+
+void evict_font_slot_hinted_glyphs(FontAtlas* a, uint16_t slot_idx) noexcept {
+    if (!a || !a->hinted_glyphs || !a->hinted_cap || !a->hinted_count) return;
+    const uint32_t cap = a->hinted_cap;
+    const uint64_t tag = uint64_t(slot_idx + 1u);
+    bool removed = false;
+    for (uint32_t i = 0u; i < cap; ++i) {
+        const EmojiBitmapEntry e = a->hinted_glyphs[i];
+        if (!e.key || (e.key >> 56) != tag) continue;
+        if (e.has_bitmap && e.shelf_idx < a->hinted_shelf_count && a->hinted_shelves[e.shelf_idx].live_count > 0u) {
+            --a->hinted_shelves[e.shelf_idx].live_count;
+        }
+        a->hinted_glyphs[i] = {};
+        --a->hinted_count;
+        removed = true;
+    }
+    if (removed) hinted_reprobe_table(a);
 }
 
 #if defined(_WIN32)
@@ -924,7 +1286,8 @@ EmojiBitmapEntry rasterize_hinted_stbtt(
     const uint32_t h = static_cast<uint32_t>(iy1 - iy0);
     if (w > 128u || h > 128u) return {};
     uint32_t tx = 0u, ty = 0u;
-    if (!ensure_subpixel_atlas(ctx, w, h, &tx, &ty)) return {};
+    uint16_t shelf_idx = UINT16_MAX;
+    if (!ensure_subpixel_atlas(ctx, w, h, &tx, &ty, &shelf_idx)) return {};
     if (a.subpixel_is_r8) {
         stbtt_MakeGlyphBitmapSubpixel(
             &s.font_info,
@@ -978,6 +1341,7 @@ EmojiBitmapEntry rasterize_hinted_stbtt(
     entry.height_px = h;
     entry.bearing_x = static_cast<float>(ix0);
     entry.bearing_y_top = static_cast<float>(-iy0);
+    entry.shelf_idx = shelf_idx;
     entry.has_bitmap = true;
     a.hinted_glyphs[idx] = entry;
     ++a.hinted_count;
@@ -1005,6 +1369,10 @@ EmojiBitmapEntry get_or_cache_hinted_glyph(Context* ctx, uint16_t slot_idx, uint
     }
     if (a.hinted_glyphs[idx].key) {
         a.hinted_glyphs[idx].last_used_frame = cur_frame;
+        const uint16_t si = a.hinted_glyphs[idx].shelf_idx;
+        if (si < a.hinted_shelf_count && cur_frame > a.hinted_shelves[si].last_used_frame) {
+            a.hinted_shelves[si].last_used_frame = cur_frame;
+        }
         return a.hinted_glyphs[idx];
     }
 
@@ -1082,9 +1450,10 @@ EmojiBitmapEntry get_or_cache_hinted_glyph(Context* ctx, uint16_t slot_idx, uint
     }
 
     uint32_t tx = 0u, ty = 0u;
+    uint16_t shelf_idx = UINT16_MAX;
     if (rgb &&
         SUCCEEDED(analysis->CreateAlphaTexture(DWRITE_TEXTURE_CLEARTYPE_3x1, &rc, rgb, static_cast<UINT32>(rgb_bytes))) &&
-        ensure_subpixel_atlas(ctx, w, h, &tx, &ty))
+        ensure_subpixel_atlas(ctx, w, h, &tx, &ty, &shelf_idx))
     {
         if (a.subpixel_is_r8) {
             for (uint32_t row = 0u; row < h; ++row) {
@@ -1121,6 +1490,7 @@ EmojiBitmapEntry get_or_cache_hinted_glyph(Context* ctx, uint16_t slot_idx, uint
         entry.height_px = h;
         entry.bearing_x = static_cast<float>(rc.left);
         entry.bearing_y_top = static_cast<float>(-rc.top);
+        entry.shelf_idx = shelf_idx;
         entry.has_bitmap = true;
     }
     if (used_arena) ctx->frame_arena.rewind(arena_mark);
@@ -1238,13 +1608,14 @@ EmojiBitmapEntry get_or_cache_hinted_glyph(Context* ctx, uint16_t slot_idx, uint
     }
 
     uint32_t tx = 0u, ty = 0u;
+    uint16_t shelf_idx = UINT16_MAX;
     if (gray) {
         std::memset(gray, 0, gray_bytes);
         CGColorSpaceRef cs = CGColorSpaceCreateDeviceGray();
         CGContextRef cg = cs
             ? CGBitmapContextCreate(gray, w, h, 8, w, cs, static_cast<uint32_t>(kCGImageAlphaNone))
             : nullptr;
-        if (cg && ensure_subpixel_atlas(ctx, w, h, &tx, &ty)) {
+        if (cg && ensure_subpixel_atlas(ctx, w, h, &tx, &ty, &shelf_idx)) {
             CGContextSetAllowsAntialiasing(cg, true);
             CGContextSetShouldAntialias(cg, true);
             CGContextSetAllowsFontSmoothing(cg, true);
@@ -1283,6 +1654,7 @@ EmojiBitmapEntry get_or_cache_hinted_glyph(Context* ctx, uint16_t slot_idx, uint
             entry.height_px = h;
             entry.bearing_x = static_cast<float>(ix0);
             entry.bearing_y_top = static_cast<float>(iy_top);
+            entry.shelf_idx = shelf_idx;
             entry.has_bitmap = true;
         }
         if (cg) CGContextRelease(cg);
@@ -1330,7 +1702,8 @@ EmojiBitmapEntry get_or_cache_hinted_glyph(Context* ctx, uint16_t slot_idx, uint
     const uint32_t h = bm.rows;
     if (w == 0u || w > 128u || h > 128u) return {};
     uint32_t tx = 0u, ty = 0u;
-    if (!ensure_subpixel_atlas(ctx, w, h, &tx, &ty)) return {};
+    uint16_t shelf_idx = UINT16_MAX;
+    if (!ensure_subpixel_atlas(ctx, w, h, &tx, &ty, &shelf_idx)) return {};
     const int pitch = bm.pitch;
     for (uint32_t row = 0u; row < h; ++row) {
         const uint8_t* src_row = (pitch >= 0)
@@ -1369,6 +1742,7 @@ EmojiBitmapEntry get_or_cache_hinted_glyph(Context* ctx, uint16_t slot_idx, uint
     entry.height_px = h;
     entry.bearing_x = static_cast<float>(face->glyph->bitmap_left);
     entry.bearing_y_top = static_cast<float>(face->glyph->bitmap_top);
+    entry.shelf_idx = shelf_idx;
     entry.has_bitmap = true;
     a.hinted_glyphs[idx] = entry;
     ++a.hinted_count;

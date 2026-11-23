@@ -434,6 +434,140 @@ bool win32_find_system_font_path(Str family_name, FontWeight weight, char* out_p
     const wchar_t* final_w = (exp_n > 0u && exp_n <= 512u) ? expanded : best_data;
     const int n = WideCharToMultiByte(CP_UTF8, 0, final_w, -1, out_path, static_cast<int>(out_cap), nullptr, nullptr);
     return n > 0;
+#elif defined(__APPLE__)
+    if (!family_name.chars || family_name.length == 0u || !out_path || out_cap == 0u) return false;
+    CFStringRef fam = CFStringCreateWithBytes(
+        kCFAllocatorDefault,
+        reinterpret_cast<const UInt8*>(family_name.chars),
+        static_cast<CFIndex>(family_name.length),
+        kCFStringEncodingUTF8,
+        false);
+    if (!fam) return false;
+    double ct_weight = 0.0;
+    uint32_t symbolic = 0u;
+    switch (weight) {
+        case FontWeight::Medium:   ct_weight = 0.23; break;
+        case FontWeight::SemiBold: ct_weight = 0.30; break;
+        case FontWeight::Bold:     ct_weight = 0.40; symbolic = kCTFontTraitBold; break;
+        case FontWeight::Italic:   symbolic = kCTFontTraitItalic; break;
+        case FontWeight::Mono:     symbolic = kCTFontTraitMonoSpace; break;
+        case FontWeight::Regular:
+        default: break;
+    }
+    CFMutableDictionaryRef traits = CFDictionaryCreateMutable(
+        kCFAllocatorDefault, 2, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    CFMutableDictionaryRef attrs = CFDictionaryCreateMutable(
+        kCFAllocatorDefault, 2, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    bool ok = false;
+    if (traits && attrs) {
+        CFNumberRef wnum = CFNumberCreate(kCFAllocatorDefault, kCFNumberDoubleType, &ct_weight);
+        if (wnum) {
+            CFDictionarySetValue(traits, kCTFontWeightTrait, wnum);
+            CFRelease(wnum);
+        }
+        if (symbolic != 0u) {
+            const int32_t sym_i32 = static_cast<int32_t>(symbolic);
+            CFNumberRef snum = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &sym_i32);
+            if (snum) {
+                CFDictionarySetValue(traits, kCTFontSymbolicTrait, snum);
+                CFRelease(snum);
+            }
+        }
+        CFDictionarySetValue(attrs, kCTFontFamilyNameAttribute, fam);
+        CFDictionarySetValue(attrs, kCTFontTraitsAttribute, traits);
+        CTFontDescriptorRef req = CTFontDescriptorCreateWithAttributes(attrs);
+        if (req) {
+            CTFontDescriptorRef matched = CTFontDescriptorCreateMatchingFontDescriptor(req, nullptr);
+            CTFontDescriptorRef src_desc = matched ? matched : req;
+            CFURLRef url = static_cast<CFURLRef>(CTFontDescriptorCopyAttribute(src_desc, kCTFontURLAttribute));
+            if (url) {
+                ok = CFURLGetFileSystemRepresentation(url, true, reinterpret_cast<UInt8*>(out_path), static_cast<CFIndex>(out_cap)) != 0;
+                CFRelease(url);
+            }
+            if (matched) CFRelease(matched);
+            CFRelease(req);
+        }
+    }
+    if (attrs) CFRelease(attrs);
+    if (traits) CFRelease(traits);
+    CFRelease(fam);
+    return ok && out_path[0] != '\0';
+#elif defined(__linux__)
+    if (!family_name.chars || family_name.length == 0u || !out_path || out_cap == 0u) return false;
+    struct FcConfig;
+    struct FcPattern;
+    enum FcMatchKind : int { FcMatchPattern = 0 };
+    enum FcResult : int { FcResultMatch = 0 };
+    struct FcApi {
+        void* so;
+        bool loaded;
+        bool ok;
+        int (*init)();
+        FcPattern* (*pat_create)();
+        void (*pat_destroy)(FcPattern*);
+        int (*pat_add_string)(FcPattern*, const char*, const unsigned char*);
+        int (*pat_add_int)(FcPattern*, const char*, int);
+        int (*cfg_sub)(FcConfig*, FcPattern*, FcMatchKind);
+        void (*def_sub)(FcPattern*);
+        FcPattern* (*font_match)(FcConfig*, FcPattern*, FcResult*);
+        FcResult (*pat_get_str)(const FcPattern*, const char*, int, unsigned char**);
+    };
+    static FcApi g_fc = {};
+    if (!g_fc.loaded) {
+        g_fc.loaded = true;
+        g_fc.so = dlopen("libfontconfig.so.1", RTLD_LAZY | RTLD_LOCAL);
+        if (g_fc.so) {
+            auto sym = [](void* h, const char* s) noexcept { return dlsym(h, s); };
+            g_fc.init = reinterpret_cast<decltype(g_fc.init)>(sym(g_fc.so, "FcInit"));
+            g_fc.pat_create = reinterpret_cast<decltype(g_fc.pat_create)>(sym(g_fc.so, "FcPatternCreate"));
+            g_fc.pat_destroy = reinterpret_cast<decltype(g_fc.pat_destroy)>(sym(g_fc.so, "FcPatternDestroy"));
+            g_fc.pat_add_string = reinterpret_cast<decltype(g_fc.pat_add_string)>(sym(g_fc.so, "FcPatternAddString"));
+            g_fc.pat_add_int = reinterpret_cast<decltype(g_fc.pat_add_int)>(sym(g_fc.so, "FcPatternAddInteger"));
+            g_fc.cfg_sub = reinterpret_cast<decltype(g_fc.cfg_sub)>(sym(g_fc.so, "FcConfigSubstitute"));
+            g_fc.def_sub = reinterpret_cast<decltype(g_fc.def_sub)>(sym(g_fc.so, "FcDefaultSubstitute"));
+            g_fc.font_match = reinterpret_cast<decltype(g_fc.font_match)>(sym(g_fc.so, "FcFontMatch"));
+            g_fc.pat_get_str = reinterpret_cast<decltype(g_fc.pat_get_str)>(sym(g_fc.so, "FcPatternGetString"));
+            g_fc.ok = (g_fc.init && g_fc.pat_create && g_fc.pat_destroy && g_fc.pat_add_string &&
+                       g_fc.pat_add_int && g_fc.cfg_sub && g_fc.def_sub && g_fc.font_match && g_fc.pat_get_str);
+            if (g_fc.ok) (void)g_fc.init();
+        }
+    }
+    if (!g_fc.ok) return false;
+    char fam_z[128] = {};
+    const uint32_t flen = family_name.length < 127u ? family_name.length : 127u;
+    std::memcpy(fam_z, family_name.chars, flen);
+    fam_z[flen] = '\0';
+    FcPattern* pat = g_fc.pat_create();
+    if (!pat) return false;
+    g_fc.pat_add_string(pat, "family", reinterpret_cast<const unsigned char*>(fam_z));
+    // Standard Fontconfig constants: FC_WEIGHT_REGULAR=80, MEDIUM=100, DEMIBOLD=180, BOLD=200; FC_SLANT_ITALIC=100; FC_MONO=100.
+    int fc_weight = 80;
+    int fc_slant = 0;
+    if (weight == FontWeight::Medium) fc_weight = 100;
+    else if (weight == FontWeight::SemiBold) fc_weight = 180;
+    else if (weight == FontWeight::Bold) fc_weight = 200;
+    else if (weight == FontWeight::Italic) fc_slant = 100;
+    else if (weight == FontWeight::Mono) g_fc.pat_add_int(pat, "spacing", 100);
+    g_fc.pat_add_int(pat, "weight", fc_weight);
+    g_fc.pat_add_int(pat, "slant", fc_slant);
+    g_fc.cfg_sub(nullptr, pat, FcMatchPattern);
+    g_fc.def_sub(pat);
+    FcResult res = FcResultMatch;
+    FcPattern* match = g_fc.font_match(nullptr, pat, &res);
+    bool ok = false;
+    if (match) {
+        unsigned char* file = nullptr;
+        if (g_fc.pat_get_str(match, "file", 0, &file) == FcResultMatch && file && file[0] != '\0') {
+            const size_t n = std::strlen(reinterpret_cast<const char*>(file));
+            if (n > 0u && n < out_cap) {
+                std::memcpy(out_path, file, n + 1u);
+                ok = true;
+            }
+        }
+        g_fc.pat_destroy(match);
+    }
+    g_fc.pat_destroy(pat);
+    return ok;
 #else
     (void)family_name; (void)weight; (void)out_path; (void)out_cap;
     return false;
