@@ -1,24 +1,9 @@
-// Etch Dedicated Hardware 3-Channel LCD Subpixel Text Shader (SM 6.0 HLSL -> DXIL & SPIR-V)
-// Hardware blend state:
-//   src_color = CONSTANT_COLOR (linear text_color.rgb), dst_color = ONE_MINUS_SRC_COLOR (1 - alpha * cov.rgb)
-//   src_alpha = ONE, dst_alpha = ONE_MINUS_SRC_ALPHA
-// Achieves mathematically exact ClearType / LCD RGB subpixel compositing on D3D12, Vulkan & Metal in 1 pass.
+// Etch Dedicated Hinted Glyph Shader (SM 6.0 HLSL -> DXIL, SPIR-V, MSL)
+// Handles 100% of PrimKind::Glyph:
+//   - Single-DC R8_UNORM 4x X-phase grayscale hinted text (all colors, text wipe, all BlendModes & AlphaMasks)
+//   - Opt-in 3-channel ClearType RGB LCD subpixel text (CONSTANT_COLOR + ONE_MINUS_SRC_COLOR) + RGBA .a fallback.
 
-#define ETCH_FLAG_ROUNDED_CLIP  (1u << 2)
-#define ETCH_FLAG_STEM_DARKEN   (1u << 4)
-#define ETCH_FLAG_TEXT_CLIP     (1u << 5)
-
-#define ETCH_GLOBAL_GRAYSCALE_TEXT (1u << 28)
-#define ETCH_GLOBAL_USE_DEPTH      (1u << 30)
-#define ETCH_GLOBAL_MANUAL_SRGB    (1u << 31)
-
-struct Prim
-{
-    float4 bounds;
-    float4 clip;
-    uint4  payload;
-    uint4  style;
-};
+#include "etch_common.hlsli"
 
 #ifdef __spirv__
 [[vk::binding(0, 0)]]
@@ -43,94 +28,26 @@ cbuffer GlobalsVS : register(b0, space1)
     uint   g_flags;
 };
 
-#ifdef __spirv__
-[[vk::combinedImageSampler]] [[vk::binding(0, 2)]]
-#endif
-Texture2D<float4> g_subpixel_atlas : register(t0, space2);
-#ifdef __spirv__
-[[vk::combinedImageSampler]] [[vk::binding(0, 2)]]
-#endif
-SamplerState g_subpixel_smp : register(s0, space2);
+ETCH_COMBINED_SAMPLER(0) Texture2D<float4> g_subpixel_atlas : register(t0, space2);
+ETCH_COMBINED_SAMPLER(0) SamplerState      g_subpixel_smp   : register(s0, space2);
 
-struct ClipShape
-{
-    float4 bounds;
-    float4 radii;
-    uint4  meta;
-};
+ETCH_COMBINED_SAMPLER(1) Texture2D<float4> g_mask_tex       : register(t1, space2);
+ETCH_COMBINED_SAMPLER(1) SamplerState      g_mask_smp       : register(s1, space2);
 
-#ifdef __spirv__
-[[vk::binding(1, 2)]]
-#endif
-StructuredBuffer<ClipShape> g_clip_shapes : register(t1, space2);
+ETCH_FRAG_STORAGE(2) StructuredBuffer<ClipShapeGpu> g_clip_shapes : register(t2, space2);
 
 struct VSOut
 {
     float4 position  : SV_Position;
     float2 pixel_pos : TEXCOORD0;
     float2 uv        : TEXCOORD1;
-    nointerpolation float4 clip      : TEXCOORD2;
-    nointerpolation float4 text_clip : TEXCOORD3; // x = min_x, y = max_x, z = text_alpha, w = srgb_luma
-    nointerpolation uint4  meta      : TEXCOORD4; // x = flags, y = clip_index, z = asuint(clip_r), w = 0
-    nointerpolation float4 text_color: TEXCOORD5; // linear rgb, straight a (for single-DC R8_UNORM grayscale text)
+    nointerpolation float4 clip       : TEXCOORD2;
+    nointerpolation float4 text_clip  : TEXCOORD3; // x = min_x, y = max_x, z = text_alpha, w = srgb_luma
+    nointerpolation uint4  meta       : TEXCOORD4; // x = flags, y = clip_index, z = asuint(clip_r), w = 0
+    nointerpolation float4 text_color : TEXCOORD5; // linear rgb, straight a
+    nointerpolation float4 wipe_color : TEXCOORD6; // linear rgb, straight a (text wipe end color)
+    nointerpolation float4 wipe_range : TEXCOORD7; // x = bounds.x, y = x0_rel, z = x1_rel, w = 0
 };
-
-float unpack_f16_bits(uint h)
-{
-    uint sign_bit = (h & 0x8000u) << 16;
-    uint exp_bits = (h >> 10) & 0x1Fu;
-    uint mant_bits = h & 0x03FFu;
-    if (exp_bits == 0u)
-    {
-        if (mant_bits == 0u) return asfloat(sign_bit);
-        float val = float(mant_bits) * (1.0f / 16777216.0f);
-        return (sign_bit != 0u) ? -val : val;
-    }
-    if (exp_bits == 31u) return asfloat(sign_bit | 0x7F800000u | (mant_bits << 13));
-    return asfloat(sign_bit | ((exp_bits + 112u) << 23) | (mant_bits << 13));
-}
-
-float2 unpack_f16x2_custom(uint packed)
-{
-    return float2(unpack_f16_bits(packed & 0xFFFFu), unpack_f16_bits((packed >> 16) & 0xFFFFu));
-}
-
-float2 unpack_unorm16x2(uint packed)
-{
-    return float2(float(packed & 0xFFFFu), float((packed >> 16) & 0xFFFFu)) * (1.0f / 65535.0f);
-}
-
-float srgb_to_linear_chan(float c)
-{
-    return (c <= 0.04045f) ? (c * (1.0f / 12.92f)) : pow(max((c + 0.055f) * (1.0f / 1.055f), 0.0f), 2.4f);
-}
-
-float linear_to_srgb_chan(float c)
-{
-    return (c <= 0.0031308f) ? (c * 12.92f) : (1.055f * pow(max(c, 0.0f), 1.0f / 2.4f) - 0.055f);
-}
-
-float3 linear_to_srgb3(float3 c)
-{
-    return float3(linear_to_srgb_chan(c.r), linear_to_srgb_chan(c.g), linear_to_srgb_chan(c.b));
-}
-
-float sd_rounded_box(float2 p, float2 b, float4 r, bool continuous)
-{
-    float2 rr = (p.x > 0.0f) ? float2(r.y, r.z) : float2(r.x, r.w);
-    float rad = (p.y > 0.0f) ? rr.y : rr.x;
-    rad = min(rad, min(b.x, b.y));
-    float2 q = abs(p) - b + rad;
-    float2 m = max(q, 0.0f);
-    if (continuous && rad > 0.5f && m.x > 0.0f && m.y > 0.0f)
-    {
-        float2 u = m / rad;
-        float k = 2.8f;
-        float s = pow(pow(u.x, k) + pow(u.y, k), 1.0f / k);
-        return (s - 1.0f) * rad;
-    }
-    return min(max(q.x, q.y), 0.0f) + length(m) - rad;
-}
 
 VSOut vs_main(uint vertex_id : SV_VertexID, uint instance_id : SV_InstanceID)
 {
@@ -159,18 +76,17 @@ VSOut vs_main(uint vertex_id : SV_VertexID, uint instance_id : SV_InstanceID)
     float2 uv0 = unpack_unorm16x2(p.payload.x);
     float2 uv1 = unpack_unorm16x2(p.payload.y);
 
-    float4 col_srgb = float4(
-        float(p.style.y & 0xFFu),
-        float((p.style.y >> 8) & 0xFFu),
-        float((p.style.y >> 16) & 0xFFu),
-        float((p.style.y >> 24) & 0xFFu)
-    ) * (1.0f / 255.0f);
-    float3 col_lin = float3(
-        srgb_to_linear_chan(col_srgb.r),
-        srgb_to_linear_chan(col_srgb.g),
-        srgb_to_linear_chan(col_srgb.b));
-    float lin_luma = saturate(dot(col_lin, float3(0.2126f, 0.7152f, 0.0722f)));
+    float4 col_lin = unpack_rgba8_srgb_to_linear(p.style.y);
+    float lin_luma = saturate(dot(col_lin.rgb, float3(0.2126f, 0.7152f, 0.0722f)));
     float srgb_luma = pow(lin_luma, 1.0f / 2.2f);
+
+    float4 wipe_col = float4(0.0f, 0.0f, 0.0f, 0.0f);
+    float2 wipe_x = float2(0.0f, 0.0f);
+    if ((flags & (ETCH_FLAG_LINEAR_GRAD | ETCH_FLAG_TEXT_CLIP)) == ETCH_FLAG_LINEAR_GRAD)
+    {
+        wipe_col = unpack_rgba8_srgb_to_linear(p.style.z);
+        wipe_x = unpack_f16x2_custom(p.payload.w);
+    }
 
     float z = ((g_flags & ETCH_GLOBAL_USE_DEPTH) != 0u)
         ? (1.0f - float(g_prim_depths[prim_idx] + 1u) * (1.0f / 8388608.0f))
@@ -186,9 +102,11 @@ VSOut vs_main(uint vertex_id : SV_VertexID, uint instance_id : SV_InstanceID)
     o.pixel_pos  = px;
     o.uv         = lerp(uv0, uv1, norm_uv);
     o.clip       = p.clip;
-    o.text_clip  = float4(asfloat(p.style.z), asfloat(p.style.w), col_srgb.a, srgb_luma);
-    o.meta       = uint4(flags | (g_flags & (ETCH_GLOBAL_MANUAL_SRGB | ETCH_GLOBAL_GRAYSCALE_TEXT)), clip_idx, asuint(clip_r), 0u);
-    o.text_color = float4(col_lin, col_srgb.a);
+    o.text_clip  = float4(asfloat(p.style.z), asfloat(p.style.w), col_lin.a, srgb_luma);
+    o.meta       = uint4(flags | (g_flags & (ETCH_GLOBAL_MANUAL_SRGB | ETCH_GLOBAL_GRAYSCALE_TEXT | ETCH_GLOBAL_TEXT_ATLAS_R8)), clip_idx, asuint(clip_r), 0u);
+    o.text_color = col_lin;
+    o.wipe_color = wipe_col;
+    o.wipe_range = float4(bmin.x, wipe_x.x, wipe_x.y, 0.0f);
     return o;
 }
 
@@ -196,52 +114,33 @@ float4 ps_main(VSOut input) : SV_Target0
 {
     uint flags = input.meta.x;
 
-    float clip_r = asfloat(input.meta.z);
-    float2 clip_half   = 0.5f * max(input.clip.zw - input.clip.xy, 0.0f);
-    float2 clip_center = 0.5f * (input.clip.xy + input.clip.zw);
-    float2 clip_rel    = input.pixel_pos - clip_center;
-    float clip_d;
-    if ((flags & ETCH_FLAG_ROUNDED_CLIP) != 0u && clip_r != 0.0f)
-    {
-        clip_d = sd_rounded_box(clip_rel, clip_half, abs(clip_r).xxxx, clip_r < 0.0f);
-    }
-    else
-    {
-        float2 cq = abs(clip_rel) - clip_half;
-        clip_d = max(cq.x, cq.y);
-    }
-    float clip_cov = saturate(0.5f - clip_d);
-    float fade_cov = 1.0f;
-    uint clip_index = input.meta.y;
-    [loop] while (clip_index != 0u)
-    {
-        ClipShape shape = g_clip_shapes[clip_index];
-        float2 half_shape = shape.bounds.zw * 0.5f;
-        float2 relative = input.pixel_pos - shape.bounds.xy - half_shape;
-        float distance = sd_rounded_box(relative, half_shape, shape.radii, shape.meta.y != 0u);
-        clip_cov = min(clip_cov, saturate(0.5f - distance));
-        float2 tb = unpack_f16x2_custom(shape.meta.z);
-        float2 lr = unpack_f16x2_custom(shape.meta.w);
-        if (tb.x > 0.0f) fade_cov *= smoothstep(0.0f, tb.x, input.pixel_pos.y - shape.bounds.y);
-        if (tb.y > 0.0f) fade_cov *= smoothstep(0.0f, tb.y, shape.bounds.y + shape.bounds.w - input.pixel_pos.y);
-        if (lr.x > 0.0f) fade_cov *= smoothstep(0.0f, lr.x, input.pixel_pos.x - shape.bounds.x);
-        if (lr.y > 0.0f) fade_cov *= smoothstep(0.0f, lr.y, shape.bounds.x + shape.bounds.z - input.pixel_pos.x);
-        clip_index = shape.meta.x;
-    }
-    clip_cov *= fade_cov;
+    float clip_cov = etch_eval_clip_chain(
+        input.pixel_pos, input.clip, asfloat(input.meta.z),
+        (flags & ETCH_FLAG_ROUNDED_CLIP) != 0u, input.meta.y,
+        g_clip_shapes, g_mask_tex, g_mask_smp);
     if ((flags & ETCH_FLAG_TEXT_CLIP) != 0u)
     {
         clip_cov *= saturate(0.5f + min(input.pixel_pos.x - input.text_clip.x, input.text_clip.y - input.pixel_pos.x));
     }
     if (clip_cov <= 0.0f) return float4(0.0f, 0.0f, 0.0f, 0.0f);
 
-    float4 tex_sample = g_subpixel_atlas.Sample(g_subpixel_smp, input.uv);
+    float4 tex_sample = g_subpixel_atlas.SampleLevel(g_subpixel_smp, input.uv, 0.0f);
     if ((flags & ETCH_GLOBAL_GRAYSCALE_TEXT) != 0u)
     {
-        float cov = tex_sample.r;
+        float cov = ((flags & ETCH_GLOBAL_TEXT_ATLAS_R8) != 0u) ? tex_sample.r : tex_sample.a;
+        float4 glyph_col = input.text_color;
+        float srgb_luma = input.text_clip.w;
+        if ((flags & (ETCH_FLAG_LINEAR_GRAD | ETCH_FLAG_TEXT_CLIP)) == ETCH_FLAG_LINEAR_GRAD)
+        {
+            float rel_x = input.pixel_pos.x - input.wipe_range.x;
+            float x0_rel = input.wipe_range.y;
+            float x1_rel = max(input.wipe_range.z, x0_rel + 0.5f);
+            glyph_col = lerp(input.text_color, input.wipe_color, smoothstep(x0_rel, x1_rel, rel_x));
+            float lin_luma = saturate(dot(glyph_col.rgb, float3(0.2126f, 0.7152f, 0.0722f)));
+            srgb_luma = pow(lin_luma, 1.0f / 2.2f);
+        }
         if ((flags & ETCH_FLAG_STEM_DARKEN) != 0u && cov > 0.0f)
         {
-            float srgb_luma = input.text_clip.w;
             // Polarity-calibrated stem darkening: prevents thin/spindly dark-on-light text in linear blending
             // and gently trims light-on-dark halo bloat.
             float dark_factor = saturate(1.0f - 2.0f * srgb_luma);
@@ -249,10 +148,10 @@ float4 ps_main(VSOut input) : SV_Target0
             cov = lerp(cov, pow(cov, 0.74f), dark_factor * 0.85f);
             cov = lerp(cov, cov * cov, light_trim);
         }
-        float a = saturate(cov * input.text_color.a * clip_cov);
+        float a = saturate(cov * glyph_col.a * clip_cov);
         float3 rgb = ((flags & ETCH_GLOBAL_MANUAL_SRGB) != 0u)
-            ? linear_to_srgb3(saturate(input.text_color.rgb))
-            : input.text_color.rgb;
+            ? linear_to_srgb3(saturate(glyph_col.rgb))
+            : glyph_col.rgb;
         return float4(rgb * a, a);
     }
 

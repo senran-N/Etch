@@ -16,13 +16,17 @@ const BidiBracket* bidi_bracket(uint32_t cp) noexcept {
     return lo < ETCH_COUNTOF(kBidiBrackets) && kBidiBrackets[lo].cp == cp ? &kBidiBrackets[lo] : nullptr;
 }
 
+constexpr uint32_t kShapeCacheEntryCap = 256u;
+constexpr uint32_t kShapeCacheGlyphCap = 2048u;
+constexpr uint32_t kShapeCacheTextCap  = 8192u;
+
 bool shape_cache_ensure(Context* ctx) noexcept {
     auto& sc = ctx->shape_cache;
     if (sc.initialized) return true;
     for (uint32_t i = 0u; i < 2u; ++i) {
-        sc.banks[i].entries = static_cast<Context::ShapeCacheEntry*>(std::calloc(Context::ShapeCache::kEntryCap, sizeof(Context::ShapeCacheEntry)));
-        sc.banks[i].glyphs = static_cast<ShapedGlyph*>(std::malloc(Context::ShapeCache::kGlyphCap * sizeof(ShapedGlyph)));
-        sc.banks[i].text = static_cast<char*>(std::malloc(Context::ShapeCache::kTextCap));
+        sc.banks[i].entries = static_cast<Context::ShapeCacheEntry*>(std::calloc(kShapeCacheEntryCap, sizeof(Context::ShapeCacheEntry)));
+        sc.banks[i].glyphs = static_cast<ShapedGlyph*>(std::malloc(kShapeCacheGlyphCap * sizeof(ShapedGlyph)));
+        sc.banks[i].text = static_cast<char*>(std::malloc(kShapeCacheTextCap));
         if (!sc.banks[i].entries || !sc.banks[i].glyphs || !sc.banks[i].text) {
             for (uint32_t j = 0u; j <= i; ++j) {
                 std::free(sc.banks[j].entries);
@@ -41,7 +45,7 @@ bool shape_cache_ensure(Context* ctx) noexcept {
 
 void shape_cache_clear_bank(Context::ShapeCacheBank& b) noexcept {
     if (b.entries && b.entry_count > 0u) {
-        std::memset(b.entries, 0, Context::ShapeCache::kEntryCap * sizeof(Context::ShapeCacheEntry));
+        std::memset(b.entries, 0, kShapeCacheEntryCap * sizeof(Context::ShapeCacheEntry));
     }
     b.entry_count = 0u;
     b.glyph_used = 0u;
@@ -58,9 +62,9 @@ void shape_cache_begin_frame(Context* ctx) noexcept {
         return;
     }
     const auto& cur = sc.banks[sc.active_bank];
-    if (cur.entry_count >= (Context::ShapeCache::kEntryCap * 3u) / 4u ||
-        cur.glyph_used >= (Context::ShapeCache::kGlyphCap * 3u) / 4u ||
-        cur.text_used >= (Context::ShapeCache::kTextCap * 3u) / 4u)
+    if (cur.entry_count >= (kShapeCacheEntryCap * 3u) / 4u ||
+        cur.glyph_used >= (kShapeCacheGlyphCap * 3u) / 4u ||
+        cur.text_used >= (kShapeCacheTextCap * 3u) / 4u)
     {
         sc.active_bank ^= 1u;
         shape_cache_clear_bank(sc.banks[sc.active_bank]);
@@ -78,7 +82,7 @@ bool shape_cache_find_in_bank(
     bool* out_rtl) noexcept
 {
     if (!b.entries || b.entry_count == 0u) return false;
-    constexpr uint32_t mask = Context::ShapeCache::kEntryCap - 1u;
+    constexpr uint32_t mask = kShapeCacheEntryCap - 1u;
     uint32_t idx = static_cast<uint32_t>(hash) & mask;
     for (uint32_t probe = 0u; probe < 16u; ++probe) {
         const auto& e = b.entries[idx];
@@ -106,13 +110,13 @@ std::span<const ShapedGlyph> shape_cache_insert(
     bool is_rtl) noexcept
 {
     const uint32_t gcount = static_cast<uint32_t>(glyphs.size());
-    if (!b.entries || b.entry_count >= (Context::ShapeCache::kEntryCap * 7u) / 8u ||
-        b.glyph_used + gcount > Context::ShapeCache::kGlyphCap ||
-        b.text_used + byte_len > Context::ShapeCache::kTextCap)
+    if (!b.entries || b.entry_count >= (kShapeCacheEntryCap * 7u) / 8u ||
+        b.glyph_used + gcount > kShapeCacheGlyphCap ||
+        b.text_used + byte_len > kShapeCacheTextCap)
     {
         return glyphs;
     }
-    constexpr uint32_t mask = Context::ShapeCache::kEntryCap - 1u;
+    constexpr uint32_t mask = kShapeCacheEntryCap - 1u;
     uint32_t idx = static_cast<uint32_t>(hash) & mask;
     for (uint32_t probe = 0u; probe < 16u; ++probe) {
         auto& e = b.entries[idx];
@@ -344,13 +348,38 @@ std::span<const ShapedGlyph> shape_utf8_run_uncached(Context* ctx, uint16_t font
     return {out, count};
 }
 
+uint64_t compute_active_ot_feature_hash(const Context* ctx) noexcept {
+    uint64_t h = 0u;
+    if (ctx->active_ot_flags != 0u) {
+        h = hash_u64(static_cast<uint64_t>(ctx->active_ot_flags) | 0xA500000000ULL);
+    }
+    if (ctx->active_ot_features && ctx->active_ot_feature_count > 0u) {
+        uint64_t fh = 14695981039346656037ULL ^ h;
+        for (uint32_t i = 0u; i < ctx->active_ot_feature_count; ++i) {
+            const uint64_t packed =
+                (static_cast<uint64_t>(ctx->active_ot_features[i].tag) << 32) |
+                static_cast<uint64_t>(ctx->active_ot_features[i].value);
+            fh ^= packed;
+            fh *= 1099511628211ULL;
+        }
+        h = hash_u64(fh);
+        if (h == 0u) h = 1u;
+    }
+    return h;
+}
+
 std::span<const ShapedGlyph> shape_utf8_run(Context* ctx, uint16_t font_id, const char* utf8, uint32_t byte_len, bool* out_is_rtl = nullptr) noexcept {
     if (out_is_rtl) *out_is_rtl = false;
     if (!byte_len || !ctx->atlas.font_valid) return {};
     if (byte_len <= 1024u && shape_cache_ensure(ctx)) {
         const uint16_t slot = resolve_font_slot_idx(&ctx->atlas, font_id);
         const uint32_t font_rev = ctx->atlas.font_revision;
-        const uint64_t h = fnv1a_64(utf8, byte_len) ^ (uint64_t(slot) * 0x9E3779B97F4A7C15ULL) ^ (uint64_t(font_rev) * 0xBF58476D1CE4E5B9ULL);
+        const uint64_t ot_feature_hash = compute_active_ot_feature_hash(ctx);
+        const uint64_t h = hash_u64(
+            fnv1a_64(utf8, byte_len) ^
+            (uint64_t(slot) * 0x9E3779B97F4A7C15ULL) ^
+            (uint64_t(font_rev) * 0xBF58476D1CE4E5B9ULL) ^
+            (ot_feature_hash * 0x94D049BB133111EBULL));
         auto& cur = ctx->shape_cache.banks[ctx->shape_cache.active_bank];
         auto& prev = ctx->shape_cache.banks[ctx->shape_cache.active_bank ^ 1u];
         std::span<const ShapedGlyph> hit = {};

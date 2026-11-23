@@ -1069,53 +1069,54 @@ void move_caret_vertical(
     bool extend_selection,
     float wrap_w = 0.0f) noexcept
 {
-    if (!ws || !desc.multiline) {
+    WidgetCold* c = ensure_widget_cold(ws);
+    if (!c || !desc.multiline) {
         return;
     }
-    const TextVisualPos cur = text_byte_to_visual(ctx, desc, text, ws->edit_cursor, wrap_w, ws->edit_wrap_affinity);
-    if (ws->edit_preferred_x < 0.0f) {
-        ws->edit_preferred_x = cur.x;
+    const TextVisualPos cur = text_byte_to_visual(ctx, desc, text, c->edit_cursor, wrap_w, c->edit_wrap_affinity);
+    if (c->edit_preferred_x < 0.0f) {
+        c->edit_preferred_x = cur.x;
     }
     const float line_adv = text_input_line_advance_logical(ctx, desc);
     const TextVisualPos total_end = text_byte_to_visual(ctx, desc, text, text.length, wrap_w, false);
 
     if (delta < 0) {
         if (cur.line_idx == 0u) {
-            ws->edit_cursor = 0u;
-            ws->edit_wrap_affinity = false;
+            c->edit_cursor = 0u;
+            c->edit_wrap_affinity = false;
         } else {
             const uint32_t target_line = cur.line_idx - 1u;
             bool aff = false;
-            ws->edit_cursor = visual_point_to_byte(
+            c->edit_cursor = visual_point_to_byte(
                 ctx,
                 desc,
                 text,
-                ws->edit_preferred_x,
+                c->edit_preferred_x,
                 (static_cast<float>(target_line) + 0.5f) * line_adv,
                 wrap_w,
                 &aff);
-            ws->edit_wrap_affinity = aff;
+            c->edit_wrap_affinity = aff;
         }
     } else if (delta > 0) {
         if (cur.line_idx >= total_end.line_idx) {
-            ws->edit_cursor = text.length;
-            ws->edit_wrap_affinity = false;
+            c->edit_cursor = text.length;
+            c->edit_wrap_affinity = false;
         } else {
             const uint32_t target_line = cur.line_idx + 1u;
             bool aff = false;
-            ws->edit_cursor = visual_point_to_byte(
+            c->edit_cursor = visual_point_to_byte(
                 ctx,
                 desc,
                 text,
-                ws->edit_preferred_x,
+                c->edit_preferred_x,
                 (static_cast<float>(target_line) + 0.5f) * line_adv,
                 wrap_w,
                 &aff);
-            ws->edit_wrap_affinity = aff;
+            c->edit_wrap_affinity = aff;
         }
     }
     if (!extend_selection) {
-        ws->edit_sel_anchor = ws->edit_cursor;
+        c->edit_sel_anchor = c->edit_cursor;
     }
 }
 
@@ -1367,8 +1368,9 @@ void update_text_scroll_and_ime(
     float* out_scroll_x,
     float* out_scroll_y) noexcept
 {
+    WidgetCold* c = ensure_widget_cold(ws);
     const float wrap_w = text_input_wrap_width(desc, geom);
-    const bool wrap_aff = (ws && wrap_w > 0.0f) ? ws->edit_wrap_affinity : false;
+    const bool wrap_aff = (c && wrap_w > 0.0f) ? c->edit_wrap_affinity : false;
     float total_w = 0.0f;
     float total_h = 0.0f;
     float comp_x = 0.0f;
@@ -1382,8 +1384,8 @@ void update_text_scroll_and_ime(
 
     const float view_w = geom.clip_logical.w;
     const float view_h = geom.clip_logical.h;
-    float sx = ws ? ws->edit_scroll_x : 0.0f;
-    float sy = ws ? ws->edit_scroll_y : 0.0f;
+    float sx = c ? c->edit_scroll_x : 0.0f;
+    float sy = c ? c->edit_scroll_y : 0.0f;
 
     if (wrap_w > 0.0f || view_w <= 0.0f) {
         sx = 0.0f;
@@ -1402,7 +1404,7 @@ void update_text_scroll_and_ime(
 
     if (desc.multiline && view_h > 0.0f) {
         const float max_sy = (total_h > view_h) ? (total_h - view_h) : 0.0f;
-        if (is_focused && (!ws || ws->edit_reveal_caret)) {
+        if (is_focused && (!c || c->edit_reveal_caret)) {
             if (caret_y + geom.line_h > sy + view_h) {
                 sy = (caret_y + geom.line_h) - view_h;
             }
@@ -1411,14 +1413,15 @@ void update_text_scroll_and_ime(
             }
         }
         sy = clamp_range(sy, 0.0f, max_sy);
-        if(ws) {ws->edit_max_scroll_y=max_sy;ws->viewport_dim.y=view_h;}
+        if(ws) {ws->viewport_dim.y=view_h;}
+        if(c) {c->edit_max_scroll_y=max_sy;}
     } else {
         sy = 0.0f;
     }
 
-    if (ws) {
-        ws->edit_scroll_x = sx;
-        ws->edit_scroll_y = sy;
+    if (c) {
+        c->edit_scroll_x = sx;
+        c->edit_scroll_y = sy;
     }
     if (out_scroll_x) *out_scroll_x = sx;
     if (out_scroll_y) *out_scroll_y = sy;
@@ -1692,15 +1695,16 @@ void emit_text_input_command(
     }
 
     const float wrap_w = text_input_wrap_width(desc, geom);
-    if (ws) {
+    WidgetCold* c = ensure_widget_cold(ws);
+    if (c) {
         if (desc.multiline && desc.word_wrap && wrap_w > 0.0f) {
-            if (std::fabs(ws->edit_wrap_width - wrap_w) > 0.5f) {
-                ws->edit_wrap_width = wrap_w;
+            if (std::fabs(c->edit_wrap_width - wrap_w) > 0.5f) {
+                c->edit_wrap_width = wrap_w;
                 request_redraw(ctx);
             }
         } else {
-            ws->edit_wrap_width = 0.0f;
-            ws->edit_wrap_affinity = false;
+            c->edit_wrap_width = 0.0f;
+            c->edit_wrap_affinity = false;
         }
     }
 
@@ -1733,7 +1737,7 @@ void emit_text_input_command(
     const uint32_t a_byte = utf8_clamp_boundary(s, len, ti->sel_anchor_byte);
     const uint32_t sel_min = (c_byte < a_byte) ? c_byte : a_byte;
     const uint32_t sel_max = (c_byte < a_byte) ? a_byte : c_byte;
-    const bool wrap_aff = (ws && wrap_w > 0.0f) ? ws->edit_wrap_affinity : false;
+    const bool wrap_aff = (c && wrap_w > 0.0f) ? c->edit_wrap_affinity : false;
 
     const auto highlights = desc.highlights;
     const auto emit_highlights = [&](uint32_t start, uint32_t end, float x, float y) noexcept {

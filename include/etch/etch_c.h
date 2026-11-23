@@ -8,7 +8,7 @@
 
 #ifndef ETCH_VERSION_MAJOR
 #define ETCH_VERSION_MAJOR 0
-#define ETCH_VERSION_MINOR 27
+#define ETCH_VERSION_MINOR 28
 #define ETCH_VERSION_PATCH 0
 #define ETCH_VERSION_STR_DETAIL(x) #x
 #define ETCH_VERSION_STR(x) ETCH_VERSION_STR_DETAIL(x)
@@ -906,6 +906,72 @@ typedef enum EtchImageFit {
     ETCH_IMAGE_FIT_COVER = 2
 } EtchImageFit;
 
+typedef struct SDL_GPUTexture* EtchTextureHandle;
+
+typedef enum EtchBlendMode {
+    ETCH_BLEND_NORMAL   = 0,
+    ETCH_BLEND_ADDITIVE = 1,
+    ETCH_BLEND_MULTIPLY = 2,
+    ETCH_BLEND_SCREEN   = 3
+} EtchBlendMode;
+
+typedef enum EtchAlphaMaskKind {
+    ETCH_ALPHA_MASK_NONE             = 0,
+    ETCH_ALPHA_MASK_ROUNDED          = 1,
+    ETCH_ALPHA_MASK_LINEAR_GRADIENT  = 2,
+    ETCH_ALPHA_MASK_RADIAL_SPOTLIGHT = 3,
+    ETCH_ALPHA_MASK_TEXTURE          = 4
+} EtchAlphaMaskKind;
+
+typedef struct EtchAlphaMaskDesc {
+    EtchAlphaMaskKind kind;
+    bool invert;
+    float angle_deg;
+    float start_t;
+    float end_t;
+    float alpha_start;
+    float alpha_end;
+    EtchVec2 center_norm;
+    EtchVec2 radius_norm;
+    EtchTextureHandle texture;
+    EtchRect uv;
+    EtchCorners radius;
+    bool continuous_corners;
+} EtchAlphaMaskDesc;
+ETCH_API EtchAlphaMaskDesc etch_alpha_mask_desc_default(void);
+
+#define ETCH_OT_TAG(a, b, c, d) \
+    (((uint32_t)(uint8_t)(a) << 24) | ((uint32_t)(uint8_t)(b) << 16) | \
+     ((uint32_t)(uint8_t)(c) << 8) | (uint32_t)(uint8_t)(d))
+
+#define ETCH_AXIS_WGHT ETCH_OT_TAG('w', 'g', 'h', 't')
+#define ETCH_AXIS_WDTH ETCH_OT_TAG('w', 'd', 't', 'h')
+#define ETCH_AXIS_OPSZ ETCH_OT_TAG('o', 'p', 's', 'z')
+#define ETCH_AXIS_SLNT ETCH_OT_TAG('s', 'l', 'n', 't')
+#define ETCH_AXIS_ITAL ETCH_OT_TAG('i', 't', 'a', 'l')
+
+typedef enum EtchOpenTypeFlags {
+    ETCH_OT_NONE            = 0u,
+    ETCH_OT_NO_LIGA         = 1u << 0,
+    ETCH_OT_TABULAR_NUMS    = 1u << 1,
+    ETCH_OT_SLASHED_ZERO    = 1u << 2,
+    ETCH_OT_SMALL_CAPS      = 1u << 3,
+    ETCH_OT_OLDSTYLE_NUMS   = 1u << 4,
+    ETCH_OT_FRACTIONS       = 1u << 5,
+    ETCH_OT_STYLISTIC_SET01 = 1u << 6,
+    ETCH_OT_STYLISTIC_SET02 = 1u << 7
+} EtchOpenTypeFlags;
+
+typedef struct EtchFontFeature {
+    uint32_t tag;
+    uint32_t value;
+} EtchFontFeature;
+
+typedef struct EtchFontAxisValue {
+    uint32_t tag;
+    float value;
+} EtchFontAxisValue;
+
 typedef enum EtchEasingKind {
     ETCH_EASING_LINEAR = 0,
     ETCH_EASING_IN = 1,
@@ -1015,6 +1081,7 @@ typedef struct EtchBoxDesc {
     float backdrop_saturation;
     float backdrop_brightness;
     float backdrop_noise;
+    EtchBlendMode blend_mode;
 } EtchBoxDesc;
 
 typedef struct EtchTextDesc {
@@ -1031,6 +1098,9 @@ typedef struct EtchTextDesc {
     EtchAlignX align_x;
     bool ellipsis;
     uint16_t max_lines;
+    uint32_t opentype_flags;
+    const EtchFontFeature* font_features;
+    uint32_t font_feature_count;
 } EtchTextDesc;
 
 typedef struct EtchTextSpan {
@@ -1130,6 +1200,7 @@ typedef struct EtchImageDesc {
     bool continuous_corners;
     EtchImageFit fit;
     EtchVec2 source_size;
+    EtchBlendMode blend_mode;
 } EtchImageDesc;
 
 typedef struct EtchIconDesc {
@@ -2069,6 +2140,8 @@ typedef struct EtchLayerDesc {
     float blur_px;
     bool blend_plus_lighter;
     float rotation_rad;
+    EtchBlendMode blend_mode;
+    EtchAlphaMaskDesc alpha_mask;
 } EtchLayerDesc;
 ETCH_API EtchLayerDesc etch_layer_desc_default(void);
 ETCH_API void etch_push_layer(const EtchLayerDesc* desc);
@@ -2160,6 +2233,7 @@ typedef enum EtchFontWeight {
 ETCH_API uint16_t etch_load_system_font(EtchContext* ctx, EtchStr family_name, EtchFontWeight weight, uint16_t slot_hint);
 ETCH_API uint16_t etch_load_font_file(EtchContext* ctx, const char* path, uint16_t slot_hint, int32_t face_index);
 ETCH_API uint16_t etch_load_font_memory(EtchContext* ctx, const void* data, size_t size_bytes, uint16_t slot_hint, int32_t face_index);
+ETCH_API uint16_t etch_create_font_variation(EtchContext* ctx, uint16_t base_font_id, const EtchFontAxisValue* axes, uint32_t axis_count, const EtchFontFeature* features, uint32_t feature_count);
 ETCH_API bool etch_is_font_loaded(const EtchContext* ctx, uint16_t font_id);
 ETCH_API bool etch_set_font_tabular_numbers(EtchContext* ctx, uint16_t font_id, bool enabled);
 ETCH_API bool etch_set_font_fallback(EtchContext* ctx, uint16_t primary_font_id, uint16_t fallback_font_id);

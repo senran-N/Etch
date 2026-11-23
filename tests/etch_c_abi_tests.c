@@ -1170,6 +1170,114 @@ static bool test_v027_c_abi(EtchContext* ctx) {
     return true;
 }
 
+typedef char c_chk_v28_minor[(ETCH_VERSION_MINOR == 28) ? 1 : -1];
+typedef char c_chk_v28_blend[(ETCH_BLEND_NORMAL == 0 && ETCH_BLEND_ADDITIVE == 1 &&
+                              ETCH_BLEND_MULTIPLY == 2 && ETCH_BLEND_SCREEN == 3) ? 1 : -1];
+typedef char c_chk_v28_mask[(ETCH_ALPHA_MASK_NONE == 0 && ETCH_ALPHA_MASK_ROUNDED == 1 &&
+                             ETCH_ALPHA_MASK_LINEAR_GRADIENT == 2 &&
+                             ETCH_ALPHA_MASK_RADIAL_SPOTLIGHT == 3 &&
+                             ETCH_ALPHA_MASK_TEXTURE == 4) ? 1 : -1];
+typedef char c_chk_v28_axes[(ETCH_OT_TAG('w', 'g', 'h', 't') == ETCH_AXIS_WGHT &&
+                             ETCH_OT_TAG('w', 'd', 't', 'h') == ETCH_AXIS_WDTH &&
+                             ETCH_OT_TAG('o', 'p', 's', 'z') == ETCH_AXIS_OPSZ &&
+                             ETCH_OT_TAG('s', 'l', 'n', 't') == ETCH_AXIS_SLNT &&
+                             ETCH_OT_TAG('i', 't', 'a', 'l') == ETCH_AXIS_ITAL) ? 1 : -1];
+typedef char c_chk_v28_ot[(ETCH_OT_NONE == 0u && ETCH_OT_NO_LIGA == (1u << 0) &&
+                           ETCH_OT_TABULAR_NUMS == (1u << 1) && ETCH_OT_SLASHED_ZERO == (1u << 2) &&
+                           ETCH_OT_SMALL_CAPS == (1u << 3) && ETCH_OT_OLDSTYLE_NUMS == (1u << 4) &&
+                           ETCH_OT_FRACTIONS == (1u << 5) && ETCH_OT_STYLISTIC_SET01 == (1u << 6) &&
+                           ETCH_OT_STYLISTIC_SET02 == (1u << 7)) ? 1 : -1];
+
+static bool test_v028_c_abi(EtchContext* ctx) {
+    const EtchAlphaMaskDesc mask_def = etch_alpha_mask_desc_default();
+    if (mask_def.kind != ETCH_ALPHA_MASK_NONE || mask_def.invert ||
+        mask_def.angle_deg != 90.0f || mask_def.start_t != 0.0f || mask_def.end_t != 1.0f ||
+        mask_def.alpha_start != 1.0f || mask_def.alpha_end != 0.0f ||
+        mask_def.center_norm.x != 0.5f || mask_def.center_norm.y != 0.5f ||
+        mask_def.radius_norm.x != 0.5f || mask_def.radius_norm.y != 0.5f ||
+        mask_def.texture != NULL || mask_def.uv.w != 1.0f || mask_def.uv.h != 1.0f ||
+        mask_def.continuous_corners) {
+        return false;
+    }
+
+    const EtchBoxDesc bd = etch_box_desc_default();
+    const EtchImageDesc imd = etch_image_desc_default();
+    const EtchLayerDesc ld = etch_layer_desc_default();
+    const EtchTextDesc td = etch_text_desc_default();
+    if (bd.blend_mode != ETCH_BLEND_NORMAL || imd.blend_mode != ETCH_BLEND_NORMAL ||
+        ld.blend_mode != ETCH_BLEND_NORMAL || ld.alpha_mask.kind != ETCH_ALPHA_MASK_NONE ||
+        td.opentype_flags != ETCH_OT_NONE || td.font_features != NULL || td.font_feature_count != 0u) {
+        return false;
+    }
+
+    /* etch_create_font_variation validation & deduplication */
+    {
+        if (etch_create_font_variation(NULL, ETCH_FONT_SANS, NULL, 0u, NULL, 0u) != ETCH_INVALID_FONT ||
+            etch_create_font_variation(ctx, 60u, NULL, 0u, NULL, 0u) != ETCH_INVALID_FONT ||
+            etch_create_font_variation(ctx, ETCH_FONT_SANS, NULL, 0u, NULL, 0u) != ETCH_FONT_SANS) {
+            return false;
+        }
+        const EtchFontAxisValue axes1[2] = {
+            { ETCH_AXIS_WGHT, 650.0f },
+            { ETCH_AXIS_WDTH, 95.0f }
+        };
+        const EtchFontAxisValue axes2[2] = {
+            { ETCH_AXIS_WDTH, 95.0f },
+            { ETCH_AXIS_WGHT, 650.0f }
+        };
+        const EtchFontFeature feats[2] = {
+            { ETCH_OT_TAG('t', 'n', 'u', 'm'), 1u },
+            { ETCH_OT_TAG('z', 'e', 'r', 'o'), 1u }
+        };
+        const uint16_t v1 = etch_create_font_variation(ctx, ETCH_FONT_SANS, axes1, 2u, feats, 2u);
+        const uint16_t v2 = etch_create_font_variation(ctx, ETCH_FONT_SANS, axes2, 2u, feats, 2u);
+        if (v1 == ETCH_INVALID_FONT || v1 == ETCH_FONT_SANS || !etch_is_font_loaded(ctx, v1) || v2 != v1) {
+            return false;
+        }
+
+        /* Live frame exercising BlendMode, AlphaMaskDesc, OpenType flags/features, and variation font */
+        EtchFrameDesc fd = etch_frame_desc_default();
+        fd.viewport_w = 320u;
+        fd.viewport_h = 160u;
+        etch_begin_frame(ctx, &fd);
+
+        EtchLayerDesc layer = etch_layer_desc_default();
+        layer.blend_mode = ETCH_BLEND_SCREEN;
+        layer.alpha_mask = etch_alpha_mask_desc_default();
+        layer.alpha_mask.kind = ETCH_ALPHA_MASK_LINEAR_GRADIENT;
+        layer.alpha_mask.angle_deg = 0.0f;
+        layer.alpha_mask.alpha_start = 1.0f;
+        layer.alpha_mask.alpha_end = 0.2f;
+        etch_push_layer(&layer);
+
+        EtchBoxDesc card = etch_box_desc_default();
+        card.id = etch_id("c_v028_blend_box");
+        card.width = etch_sizing_fixed(180.0f);
+        card.height = etch_sizing_fixed(64.0f);
+        card.background = etch_rgb_hex(0x38BDF8u, 255u);
+        card.blend_mode = ETCH_BLEND_MULTIPLY;
+        etch_begin_box(&card);
+
+        EtchTextDesc ot = etch_text_desc_default();
+        ot.font_id = v1;
+        ot.font_size_px = 16.0f;
+        ot.opentype_flags = ETCH_OT_TABULAR_NUMS | ETCH_OT_SLASHED_ZERO;
+        ot.font_features = feats;
+        ot.font_feature_count = 2u;
+        etch_text(ETCH_STR_LIT("0123.45 ms"), &ot);
+
+        etch_end_box();
+        etch_pop_layer();
+        etch_end_frame(ctx);
+
+        if (etch_frame_prim_count(ctx) < 2u) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
 int main(void) {
     if (!test_abi_and_arena()) {
         fprintf(stderr, "c99_abi_smoke: test_abi_and_arena failed\n");
@@ -1336,7 +1444,7 @@ int main(void) {
         }
     }
     const bool ok_v26_ctx = ok_v25_compat && def_ctx.max_prims_per_frame == 2048u &&
-        def_ctx.frame_arena_bytes == (1024u * 1024u) &&
+        def_ctx.frame_arena_bytes == (512u * 1024u) &&
         def_ctx.reserved_v025_pad == 0u &&
         !def_ctx.prefer_high_performance_gpu &&
         !def_ctx.lcd_subpixel_text &&
@@ -1357,7 +1465,9 @@ int main(void) {
     if (!ok_abi) fprintf(stderr, "c99_abi_smoke: test_versioned_c_abi failed\n");
     const bool ok_v027 = ok_abi && test_v027_c_abi(ctx);
     if (!ok_v027) fprintf(stderr, "c99_abi_smoke: test_v027_c_abi failed\n");
-    const bool ok_release = ok_v027 && test_release_api(ctx);
+    const bool ok_v028 = ok_v027 && test_v028_c_abi(ctx);
+    if (!ok_v028) fprintf(stderr, "c99_abi_smoke: test_v028_c_abi failed\n");
+    const bool ok_release = ok_v028 && test_release_api(ctx);
     if (!ok_release) fprintf(stderr, "c99_abi_smoke: Etch %s public API failed\n", ETCH_VERSION_STRING);
     const bool ok_layout = ok_release && ok_material_defaults && ok_closure && ok_numerals && test_layout_widgets_and_a11y(ctx);
     const bool ok_editor = test_text_buffer_and_code_editor(ctx);

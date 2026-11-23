@@ -22,8 +22,15 @@ struct Showcase {
     bool light_mode = false;
 };
 
-void label(const char* value, float size, Color color, uint16_t font = kFontSans) noexcept {
-    text(str_cstr(value), {.color = color, .font_size_px = size, .font_id = font, .wrap = false});
+void label(const char* value, float size, Color color, uint16_t font = kFontSans,
+           uint32_t opentype_flags = OpenTypeFlag_None) noexcept {
+    text(str_cstr(value), {
+        .color = color,
+        .font_size_px = size,
+        .font_id = font,
+        .wrap = false,
+        .opentype_flags = opentype_flags,
+    });
 }
 
 void fill_terminal(Showcase* app) noexcept {
@@ -284,16 +291,25 @@ void build_ui(Context* ctx, Showcase* app) noexcept {
         fill_terminal(app);
     }
 
-    label("NATIVE  ·  " ETCH_VERSION_STRING, 11.0f, t.text_muted, kFontMono);
+    label("NATIVE  ·  " ETCH_VERSION_STRING, 11.0f, t.text_muted, kFontMono, OpenTypeFlag_TabularNums);
     end_box();
 
-    // Multi-stop Oklab gradient accent hairline
-    box({
-        .width = Sizing::grow(),
-        .height = Sizing::fixed(2.5f),
-        .radius = Corners::all(2.0f),
-        .gradient = accent_bar_grad,
-    });
+    // Multi-stop Oklab gradient accent hairline with subtle LinearGradient alpha-mask taper
+    ETCH_LAYER({.alpha_mask = {
+        .kind = AlphaMaskKind::LinearGradient,
+        .angle_deg = 0.0f,
+        .start_t = 0.45f,
+        .end_t = 1.0f,
+        .alpha_start = 1.0f,
+        .alpha_end = 0.22f,
+    }}) {
+        box({
+            .width = Sizing::grow(),
+            .height = Sizing::fixed(2.5f),
+            .radius = Corners::all(2.0f),
+            .gradient = accent_bar_grad,
+        });
+    }
 
     // Main 2-column workspace
     begin_box({
@@ -366,7 +382,7 @@ void build_ui(Context* ctx, Showcase* app) noexcept {
     }
     end_box();
 
-    // Elevated Hero Status Card (Elevation::Lg)
+    // Elevated Hero Status Card (Elevation::Lg + subtle RadialSpotlight Screen/Multiply highlight)
     begin_box({
         .axis = Axis::Col,
         .width = Sizing::grow(),
@@ -382,13 +398,37 @@ void build_ui(Context* ctx, Showcase* app) noexcept {
         .top_rim_alpha = light ? 0.0f : 0.22f,
         .elevation = Elevation::Lg,
     });
+    ETCH_LAYER({
+        .blend_mode = light ? BlendMode::Multiply : BlendMode::Screen,
+        .alpha_mask = {
+            .kind = AlphaMaskKind::RadialSpotlight,
+            .start_t = 0.0f,
+            .end_t = 1.0f,
+            .alpha_start = 1.0f,
+            .alpha_end = 0.0f,
+            .center_norm = {0.86f, 0.16f},
+            .radius_norm = {0.68f, 0.90f},
+        },
+    }) {
+        box({
+            .width = Sizing::grow(),
+            .height = Sizing::grow(),
+            .background = light ? Color::rgba8(226, 248, 240, 120) : Color::rgba8(52, 211, 153, 26),
+            .radius = Corners::all(16.0f),
+            .attach_to = AttachTo::Parent,
+            .anchor_parent = Anchor::TopLeft,
+            .z_index = 0,
+            .pointer_passthrough = true,
+            .continuous_corners = true,
+        });
+    }
     begin_box({.axis = Axis::Row, .width = Sizing::grow(), .align_y = AlignY::Center});
     label("CONNECTED", 10.5f, emerald, kFontMono);
     box({.width = Sizing::grow()});
-    label("●  32 ms", 10.5f, emerald, kFontMono);
+    label("●  32 ms", 10.5f, emerald, kFontMono, OpenTypeFlag_TabularNums);
     end_box();
 
-    label("Tokyo · 03", 24.0f, t.text_primary, kFontBold);
+    label("Tokyo · 03", 24.0f, t.text_primary, kFontBold, OpenTypeFlag_TabularNums);
     label("Direct route  ·  AES-256-GCM", 12.5f, t.text_muted);
     box({.height = Sizing::grow()});
 
@@ -409,8 +449,8 @@ void build_ui(Context* ctx, Showcase* app) noexcept {
     end_box();
 
     begin_box({.axis = Axis::Row, .gap = 28.0f});
-    label("↓  128.4 Mbps", 13.0f, emerald, kFontMono);
-    label("↑  24.8 Mbps", 13.0f, t.text_secondary, kFontMono);
+    label("↓  128.4 Mbps", 13.0f, emerald, kFontMono, OpenTypeFlag_TabularNums | OpenTypeFlag_SlashedZero);
+    label("↑  24.8 Mbps", 13.0f, t.text_secondary, kFontMono, OpenTypeFlag_TabularNums | OpenTypeFlag_SlashedZero);
     end_box();
     end_box();
 
@@ -575,7 +615,7 @@ void build_ui(Context* ctx, Showcase* app) noexcept {
             .align_y = AlignY::Center,
         });
         label("Connection details", 15.0f, t.text_primary, kFontBold);
-        label("AES-256-GCM  /  Tokyo  /  32 ms", 12.0f, emerald, kFontMono);
+        label("AES-256-GCM  /  Tokyo  /  32 ms", 12.0f, emerald, kFontMono, OpenTypeFlag_TabularNums);
         box({.width = Sizing::grow()});
         label("DRAG TO SNAP  ↑ ↓", 10.0f, t.text_muted, kFontMono);
         end_box();
@@ -647,10 +687,12 @@ int main(int argc, char** argv) {
             end_frame(ctx);
         }
         ok &= render_headless_png(ctx, 1200u, 800u, out_png, theme(ctx).bg_canvas);
-        ok &= frame_stats(ctx).draw_call_count > 0u &&
-              frame_stats(ctx).draw_call_count <= 32u &&
+        const FrameStats st = frame_stats(ctx);
+        ok &= st.draw_call_count > 0u &&
+              st.draw_call_count <= 32u &&
               element_bounds(id("aurora-canvas")).w > 500.0f;
-        std::printf("Showcase material/layout/batch checks: %s\n", ok ? "PASS" : "FAIL");
+        std::printf("Showcase material/layout/batch checks: %s (dc=%u, blur=%u, prims=%u, arena=%zu B)\n",
+            ok ? "PASS" : "FAIL", st.draw_call_count, st.blur_pass_count, st.prim_count, st.arena_used_bytes);
     } else {
         uint64_t previous = SDL_GetTicksNS();
         while (running) {

@@ -122,6 +122,14 @@ ETCH_ASSERT_FIELD_COMPAT(EtchArena, etch::Arena, capacity);
 ETCH_ASSERT_FIELD_COMPAT(EtchArena, etch::Arena, offset);
 ETCH_ASSERT_FIELD_COMPAT(EtchArena, etch::Arena, peak_offset);
 
+ETCH_ASSERT_LAYOUT_COMPAT(EtchFontFeature, etch::FontFeature);
+ETCH_ASSERT_FIELD_COMPAT(EtchFontFeature, etch::FontFeature, tag);
+ETCH_ASSERT_FIELD_COMPAT(EtchFontFeature, etch::FontFeature, value);
+
+ETCH_ASSERT_LAYOUT_COMPAT(EtchFontAxisValue, etch::FontAxisValue);
+ETCH_ASSERT_FIELD_COMPAT(EtchFontAxisValue, etch::FontAxisValue, tag);
+ETCH_ASSERT_FIELD_COMPAT(EtchFontAxisValue, etch::FontAxisValue, value);
+
 #undef ETCH_ASSERT_FIELD_COMPAT
 #undef ETCH_ASSERT_LAYOUT_COMPAT
 
@@ -236,6 +244,47 @@ inline etch::ImageFit to_cpp(EtchImageFit f) noexcept {
     return (static_cast<uint32_t>(f) <= static_cast<uint32_t>(ETCH_IMAGE_FIT_COVER))
         ? static_cast<etch::ImageFit>(f)
         : etch::ImageFit::Fill;
+}
+inline etch::BlendMode to_cpp(EtchBlendMode m) noexcept {
+    return (static_cast<uint32_t>(m) <= static_cast<uint32_t>(ETCH_BLEND_SCREEN))
+        ? static_cast<etch::BlendMode>(m)
+        : etch::BlendMode::Normal;
+}
+inline etch::AlphaMaskDesc to_cpp(const EtchAlphaMaskDesc& m) noexcept {
+    etch::AlphaMaskDesc out{};
+    out.kind = (static_cast<uint32_t>(m.kind) <= static_cast<uint32_t>(ETCH_ALPHA_MASK_TEXTURE))
+        ? static_cast<etch::AlphaMaskKind>(m.kind)
+        : etch::AlphaMaskKind::None;
+    out.invert = m.invert;
+    out.angle_deg = m.angle_deg;
+    out.start_t = m.start_t;
+    out.end_t = m.end_t;
+    out.alpha_start = m.alpha_start;
+    out.alpha_end = m.alpha_end;
+    out.center_norm = to_cpp(m.center_norm);
+    out.radius_norm = to_cpp(m.radius_norm);
+    out.texture = m.texture;
+    out.uv = to_cpp(m.uv);
+    out.radius = to_cpp(m.radius);
+    out.continuous_corners = m.continuous_corners;
+    return out;
+}
+inline EtchAlphaMaskDesc from_cpp(const etch::AlphaMaskDesc& m) noexcept {
+    EtchAlphaMaskDesc out{};
+    out.kind = static_cast<EtchAlphaMaskKind>(m.kind);
+    out.invert = m.invert;
+    out.angle_deg = m.angle_deg;
+    out.start_t = m.start_t;
+    out.end_t = m.end_t;
+    out.alpha_start = m.alpha_start;
+    out.alpha_end = m.alpha_end;
+    out.center_norm = from_cpp(m.center_norm);
+    out.radius_norm = from_cpp(m.radius_norm);
+    out.texture = m.texture;
+    out.uv = from_cpp(m.uv);
+    out.radius = from_cpp(m.radius);
+    out.continuous_corners = m.continuous_corners;
+    return out;
 }
 
 inline etch::GridTrack to_cpp(const EtchGridTrack& t) noexcept {
@@ -381,13 +430,16 @@ inline etch::BoxDesc to_cpp(const EtchBoxDesc& d) noexcept {
     out.backdrop_saturation = d.backdrop_saturation;
     out.backdrop_brightness = d.backdrop_brightness;
     out.backdrop_noise = d.backdrop_noise;
+    out.blend_mode = to_cpp(d.blend_mode);
     return out;
 }
 
 inline etch::TextDesc to_cpp(const EtchTextDesc& d) noexcept {
     return {to_cpp(d.color), d.font_size_px, d.font_id, d.letter_spacing, d.wrap, d.id,
             d.selectable, to_cpp(d.selection_color), d.line_height_px,
-            static_cast<etch::AlignX>(d.align_x), d.ellipsis, d.max_lines};
+            static_cast<etch::AlignX>(d.align_x), d.ellipsis, d.max_lines,
+            d.opentype_flags,
+            view_compatible_span<etch::FontFeature>(d.font_features, d.font_features ? d.font_feature_count : 0u)};
 }
 
 inline etch::RichTextDesc to_cpp(const EtchRichTextDesc& d) noexcept {
@@ -508,6 +560,10 @@ ETCH_API EtchGradientDesc etch_gradient_desc_default(void) {
     return from_cpp(etch::GradientDesc{});
 }
 
+ETCH_API EtchAlphaMaskDesc etch_alpha_mask_desc_default(void) {
+    return from_cpp(etch::AlphaMaskDesc{});
+}
+
 ETCH_API EtchBoxDesc etch_box_desc_default(void) {
     const etch::BoxDesc d{};
     return {static_cast<uint32_t>(sizeof(EtchBoxDesc)),
@@ -529,7 +585,8 @@ ETCH_API EtchBoxDesc etch_box_desc_default(void) {
             d.stick_to_bottom, 0u,
             {from_cpp(d.shadows[0]), from_cpp(d.shadows[1]), from_cpp(d.shadows[2]), from_cpp(d.shadows[3])},
             d.shadow_count, static_cast<EtchElevation>(d.elevation), d.shadow_inset,
-            from_cpp(d.gradient), d.backdrop_saturation, d.backdrop_brightness, d.backdrop_noise};
+            from_cpp(d.gradient), d.backdrop_saturation, d.backdrop_brightness, d.backdrop_noise,
+            static_cast<EtchBlendMode>(d.blend_mode)};
 }
 
 ETCH_API EtchTextDesc etch_text_desc_default(void) {
@@ -537,7 +594,8 @@ ETCH_API EtchTextDesc etch_text_desc_default(void) {
     return {static_cast<uint32_t>(sizeof(EtchTextDesc)),
             from_cpp(d.color), d.font_size_px, d.font_id, d.letter_spacing, d.wrap, d.id,
             d.selectable, from_cpp(d.selection_color), d.line_height_px,
-            static_cast<EtchAlignX>(d.align_x), d.ellipsis, d.max_lines};
+            static_cast<EtchAlignX>(d.align_x), d.ellipsis, d.max_lines,
+            d.opentype_flags, nullptr, 0u};
 }
 
 ETCH_API EtchTextSpan etch_text_span_default(void) {
@@ -577,7 +635,8 @@ ETCH_API EtchImageDesc etch_image_desc_default(void) {
     return {d.id, d.texture, d.sprite_id, from_cpp(d.width), from_cpp(d.height),
             from_cpp(d.uv_min), from_cpp(d.uv_max), from_cpp(d.radius), from_cpp(d.tint),
             from_cpp(d.border_color), d.border_width, d.aspect_ratio, d.grid_col_span,
-            d.continuous_corners, static_cast<EtchImageFit>(d.fit), from_cpp(d.source_size)};
+            d.continuous_corners, static_cast<EtchImageFit>(d.fit), from_cpp(d.source_size),
+            static_cast<EtchBlendMode>(d.blend_mode)};
 }
 
 ETCH_API EtchIconDesc etch_icon_desc_default(void) {
@@ -1032,6 +1091,14 @@ ETCH_API uint16_t etch_load_font_memory(EtchContext* ctx, const void* data, size
     return etch::load_font_memory(to_ctx(ctx), data, size_bytes, slot_hint, face_index);
 }
 
+ETCH_API uint16_t etch_create_font_variation(EtchContext* ctx, uint16_t base_font_id, const EtchFontAxisValue* axes, uint32_t axis_count, const EtchFontFeature* features, uint32_t feature_count) {
+    return etch::create_font_variation(
+        to_ctx(ctx),
+        base_font_id,
+        view_compatible_span<etch::FontAxisValue>(axes, axes ? axis_count : 0u),
+        view_compatible_span<etch::FontFeature>(features, features ? feature_count : 0u));
+}
+
 ETCH_API bool etch_set_font_tabular_numbers(EtchContext* ctx, uint16_t font_id, bool enabled) {
     return etch::set_font_tabular_numbers(to_ctx(ctx), font_id, enabled);
 }
@@ -1330,7 +1397,8 @@ ETCH_API void etch_image(const EtchImageDesc* desc) {
     etch::image({desc->id, desc->texture, desc->sprite_id, to_cpp(desc->width), to_cpp(desc->height),
                  to_cpp(desc->uv_min), to_cpp(desc->uv_max), to_cpp(desc->radius), to_cpp(desc->tint),
                  to_cpp(desc->border_color), desc->border_width, desc->aspect_ratio, desc->grid_col_span,
-                 desc->continuous_corners, to_cpp(desc->fit), to_cpp(desc->source_size)});
+                 desc->continuous_corners, to_cpp(desc->fit), to_cpp(desc->source_size),
+                 to_cpp(desc->blend_mode)});
 }
 ETCH_API void etch_icon(const EtchIconDesc* desc) {
     if (!desc) return;
@@ -2125,7 +2193,8 @@ ETCH_API EtchLayerDesc etch_layer_desc_default(void) {
     const etch::LayerDesc d{};
     return {static_cast<uint32_t>(sizeof(EtchLayerDesc)),
             d.opacity, from_cpp(d.translate), from_cpp(d.scale), from_cpp(d.pivot_norm),
-            from_cpp(d.pivot_px), d.animating, d.blur_px, d.blend_plus_lighter, d.rotation_rad};
+            from_cpp(d.pivot_px), d.animating, d.blur_px, d.blend_plus_lighter, d.rotation_rad,
+            static_cast<EtchBlendMode>(d.blend_mode), from_cpp(d.alpha_mask)};
 }
 ETCH_API void etch_push_layer(const EtchLayerDesc* desc) {
     if (!desc) { etch::push_layer(etch::LayerDesc{}); return; }
@@ -2133,7 +2202,8 @@ ETCH_API void etch_push_layer(const EtchLayerDesc* desc) {
     const EtchLayerDesc* d = resolve_c_desc(desc, &scratch, etch_layer_desc_default);
     if (!d) return;
     etch::push_layer({d->opacity, to_cpp(d->translate), to_cpp(d->scale), to_cpp(d->pivot_norm),
-                      to_cpp(d->pivot_px), d->animating, d->blur_px, d->blend_plus_lighter, d->rotation_rad});
+                      to_cpp(d->pivot_px), d->animating, d->blur_px, d->blend_plus_lighter, d->rotation_rad,
+                      to_cpp(d->blend_mode), to_cpp(d->alpha_mask)});
 }
 ETCH_API void etch_pop_layer(void) {etch::pop_layer();}
 

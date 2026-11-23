@@ -27,9 +27,17 @@
 #include "checks_phase2_layout.h"
 #include "checks_craft_upgrades.h"
 #include "checks_v027.h"
-#include "etch_uber_vs_msl.h"
-#include "etch_uber_ps_msl.h"
+#include "checks_v028.h"
+#include "etch_quad_vs_msl.h"
 #include "etch_quad_ps_msl.h"
+#include "etch_subpixel_vs_msl.h"
+#include "etch_subpixel_ps_msl.h"
+#include "etch_slug_vs_msl.h"
+#include "etch_slug_ps_msl.h"
+#include "etch_image_vs_msl.h"
+#include "etch_image_ps_msl.h"
+#include "etch_fx_vs_msl.h"
+#include "etch_fx_ps_msl.h"
 #include "etch_kawase_vs_msl.h"
 #include "etch_kawase_ps_msl.h"
 using namespace etch;
@@ -596,16 +604,87 @@ static bool v019_regression() noexcept {
     return ok;
 }
 
+static bool g_test_owns_video = false;
+static void ensure_test_video() noexcept {
+    if (!SDL_WasInit(SDL_INIT_VIDEO)) {
+        g_test_owns_video = SDL_InitSubSystem(SDL_INIT_VIDEO);
+    }
+}
+static int finish_tests(int rc) noexcept {
+    if (g_test_owns_video) {
+        SDL_QuitSubSystem(SDL_INIT_VIDEO);
+        g_test_owns_video = false;
+    }
+    return rc;
+}
+
 static bool gpu_suite() noexcept {
-    const bool media_ok=v019_regression() && verify_v021_gpu() && verify_v022_gpu() && verify_v027() && verify_phase1_gpu() && verify_phase2_cached_subtree_gpu() && verify_workbench_materials_gpu() && verify_shader_surface_gpu() && verify_texture_regions_gpu() && verify_mesh_gpu() && verify_punch_gpu() && verify_beam_fade_gpu() && verify_media_emoji_checks() && verify_sprite_recycling_gpu() && verify_border_coverage() && verify_visual_quality_gpu() && verify_closure_gpu();
+    ensure_test_video();
+    const bool media_ok=v019_regression() && verify_v021_gpu() && verify_v022_gpu() && verify_v027() && verify_v028() && verify_phase1_gpu() && verify_phase2_cached_subtree_gpu() && verify_workbench_materials_gpu() && verify_shader_surface_gpu() && verify_texture_regions_gpu() && verify_mesh_gpu() && verify_punch_gpu() && verify_beam_fade_gpu() && verify_media_emoji_checks() && verify_sprite_recycling_gpu() && verify_border_coverage() && verify_visual_quality_gpu() && verify_closure_gpu();
     const bool v070_ok=verify_theme_wrap_checks();
     static_assert(sizeof(Prim)==64);
-    bool ok=source_ok(g_etch_uber_vs_msl,sizeof(g_etch_uber_vs_msl),"vertex vs_main_out vs_main(") && source_ok(g_etch_uber_ps_msl,sizeof(g_etch_uber_ps_msl),"fragment ps_main_out ps_main(") && source_ok(g_etch_quad_ps_msl,sizeof(g_etch_quad_ps_msl),"fragment ps_main_out ps_main(") && source_ok(g_etch_kawase_vs_msl,sizeof(g_etch_kawase_vs_msl),"vertex vs_main_out vs_main(") && source_ok(g_etch_kawase_ps_msl,sizeof(g_etch_kawase_ps_msl),"fragment ps_main_out ps_main(");
-    const char* vs=reinterpret_cast<const char*>(g_etch_uber_vs_msl);const char* ps=reinterpret_cast<const char*>(g_etch_uber_ps_msl);const char* qps=reinterpret_cast<const char*>(g_etch_quad_ps_msl);const char* ks=reinterpret_cast<const char*>(g_etch_kawase_ps_msl);
-    ok &= std::strstr(vs,"GlobalsVS [[buffer(0)]]") && std::strstr(vs,"g_prims [[buffer(1)]]") && std::strstr(ks,"KawaseFS [[buffer(0)]]") && std::strstr(ks,"g_src_tex [[texture(0)]]") && std::strstr(ks,"g_src_texSmplr [[sampler(0)]]");
-    for(uint32_t i=0;i<9;++i){char slot[80];std::snprintf(slot,sizeof(slot),"g_tex%u [[texture(%u)]]",i,i);ok &= std::strstr(ps,slot)!=nullptr;std::snprintf(slot,sizeof(slot),"g_tex%uSmplr [[sampler(%u)]]",i,i);ok &= std::strstr(ps,slot)!=nullptr;}
-    const char* buffers[]={"g_slug_curves [[buffer(0)]]","g_slug_bands [[buffer(1)]]","g_dyn_slug_curves [[buffer(2)]]","g_dyn_slug_bands [[buffer(3)]]","g_clip_shapes [[buffer(4)]]","g_grad_stops [[buffer(5)]]"};for(const char* b:buffers)ok &= std::strstr(ps,b)!=nullptr;
-    ok &= std::strstr(qps,"g_clip_shapes [[buffer(0)]]")!=nullptr && std::strstr(qps,"g_grad_stops [[buffer(1)]]")!=nullptr;
+    bool ok=source_ok(g_etch_quad_vs_msl,sizeof(g_etch_quad_vs_msl),"vertex vs_main_out vs_main(")
+        && source_ok(g_etch_quad_ps_msl,sizeof(g_etch_quad_ps_msl),"fragment ps_main_out ps_main(")
+        && source_ok(g_etch_subpixel_vs_msl,sizeof(g_etch_subpixel_vs_msl),"vertex vs_main_out vs_main(")
+        && source_ok(g_etch_subpixel_ps_msl,sizeof(g_etch_subpixel_ps_msl),"fragment ps_main_out ps_main(")
+        && source_ok(g_etch_slug_vs_msl,sizeof(g_etch_slug_vs_msl),"vertex vs_main_out vs_main(")
+        && source_ok(g_etch_slug_ps_msl,sizeof(g_etch_slug_ps_msl),"fragment ps_main_out ps_main(")
+        && source_ok(g_etch_image_vs_msl,sizeof(g_etch_image_vs_msl),"vertex vs_main_out vs_main(")
+        && source_ok(g_etch_image_ps_msl,sizeof(g_etch_image_ps_msl),"fragment ps_main_out ps_main(")
+        && source_ok(g_etch_fx_vs_msl,sizeof(g_etch_fx_vs_msl),"vertex vs_main_out vs_main(")
+        && source_ok(g_etch_fx_ps_msl,sizeof(g_etch_fx_ps_msl),"fragment ps_main_out ps_main(")
+        && source_ok(g_etch_kawase_vs_msl,sizeof(g_etch_kawase_vs_msl),"vertex vs_main_out vs_main(")
+        && source_ok(g_etch_kawase_ps_msl,sizeof(g_etch_kawase_ps_msl),"fragment ps_main_out ps_main(");
+    const char* ui_vs[]={
+        reinterpret_cast<const char*>(g_etch_quad_vs_msl),
+        reinterpret_cast<const char*>(g_etch_subpixel_vs_msl),
+        reinterpret_cast<const char*>(g_etch_slug_vs_msl),
+        reinterpret_cast<const char*>(g_etch_image_vs_msl),
+        reinterpret_cast<const char*>(g_etch_fx_vs_msl),
+    };
+    for(const char* vs:ui_vs) {
+        ok &= std::strstr(vs,"GlobalsVS [[buffer(0)]]")!=nullptr
+           && std::strstr(vs,"g_prims [[buffer(1)]]")!=nullptr
+           && std::strstr(vs,"g_prim_depths [[buffer(2)]]")!=nullptr;
+    }
+    const char* qps=reinterpret_cast<const char*>(g_etch_quad_ps_msl);
+    const char* tps=reinterpret_cast<const char*>(g_etch_subpixel_ps_msl);
+    const char* sps=reinterpret_cast<const char*>(g_etch_slug_ps_msl);
+    const char* ips=reinterpret_cast<const char*>(g_etch_image_ps_msl);
+    const char* fps=reinterpret_cast<const char*>(g_etch_fx_ps_msl);
+    const char* kps=reinterpret_cast<const char*>(g_etch_kawase_ps_msl);
+    ok &= std::strstr(qps,"g_clip_shapes [[buffer(0)]]")!=nullptr
+       && std::strstr(qps,"g_grad_stops [[buffer(1)]]")!=nullptr
+       && std::strstr(qps,"g_mask_tex [[texture(0)]]")!=nullptr
+       && std::strstr(qps,"g_mask_texSmplr [[sampler(0)]]")!=nullptr;
+    ok &= std::strstr(tps,"g_clip_shapes [[buffer(0)]]")!=nullptr
+       && std::strstr(tps,"g_subpixel_atlas [[texture(0)]]")!=nullptr
+       && std::strstr(tps,"g_subpixel_atlasSmplr [[sampler(0)]]")!=nullptr
+       && std::strstr(tps,"g_mask_tex [[texture(1)]]")!=nullptr
+       && std::strstr(tps,"g_mask_texSmplr [[sampler(1)]]")!=nullptr;
+    ok &= std::strstr(sps,"g_clip_shapes [[buffer(0)]]")!=nullptr
+       && std::strstr(sps,"g_slug_curves [[buffer(1)]]")!=nullptr
+       && std::strstr(sps,"g_slug_bands [[buffer(2)]]")!=nullptr
+       && std::strstr(sps,"g_dyn_slug_curves [[buffer(3)]]")!=nullptr
+       && std::strstr(sps,"g_dyn_slug_bands [[buffer(4)]]")!=nullptr
+       && std::strstr(sps,"g_mask_tex [[texture(0)]]")!=nullptr
+       && std::strstr(sps,"g_mask_texSmplr [[sampler(0)]]")!=nullptr;
+    ok &= std::strstr(ips,"g_clip_shapes [[buffer(0)]]")!=nullptr
+       && std::strstr(ips,"g_mask_tex [[texture(9)]]")!=nullptr
+       && std::strstr(ips,"g_mask_texSmplr [[sampler(9)]]")!=nullptr;
+    for(uint32_t i=0;i<9;++i){
+        char slot[80];
+        std::snprintf(slot,sizeof(slot),"g_tex%u [[texture(%u)]]",i,i);
+        ok &= std::strstr(ips,slot)!=nullptr;
+        std::snprintf(slot,sizeof(slot),"g_tex%uSmplr [[sampler(%u)]]",i,i);
+        ok &= std::strstr(ips,slot)!=nullptr;
+    }
+    ok &= std::strstr(fps,"g_clip_shapes [[buffer(0)]]")!=nullptr
+       && std::strstr(fps,"g_mask_tex [[texture(0)]]")!=nullptr
+       && std::strstr(fps,"g_mask_texSmplr [[sampler(0)]]")!=nullptr;
+    ok &= std::strstr(kps,"KawaseFS [[buffer(0)]]")!=nullptr
+       && std::strstr(kps,"g_src_tex [[texture(0)]]")!=nullptr
+       && std::strstr(kps,"g_src_texSmplr [[sampler(0)]]")!=nullptr;
     Context* bad=create_context({.headless=true,.gpu_driver="nonexistent_driver_xyz"});
     if(!bad)return false;
     ok &= gpu_device(bad)==nullptr;
@@ -622,27 +701,28 @@ static bool gpu_suite() noexcept {
     std::remove("etch_ctest_gpu.png");destroy_context(c);set_current_context(nullptr);return ok;
 }
 int main(int argc,char** argv) {
-    if(argc==2 && std::strcmp(argv[1],"--suite=v019")==0) return v019_regression() ? 0 : 1;
-    if(argc==2 && std::strcmp(argv[1],"--suite=v021")==0) return verify_v021_gpu() ? 0 : 1;
-    if(argc==2 && std::strcmp(argv[1],"--suite=v022")==0) return verify_v022_gpu() ? 0 : 1;
-    if(argc==2 && std::strcmp(argv[1],"--suite=mesh_grad")==0) return verify_mesh_gpu() ? 0 : 1;
-    if(argc==2 && std::strcmp(argv[1],"--suite=punch_hole")==0) return verify_punch_gpu() ? 0 : 1;
-    if(argc==2 && std::strcmp(argv[1],"--suite=workbench_materials")==0) return verify_workbench_materials_gpu() ? 0 : 1;
-    if(argc==2 && std::strcmp(argv[1],"--suite=snap_sheet")==0) return verify_snap_sheet() ? 0 : 1;
-    if(argc==2 && std::strcmp(argv[1],"--suite=shader_surface")==0) return verify_shader_surface_gpu() ? 0 : 1;
-    if(argc==2 && std::strcmp(argv[1],"--suite=beam_fade")==0) return verify_beam_fade_gpu() ? 0 : 1;
-    if(argc==2 && std::strcmp(argv[1],"--suite=texture_regions")==0) return verify_texture_regions_gpu() ? 0 : 1;
-    if(argc==2 && std::strcmp(argv[1],"--suite=motion_layers_presence")==0) return verify_motion_checks() ? 0 : 1;
-    if(argc==2 && std::strcmp(argv[1],"--suite=closure_gpu")==0) return verify_closure_gpu() ? 0 : 1;
-    if(argc==2 && std::strcmp(argv[1],"--suite=phase1_gpu")==0) return verify_phase1_gpu() ? 0 : 1;
-    if(argc==2 && std::strcmp(argv[1],"--suite=phase2_layout")==0) return (verify_phase2_layout_cpu() && verify_phase2_cached_subtree_gpu()) ? 0 : 1;
-    if(argc==2 && std::strcmp(argv[1],"--suite=craft_upgrades")==0) return verify_craft_upgrades() ? 0 : 1;
-    if(argc==2 && std::strcmp(argv[1],"--suite=v027")==0) return verify_v027() ? 0 : 1;
+    if(argc==2 && std::strcmp(argv[1],"--suite=v019")==0) return finish_tests(v019_regression() ? 0 : 1);
+    if(argc==2 && std::strcmp(argv[1],"--suite=v021")==0) { ensure_test_video(); return finish_tests(verify_v021_gpu() ? 0 : 1); }
+    if(argc==2 && std::strcmp(argv[1],"--suite=v022")==0) { ensure_test_video(); return finish_tests(verify_v022_gpu() ? 0 : 1); }
+    if(argc==2 && std::strcmp(argv[1],"--suite=mesh_grad")==0) { ensure_test_video(); return finish_tests(verify_mesh_gpu() ? 0 : 1); }
+    if(argc==2 && std::strcmp(argv[1],"--suite=punch_hole")==0) { ensure_test_video(); return finish_tests(verify_punch_gpu() ? 0 : 1); }
+    if(argc==2 && std::strcmp(argv[1],"--suite=workbench_materials")==0) { ensure_test_video(); return finish_tests(verify_workbench_materials_gpu() ? 0 : 1); }
+    if(argc==2 && std::strcmp(argv[1],"--suite=snap_sheet")==0) return finish_tests(verify_snap_sheet() ? 0 : 1);
+    if(argc==2 && std::strcmp(argv[1],"--suite=shader_surface")==0) { ensure_test_video(); return finish_tests(verify_shader_surface_gpu() ? 0 : 1); }
+    if(argc==2 && std::strcmp(argv[1],"--suite=beam_fade")==0) { ensure_test_video(); return finish_tests(verify_beam_fade_gpu() ? 0 : 1); }
+    if(argc==2 && std::strcmp(argv[1],"--suite=texture_regions")==0) { ensure_test_video(); return finish_tests(verify_texture_regions_gpu() ? 0 : 1); }
+    if(argc==2 && std::strcmp(argv[1],"--suite=motion_layers_presence")==0) return finish_tests(verify_motion_checks() ? 0 : 1);
+    if(argc==2 && std::strcmp(argv[1],"--suite=closure_gpu")==0) { ensure_test_video(); return finish_tests(verify_closure_gpu() ? 0 : 1); }
+    if(argc==2 && std::strcmp(argv[1],"--suite=phase1_gpu")==0) { ensure_test_video(); return finish_tests(verify_phase1_gpu() ? 0 : 1); }
+    if(argc==2 && std::strcmp(argv[1],"--suite=phase2_layout")==0) { ensure_test_video(); return finish_tests((verify_phase2_layout_cpu() && verify_phase2_cached_subtree_gpu()) ? 0 : 1); }
+    if(argc==2 && std::strcmp(argv[1],"--suite=craft_upgrades")==0) { ensure_test_video(); return finish_tests(verify_craft_upgrades() ? 0 : 1); }
+    if(argc==2 && std::strcmp(argv[1],"--suite=v027")==0) { ensure_test_video(); return finish_tests(verify_v027() ? 0 : 1); }
+    if(argc==2 && std::strcmp(argv[1],"--suite=v028")==0) { ensure_test_video(); return finish_tests(verify_v028() ? 0 : 1); }
     const char* names[]={"arena_and_elasticity","unicode_bidi_grapheme","layout_clay_flex_grid","fenwick_virtual_list_1m","widgets_and_dockspace","text_buffer_and_code_editor","a11y_semantic_tree","headless_gpu_invariants"};
     const char* selected=argc==2 && std::strncmp(argv[1],"--suite=",8)==0?argv[1]+8:nullptr;
     if(argc>1 && !selected) { return 2; } bool found=false,ok=true;
     for(uint32_t i=0;i<8;++i)if(!selected || std::strcmp(selected,names[i])==0){found=true;bool pass=false;
-        switch(i){case 0:pass=arena_suite();break;case 1:pass=unicode_suite();break;case 2:pass=perceptual_color_checks::verify() && layout_suite() && verify_phase2_layout_cpu() && verify_desktop_precision() && verify_visual_quality_cpu() && verify_workbench_checks() && verify_closure_controls();break;case 3:pass=list_suite();break;case 4:pass=verify_desktop_checks(nullptr) && verify_craft_upgrades();break;case 5:pass=verify_editor_checks(nullptr);break;case 6:pass=verify_a11y_checks(nullptr) && verify_os_window_a11y_checks();break;case 7:pass=gpu_suite();break;}
+        switch(i){case 0:pass=arena_suite();break;case 1:pass=unicode_suite();break;case 2:pass=perceptual_color_checks::verify() && layout_suite() && verify_phase2_layout_cpu() && verify_desktop_precision() && verify_visual_quality_cpu() && verify_workbench_checks() && verify_closure_controls();break;case 3:pass=list_suite();break;case 4:ensure_test_video();pass=verify_desktop_checks(nullptr) && verify_craft_upgrades();break;case 5:pass=verify_editor_checks(nullptr);break;case 6:ensure_test_video();pass=verify_a11y_checks(nullptr) && verify_os_window_a11y_checks();break;case 7:pass=gpu_suite();break;}
         std::printf("%s: %s\n",names[i],pass?"PASS":"FAIL");ok &= pass;
-    }return !found?2:ok?0:1;
+    }return finish_tests(!found?2:ok?0:1);
 }

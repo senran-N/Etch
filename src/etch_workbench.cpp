@@ -78,10 +78,12 @@ void terminal_grid_run(const TerminalGridDesc& d,const void* cells,size_t count,
                 DrawCmdNode* node=append_open_box_draw_cmd(ctx,false);
                 if(!node)return;
                 node->kind=DrawCmdKind::Text;
-                node->text_cmd={.text={text_data,bytes,true},.pos={x+bold_offset,y+(d.line_height_px-d.font_size_px)*.5f},
-                    .font_id=d.font_id,.size=d.font_size_px,.color=foreground};
-                node->terminal_columns=columns+row_bytes-bytes;
-                node->terminal_cell_width=d.cell_width_px;
+                node->text_payload = DrawCmdTextPayload{
+                    .cmd = {.text={text_data,bytes,true},.pos={x+bold_offset,y+(d.line_height_px-d.font_size_px)*.5f},
+                            .font_id=d.font_id,.size=d.font_size_px,.color=foreground},
+                    .terminal_columns = columns+row_bytes-bytes,
+                    .terminal_cell_width = d.cell_width_px,
+                };
             };
             draw_run(0);
             if(first.bold)draw_run(.35f);
@@ -90,12 +92,12 @@ void terminal_grid_run(const TerminalGridDesc& d,const void* cells,size_t count,
     }
     if(d.cursor_column>=0 && uint32_t(d.cursor_column)<d.columns && d.cursor_row>=0 && uint32_t(d.cursor_row)<d.rows) {
         WidgetState* ws=state_map_get_or_insert(&ui.states,d.id,ui.frame_index);
-        if(ws) {
+        if(WidgetCold* c = ensure_widget_cold(ws)) {
             const Vec2 target={float(d.cursor_column)*d.cell_width_px,float(d.cursor_row)*d.line_height_px};
-            if(!ws->terminal_initialized) {ws->terminal_cursor=target;ws->terminal_initialized=true;}
-            advance_motion(ctx,&ws->terminal_cursor.x,&ws->terminal_velocity.x,target.x,d.cursor_motion);
-            advance_motion(ctx,&ws->terminal_cursor.y,&ws->terminal_velocity.y,target.y,d.cursor_motion);
-            const Vec2 cursor=ws->terminal_cursor;
+            if(!c->terminal_initialized) {c->terminal_cursor=target;c->terminal_initialized=true;}
+            advance_motion(ctx,&c->terminal_cursor.x,&c->terminal_velocity.x,target.x,d.cursor_motion);
+            advance_motion(ctx,&c->terminal_cursor.y,&c->terminal_velocity.y,target.y,d.cursor_motion);
+            const Vec2 cursor=c->terminal_cursor;
             draw_rect({.rect={cursor.x,cursor.y+d.line_height_px-3,d.cell_width_px,2},
                 .fill=resolve_theme_color(d.cursor_color,theme.accent_primary),.foreground=true});
         }
@@ -128,10 +130,11 @@ bool begin_sheet(const SheetDesc& d) noexcept {
     const uint32_t scrim_id=id_index(d.id,0x5343524D);
     const bool handle_pressed=d.show_handle && pressed(handle);
     WidgetState* ws=state_map_get_or_insert(&ui.states,d.id,ui.frame_index);
-    if(!ws) return false;
-    if(!ws->sheet_initialized) {ws->sheet_snap=d.snap_count-1;ws->sheet_initialized=true;}
-    if(d.snap_index) ws->sheet_snap=*d.snap_index<d.snap_count ? *d.snap_index : d.snap_count-1;
-    if(ws->sheet_snap>=d.snap_count) ws->sheet_snap=d.snap_count-1;
+    WidgetCold* c = ensure_widget_cold(ws);
+    if(!c) return false;
+    if(!c->sheet_initialized) {c->sheet_snap=d.snap_count-1;c->sheet_initialized=true;}
+    if(d.snap_index) c->sheet_snap=*d.snap_index<d.snap_count ? *d.snap_index : d.snap_count-1;
+    if(c->sheet_snap>=d.snap_count) c->sheet_snap=d.snap_count-1;
     if(open_val && d.open_state && d.dismiss_on_escape && ui.popup_count==0u && ui.modal_count==0u && !ui.frame_escape_consumed_by_ime && consume_key_pressed(SDLK_ESCAPE,false)) {
         *d.open_state=false;open_val=false;request_redraw(ctx);
     }
@@ -140,32 +143,32 @@ bool begin_sheet(const SheetDesc& d) noexcept {
     }
     const float pointer=d.edge==SheetEdge::Bottom ? ui.pointer_pos.y : ui.pointer_pos.x;
     const float direction=d.edge==SheetEdge::Left ? 1.f : -1.f;
-    if(open_val && handle_pressed && ui.prev_pointer_down && !ws->sheet_dragging) {
-        ws->sheet_dragging=true;ws->sheet_last_pointer=pointer;ws->sheet_velocity=0;
+    if(open_val && handle_pressed && ui.prev_pointer_down && !c->sheet_dragging) {
+        c->sheet_dragging=true;c->sheet_last_pointer=pointer;c->sheet_velocity=0;
     }
-    if(ws->sheet_dragging) {
+    if(c->sheet_dragging) {
         if(ui.prev_pointer_down && open_val) {
-            const float delta=(pointer-ws->sheet_last_pointer)*direction/d.extent_px;
-            ws->sheet_pos=clamp_range(ws->sheet_pos+delta,0,1);
-            if(ui.sim_dt>0) ws->sheet_velocity=delta/ui.sim_dt;
-            ws->sheet_last_pointer=pointer;
+            const float delta=(pointer-c->sheet_last_pointer)*direction/d.extent_px;
+            c->sheet_pos=clamp_range(c->sheet_pos+delta,0,1);
+            if(ui.sim_dt>0) c->sheet_velocity=delta/ui.sim_dt;
+            c->sheet_last_pointer=pointer;
         } else {
-            const float projected=clamp_range(ws->sheet_pos+ws->sheet_velocity*.18f,0,1);
+            const float projected=clamp_range(c->sheet_pos+c->sheet_velocity*.18f,0,1);
             uint32_t nearest=0;
             for(uint32_t i=1;i<d.snap_count;++i)
                 if(std::fabs(d.snap_points[i]-projected)<std::fabs(d.snap_points[nearest]-projected)) nearest=i;
-            ws->sheet_snap=nearest;
+            c->sheet_snap=nearest;
             if(d.snap_index) *d.snap_index=nearest;
             if(d.open_state && d.snap_points[nearest]<=0.0001f) {
-                *d.open_state=false;open_val=false;ws->sheet_snap=d.snap_count-1;
-                if(d.snap_index) *d.snap_index=ws->sheet_snap;
+                *d.open_state=false;open_val=false;c->sheet_snap=d.snap_count-1;
+                if(d.snap_index) *d.snap_index=c->sheet_snap;
             }
-            ws->sheet_dragging=false;
+            c->sheet_dragging=false;
         }
     }
-    if(!ws->sheet_dragging) advance_motion(ctx,&ws->sheet_pos,&ws->sheet_velocity,open_val ? d.snap_points[ws->sheet_snap] : 0,d.motion);
-    const float visible=clamp_range(ws->sheet_pos,0,1);
-    if(!open_val && ws->sheet_pos==0 && ws->sheet_velocity==0) return false;
+    if(!c->sheet_dragging) advance_motion(ctx,&c->sheet_pos,&c->sheet_velocity,open_val ? d.snap_points[c->sheet_snap] : 0,d.motion);
+    const float visible=clamp_range(c->sheet_pos,0,1);
+    if(!open_val && c->sheet_pos==0 && c->sheet_velocity==0) return false;
     const float width=float(ui.viewport_w)/ui.dpi_scale,height=float(ui.viewport_h)/ui.dpi_scale;
     if((d.backdrop_color.a>0 || d.dismiss_on_backdrop) && visible>0.002f) {
         Color sc=d.backdrop_color;

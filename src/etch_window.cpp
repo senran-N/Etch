@@ -18,7 +18,7 @@ float desktop_coordinate_scale(SDL_Window* window) noexcept {
     const float ratio = safe_display / density;
     return (std::isfinite(ratio) && ratio >= 0.25f && ratio <= 8.0f) ? ratio : safe_display;
 }
-void sync_desktop_window(SDL_Window* window) noexcept {
+void sync_desktop_window(SDL_Window* window, Context* ctx = nullptr) noexcept {
     if (!window) return;
     const SDL_WindowFlags flags = SDL_GetWindowFlags(window);
     // Never recompute coordinate scale or minimum size while minimized:
@@ -30,6 +30,9 @@ void sync_desktop_window(SDL_Window* window) noexcept {
     const float scale = desktop_coordinate_scale(window);
     if (std::fabs(scale - old_scale) < 0.0001f) return;
     SDL_SetFloatProperty(props, kDesktopScale, scale);
+    if (Context* target = ctx ? ctx : current_context()) {
+        target->atlas.hinted_gc_pending = true;
+    }
     int w = 0, h = 0, min_w = 0, min_h = 0;
     SDL_GetWindowSize(window, &w, &h);
     SDL_GetWindowMinimumSize(window, &min_w, &min_h);

@@ -12,7 +12,7 @@
 #include <type_traits>
 
 #define ETCH_VERSION_MAJOR 0
-#define ETCH_VERSION_MINOR 27
+#define ETCH_VERSION_MINOR 28
 #define ETCH_VERSION_PATCH 0
 #define ETCH_VERSION_STR_DETAIL(x) #x
 #define ETCH_VERSION_STR(x) ETCH_VERSION_STR_DETAIL(x)
@@ -498,7 +498,7 @@ enum PrimFlags : uint8_t {
 #    pragma warning(disable : 4324) // Structure padded due to alignas() for GPU buffer contracts
 #endif
 
-// Matches HLSL StructuredBuffer<Prim> layout in shaders/etch_uber.hlsl (strictly 64 bytes = 4 x 16B).
+// Matches HLSL StructuredBuffer<Prim> layout in shaders/etch_common.hlsli (strictly 64 bytes = 4 x 16B).
 // Uses alignas(16) so Prim[] can share a single SDL_GPUTransferBuffer right after GlobalsUniform (32B).
 //
 //   struct Prim {
@@ -1053,7 +1053,7 @@ using WindowRefreshFn = void (*)(Context* ctx, SDL_Window* window, float dt_seco
 struct ContextDesc {
     uint32_t max_layout_elements = 16384u;
     SDL_Window* window = nullptr;
-    size_t frame_arena_bytes = 1024u * 1024u;
+    size_t frame_arena_bytes = 512u * 1024u;
     // Initial reserve, clamped [64..4194304]; doubles on demand up to 4194304 prims.
     uint32_t max_prims_per_frame = 2048u;
     const char* font_path = nullptr;
@@ -1363,6 +1363,40 @@ float stagger_delay(uint32_t index, float step_sec = 0.04f, float max_delay_sec 
 
 // Zero pauses animation time; reduced-motion preference settles springs immediately.
 void set_time_scale(Context* ctx, float scale) noexcept;
+
+using TextureHandle = SDL_GPUTexture*;
+
+enum class BlendMode : uint8_t {
+    Normal = 0,
+    Additive = 1,
+    Multiply = 2,
+    Screen = 3,
+};
+
+enum class AlphaMaskKind : uint8_t {
+    None = 0,
+    Rounded = 1,
+    LinearGradient = 2,
+    RadialSpotlight = 3,
+    Texture = 4,
+};
+
+struct AlphaMaskDesc {
+    AlphaMaskKind kind = AlphaMaskKind::None;
+    bool invert = false;
+    float angle_deg = 90.0f;          // LinearGradient: 0 = left->right, 90 = top->bottom
+    float start_t = 0.0f;             // Normalized [0..1] along gradient or inner radius for RadialSpotlight
+    float end_t = 1.0f;               // Normalized [0..1] along gradient or outer radius for RadialSpotlight
+    float alpha_start = 1.0f;
+    float alpha_end = 0.0f;
+    Vec2 center_norm = {0.5f, 0.5f};  // RadialSpotlight normalized center
+    Vec2 radius_norm = {0.5f, 0.5f};  // RadialSpotlight normalized radii
+    TextureHandle texture = {};       // Texture alpha mask (samples .a)
+    Rect uv = {0.0f, 0.0f, 1.0f, 1.0f};
+    Corners radius = {};              // Rounded mask corner radii (logical px)
+    bool continuous_corners = false;
+};
+
 struct LayerDesc {
     float opacity = 1.0f;
     Vec2 translate = {};
@@ -1371,8 +1405,10 @@ struct LayerDesc {
     Vec2 pivot_px = {NAN,NAN};
     bool animating = false;
     float blur_px = 0.0f;
-    bool blend_plus_lighter = false;
+    bool blend_plus_lighter = false;  // Backwards-compatible alias for BlendMode::Additive when blend_mode == Normal
     float rotation_rad = 0.0f;
+    BlendMode blend_mode = BlendMode::Normal;
+    AlphaMaskDesc alpha_mask = {};
 };
 void push_layer(const LayerDesc& desc) noexcept;
 void pop_layer() noexcept;
@@ -1516,6 +1552,7 @@ struct BoxDesc {
     float backdrop_saturation = 1.0f;
     float backdrop_brightness = 1.0f;
     float backdrop_noise = 0.0f;
+    BlendMode blend_mode = BlendMode::Normal;
 };
 
 inline constexpr uint16_t kFontSans       = 0u;
@@ -1528,6 +1565,41 @@ inline constexpr uint16_t kInvalidFont    = 0xFFFFu;
 inline constexpr uint16_t kMaxVectorIcons = 1024u;
 inline constexpr uint32_t kInvalidSprite = 0u;
 inline constexpr uint16_t kInvalidIcon    = 0xFFFFu;
+
+constexpr uint32_t make_opentype_tag(char a, char b, char c, char d) noexcept {
+    return (static_cast<uint32_t>(static_cast<uint8_t>(a)) << 24) |
+           (static_cast<uint32_t>(static_cast<uint8_t>(b)) << 16) |
+           (static_cast<uint32_t>(static_cast<uint8_t>(c)) << 8) |
+           static_cast<uint32_t>(static_cast<uint8_t>(d));
+}
+
+inline constexpr uint32_t kAxisWeight  = make_opentype_tag('w', 'g', 'h', 't');
+inline constexpr uint32_t kAxisWidth   = make_opentype_tag('w', 'd', 't', 'h');
+inline constexpr uint32_t kAxisOptical = make_opentype_tag('o', 'p', 's', 'z');
+inline constexpr uint32_t kAxisSlant   = make_opentype_tag('s', 'l', 'n', 't');
+inline constexpr uint32_t kAxisItalic  = make_opentype_tag('i', 't', 'a', 'l');
+
+struct FontFeature {
+    uint32_t tag = 0;
+    uint32_t value = 1;
+};
+
+struct FontAxisValue {
+    uint32_t tag = 0;
+    float value = 0.0f;
+};
+
+enum OpenTypeFlags : uint32_t {
+    OpenTypeFlag_None           = 0u,
+    OpenTypeFlag_NoLiga         = 1u << 0,
+    OpenTypeFlag_TabularNums    = 1u << 1,
+    OpenTypeFlag_SlashedZero    = 1u << 2,
+    OpenTypeFlag_SmallCaps      = 1u << 3,
+    OpenTypeFlag_OldstyleNums   = 1u << 4,
+    OpenTypeFlag_Fractions      = 1u << 5,
+    OpenTypeFlag_StylisticSet01 = 1u << 6,
+    OpenTypeFlag_StylisticSet02 = 1u << 7,
+};
 
 struct TextDesc {
     Color color = Color::theme_auto();
@@ -1542,6 +1614,8 @@ struct TextDesc {
     AlignX align_x = AlignX::Left;
     bool ellipsis = false;
     uint16_t max_lines = 0;
+    uint32_t opentype_flags = OpenTypeFlag_None;
+    std::span<const FontFeature> font_features = {};
 };
 
 struct TextSpan {
@@ -1650,6 +1724,7 @@ struct ImageDesc {
     bool continuous_corners = false;
     ImageFit fit = ImageFit::Fill;
     Vec2 source_size = {};
+    BlendMode blend_mode = BlendMode::Normal;
 };
 
 struct IconDesc {
@@ -2421,6 +2496,11 @@ uint16_t load_font_memory(
     size_t size_bytes,
     uint16_t slot_hint = kInvalidFont,
     int32_t face_index = 0) noexcept;
+uint16_t create_font_variation(
+    Context* ctx,
+    uint16_t base_font_id,
+    std::span<const FontAxisValue> axes,
+    std::span<const FontFeature> default_features = {}) noexcept;
 bool is_font_loaded(const Context* ctx, uint16_t font_id) noexcept;
 // Configure a loaded font outside a frame; applies to measurement and all text APIs.
 bool set_font_tabular_numbers(Context* ctx, uint16_t font_id, bool enabled) noexcept;

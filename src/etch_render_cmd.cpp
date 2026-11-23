@@ -94,12 +94,12 @@ WidgetState* resolve_canvas_owner(Context* ctx, std::span<const uint32_t> over) 
         if (!ws || !ws->is_user_element) {
             continue;
         }
-        if (ws->is_canvas && ws->canvas_interactive) {
+        if (ws->is_canvas && (!ws->cold || ws->cold->canvas_interactive)) {
             return ws;
         }
-        if (ws->owner_canvas_id != 0u) {
-            WidgetState* cws = state_map_find(&ctx->active_ui->states, ws->owner_canvas_id);
-            if (cws && cws->is_canvas && cws->canvas_interactive) {
+        if (ws->cold && ws->cold->owner_canvas_id != 0u) {
+            WidgetState* cws = state_map_find(&ctx->active_ui->states, ws->cold->owner_canvas_id);
+            if (cws && cws->is_canvas && (!cws->cold || cws->cold->canvas_interactive)) {
                 return cws;
             }
         }
@@ -144,17 +144,21 @@ ScrollbarGeom compute_vscrollbar_geom(const WidgetState* ws) noexcept {
     if (!ws || !ws->show_scrollbar || (!ws->is_scroll_y && !ws->is_virtual_list && !ws->is_multiline_input)) {
         return g;
     }
-    if(ws->edit_text_buffer && !ws->editor_show_scrollbar)return g;
+    const WidgetCold* c = ws->cold;
+    if (c && c->edit_text_buffer && !c->editor_show_scrollbar) return g;
     double scroll_y = 0.0;
     double scroll_max_y = 0.0;
     double content_h = 0.0;
-    if(ws->is_multiline_input) {
-        scroll_y=ws->edit_scroll_y;scroll_max_y=ws->edit_max_scroll_y;
-        content_h=ws->edit_max_scroll_y+ws->viewport_dim.y;
+    if (ws->is_multiline_input) {
+        if (!c) return g;
+        scroll_y = c->edit_scroll_y;
+        scroll_max_y = c->edit_max_scroll_y;
+        content_h = c->edit_max_scroll_y + ws->viewport_dim.y;
     } else if (ws->is_virtual_list) {
-        scroll_y = ws->vscroll_pos_y;
-        scroll_max_y = ws->vscroll_max_y;
-        content_h = ws->vscroll_total_h;
+        if (!c) return g;
+        scroll_y = c->vscroll_pos_y;
+        scroll_max_y = c->vscroll_max_y;
+        content_h = c->vscroll_total_h;
     } else {
         scroll_y = static_cast<double>(ws->scroll_pos.y);
         scroll_max_y = static_cast<double>(ws->scroll_max.y);
@@ -178,8 +182,9 @@ ScrollbarGeom compute_vscrollbar_geom(const WidgetState* ws) noexcept {
     if (r_d < 0.0) r_d = 0.0;
     if (r_d > 1.0) r_d = 1.0;
     const float ratio = static_cast<float>(r_d);
-    const float right_edge = (ws->vscrollbar_right_edge_x > b.x + kSbHitWidth + 4.0f && ws->vscrollbar_right_edge_x < b.x + b.w)
-        ? ws->vscrollbar_right_edge_x
+    const float vright = c ? c->vscrollbar_right_edge_x : 0.0f;
+    const float right_edge = (vright > b.x + kSbHitWidth + 4.0f && vright < b.x + b.w)
+        ? vright
         : (b.x + b.w);
     const float thumb_x = right_edge - kSbMargin - kSbThumbWidth;
     const float track_y = b.y + kSbMargin;
@@ -466,11 +471,24 @@ Vec2 etch_measure_text(Str text, const LayoutTextConfig& config, void* user_data
         if (!text.chars || text.length == 0u) {
             dims = Vec2{ 0.0f, metric_h };
         } else {
+            const uint32_t saved_ot_flags = ctx ? ctx->active_ot_flags : 0u;
+            const FontFeature* saved_ot_feat = ctx ? ctx->active_ot_features : nullptr;
+            const uint32_t saved_ot_count = ctx ? ctx->active_ot_feature_count : 0u;
+            if (ctx) {
+                ctx->active_ot_flags = config.opentype_flags;
+                ctx->active_ot_features = config.font_features;
+                ctx->active_ot_feature_count = config.font_feature_count;
+            }
             float width_logical = 0.0f;
             measure_line_segment_x(
                 ctx, font_id, text.chars, text.length, 0u, 0u,
                 logical_font_px, letter_spacing, false, true,
                 nullptr, nullptr, &width_logical);
+            if (ctx) {
+                ctx->active_ot_flags = saved_ot_flags;
+                ctx->active_ot_features = saved_ot_feat;
+                ctx->active_ot_feature_count = saved_ot_count;
+            }
             dims = Vec2{ width_logical, metric_h };
         }
     }
@@ -513,6 +531,179 @@ inline Rect rotated_aabb(Rect r, float angle_rad) noexcept {
     return { cx - ex, cy - ey, 2.0f * ex, 2.0f * ey };
 }
 
+bool ensure_clip_shape_capacity(Context* ctx) noexcept {
+    if (ctx->clip_shape_count < ctx->clip_shape_capacity && ctx->clip_shape_capacity > 0u) {
+        return true;
+    }
+    if (ctx->clip_shape_count >= 65536u) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Rounded clip shape limit exceeded");
+        return false;
+    }
+    const uint32_t capacity = ctx->clip_shape_capacity ? std::min(65536u, ctx->clip_shape_capacity * 2u) : 128u;
+    auto* grown = static_cast<ClipShapeGpu*>(std::realloc(ctx->clip_shapes, size_t(capacity) * sizeof(ClipShapeGpu)));
+    if (!grown) return false;
+    ctx->clip_shapes = grown;
+    auto* grown_tex = static_cast<SDL_GPUTexture**>(std::realloc(ctx->clip_mask_textures, size_t(capacity) * sizeof(SDL_GPUTexture*)));
+    if (!grown_tex) return false;
+    ctx->clip_mask_textures = grown_tex;
+    if (ctx->clip_shape_capacity == 0u) {
+        ctx->clip_shapes[0] = ClipShapeGpu{};
+        ctx->clip_mask_textures[0] = nullptr;
+    }
+    ctx->clip_shape_capacity = capacity;
+    return true;
+}
+
+uint32_t emit_alpha_mask_clip(
+    Context* ctx,
+    uint32_t parent_shape,
+    Rect bounds_px,
+    const AlphaMaskDesc& mask,
+    float radius_scale) noexcept
+{
+    if (mask.kind == AlphaMaskKind::None || bounds_px.w <= 0.0f || bounds_px.h <= 0.0f) {
+        return parent_shape;
+    }
+    if (mask.kind == AlphaMaskKind::Texture && !mask.texture) {
+        return parent_shape;
+    }
+    if (!ensure_clip_shape_capacity(ctx)) {
+        return parent_shape;
+    }
+    const uint32_t index = ctx->clip_shape_count++;
+    const uint32_t inv_bit = mask.invert ? (1u << 4) : 0u;
+    ClipShapeGpu entry = {};
+    entry.bounds = {bounds_px.x, bounds_px.y, bounds_px.w, bounds_px.h};
+    SDL_GPUTexture* mask_tex = nullptr;
+    switch (mask.kind) {
+        case AlphaMaskKind::Rounded: {
+            entry.radii = {
+                mask.radius.tl * radius_scale,
+                mask.radius.tr * radius_scale,
+                mask.radius.br * radius_scale,
+                mask.radius.bl * radius_scale,
+            };
+            entry.meta = {
+                parent_shape,
+                (mask.continuous_corners ? 1u : 0u) | (kClipMaskRounded << 1) | inv_bit,
+                0u,
+                0u,
+            };
+            break;
+        }
+        case AlphaMaskKind::LinearGradient: {
+            constexpr float kDegToRad = 0.01745329251994329577f;
+            const float rad = mask.angle_deg * kDegToRad;
+            const float dx = std::cos(rad);
+            const float dy = std::sin(rad);
+            const float x0 = bounds_px.x, y0 = bounds_px.y;
+            const float x1 = bounds_px.x + bounds_px.w, y1 = bounds_px.y + bounds_px.h;
+            const float d00 = x0 * dx + y0 * dy;
+            const float d10 = x1 * dx + y0 * dy;
+            const float d01 = x0 * dx + y1 * dy;
+            const float d11 = x1 * dx + y1 * dy;
+            const float min_d = min4f(d00, d10, d01, d11);
+            const float max_d = std::fmax(std::fmax(d00, d10), std::fmax(d01, d11));
+            const float inv_len = 1.0f / std::fmax(max_d - min_d, 1e-4f);
+            entry.meta = {
+                parent_shape,
+                (kClipMaskLinear << 1) | inv_bit,
+                pack_f16x2(mask.alpha_start, mask.alpha_end),
+                pack_f16x2(mask.start_t, mask.end_t),
+            };
+            entry.mask_params = {dx, dy, min_d, inv_len};
+            break;
+        }
+        case AlphaMaskKind::RadialSpotlight: {
+            const float cx = bounds_px.x + bounds_px.w * mask.center_norm.x;
+            const float cy = bounds_px.y + bounds_px.h * mask.center_norm.y;
+            const float inv_rx = 1.0f / std::fmax(bounds_px.w * mask.radius_norm.x, 1e-3f);
+            const float inv_ry = 1.0f / std::fmax(bounds_px.h * mask.radius_norm.y, 1e-3f);
+            entry.meta = {
+                parent_shape,
+                (kClipMaskRadial << 1) | inv_bit,
+                pack_f16x2(mask.alpha_start, mask.alpha_end),
+                pack_f16x2(mask.start_t, mask.end_t),
+            };
+            entry.mask_params = {cx, cy, inv_rx, inv_ry};
+            break;
+        }
+        case AlphaMaskKind::Texture: {
+            entry.meta = {
+                parent_shape,
+                (kClipMaskTexture << 1) | inv_bit,
+                pack_f16x2(mask.alpha_start, mask.alpha_end),
+                pack_f16x2(mask.start_t, mask.end_t),
+            };
+            entry.mask_params = {mask.uv.x, mask.uv.y, mask.uv.x + mask.uv.w, mask.uv.y + mask.uv.h};
+            mask_tex = mask.texture;
+            break;
+        }
+        default:
+            --ctx->clip_shape_count;
+            return parent_shape;
+    }
+    ctx->clip_shapes[index] = entry;
+    ctx->clip_mask_textures[index] = mask_tex;
+    return index;
+}
+
+uint32_t ensure_layer_alpha_mask_clip(
+    Context* ctx,
+    const VisualLayerNode* node,
+    const VisualLayerNode* stop_at,
+    uint32_t base_clip_idx,
+    Rect fallback_bounds_px,
+    float dpi) noexcept
+{
+    if (!node || node == stop_at || !node->resolved_has_alpha_mask) {
+        return base_clip_idx;
+    }
+    uint32_t parent_idx = base_clip_idx;
+    if (node->parent && node->parent != stop_at && node->parent->resolved_has_alpha_mask) {
+        parent_idx = ensure_layer_alpha_mask_clip(ctx, node->parent, stop_at, base_clip_idx, fallback_bounds_px, dpi);
+    }
+    if (node->local.alpha_mask.kind == AlphaMaskKind::None) {
+        return parent_idx;
+    }
+    const BoxExtra* anchor = node->source_box ? node->source_box : node->pivot_box;
+    const uint32_t frame = ctx->active_ui->frame_index;
+    if (anchor && node->cached_mask_clip_frame == frame && node->cached_mask_clip_parent == parent_idx) {
+        return node->cached_mask_clip_idx;
+    }
+    Rect mask_bounds_px = fallback_bounds_px;
+    if (anchor) {
+        const Rect raw = {
+            anchor->layout_rect_logical.x * dpi,
+            anchor->layout_rect_logical.y * dpi,
+            anchor->layout_rect_logical.w * dpi,
+            anchor->layout_rect_logical.h * dpi,
+        };
+        const Vec2 s = node->resolved_scale;
+        if (std::fabs(node->resolved_rotation_rad) > 1e-4f) {
+            const float rcx = raw.x + raw.w * 0.5f;
+            const float rcy = raw.y + raw.h * 0.5f;
+            const float* m = node->resolved_m;
+            const float cx = m[0] * rcx + m[1] * rcy + m[2];
+            const float cy = m[3] * rcx + m[4] * rcy + m[5];
+            const float vw = raw.w * std::fabs(s.x);
+            const float vh = raw.h * std::fabs(s.y);
+            mask_bounds_px = rotated_aabb({cx - vw * 0.5f, cy - vh * 0.5f, vw, vh}, node->resolved_rotation_rad);
+        } else {
+            const Vec2 o = node->resolved_offset_px;
+            mask_bounds_px = {raw.x * s.x + o.x, raw.y * s.y + o.y, raw.w * s.x, raw.h * s.y};
+        }
+    }
+    const float r_scale = 0.5f * (node->resolved_scale.x + node->resolved_scale.y) * dpi;
+    const uint32_t idx = emit_alpha_mask_clip(ctx, parent_idx, mask_bounds_px, node->local.alpha_mask, r_scale);
+    if (anchor) {
+        node->cached_mask_clip_frame = frame;
+        node->cached_mask_clip_parent = parent_idx;
+        node->cached_mask_clip_idx = idx;
+    }
+    return idx;
+}
+
 ClipEntry make_box_clip(Context* ctx,const ClipEntry& parent,Rect bounds,Corners radii,bool continuous,Vec4 fade = {}) noexcept {
     if(const auto* layer=ctx->active_render_layer) {
         resolve_layer_chain(ctx,layer,ctx->active_ui->dpi_scale);
@@ -537,16 +728,13 @@ ClipEntry make_box_clip(Context* ctx,const ClipEntry& parent,Rect bounds,Corners
         if(result.rect.x==parent.rect.x && result.rect.y==parent.rect.y && result.rect.w==parent.rect.w && result.rect.h==parent.rect.h) result.radius=parent.radius;
         return result;
     }
-    if(ctx->clip_shape_count==ctx->clip_shape_capacity || ctx->clip_shape_capacity==0) {
-        const uint32_t capacity=ctx->clip_shape_capacity ? std::min(65536u,ctx->clip_shape_capacity*2) : 128;
-        if(ctx->clip_shape_count>=65536) {SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,"Rounded clip shape limit exceeded");return result;}
-        auto* grown=static_cast<ClipShapeGpu*>(std::realloc(ctx->clip_shapes,size_t(capacity)*sizeof(ClipShapeGpu)));
-        if(!grown) return result;
-        ctx->clip_shapes=grown;ctx->clip_shape_capacity=capacity;ctx->clip_shapes[0]={};
+    if (!ensure_clip_shape_capacity(ctx)) {
+        return result;
     }
     const uint32_t index=ctx->clip_shape_count++;
     ctx->clip_shapes[index]={{bounds.x,bounds.y,bounds.w,bounds.h},{radii.tl,radii.tr,radii.br,radii.bl},
-        {parent.shape,continuous ? 1u : 0u,pack_f16x2(fade.x,fade.y),pack_f16x2(fade.z,fade.w)}};
+        {parent.shape,continuous ? 1u : 0u,pack_f16x2(fade.x,fade.y),pack_f16x2(fade.z,fade.w)},{}};
+    ctx->clip_mask_textures[index]=nullptr;
     result.shape=index;
     result.indexed=parent.shape!=0 || radii.tl!=radii.tr || radii.tr!=radii.br || radii.br!=radii.bl || fade.x>0 || fade.y>0 || fade.z>0 || fade.w>0;
     return result;
@@ -562,8 +750,9 @@ Vec4 box_scroll_fade(Context* ctx,const BoxExtra* extra,float dpi) noexcept {
     if(extra->desc.scroll_fade_px<=0 || !extra->desc.id) return fade;
     const auto* ws=state_map_find(&ctx->active_ui->states,extra->desc.id);
     if(!ws) return fade;
-    const double pos=extra->is_virtual_list ? ws->vscroll_pos_y : ws->scroll_pos.y;
-    double max=extra->is_virtual_list ? ws->vscroll_max_y : ws->scroll_max.y;
+    const WidgetCold* c = ws->cold;
+    const double pos=extra->is_virtual_list ? (c ? c->vscroll_pos_y : 0.0) : ws->scroll_pos.y;
+    double max=extra->is_virtual_list ? (c ? c->vscroll_max_y : 0.0) : ws->scroll_max.y;
     float max_x=ws->scroll_max.x;
     if((extra->desc.scroll_y || extra->desc.scroll_x) && !extra->is_virtual_list) {
         const LayoutScrollData sc = layout_engine_scroll_data(ctx->active_ui->layout, extra->desc.id);
@@ -731,6 +920,8 @@ void apply_image_fit(
 
 bool append_prim_to_batch(
     Prim** prims,
+    uint8_t** prim_aux,
+    uint32_t* prim_aux_cap,
     uint32_t* prim_count,
     uint32_t* prim_cap,
     uint32_t hard_cap,
@@ -740,8 +931,10 @@ bool append_prim_to_batch(
     Prim prim,
     SDL_GPUTexture* ext_tex,
     SDL_GPUTexture* ext_tex2,
+    SDL_GPUTexture* mask_tex,
     bool hole,
-    bool additive,
+    uint8_t blend_mode,
+    uint8_t aux_flags,
     bool force_new_batch) noexcept
 {
     if (*prim_count >= *prim_cap) {
@@ -753,6 +946,13 @@ bool append_prim_to_batch(
         *prims = grown;
         *prim_cap = cap;
     }
+    if (*prim_count >= *prim_aux_cap) {
+        const uint32_t cap = *prim_cap >= kMinPrimCap ? *prim_cap : kMinPrimCap;
+        uint8_t* grown_aux = static_cast<uint8_t*>(std::realloc(*prim_aux, static_cast<size_t>(cap)));
+        if (!grown_aux) return false;
+        *prim_aux = grown_aux;
+        *prim_aux_cap = cap;
+    }
 
     if (*batch_count == 0u || force_new_batch) {
         if (!ensure_batch_cap_array(batches, batch_cap, *batch_count)) return false;
@@ -761,13 +961,16 @@ bool append_prim_to_batch(
             .prim_count = 0u,
             .ext_textures = {},
             .ext_count = 0u,
+            .mask_tex = mask_tex,
+            .blend_mode = blend_mode,
             .is_punch_hole = hole,
-            .is_additive = additive,
         };
     }
 
     DrawBatch* cur = &(*batches)[*batch_count - 1u];
-    if ((cur->is_punch_hole != hole || cur->is_additive != additive) && cur->prim_count > 0u) {
+    if ((cur->is_punch_hole != hole || cur->blend_mode != blend_mode || cur->mask_tex != mask_tex) &&
+        cur->prim_count > 0u)
+    {
         if (!ensure_batch_cap_array(batches, batch_cap, *batch_count)) return false;
         cur = &(*batches)[(*batch_count)++];
         *cur = DrawBatch{
@@ -775,12 +978,14 @@ bool append_prim_to_batch(
             .prim_count = 0u,
             .ext_textures = {},
             .ext_count = 0u,
+            .mask_tex = mask_tex,
+            .blend_mode = blend_mode,
             .is_punch_hole = hole,
-            .is_additive = additive,
         };
     }
     cur->is_punch_hole = hole;
-    cur->is_additive = additive;
+    cur->blend_mode = blend_mode;
+    cur->mask_tex = mask_tex;
 
     const auto find_ext_slot = [](const DrawBatch* b, SDL_GPUTexture* tex) noexcept -> uint16_t {
         if (!tex) return 0u;
@@ -804,8 +1009,9 @@ bool append_prim_to_batch(
             .prim_count = 0u,
             .ext_textures = {},
             .ext_count = 0u,
+            .mask_tex = mask_tex,
+            .blend_mode = blend_mode,
             .is_punch_hole = hole,
-            .is_additive = additive,
         };
         tex_slot = 0u;
         slot2 = 0u;
@@ -831,6 +1037,7 @@ bool append_prim_to_batch(
     if (ext_tex2) {
         prim.payload.y = static_cast<uint32_t>(slot2);
     }
+    (*prim_aux)[*prim_count] = aux_flags;
     (*prims)[(*prim_count)++] = prim;
     ++cur->prim_count;
     return true;
@@ -842,7 +1049,8 @@ void push_prim(
     SDL_GPUTexture* ext_tex = nullptr,
     float cull_pad_px = 2.0f,
     SDL_GPUTexture* ext_tex2 = nullptr,
-    bool force_additive = false) noexcept
+    BlendMode explicit_blend = BlendMode::Normal,
+    bool hollow_border = false) noexcept
 {
     if (!ctx || !ctx->prims) return;
     const auto* layer=ctx->active_render_layer;
@@ -934,13 +1142,27 @@ void push_prim(
         if (snap_rect && width > 0) prim.style.w = (prim.style.w & 0xFFFF0000u) | pack_f16(std::fmax(1.0f, std::round(width)));
     }
     FilterBlurGroup* fg = ctx->active_filter_group;
+    uint32_t effective_clip_idx = 0u;
+    uint32_t mask_base_clip = 0u;
     if (fg && ctx->render_clip_depth <= fg->ancestor_clip_depth) {
         prim.style.x &= 0x3FFFu;
         prim.style.x &= ~(uint32_t(PrimFlag_RoundedClip) << 4);
         prim.clip = {0.0f, 0.0f, static_cast<float>(ctx->active_ui->viewport_w), static_cast<float>(ctx->active_ui->viewport_h)};
-    } else if (ctx->render_clip_index) {
-        const uint32_t index=ctx->render_clip_index;
-        prim.style.x=(prim.style.x & 0x3FFFu) | (1u<<18) | ((index&0xFFFu)<<20) | ((index>>12)<<14);
+    } else {
+        effective_clip_idx = ctx->render_clip_index;
+        mask_base_clip = ctx->render_clip_shape;
+    }
+    if (layer && layer->resolved_has_alpha_mask) {
+        const VisualLayerNode* stop_at = fg ? fg->blur_root : nullptr;
+        const Rect fallback_px = {prim.bounds.x, prim.bounds.y, prim.bounds.z, prim.bounds.w};
+        const uint32_t masked_clip = ensure_layer_alpha_mask_clip(
+            ctx, layer, stop_at, mask_base_clip, fallback_px, ctx->active_ui->dpi_scale);
+        if (masked_clip != mask_base_clip) {
+            effective_clip_idx = masked_clip;
+        }
+    }
+    if (effective_clip_idx != 0u) {
+        prim.style.x=(prim.style.x & 0x3FFFu) | (1u<<18) | ((effective_clip_idx&0xFFFu)<<20) | ((effective_clip_idx>>12)<<14);
     }
     // CPU-side offscreen clip culling: drop primitives completely outside their active clip rect.
     if (prim.clip.z <= prim.clip.x || prim.clip.w <= prim.clip.y ||
@@ -978,6 +1200,12 @@ void push_prim(
     }
 
     const bool hole = (prim.style.x & 15u) == uint32_t(PrimKind::PunchHole);
+    SDL_GPUTexture* mask_tex = resolve_clip_mask_texture(ctx, effective_clip_idx);
+    const bool is_hollow = (kind == PrimKind::Rect) && (hollow_border ||
+        ((prim.style.y >> 24) == 0u &&
+         ((prim.style.x >> 4) & (PrimFlag_LinearGrad | PrimFlag_RadialGrad)) == 0u &&
+         (prim.style.z >> 24) > 0u &&
+         unpack_f16_cpu(static_cast<uint16_t>(prim.style.w)) > 0.0f));
     if (fg) {
         const float bx0 = min_x - cull_pad_px;
         const float by0 = min_y - cull_pad_px;
@@ -996,20 +1224,40 @@ void push_prim(
         if (layer) {
             fg->blur_px = std::fmax(fg->blur_px, layer->resolved_blur_px);
         }
-        const bool child_additive = !hole && (force_additive || (layer && layer->resolved_plus_lighter && !fg->blur_root->resolved_plus_lighter));
+        BlendMode child_bm = BlendMode::Normal;
+        if (!hole) {
+            if (explicit_blend != BlendMode::Normal) {
+                child_bm = explicit_blend;
+            } else if (layer && layer->resolved_blend_mode != BlendMode::Normal &&
+                       layer->resolved_blend_mode != fg->blur_root->resolved_blend_mode)
+            {
+                child_bm = layer->resolved_blend_mode;
+            }
+        }
+        const uint8_t child_bm_u8 = static_cast<uint8_t>(child_bm) & kPrimAuxBlendMask;
+        const uint8_t child_aux = child_bm_u8 | (is_hollow ? kPrimAuxHollowBorder : 0u);
         const bool need_new = (ctx->filter_batch_count == fg->first_batch);
         (void)append_prim_to_batch(
-            &ctx->filter_prims, &ctx->filter_prim_count, &ctx->filter_prim_cap, kMaxPrimHardCap,
+            &ctx->filter_prims, &ctx->filter_prim_aux_flags, &ctx->filter_prim_aux_cap,
+            &ctx->filter_prim_count, &ctx->filter_prim_cap, kMaxPrimHardCap,
             &ctx->filter_batches, &ctx->filter_batch_count, &ctx->filter_batch_cap,
-            prim, ext_tex, ext_tex2, hole, child_additive, need_new);
+            prim, ext_tex, ext_tex2, mask_tex, hole, child_bm_u8, child_aux, need_new);
         return;
     }
 
-    const bool additive = !hole && (force_additive || (layer && layer->resolved_plus_lighter));
+    BlendMode resolved_bm = BlendMode::Normal;
+    if (!hole) {
+        resolved_bm = (explicit_blend != BlendMode::Normal)
+            ? explicit_blend
+            : (layer ? layer->resolved_blend_mode : BlendMode::Normal);
+    }
+    const uint8_t bm_u8 = static_cast<uint8_t>(resolved_bm) & kPrimAuxBlendMask;
+    const uint8_t aux_flags = bm_u8 | (is_hollow ? kPrimAuxHollowBorder : 0u);
     if (!append_prim_to_batch(
-            &ctx->prims, &ctx->prim_count, &ctx->max_prims, kMaxPrimHardCap,
+            &ctx->prims, &ctx->prim_aux_flags, &ctx->prim_aux_cap,
+            &ctx->prim_count, &ctx->max_prims, kMaxPrimHardCap,
             &ctx->batches, &ctx->batch_count, &ctx->batch_cap,
-            prim, ext_tex, ext_tex2, hole, additive, false))
+            prim, ext_tex, ext_tex2, mask_tex, hole, bm_u8, aux_flags, false))
     {
         return;
     }
@@ -1060,12 +1308,13 @@ void begin_filter_group(Context* ctx, const VisualLayerNode* blur_root, const Cl
         .slice = 0u,
         .max_level = 3u,
         .blur_px = blur_root->resolved_blur_px,
-        .plus_lighter = blur_root->resolved_plus_lighter,
+        .blend_mode = blur_root->resolved_blend_mode,
         .raw_bounds = {},
         .has_bounds = false,
         .padded_bounds = {},
         .ancestor_clip = ancestor_clip,
         .ancestor_clip_index = ancestor_clip.indexed ? ancestor_clip.shape : 0u,
+        .ancestor_clip_shape = ancestor_clip.shape,
         .ancestor_clip_depth = clip_depth,
     };
     ctx->active_filter_group = &g;
@@ -1135,17 +1384,28 @@ void finalize_filter_group(Context* ctx) noexcept {
 
     const VisualLayerNode* saved_layer = ctx->active_render_layer;
     const uint32_t saved_clip = ctx->render_clip_index;
+    const uint32_t saved_shape = ctx->render_clip_shape;
     ctx->active_render_layer = nullptr;
-    ctx->render_clip_index = g.ancestor_clip_index;
+    uint32_t composite_clip = g.ancestor_clip_index;
+    if (g.blur_root && g.blur_root->resolved_has_alpha_mask) {
+        const uint32_t masked_clip = ensure_layer_alpha_mask_clip(
+            ctx, g.blur_root, nullptr, g.ancestor_clip_shape, g.padded_bounds, ctx->active_ui->dpi_scale);
+        if (masked_clip != g.ancestor_clip_shape) {
+            composite_clip = masked_clip;
+        }
+    }
+    ctx->render_clip_index = composite_clip;
+    ctx->render_clip_shape = composite_clip ? composite_clip : g.ancestor_clip_shape;
     push_prim(
         ctx,
         Prim::make_layer_blur(g.padded_bounds, g.ancestor_clip.rect, blend_t, 0u, g.ancestor_clip.radius),
         filter_tex_sentinel(g.slice, lo),
         0.0f,
         filter_tex_sentinel(g.slice, hi),
-        g.plus_lighter);
+        g.blend_mode);
     ctx->active_render_layer = saved_layer;
     ctx->render_clip_index = saved_clip;
+    ctx->render_clip_shape = saved_shape;
 }
 
 inline Corners scale_corners(Corners c, float dpi) noexcept {
@@ -1155,46 +1415,72 @@ inline Corners scale_corners(Corners c, float dpi) noexcept {
 bool begin_blur_layer(Context* ctx, Rect box_px, float radius_px) noexcept {
     if (ctx->active_filter_group) return false;
     if (ctx->blur_split_count > 0u) {
-        BlurSplit& cur = ctx->blur_splits[ctx->blur_split_count - 1u];
-        const float max_r = std::fmax(radius_px, cur.blur_radius_px);
-        const bool radius_compatible = std::fabs(radius_px - cur.blur_radius_px) <= std::fmax(2.0f, 0.25f * max_r);
-        if (radius_compatible) {
+        const float vw = static_cast<float>(ctx->active_ui->viewport_w > 0u ? ctx->active_ui->viewport_w : 1u);
+        const float vh = static_cast<float>(ctx->active_ui->viewport_h > 0u ? ctx->active_ui->viewport_h : 1u);
+        for (uint32_t rev = 0u; rev < ctx->blur_split_count; ++rev) {
+            const uint32_t si = ctx->blur_split_count - 1u - rev;
+            BlurSplit& cur = ctx->blur_splits[si];
+            const float max_r = std::fmax(radius_px, cur.blur_radius_px);
+            const bool radius_compatible = std::fabs(radius_px - cur.blur_radius_px) <= std::fmax(2.0f, 0.25f * max_r);
+            if (!radius_compatible) {
+                continue;
+            }
+            const float halo = std::ceil(max_r);
+            const float bx0 = box_px.x - halo;
+            const float by0 = box_px.y - halo;
+            const float bx1 = box_px.x + box_px.w + halo;
+            const float by1 = box_px.y + box_px.h + halo;
+
+            // Earlier split reuse requires that no later split's Kawase pass overwrites our region.
+            bool later_split_overlap = false;
+            for (uint32_t j = si + 1u; j < ctx->blur_split_count; ++j) {
+                const BlurSplit& later = ctx->blur_splits[j];
+                const float lpad = etch_blur_down1_margin_px(later.blur_radius_px);
+                const float lx0 = later.union_bounds.x - lpad;
+                const float ly0 = later.union_bounds.y - lpad;
+                const float lx1 = later.union_bounds.x + later.union_bounds.w + lpad;
+                const float ly1 = later.union_bounds.y + later.union_bounds.h + lpad;
+                if (lx1 > bx0 && lx0 < bx1 && ly1 > by0 && ly0 < by1) {
+                    later_split_overlap = true;
+                    break;
+                }
+            }
+            if (later_split_overlap) {
+                continue;
+            }
+
             bool dirty_overlap = false;
-            if (ctx->blur_dirty_valid) {
-                const float vw = static_cast<float>(ctx->active_ui->viewport_w > 0u ? ctx->active_ui->viewport_w : 1u);
-                const float vh = static_cast<float>(ctx->active_ui->viewport_h > 0u ? ctx->active_ui->viewport_h : 1u);
-                const uint32_t cx0 = static_cast<uint32_t>(clamp_range(std::floor(box_px.x * 16.0f / vw), 0.0f, 15.0f));
-                const uint32_t cy0 = static_cast<uint32_t>(clamp_range(std::floor(box_px.y * 16.0f / vh), 0.0f, 15.0f));
-                const uint32_t cx1 = static_cast<uint32_t>(clamp_range(std::floor((box_px.x + box_px.w - 1e-3f) * 16.0f / vw), 0.0f, 15.0f));
-                const uint32_t cy1 = static_cast<uint32_t>(clamp_range(std::floor((box_px.y + box_px.h - 1e-3f) * 16.0f / vh), 0.0f, 15.0f));
-                bool tile_hit = false;
-                for (uint32_t ty = cy0; ty <= cy1 && !tile_hit; ++ty) {
+            bool need_prim_scan = (si + 1u < ctx->blur_split_count);
+            if (!need_prim_scan && ctx->blur_dirty_valid) {
+                const uint32_t cx0 = static_cast<uint32_t>(clamp_range(std::floor(bx0 * 16.0f / vw), 0.0f, 15.0f));
+                const uint32_t cy0 = static_cast<uint32_t>(clamp_range(std::floor(by0 * 16.0f / vh), 0.0f, 15.0f));
+                const uint32_t cx1 = static_cast<uint32_t>(clamp_range(std::floor((bx1 - 1e-3f) * 16.0f / vw), 0.0f, 15.0f));
+                const uint32_t cy1 = static_cast<uint32_t>(clamp_range(std::floor((by1 - 1e-3f) * 16.0f / vh), 0.0f, 15.0f));
+                for (uint32_t ty = cy0; ty <= cy1 && !need_prim_scan; ++ty) {
                     for (uint32_t tx = cx0; tx <= cx1; ++tx) {
                         const uint32_t bit = ty * 16u + tx;
                         if ((ctx->blur_dirty_grid[bit >> 6] & (1ULL << (bit & 63u))) != 0ULL) {
-                            tile_hit = true;
+                            need_prim_scan = true;
                             break;
                         }
                     }
                 }
-                if (tile_hit) {
-                    const float bx0 = box_px.x, by0 = box_px.y;
-                    const float bx1 = box_px.x + box_px.w, by1 = box_px.y + box_px.h;
-                    const uint32_t count = ctx->prim_count - cur.split_prim;
-                    if (count > 2048u) {
-                        dirty_overlap = true;
-                    } else {
-                        for (uint32_t pi = cur.split_prim; pi < ctx->prim_count; ++pi) {
-                            const Prim& p = ctx->prims[pi];
-                            if ((p.style.x & 0xFu) == static_cast<uint32_t>(PrimKind::Shadow)) continue;
-                            const float px0 = std::fmax(p.bounds.x, p.clip.x);
-                            const float py0 = std::fmax(p.bounds.y, p.clip.y);
-                            const float px1 = std::fmin(p.bounds.x + p.bounds.z, p.clip.z);
-                            const float py1 = std::fmin(p.bounds.y + p.bounds.w, p.clip.w);
-                            if (px1 > bx0 && px0 < bx1 && py1 > by0 && py0 < by1) {
-                                dirty_overlap = true;
-                                break;
-                            }
+            }
+            if (need_prim_scan) {
+                const uint32_t count = ctx->prim_count - cur.split_prim;
+                if (count > 2048u) {
+                    dirty_overlap = true;
+                } else {
+                    for (uint32_t pi = cur.split_prim; pi < ctx->prim_count; ++pi) {
+                        const Prim& p = ctx->prims[pi];
+                        if ((p.style.x & 0xFu) == static_cast<uint32_t>(PrimKind::Shadow)) continue;
+                        const float px0 = std::fmax(p.bounds.x, p.clip.x);
+                        const float py0 = std::fmax(p.bounds.y, p.clip.y);
+                        const float px1 = std::fmin(p.bounds.x + p.bounds.z, p.clip.z);
+                        const float py1 = std::fmin(p.bounds.y + p.bounds.w, p.clip.w);
+                        if (px1 > bx0 && px0 < bx1 && py1 > by0 && py0 < by1) {
+                            dirty_overlap = true;
+                            break;
                         }
                     }
                 }
@@ -1204,13 +1490,16 @@ bool begin_blur_layer(Context* ctx, Rect box_px, float radius_px) noexcept {
                 const float y0 = (box_px.y < cur.union_bounds.y) ? box_px.y : cur.union_bounds.y;
                 const float rx1 = box_px.x + box_px.w;
                 const float cx1 = cur.union_bounds.x + cur.union_bounds.w;
-                const float by1 = box_px.y + box_px.h;
-                const float cy1 = cur.union_bounds.y + cur.union_bounds.h;
+                const float by1_u = box_px.y + box_px.h;
+                const float cy1_u = cur.union_bounds.y + cur.union_bounds.h;
                 const float x1 = (rx1 > cx1) ? rx1 : cx1;
-                const float y1 = (by1 > cy1) ? by1 : cy1;
+                const float y1 = (by1_u > cy1_u) ? by1_u : cy1_u;
                 cur.union_bounds = Rect{ x0, y0, x1 - x0, y1 - y0 };
                 if (radius_px > cur.blur_radius_px) {
                     cur.blur_radius_px = radius_px;
+                }
+                if (si + 1u < ctx->blur_split_count) {
+                    ctx->blur_splits_need_load_preserve = true;
                 }
                 return true;
             }
@@ -1329,7 +1618,9 @@ void emit_segmented_border(Context* ctx, const BoxDesc& d, Rect box, const ClipE
     const ClipEntry clip = (sides && rounded) || clip_corner_arcs
         ? make_box_clip(ctx, parent, outer, r, d.continuous_corners) : parent;
     const uint32_t saved_clip = ctx->render_clip_index;
+    const uint32_t saved_shape = ctx->render_clip_shape;
     ctx->render_clip_index = (clip.indexed || clip.shape != parent.shape) ? clip.shape : 0u;
+    ctx->render_clip_shape = clip.shape;
     const float dash = d.border_dash_px * dpi;
     const float gap = d.border_gap_px > 0.0f ? d.border_gap_px * dpi : dash;
     const float period = std::fmax(0.5f, dash + gap);
@@ -1371,7 +1662,7 @@ void emit_segmented_border(Context* ctx, const BoxDesc& d, Rect box, const ClipE
             const float offset = reverse ? length - b : a;
             if (horizontal) { piece.x += offset; piece.w = b - a; }
             else { piece.y += offset; piece.h = b - a; }
-            push_prim(ctx, Prim::make_rect(piece, clip.rect, d.border_color, {}, {}, 0, 1, clip.radius));
+            push_prim(ctx, Prim::make_rect(piece, clip.rect, d.border_color, {}, {}, 0, 1, clip.radius), nullptr, 2.0f, nullptr, d.blend_mode);
         });
     };
     const float x = outer.x, y = outer.y, right = x + outer.w, bottom = y + outer.h;
@@ -1402,7 +1693,7 @@ void emit_segmented_border(Context* ctx, const BoxDesc& d, Rect box, const ClipE
             segments(length, 0.0f, last, [&](float a, float b) noexcept {
                 if ((b - a) / center_r < 1e-4f) return;
                 push_prim(ctx, Prim::make_ring_arc(center, center_r, corner_half, angle + a / center_r,
-                    (b - a) / center_r, clip.rect, d.border_color, d.border_color, false, {}, 0, clip.radius));
+                    (b - a) / center_r, clip.rect, d.border_color, d.border_color, false, {}, 0, clip.radius), nullptr, 2.0f, nullptr, d.blend_mode);
             });
         };
         strip({x + tl, y, outer.w - tl - tr, top_w}, true, false);
@@ -1417,6 +1708,7 @@ void emit_segmented_border(Context* ctx, const BoxDesc& d, Rect box, const ClipE
         arc({x + tl, y + tl}, tl, 2.0f * quarter);
     }
     ctx->render_clip_index = saved_clip;
+    ctx->render_clip_shape = saved_shape;
 }
 
 inline bool inset_shadow_active(Color col, float blur_px, float spread_px, Vec2 offset) noexcept {
@@ -1615,12 +1907,19 @@ void emit_box_background_and_shadow(
                     d.backdrop_saturation,
                     d.backdrop_brightness,
                     d.backdrop_noise), d.continuous_corners),
-                blur_tex_sentinel());
+                blur_tex_sentinel(),
+                2.0f,
+                nullptr,
+                d.blend_mode);
         } else if (want_multi_grad) {
             push_prim(
                 ctx,
                 make_multistop_or_fallback_rect_prim(
-                    ctx, box_px, clip, d.gradient, d.background, rad_px, border_col, border_w, d.continuous_corners));
+                    ctx, box_px, clip, d.gradient, d.background, rad_px, border_col, border_w, d.continuous_corners),
+                nullptr,
+                2.0f,
+                nullptr,
+                d.blend_mode);
         } else if (has_legacy_grad) {
             push_prim(
                 ctx,
@@ -1634,7 +1933,11 @@ void emit_box_background_and_shadow(
                     border_col,
                     border_w,
                     clip.radius,
-                    d.radial_gradient), d.continuous_corners));
+                    d.radial_gradient), d.continuous_corners),
+                nullptr,
+                2.0f,
+                nullptr,
+                d.blend_mode);
         } else {
             push_prim(
                 ctx,
@@ -1646,7 +1949,11 @@ void emit_box_background_and_shadow(
                     border_col,
                     border_w,
                     1.0f,
-                    clip.radius), d.continuous_corners));
+                    clip.radius), d.continuous_corners),
+                nullptr,
+                2.0f,
+                nullptr,
+                d.blend_mode);
         }
     }
 
@@ -1740,7 +2047,6 @@ void emit_slug_outline_quad(
                 0u,
                 clip_px.radius,
                 PrimFlag_StemDarken);
-            bool has_wipe_grad = false;
             if (wipe && wipe->enabled) {
                 const float x0_rel = wipe->x0_px - gx;
                 const float x1_rel = wipe->x1_px - gx;
@@ -1751,12 +2057,9 @@ void emit_slug_outline_quad(
                     p.style.z = wipe->color_end.pack_rgba8();
                     p.payload.w = pack_f16x2(clamp_range(x0_rel, -32768.0f, 32768.0f),
                                              clamp_range(x1_rel, -32768.0f, 32768.0f));
-                    has_wipe_grad = true;
                 }
             }
-            const bool is_additive = ctx->active_render_layer && ctx->active_render_layer->resolved_plus_lighter;
-            const bool use_uber_glyph = (ctx->active_filter_group != nullptr) || has_wipe_grad || is_additive;
-            push_prim(ctx, p, use_uber_glyph ? subpixel_tex_sentinel() : nullptr);
+            push_prim(ctx, p);
             return;
         }
     }
@@ -2031,7 +2334,16 @@ void selection_line_geometry(Context* ctx, const LayoutCmd* cmd, const Selection
         }
     } else {
         const auto& td = cmd->text_cfg;
+        const uint32_t prev_ot_flags = ctx->active_ot_flags;
+        const FontFeature* prev_ot_feats = ctx->active_ot_features;
+        const uint32_t prev_ot_count = ctx->active_ot_feature_count;
+        ctx->active_ot_flags = td.opentype_flags;
+        ctx->active_ot_features = td.font_features;
+        ctx->active_ot_feature_count = td.font_feature_count;
         segment(line.start, line.end, td.font_id, td.font_size_px, td.letter_spacing, false, 0u);
+        ctx->active_ot_flags = prev_ot_flags;
+        ctx->active_ot_features = prev_ot_feats;
+        ctx->active_ot_feature_count = prev_ot_count;
     }
     const uint32_t text_end = selection_text_offset(line, line.end);
     if (!has_xa && a >= text_end) *xa = pen;
@@ -2049,9 +2361,10 @@ void emit_selection_line(Context* ctx, const LayoutCmd* cmd, const ClipEntry& cl
     }
     push_span_hitbox(ctx, line.id, line.clay_id, cmd->node_idx, cmd->bounds, clip, cmd->z_index, dpi);
     const auto* ws = state_map_find(&ctx->active_ui->states, line.id);
-    if (!ws) return;
-    const uint32_t a = ws->edit_cursor < ws->edit_sel_anchor ? ws->edit_cursor : ws->edit_sel_anchor;
-    const uint32_t b = ws->edit_cursor > ws->edit_sel_anchor ? ws->edit_cursor : ws->edit_sel_anchor;
+    if (!ws || !ws->cold) return;
+    const WidgetCold* c = ws->cold;
+    const uint32_t a = c->edit_cursor < c->edit_sel_anchor ? c->edit_cursor : c->edit_sel_anchor;
+    const uint32_t b = c->edit_cursor > c->edit_sel_anchor ? c->edit_cursor : c->edit_sel_anchor;
     if (a == b || a >= selection_text_offset(line, line.end) ||
         b <= selection_text_offset(line, line.start)) return;
     float xa, xb; uint32_t hit;
@@ -2505,6 +2818,13 @@ void emit_text_command(
 
     const Color tint = td.text_color;
 
+    const uint32_t prev_ot_flags = ctx->active_ot_flags;
+    const FontFeature* prev_ot_feats = ctx->active_ot_features;
+    const uint32_t prev_ot_count = ctx->active_ot_feature_count;
+    ctx->active_ot_flags = td.opentype_flags;
+    ctx->active_ot_features = td.font_features;
+    ctx->active_ot_feature_count = td.font_feature_count;
+
     if(cmd->text_truncated) {
         ClipEntry local_clip=clip;
         const float width=cmd->text_max_width>0?cmd->text_max_width:cmd->bounds.w;
@@ -2513,7 +2833,11 @@ void emit_text_command(
         const float ox=layer ? layer->resolved_offset_px.x : 0.f;
         local_clip.rect=rect_intersect(clip.rect,Rect{cmd->bounds.x*dpi*sx+ox,clip.rect.y,width*dpi*sx,clip.rect.h});
         emit_elided_line(ctx,chars,static_cast<uint32_t>(len),primary_slot,logical_font_px,td.letter_spacing,
-            cmd->bounds.x,baseline_y/dpi,width,local_clip,tint,dpi);return;
+            cmd->bounds.x,baseline_y/dpi,width,local_clip,tint,dpi);
+        ctx->active_ot_flags = prev_ot_flags;
+        ctx->active_ot_features = prev_ot_feats;
+        ctx->active_ot_feature_count = prev_ot_count;
+        return;
     }
     float pen_x = snap_text ? std::round(cmd->bounds.x * dpi) : (cmd->bounds.x * dpi);
     const uint32_t ulen = static_cast<uint32_t>(len);
@@ -2545,6 +2869,9 @@ void emit_text_command(
         }
         pos = run_end;
     }
+    ctx->active_ot_flags = prev_ot_flags;
+    ctx->active_ot_features = prev_ot_feats;
+    ctx->active_ot_feature_count = prev_ot_count;
 }
 
 WidgetState* find_scrollbar_owner(Context* ctx, uint32_t thumb_active_id) noexcept {
@@ -2571,12 +2898,16 @@ void apply_scrollbar_drag(WidgetState* ws, float pointer_y, float grab_offset, b
         if(horizontal) {
             ws->scroll_pos.x=ratio*ws->scroll_max.x;ws->scroll_vel.x=0;
         } else if(ws->is_multiline_input) {
-            ws->edit_scroll_y=ratio*ws->edit_max_scroll_y;ws->edit_reveal_caret=false;
+            if (WidgetCold* c = ensure_widget_cold(ws)) {
+                c->edit_scroll_y=ratio*c->edit_max_scroll_y;c->edit_reveal_caret=false;
+            }
         } else if (ws->is_virtual_list) {
-            ws->vscroll_pos_y = static_cast<double>(ratio) * ws->vscroll_max_y;
-            ws->vscroll_vel_y = 0.0;
-            ws->vlist_pending_scroll = false;
-            ws->vlist_stuck_bottom = (ws->vscroll_max_y <= 0.5) || (ws->vscroll_pos_y >= ws->vscroll_max_y - 2.0);
+            if (WidgetCold* c = ensure_widget_cold(ws)) {
+                c->vscroll_pos_y = static_cast<double>(ratio) * c->vscroll_max_y;
+                c->vscroll_vel_y = 0.0;
+                c->vlist_pending_scroll = false;
+                c->vlist_stuck_bottom = (c->vscroll_max_y <= 0.5) || (c->vscroll_pos_y >= c->vscroll_max_y - 2.0);
+            }
         } else {
             ws->scroll_pos.y = ratio * ws->scroll_max.y;
             ws->scroll_vel.y = 0.0f;
@@ -2711,8 +3042,9 @@ void emit_canvas_wire_command(
         return;
     }
     const WidgetState* cws = (cw->canvas_id != 0u) ? state_map_find(&ctx->active_ui->states, cw->canvas_id) : nullptr;
-    const Vec2 pan = cws ? cws->canvas_pan : Vec2{};
-    const float zoom = (cws && cws->canvas_zoom > 1e-4f) ? cws->canvas_zoom : 1.0f;
+    const WidgetCold* cc = cws ? cws->cold : nullptr;
+    const Vec2 pan = cc ? cc->canvas_pan : Vec2{};
+    const float zoom = (cc && cc->canvas_zoom > 1e-4f) ? cc->canvas_zoom : 1.0f;
 
     Rect canvas_logical = fallback_box_logical;
     if (cw->canvas_id != 0u) {

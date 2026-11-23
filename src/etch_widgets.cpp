@@ -632,10 +632,13 @@ bool combo_box(const ComboBoxDesc& d) noexcept {
         if(begin_popup({.id=pop,.trigger_id=d.id,.height=Sizing::fixed(height),.attach_to_trigger=true,.match_trigger_width=true,.scroll_y=false})) {
             if((opened || reveal) && index>=0) {
                 if(auto* ws=state_map_get_or_insert(&current_context()->active_ui->states,list,ui.frame_index)) {
-                    ws->viewport_dim.y=height-12;ws->vlist_stride=28;
-                    const double top=double(index)*28,bottom=top+26;
-                    if(opened || top<ws->vscroll_pos_y || bottom>ws->vscroll_pos_y+height-12)
-                        virtual_list_scroll_to_row(list,uint32_t(index),28,top<ws->vscroll_pos_y ? AlignY::Top : AlignY::Bottom);
+                    ws->viewport_dim.y=height-12;
+                    if (WidgetCold* c = ensure_widget_cold(ws)) {
+                        c->vlist_stride=28;
+                        const double top=double(index)*28,bottom=top+26;
+                        if(opened || top<c->vscroll_pos_y || bottom>c->vscroll_pos_y+height-12)
+                            virtual_list_scroll_to_row(list,uint32_t(index),28,top<c->vscroll_pos_y ? AlignY::Top : AlignY::Bottom);
+                    }
                 }
             }
             const VirtualListSlice slice=begin_virtual_list({.id=list,.item_count=uint32_t(d.items.size()),.item_height_px=26,.row_gap_px=2,

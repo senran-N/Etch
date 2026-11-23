@@ -79,9 +79,36 @@ void push_layer(const LayerDesc& desc) noexcept {
     local.opacity=std::fmin(1.f,std::fmax(0.f,local.opacity));
     local.blur_px=std::isfinite(local.blur_px) ? std::fmin(64.f,std::fmax(0.f,local.blur_px)) : 0.f;
     local.rotation_rad=std::isfinite(local.rotation_rad) ? local.rotation_rad : 0.f;
+    if(static_cast<uint8_t>(local.blend_mode)>static_cast<uint8_t>(BlendMode::Screen)) local.blend_mode=BlendMode::Normal;
+    if(local.blend_mode==BlendMode::Normal && local.blend_plus_lighter) local.blend_mode=BlendMode::Additive;
+    if(static_cast<uint8_t>(local.alpha_mask.kind)>static_cast<uint8_t>(AlphaMaskKind::Texture)) local.alpha_mask.kind=AlphaMaskKind::None;
+    if(local.alpha_mask.kind==AlphaMaskKind::Texture && !local.alpha_mask.texture) local.alpha_mask.kind=AlphaMaskKind::None;
+    if(local.alpha_mask.kind!=AlphaMaskKind::None) {
+        auto& m = local.alpha_mask;
+        m.angle_deg = std::isfinite(m.angle_deg) ? m.angle_deg : 90.0f;
+        m.start_t = std::isfinite(m.start_t) ? std::fmin(1.0f, std::fmax(0.0f, m.start_t)) : 0.0f;
+        m.end_t = std::isfinite(m.end_t) ? std::fmin(1.0f, std::fmax(0.0f, m.end_t)) : 1.0f;
+        m.alpha_start = std::isfinite(m.alpha_start) ? std::fmin(1.0f, std::fmax(0.0f, m.alpha_start)) : 1.0f;
+        m.alpha_end = std::isfinite(m.alpha_end) ? std::fmin(1.0f, std::fmax(0.0f, m.alpha_end)) : 0.0f;
+        if(!std::isfinite(m.center_norm.x)) m.center_norm.x = 0.5f;
+        if(!std::isfinite(m.center_norm.y)) m.center_norm.y = 0.5f;
+        if(!std::isfinite(m.radius_norm.x) || m.radius_norm.x <= 0.0f) m.radius_norm.x = 0.5f;
+        if(!std::isfinite(m.radius_norm.y) || m.radius_norm.y <= 0.0f) m.radius_norm.y = 0.5f;
+        if(!std::isfinite(m.uv.x) || !std::isfinite(m.uv.y) || !std::isfinite(m.uv.w) || !std::isfinite(m.uv.h)) m.uv = {0.0f, 0.0f, 1.0f, 1.0f};
+        m.radius.tl = (std::isfinite(m.radius.tl) && m.radius.tl > 0.0f) ? m.radius.tl : 0.0f;
+        m.radius.tr = (std::isfinite(m.radius.tr) && m.radius.tr > 0.0f) ? m.radius.tr : 0.0f;
+        m.radius.br = (std::isfinite(m.radius.br) && m.radius.br > 0.0f) ? m.radius.br : 0.0f;
+        m.radius.bl = (std::isfinite(m.radius.bl) && m.radius.bl > 0.0f) ? m.radius.bl : 0.0f;
+    }
     if(local.translate.x!=0.0f || local.translate.y!=0.0f || local.scale.x!=1.0f || local.scale.y!=1.0f || local.rotation_rad!=0.0f) {
         // Disable layout-space culling when a visual layer can move, scale, or rotate content into view.
         if (ctx->active_ui->layout) ctx->active_ui->layout->culling_enabled = false;
+        if (ctx->active_ui->subtree_depth > 0u) {
+            if (SubtreeMeta* sm = ctx->active_ui->subtree_stack[ctx->active_ui->subtree_depth - 1u].meta) {
+                sm->tainted = true;
+            }
+        }
+    } else if(local.blend_mode!=BlendMode::Normal || local.alpha_mask.kind!=AlphaMaskKind::None) {
         if (ctx->active_ui->subtree_depth > 0u) {
             if (SubtreeMeta* sm = ctx->active_ui->subtree_stack[ctx->active_ui->subtree_depth - 1u].meta) {
                 sm->tainted = true;
@@ -104,14 +131,16 @@ namespace {
 void resolve_layer_chain(Context* ctx, const VisualLayerNode* node, float dpi) noexcept {
     if(node->resolved_frame==ctx->active_ui->frame_index) return;
     Vec2 parent_scale={1,1},parent_offset={}, inherited_scale={1,1},inherited_offset={};
-    float parent_opacity=1, parent_blur=0, parent_rot=0; bool parent_animating=false, parent_plus_lighter=false;
+    float parent_opacity=1, parent_blur=0, parent_rot=0; bool parent_animating=false, parent_has_mask=false;
+    BlendMode parent_blend=BlendMode::Normal;
     float pm[6] = {1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f};
     const VisualLayerNode* parent_blur_root = nullptr;
     if(node->parent) {
         resolve_layer_chain(ctx,node->parent,dpi);
         parent_scale=node->parent->resolved_scale;parent_offset=node->parent->resolved_offset_px;
         parent_opacity=node->parent->resolved_opacity;parent_animating=node->parent->resolved_animating;
-        parent_blur=node->parent->resolved_blur_px;parent_plus_lighter=node->parent->resolved_plus_lighter;
+        parent_blur=node->parent->resolved_blur_px;parent_blend=node->parent->resolved_blend_mode;
+        parent_has_mask=node->parent->resolved_has_alpha_mask;
         parent_blur_root=node->parent->resolved_blur_root;
         parent_rot=node->parent->resolved_rotation_rad;
         std::memcpy(pm,node->parent->resolved_m,sizeof(pm));
@@ -150,30 +179,33 @@ void resolve_layer_chain(Context* ctx, const VisualLayerNode* node, float dpi) n
                 }
                 bool moving=false;
                 if(box.desc.animate_layout || box.desc.hero_id) {
-                    if(!ws->anim_seen_frame) ws->anim_rect=target;
-                    if(ws->anim_seen_frame!=ctx->active_ui->frame_index) {
-                        moving |= advance_motion(ctx,&ws->anim_rect.x,&ws->anim_vel_pos.x,target.x,spec);
-                        moving |= advance_motion(ctx,&ws->anim_rect.y,&ws->anim_vel_pos.y,target.y,spec);
-                        moving |= advance_motion(ctx,&ws->anim_rect.w,&ws->anim_vel_size.x,target.w,spec);
-                        moving |= advance_motion(ctx,&ws->anim_rect.h,&ws->anim_vel_size.y,target.h,spec);
-                        ws->anim_seen_frame=ctx->active_ui->frame_index;
-                    }
-                    Rect animated=ws->anim_rect;
-                    if(animated_parent) {
-                        const Rect p=animated_parent->layout_rect_logical;
-                        animated={p.x+animated.x*p.w,p.y+animated.y*p.h,animated.w*p.w,animated.h*p.h};
-                    }
-                    // Shared heroes retain absolute coordinates across parent changes.
-                    // Remove the inherited transform before composing that absolute spring.
-                    if(box.desc.hero_id && node->parent) {
-                        animated={(animated.x*inherited_scale.x+(inherited_offset.x-parent_offset.x)/dpi)/parent_scale.x,
-                                  (animated.y*inherited_scale.y+(inherited_offset.y-parent_offset.y)/dpi)/parent_scale.y,
-                                  animated.w*inherited_scale.x/parent_scale.x,animated.h*inherited_scale.y/parent_scale.y};
-                    }
-                    if(r.w>0 && r.h>0) {
-                        d.scale={animated.w/r.w,animated.h/r.h};
-                        d.pivot_px={r.x,r.y};
-                        d.translate={animated.x-r.x,animated.y-r.y};
+                    WidgetCold* cold=ensure_widget_cold(ws);
+                    if(cold) {
+                        if(!cold->anim_seen_frame) cold->anim_rect=target;
+                        if(cold->anim_seen_frame!=ctx->active_ui->frame_index) {
+                            moving |= advance_motion(ctx,&cold->anim_rect.x,&cold->anim_vel_pos.x,target.x,spec);
+                            moving |= advance_motion(ctx,&cold->anim_rect.y,&cold->anim_vel_pos.y,target.y,spec);
+                            moving |= advance_motion(ctx,&cold->anim_rect.w,&cold->anim_vel_size.x,target.w,spec);
+                            moving |= advance_motion(ctx,&cold->anim_rect.h,&cold->anim_vel_size.y,target.h,spec);
+                            cold->anim_seen_frame=ctx->active_ui->frame_index;
+                        }
+                        Rect animated=cold->anim_rect;
+                        if(animated_parent) {
+                            const Rect p=animated_parent->layout_rect_logical;
+                            animated={p.x+animated.x*p.w,p.y+animated.y*p.h,animated.w*p.w,animated.h*p.h};
+                        }
+                        // Shared heroes retain absolute coordinates across parent changes.
+                        // Remove the inherited transform before composing that absolute spring.
+                        if(box.desc.hero_id && node->parent) {
+                            animated={(animated.x*inherited_scale.x+(inherited_offset.x-parent_offset.x)/dpi)/parent_scale.x,
+                                      (animated.y*inherited_scale.y+(inherited_offset.y-parent_offset.y)/dpi)/parent_scale.y,
+                                      animated.w*inherited_scale.x/parent_scale.x,animated.h*inherited_scale.y/parent_scale.y};
+                        }
+                        if(r.w>0 && r.h>0) {
+                            d.scale={animated.w/r.w,animated.h/r.h};
+                            d.pivot_px={r.x,r.y};
+                            d.translate={animated.x-r.x,animated.y-r.y};
+                        }
                     }
                 }
                 const float interaction_scale=(1+(box.desc.hover_scale-1)*hover)*(1+(box.desc.press_scale-1)*press);
@@ -242,7 +274,14 @@ void resolve_layer_chain(Context* ctx, const VisualLayerNode* node, float dpi) n
         : (parent_blur + local_blur);
     node->resolved_blur_px = std::fmin(64.0f, combined_blur);
     node->resolved_blur_root = parent_blur_root ? parent_blur_root : (d.blur_px > 0.05f ? node : nullptr);
-    node->resolved_plus_lighter = parent_plus_lighter || d.blend_plus_lighter;
+    const BlendMode local_blend = (d.blend_mode != BlendMode::Normal)
+        ? d.blend_mode
+        : (d.blend_plus_lighter ? BlendMode::Additive : BlendMode::Normal);
+    node->resolved_blend_mode = (local_blend != BlendMode::Normal) ? local_blend : parent_blend;
+    node->resolved_has_alpha_mask = parent_has_mask || (d.alpha_mask.kind != AlphaMaskKind::None);
+    node->cached_mask_clip_frame = 0u;
+    node->cached_mask_clip_parent = UINT32_MAX;
+    node->cached_mask_clip_idx = 0u;
     node->resolved_frame=ctx->active_ui->frame_index;
 }
 Rect layer_rect(Context* ctx, Rect r) noexcept {
@@ -364,62 +403,63 @@ float tween(uint32_t id, float target, float duration_sec, EasingSpec spec, floa
     const float del = (std::isfinite(delay_sec) && delay_sec > 0.0f) ? delay_sec : 0.0f;
     const uint32_t frame = ctx->active_ui->frame_index;
     WidgetState* ws = state_map_get_or_insert(&ctx->active_ui->states, id, frame);
-    if (!ws) return target;
+    WidgetCold* c = ensure_widget_cold(ws);
+    if (!c) return target;
 
-    if (!ws->tween_initialized) {
-        ws->tween_initialized = true;
-        ws->tween_start = target;
-        ws->tween_target = target;
-        ws->tween_value = target;
-        ws->tween_elapsed = 0.0f;
-        ws->tween_duration = 0.0f;
-        ws->tween_delay = 0.0f;
-        ws->tween_frame = frame;
-        return ws->tween_value;
+    if (!c->tween_initialized) {
+        c->tween_initialized = true;
+        c->tween_start = target;
+        c->tween_target = target;
+        c->tween_value = target;
+        c->tween_elapsed = 0.0f;
+        c->tween_duration = 0.0f;
+        c->tween_delay = 0.0f;
+        c->tween_frame = frame;
+        return c->tween_value;
     }
 
     if (ctx->reduced_motion || dur <= 1e-4f) {
-        ws->tween_start = target;
-        ws->tween_target = target;
-        ws->tween_value = target;
-        ws->tween_elapsed = 0.0f;
-        ws->tween_duration = 0.0f;
-        ws->tween_delay = 0.0f;
-        ws->tween_frame = frame;
-        return ws->tween_value;
+        c->tween_start = target;
+        c->tween_target = target;
+        c->tween_value = target;
+        c->tween_elapsed = 0.0f;
+        c->tween_duration = 0.0f;
+        c->tween_delay = 0.0f;
+        c->tween_frame = frame;
+        return c->tween_value;
     }
 
-    const bool target_changed = std::fabs(target - ws->tween_target) > 1e-5f;
+    const bool target_changed = std::fabs(target - c->tween_target) > 1e-5f;
     if (target_changed) {
-        ws->tween_start = ws->tween_value;
-        ws->tween_target = target;
-        ws->tween_elapsed = 0.0f;
-        ws->tween_duration = dur;
-        ws->tween_delay = del;
-        if (ws->tween_frame == frame && ctx->time_scale > 0.0f) {
+        c->tween_start = c->tween_value;
+        c->tween_target = target;
+        c->tween_elapsed = 0.0f;
+        c->tween_duration = dur;
+        c->tween_delay = del;
+        if (c->tween_frame == frame && ctx->time_scale > 0.0f) {
             ++ctx->active_ui->active_anim_count;
         }
     }
 
-    if (ws->tween_duration > 1e-4f && ws->tween_frame != frame) {
-        ws->tween_frame = frame;
-        ws->tween_elapsed += ctx->active_ui->sim_dt;
-        const float total = ws->tween_delay + ws->tween_duration;
-        if (ws->tween_elapsed >= total) {
-            ws->tween_value = ws->tween_target;
-            ws->tween_start = ws->tween_target;
-            ws->tween_elapsed = total;
-            ws->tween_duration = 0.0f;
+    if (c->tween_duration > 1e-4f && c->tween_frame != frame) {
+        c->tween_frame = frame;
+        c->tween_elapsed += ctx->active_ui->sim_dt;
+        const float total = c->tween_delay + c->tween_duration;
+        if (c->tween_elapsed >= total) {
+            c->tween_value = c->tween_target;
+            c->tween_start = c->tween_target;
+            c->tween_elapsed = total;
+            c->tween_duration = 0.0f;
         } else {
-            const float raw_u = (ws->tween_elapsed - ws->tween_delay) / ws->tween_duration;
+            const float raw_u = (c->tween_elapsed - c->tween_delay) / c->tween_duration;
             const float u = std::fmin(1.0f, std::fmax(0.0f, raw_u));
-            ws->tween_value = ws->tween_start + (ws->tween_target - ws->tween_start) * eval_easing(spec, u);
+            c->tween_value = c->tween_start + (c->tween_target - c->tween_start) * eval_easing(spec, u);
             if (ctx->time_scale > 0.0f) {
                 ++ctx->active_ui->active_anim_count;
             }
         }
     }
-    return ws->tween_value;
+    return c->tween_value;
 }
 void set_time_scale(Context* ctx, float scale) noexcept {
     if(!ctx || !std::isfinite(scale) || scale<0 || scale>16) return;
@@ -430,17 +470,18 @@ PresenceResult presence(uint32_t id, bool mounted, SpringSpec spec) noexcept {
     if(!ctx || !ctx->in_frame || !id) return {};
     spec=valid_spring_spec(spec);
     auto* ws=state_map_get_or_insert(&ctx->active_ui->states,id,ctx->active_ui->frame_index);
-    if(!ws) return {};
-    if(!ws->presence_initialized) {
-        ws->presence_initialized=true;
-        ws->presence_pos=0;
-        ws->presence_vel=0;
+    WidgetCold* c=ensure_widget_cold(ws);
+    if(!c) return {};
+    if(!c->presence_initialized) {
+        c->presence_initialized=true;
+        c->presence_pos=0;
+        c->presence_vel=0;
     }
-    if(ws->presence_frame!=ctx->active_ui->frame_index) {
-        ws->presence_frame=ctx->active_ui->frame_index;
-        advance_motion(ctx,&ws->presence_pos,&ws->presence_vel,mounted ? 1.f : 0.f,spec);
+    if(c->presence_frame!=ctx->active_ui->frame_index) {
+        c->presence_frame=ctx->active_ui->frame_index;
+        advance_motion(ctx,&c->presence_pos,&c->presence_vel,mounted ? 1.f : 0.f,spec);
     }
-    const float opacity=std::fmin(1.f,std::fmax(0.f,ws->presence_pos));
-    return {mounted || ws->presence_pos!=0 || ws->presence_vel!=0,opacity,!mounted && (ws->presence_pos!=0 || ws->presence_vel!=0)};
+    const float opacity=std::fmin(1.f,std::fmax(0.f,c->presence_pos));
+    return {mounted || c->presence_pos!=0 || c->presence_vel!=0,opacity,!mounted && (c->presence_pos!=0 || c->presence_vel!=0)};
 }
 } // namespace etch

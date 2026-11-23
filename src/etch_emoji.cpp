@@ -1,4 +1,18 @@
 // OpenType bitmap strikes; all offsets are validated before forming pointers.
+#if defined(_WIN32)
+#    include <dwrite_3.h>
+#    include <new>
+#elif defined(__APPLE__)
+#    include <CoreFoundation/CoreFoundation.h>
+#    include <CoreGraphics/CoreGraphics.h>
+#    include <CoreText/CoreText.h>
+#elif defined(ETCH_USE_FREETYPE)
+#    include <ft2build.h>
+#    include FT_FREETYPE_H
+#    include FT_LCD_FILTER_H
+#    include FT_MULTIPLE_MASTERS_H
+#endif
+
 namespace etch {
 namespace {
 struct BitmapSource {
@@ -401,6 +415,185 @@ void evict_font_slot_hinted_glyphs(FontAtlas* a, uint16_t slot_idx) noexcept {
 }
 
 #if defined(_WIN32)
+struct EtchDWriteMemKey {
+    const void* data;
+    size_t      size;
+    uint64_t    unique_id;
+};
+
+class EtchDWriteMemStream final : public IDWriteFontFileStream {
+public:
+    EtchDWriteMemStream(uint8_t* owned_data, size_t size) noexcept
+        : ref_count_(1), data_(owned_data), size_(static_cast<UINT64>(size)) {}
+
+    ~EtchDWriteMemStream() noexcept {
+        if (data_) SDL_free(data_);
+    }
+
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppv) override {
+        if (!ppv) return E_POINTER;
+        if (IsEqualIID(riid, __uuidof(IUnknown)) || IsEqualIID(riid, __uuidof(IDWriteFontFileStream))) {
+            *ppv = static_cast<IDWriteFontFileStream*>(this);
+            AddRef();
+            return S_OK;
+        }
+        *ppv = nullptr;
+        return E_NOINTERFACE;
+    }
+
+    ULONG STDMETHODCALLTYPE AddRef() override {
+        return static_cast<ULONG>(InterlockedIncrement(&ref_count_));
+    }
+
+    ULONG STDMETHODCALLTYPE Release() override {
+        const LONG c = InterlockedDecrement(&ref_count_);
+        if (c == 0) {
+            this->~EtchDWriteMemStream();
+            std::free(this);
+        }
+        return static_cast<ULONG>(c);
+    }
+
+    HRESULT STDMETHODCALLTYPE ReadFileFragment(
+        void const** fragmentStart,
+        UINT64 fileOffset,
+        UINT64 fragmentSize,
+        void** fragmentContext) override
+    {
+        if (!fragmentStart || !fragmentContext) return E_INVALIDARG;
+        if (fileOffset > size_ || fragmentSize > size_ - fileOffset) {
+            *fragmentStart = nullptr;
+            *fragmentContext = nullptr;
+            return E_FAIL;
+        }
+        *fragmentStart = data_ + fileOffset;
+        *fragmentContext = nullptr;
+        return S_OK;
+    }
+
+    void STDMETHODCALLTYPE ReleaseFileFragment(void* fragmentContext) override {
+        (void)fragmentContext;
+    }
+
+    HRESULT STDMETHODCALLTYPE GetFileSize(UINT64* fileSize) override {
+        if (!fileSize) return E_INVALIDARG;
+        *fileSize = size_;
+        return S_OK;
+    }
+
+    HRESULT STDMETHODCALLTYPE GetLastWriteTime(UINT64* lastWriteTime) override {
+        if (!lastWriteTime) return E_INVALIDARG;
+        *lastWriteTime = 0u;
+        return E_NOTIMPL;
+    }
+
+private:
+    LONG     ref_count_;
+    uint8_t* data_;
+    UINT64   size_;
+};
+
+class EtchDWriteMemLoader final : public IDWriteFontFileLoader {
+public:
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppv) override {
+        if (!ppv) return E_POINTER;
+        if (IsEqualIID(riid, __uuidof(IUnknown)) || IsEqualIID(riid, __uuidof(IDWriteFontFileLoader))) {
+            *ppv = static_cast<IDWriteFontFileLoader*>(this);
+            AddRef();
+            return S_OK;
+        }
+        *ppv = nullptr;
+        return E_NOINTERFACE;
+    }
+
+    ULONG STDMETHODCALLTYPE AddRef() override {
+        return static_cast<ULONG>(InterlockedIncrement(&ref_count_));
+    }
+
+    ULONG STDMETHODCALLTYPE Release() override {
+        return static_cast<ULONG>(InterlockedDecrement(&ref_count_));
+    }
+
+    HRESULT STDMETHODCALLTYPE CreateStreamFromKey(
+        void const* key,
+        UINT32 keySize,
+        IDWriteFontFileStream** outStream) override
+    {
+        if (!outStream) return E_POINTER;
+        *outStream = nullptr;
+        if (!key || keySize != sizeof(EtchDWriteMemKey)) return E_INVALIDARG;
+        EtchDWriteMemKey mk{};
+        std::memcpy(&mk, key, sizeof(mk));
+        if (!mk.data || mk.size == 0u) return E_INVALIDARG;
+        void* copy = SDL_malloc(mk.size);
+        if (!copy) return E_OUTOFMEMORY;
+        std::memcpy(copy, mk.data, mk.size);
+        void* mem = std::malloc(sizeof(EtchDWriteMemStream));
+        if (!mem) {
+            SDL_free(copy);
+            return E_OUTOFMEMORY;
+        }
+        *outStream = ::new (mem) EtchDWriteMemStream(static_cast<uint8_t*>(copy), mk.size);
+        return S_OK;
+    }
+
+private:
+    LONG ref_count_ = 1;
+};
+
+SRWLOCK             g_dwrite_lock = SRWLOCK_INIT;
+EtchDWriteMemLoader g_dwrite_mem_loader;
+LONG                g_dwrite_factory_refs = 0;
+bool                g_dwrite_custom_loader_registered = false;
+#if defined(NTDDI_WIN10_RS2) && (NTDDI_VERSION >= NTDDI_WIN10_RS2)
+IDWriteInMemoryFontFileLoader* g_dwrite_inmem_loader = nullptr;
+#endif
+
+#if defined(NTDDI_WIN10_RS3) && (NTDDI_VERSION >= NTDDI_WIN10_RS3)
+constexpr DWRITE_FONT_AXIS_TAG to_dwrite_axis_tag(uint32_t ot_tag) noexcept {
+    // OpenType/HarfBuzz tags are big-endian ('wght' = 0x77676874); DirectWrite tags are little-endian.
+    return static_cast<DWRITE_FONT_AXIS_TAG>(
+        ((ot_tag & 0x000000FFu) << 24) |
+        ((ot_tag & 0x0000FF00u) << 8)  |
+        ((ot_tag & 0x00FF0000u) >> 8)  |
+        ((ot_tag & 0xFF000000u) >> 24));
+}
+#endif
+
+void release_platform_font_face(FontSlot* slot) noexcept {
+    if (slot->dwrite_face) {
+        static_cast<IDWriteFontFace*>(slot->dwrite_face)->Release();
+        slot->dwrite_face = nullptr;
+    }
+}
+
+void release_platform_font_factory(FontAtlas* a) noexcept {
+    if (a->dwrite_factory) {
+        auto* factory = static_cast<IDWriteFactory*>(a->dwrite_factory);
+        AcquireSRWLockExclusive(&g_dwrite_lock);
+        if (g_dwrite_factory_refs > 0 && --g_dwrite_factory_refs == 0) {
+#if defined(NTDDI_WIN10_RS2) && (NTDDI_VERSION >= NTDDI_WIN10_RS2)
+            if (g_dwrite_inmem_loader) {
+                factory->UnregisterFontFileLoader(g_dwrite_inmem_loader);
+                g_dwrite_inmem_loader->Release();
+                g_dwrite_inmem_loader = nullptr;
+            }
+#endif
+            if (g_dwrite_custom_loader_registered) {
+                factory->UnregisterFontFileLoader(&g_dwrite_mem_loader);
+                g_dwrite_custom_loader_registered = false;
+            }
+        }
+        ReleaseSRWLockExclusive(&g_dwrite_lock);
+        factory->Release();
+        a->dwrite_factory = nullptr;
+    }
+    if (a->dwrite_module) {
+        FreeLibrary(static_cast<HMODULE>(a->dwrite_module));
+        a->dwrite_module = nullptr;
+    }
+}
+
 IDWriteFactory* ensure_dwrite_factory(FontAtlas* a) noexcept {
     if (a->dwrite_factory) return static_cast<IDWriteFactory*>(a->dwrite_factory);
     if (a->dwrite_probed) return nullptr;
@@ -415,36 +608,380 @@ IDWriteFactory* ensure_dwrite_factory(FontAtlas* a) noexcept {
         FreeLibrary(mod);
         return nullptr;
     }
+    auto* factory = static_cast<IDWriteFactory*>(unk);
+    AcquireSRWLockExclusive(&g_dwrite_lock);
+    if (++g_dwrite_factory_refs == 1) {
+#if defined(NTDDI_WIN10_RS2) && (NTDDI_VERSION >= NTDDI_WIN10_RS2)
+        IDWriteFactory5* f5 = nullptr;
+        if (SUCCEEDED(factory->QueryInterface(__uuidof(IDWriteFactory5), reinterpret_cast<void**>(&f5))) && f5) {
+            IDWriteInMemoryFontFileLoader* inmem = nullptr;
+            if (SUCCEEDED(f5->CreateInMemoryFontFileLoader(&inmem)) && inmem) {
+                if (SUCCEEDED(factory->RegisterFontFileLoader(inmem))) {
+                    g_dwrite_inmem_loader = inmem;
+                } else {
+                    inmem->Release();
+                }
+            }
+            f5->Release();
+        }
+        if (!g_dwrite_inmem_loader) {
+            g_dwrite_custom_loader_registered = SUCCEEDED(factory->RegisterFontFileLoader(&g_dwrite_mem_loader));
+        }
+#else
+        g_dwrite_custom_loader_registered = SUCCEEDED(factory->RegisterFontFileLoader(&g_dwrite_mem_loader));
+#endif
+    }
+    ReleaseSRWLockExclusive(&g_dwrite_lock);
     a->dwrite_module = mod;
     a->dwrite_factory = unk;
-    return static_cast<IDWriteFactory*>(unk);
+    return factory;
+}
+
+IDWriteFontFile* create_dwrite_font_file(IDWriteFactory* factory, const FontSlot* slot) noexcept {
+    IDWriteFontFile* file = nullptr;
+    if (slot->font_file_path[0] != '\0') {
+        wchar_t wpath[512] = {};
+        const int wlen = MultiByteToWideChar(CP_UTF8, 0, slot->font_file_path, -1, wpath, 512);
+        if (wlen > 0 && SUCCEEDED(factory->CreateFontFileReference(wpath, nullptr, &file)) && file) {
+            return file;
+        }
+        file = nullptr;
+    }
+    if (!slot->font_file_data || slot->font_file_size == 0u || slot->font_file_size > 0xFFFFFFFFu) {
+        return nullptr;
+    }
+#if defined(NTDDI_WIN10_RS2) && (NTDDI_VERSION >= NTDDI_WIN10_RS2)
+    IDWriteInMemoryFontFileLoader* inmem = nullptr;
+    AcquireSRWLockShared(&g_dwrite_lock);
+    inmem = g_dwrite_inmem_loader;
+    if (inmem) inmem->AddRef();
+    const bool custom_registered = g_dwrite_custom_loader_registered;
+    ReleaseSRWLockShared(&g_dwrite_lock);
+    if (inmem) {
+        const HRESULT hr = inmem->CreateInMemoryFontFileReference(
+            factory, slot->font_file_data, static_cast<UINT32>(slot->font_file_size), nullptr, &file);
+        inmem->Release();
+        if (SUCCEEDED(hr) && file) {
+            return file;
+        }
+        file = nullptr;
+    }
+#else
+    AcquireSRWLockShared(&g_dwrite_lock);
+    const bool custom_registered = g_dwrite_custom_loader_registered;
+    ReleaseSRWLockShared(&g_dwrite_lock);
+#endif
+    if (custom_registered) {
+        static volatile LONG64 s_mem_key_seq = 0;
+        const EtchDWriteMemKey key = {
+            slot->font_file_data,
+            slot->font_file_size,
+            static_cast<uint64_t>(InterlockedIncrement64(&s_mem_key_seq)),
+        };
+        if (SUCCEEDED(factory->CreateCustomFontFileReference(&key, sizeof(key), &g_dwrite_mem_loader, &file)) && file) {
+            return file;
+        }
+    }
+    return nullptr;
 }
 
 IDWriteFontFace* ensure_dwrite_face(FontAtlas* a, FontSlot* slot) noexcept {
     if (slot->dwrite_face) return static_cast<IDWriteFontFace*>(slot->dwrite_face);
-    if (slot->dwrite_probed || slot->font_file_path[0] == '\0') return nullptr;
+    if (slot->dwrite_probed) return nullptr;
+    if (slot->font_file_path[0] == '\0' && (!slot->font_file_data || slot->font_file_size == 0u)) return nullptr;
     slot->dwrite_probed = true;
     IDWriteFactory* factory = ensure_dwrite_factory(a);
     if (!factory) return nullptr;
-    wchar_t wpath[512] = {};
-    const int wlen = MultiByteToWideChar(CP_UTF8, 0, slot->font_file_path, -1, wpath, 512);
-    if (wlen <= 0) return nullptr;
-    IDWriteFontFile* file = nullptr;
-    if (FAILED(factory->CreateFontFileReference(wpath, nullptr, &file)) || !file) return nullptr;
+
+    IDWriteFontFace* face = nullptr;
+    const bool want_var_axes = slot->is_variation && slot->axis_count > 0u;
+#if defined(NTDDI_WIN10_RS3) && (NTDDI_VERSION >= NTDDI_WIN10_RS3)
+    DWRITE_FONT_AXIS_VALUE dw_axes[8] = {};
+    const UINT32 dw_axis_count = want_var_axes
+        ? static_cast<UINT32>(slot->axis_count <= 8u ? slot->axis_count : 8u)
+        : 0u;
+    for (UINT32 i = 0u; i < dw_axis_count; ++i) {
+        dw_axes[i] = DWRITE_FONT_AXIS_VALUE{
+            to_dwrite_axis_tag(slot->axes[i].tag),
+            slot->axes[i].value,
+        };
+    }
+    // Reuse parent slot's IDWriteFontResource when available to avoid duplicating in-memory font bytes.
+    if (want_var_axes && slot->parent_slot < kMaxFontSlots && a->slots[slot->parent_slot].dwrite_face) {
+        auto* parent_face = static_cast<IDWriteFontFace*>(a->slots[slot->parent_slot].dwrite_face);
+        IDWriteFontFace5* parent_face5 = nullptr;
+        if (SUCCEEDED(parent_face->QueryInterface(__uuidof(IDWriteFontFace5), reinterpret_cast<void**>(&parent_face5))) && parent_face5) {
+            IDWriteFontResource* resource = nullptr;
+            if (SUCCEEDED(parent_face5->GetFontResource(&resource)) && resource) {
+                IDWriteFontFace5* var_face5 = nullptr;
+                if (SUCCEEDED(resource->CreateFontFace(DWRITE_FONT_SIMULATIONS_NONE, dw_axes, dw_axis_count, &var_face5)) && var_face5) {
+                    face = var_face5;
+                }
+                resource->Release();
+            }
+            parent_face5->Release();
+        }
+        if (face) {
+            slot->dwrite_face = face;
+            return face;
+        }
+    }
+#endif
+
+    IDWriteFontFile* file = create_dwrite_font_file(factory, slot);
+    if (!file) return nullptr;
+
     BOOL supported = FALSE;
     DWRITE_FONT_FILE_TYPE file_type = DWRITE_FONT_FILE_TYPE_UNKNOWN;
     DWRITE_FONT_FACE_TYPE face_type = DWRITE_FONT_FACE_TYPE_UNKNOWN;
     UINT32 num_faces = 0;
-    IDWriteFontFace* face = nullptr;
     if (SUCCEEDED(file->Analyze(&supported, &file_type, &face_type, &num_faces)) && supported && num_faces > 0) {
         const UINT32 fidx = (slot->face_index >= 0 && static_cast<UINT32>(slot->face_index) < num_faces)
             ? static_cast<UINT32>(slot->face_index) : 0u;
-        IDWriteFontFile* files[1] = {file};
-        factory->CreateFontFace(face_type, 1, files, fidx, DWRITE_FONT_SIMULATIONS_NONE, &face);
+        if (want_var_axes) {
+#if defined(NTDDI_WIN10_RS3) && (NTDDI_VERSION >= NTDDI_WIN10_RS3)
+            IDWriteFactory6* f6 = nullptr;
+            if (SUCCEEDED(factory->QueryInterface(__uuidof(IDWriteFactory6), reinterpret_cast<void**>(&f6))) && f6) {
+                IDWriteFontResource* resource = nullptr;
+                if (SUCCEEDED(f6->CreateFontResource(file, fidx, &resource)) && resource) {
+                    IDWriteFontFace5* var_face5 = nullptr;
+                    if (SUCCEEDED(resource->CreateFontFace(DWRITE_FONT_SIMULATIONS_NONE, dw_axes, dw_axis_count, &var_face5)) && var_face5) {
+                        face = var_face5;
+                    }
+                    resource->Release();
+                }
+                f6->Release();
+            }
+#endif
+            // Only fall back to the default static face if the font has no fvar variation table;
+            // otherwise return nullptr so Slug renders the exact HarfBuzz variation outline.
+            if (!face && (!slot->hb_face || !hb_ot_var_has_data(slot->hb_face))) {
+                IDWriteFontFile* files[1] = {file};
+                factory->CreateFontFace(face_type, 1, files, fidx, DWRITE_FONT_SIMULATIONS_NONE, &face);
+            }
+        } else {
+            IDWriteFontFile* files[1] = {file};
+            factory->CreateFontFace(face_type, 1, files, fidx, DWRITE_FONT_SIMULATIONS_NONE, &face);
+        }
     }
     file->Release();
     slot->dwrite_face = face;
     return face;
+}
+#elif defined(__APPLE__)
+void release_platform_font_face(FontSlot* slot) noexcept {
+    if (slot->dwrite_face) {
+        CGFontRelease(static_cast<CGFontRef>(slot->dwrite_face));
+        slot->dwrite_face = nullptr;
+    }
+}
+
+void release_platform_font_factory(FontAtlas* a) noexcept {
+    (void)a;
+}
+
+CGFontRef ensure_cg_font(FontSlot* slot) noexcept {
+    if (slot->dwrite_face) return static_cast<CGFontRef>(slot->dwrite_face);
+    if (slot->dwrite_probed || !slot->font_file_data || slot->font_file_size == 0u) return nullptr;
+    slot->dwrite_probed = true;
+    CGFontRef cg_font = nullptr;
+    if (slot->face_index == 0) {
+        CGDataProviderRef provider = CGDataProviderCreateWithData(nullptr, slot->font_file_data, slot->font_file_size, nullptr);
+        if (provider) {
+            cg_font = CGFontCreateWithDataProvider(provider);
+            CGDataProviderRelease(provider);
+        }
+    }
+    if (!cg_font) {
+        CFDataRef cf_data = CFDataCreateWithBytesNoCopy(
+            kCFAllocatorDefault, slot->font_file_data, static_cast<CFIndex>(slot->font_file_size), kCFAllocatorNull);
+        if (cf_data) {
+            CFArrayRef descs = CTFontManagerCreateFontDescriptorsFromData(cf_data);
+            if (descs) {
+                const CFIndex count = CFArrayGetCount(descs);
+                if (count > 0) {
+                    const CFIndex idx = (slot->face_index >= 0 && static_cast<CFIndex>(slot->face_index) < count)
+                        ? static_cast<CFIndex>(slot->face_index) : 0;
+                    auto desc = static_cast<CTFontDescriptorRef>(CFArrayGetValueAtIndex(descs, idx));
+                    CTFontRef ct = desc ? CTFontCreateWithFontDescriptor(desc, 0.0, nullptr) : nullptr;
+                    if (ct) {
+                        cg_font = CTFontCopyGraphicsFont(ct, nullptr);
+                        CFRelease(ct);
+                    }
+                }
+                CFRelease(descs);
+            }
+            CFRelease(cf_data);
+        }
+    }
+    slot->dwrite_face = cg_font;
+    return cg_font;
+}
+#elif defined(ETCH_USE_FREETYPE)
+void release_platform_font_face(FontSlot* slot) noexcept {
+    if (slot->dwrite_face) {
+        FT_Done_Face(static_cast<FT_Face>(slot->dwrite_face));
+        slot->dwrite_face = nullptr;
+    }
+}
+
+void release_platform_font_factory(FontAtlas* a) noexcept {
+    if (a->dwrite_factory) {
+        FT_Done_FreeType(static_cast<FT_Library>(a->dwrite_factory));
+        a->dwrite_factory = nullptr;
+    }
+}
+
+FT_Library ensure_ft_library(FontAtlas* a) noexcept {
+    if (a->dwrite_factory) return static_cast<FT_Library>(a->dwrite_factory);
+    if (a->dwrite_probed) return nullptr;
+    a->dwrite_probed = true;
+    FT_Library lib = nullptr;
+    if (FT_Init_FreeType(&lib) != 0 || !lib) return nullptr;
+    (void)FT_Library_SetLcdFilter(lib, FT_LCD_FILTER_DEFAULT);
+    a->dwrite_factory = lib;
+    return lib;
+}
+
+FT_Face ensure_ft_face(FontAtlas* a, FontSlot* slot) noexcept {
+    if (slot->dwrite_face) return static_cast<FT_Face>(slot->dwrite_face);
+    if (slot->dwrite_probed) return nullptr;
+    slot->dwrite_probed = true;
+    FT_Library lib = ensure_ft_library(a);
+    if (!lib) return nullptr;
+    FT_Face face = nullptr;
+    if (slot->font_file_data && slot->font_file_size > 0u) {
+        if (FT_New_Memory_Face(lib, slot->font_file_data, static_cast<FT_Long>(slot->font_file_size),
+                               static_cast<FT_Long>(slot->face_index), &face) != 0)
+        {
+            face = nullptr;
+        }
+    } else if (slot->font_file_path[0] != '\0') {
+        if (FT_New_Face(lib, slot->font_file_path, static_cast<FT_Long>(slot->face_index), &face) != 0) {
+            face = nullptr;
+        }
+    }
+    if (!face) return nullptr;
+    if (slot->is_variation && slot->axis_count > 0u) {
+        FT_MM_Var* mm = nullptr;
+        if (FT_Get_MM_Var(face, &mm) == 0 && mm) {
+            const FT_UInt num_axes = mm->num_axis < 32u ? mm->num_axis : 32u;
+            FT_Fixed coords[32] = {};
+            for (FT_UInt k = 0u; k < num_axes; ++k) {
+                coords[k] = mm->axis[k].def;
+                const uint32_t axis_tag = static_cast<uint32_t>(mm->axis[k].tag);
+                const uint8_t ac = slot->axis_count <= 8u ? slot->axis_count : 8u;
+                for (uint8_t i = 0u; i < ac; ++i) {
+                    if (slot->axes[i].tag == axis_tag) {
+                        FT_Fixed val = static_cast<FT_Fixed>(std::lround(static_cast<double>(slot->axes[i].value) * 65536.0));
+                        if (val < mm->axis[k].minimum) val = mm->axis[k].minimum;
+                        if (val > mm->axis[k].maximum) val = mm->axis[k].maximum;
+                        coords[k] = val;
+                        break;
+                    }
+                }
+            }
+            (void)FT_Set_Var_Design_Coordinates(face, num_axes, coords);
+            FT_Done_MM_Var(lib, mm);
+        }
+    }
+    slot->dwrite_face = face;
+    return face;
+}
+#else
+void release_platform_font_face(FontSlot* slot) noexcept {
+    (void)slot;
+}
+
+void release_platform_font_factory(FontAtlas* a) noexcept {
+    (void)a;
+}
+#endif
+
+#if !defined(_WIN32)
+EmojiBitmapEntry rasterize_hinted_stbtt(
+    Context* ctx,
+    FontAtlas& a,
+    const FontSlot& s,
+    uint32_t idx,
+    EmojiBitmapEntry entry,
+    uint32_t glyph_id,
+    uint32_t ppem_half,
+    uint32_t phase2) noexcept
+{
+    if (!s.font_info.data) return {};
+    if (s.is_variation && s.axis_count > 0u && s.hb_face && hb_ot_var_has_data(s.hb_face)) return {};
+    const float scale = (static_cast<float>(ppem_half) * 0.5f) * s.scale_1px;
+    const float shift_x = static_cast<float>(phase2) * 0.25f;
+    int ix0 = 0, iy0 = 0, ix1 = 0, iy1 = 0;
+    stbtt_GetGlyphBitmapBoxSubpixel(&s.font_info, static_cast<int>(glyph_id), scale, scale, shift_x, 0.0f, &ix0, &iy0, &ix1, &iy1);
+    if (ix1 <= ix0 || iy1 <= iy0) {
+        a.hinted_glyphs[idx] = entry;
+        ++a.hinted_count;
+        return entry;
+    }
+    const uint32_t w = static_cast<uint32_t>(ix1 - ix0);
+    const uint32_t h = static_cast<uint32_t>(iy1 - iy0);
+    if (w > 128u || h > 128u) return {};
+    uint32_t tx = 0u, ty = 0u;
+    if (!ensure_subpixel_atlas(ctx, w, h, &tx, &ty)) return {};
+    if (a.subpixel_is_r8) {
+        stbtt_MakeGlyphBitmapSubpixel(
+            &s.font_info,
+            a.subpixel_pixels + size_t(ty) * a.subpixel_w + tx,
+            static_cast<int>(w), static_cast<int>(h), static_cast<int>(a.subpixel_w),
+            scale, scale, shift_x, 0.0f, static_cast<int>(glyph_id));
+    } else {
+        const size_t gray_bytes = size_t(w) * size_t(h);
+        uint8_t stack_gray[4096];
+        uint8_t* gray = nullptr;
+        size_t arena_mark = 0u;
+        bool used_arena = false;
+        bool used_heap = false;
+        if (gray_bytes <= sizeof(stack_gray)) {
+            gray = stack_gray;
+        } else {
+            arena_mark = ctx->frame_arena.mark();
+            gray = ctx->frame_arena.alloc_uninit<uint8_t>(gray_bytes);
+            if (gray) {
+                used_arena = true;
+            } else {
+                gray = static_cast<uint8_t*>(std::malloc(gray_bytes));
+                used_heap = (gray != nullptr);
+            }
+        }
+        if (!gray) return {};
+        stbtt_MakeGlyphBitmapSubpixel(
+            &s.font_info, gray,
+            static_cast<int>(w), static_cast<int>(h), static_cast<int>(w),
+            scale, scale, shift_x, 0.0f, static_cast<int>(glyph_id));
+        for (uint32_t row = 0u; row < h; ++row) {
+            const uint8_t* src_row = gray + size_t(row) * w;
+            uint8_t* dst_row = a.subpixel_pixels + (size_t(ty + row) * a.subpixel_w + tx) * 4u;
+            for (uint32_t col = 0u; col < w; ++col) {
+                const uint8_t g = src_row[col];
+                dst_row[col * 4u + 0u] = g;
+                dst_row[col * 4u + 1u] = g;
+                dst_row[col * 4u + 2u] = g;
+                dst_row[col * 4u + 3u] = g;
+            }
+        }
+        if (used_arena) ctx->frame_arena.rewind(arena_mark);
+        if (used_heap) std::free(gray);
+    }
+    a.subpixel_dirty = true;
+    if (ty < a.subpixel_dirty_y0) a.subpixel_dirty_y0 = ty;
+    if (ty + h > a.subpixel_dirty_y1) a.subpixel_dirty_y1 = ty + h;
+    entry.tile_x = tx;
+    entry.tile_y = ty;
+    entry.width_px = w;
+    entry.height_px = h;
+    entry.bearing_x = static_cast<float>(ix0);
+    entry.bearing_y_top = static_cast<float>(-iy0);
+    entry.has_bitmap = true;
+    a.hinted_glyphs[idx] = entry;
+    ++a.hinted_count;
+    return entry;
 }
 #endif
 
@@ -477,7 +1014,6 @@ EmojiBitmapEntry get_or_cache_hinted_glyph(Context* ctx, uint16_t slot_idx, uint
     entry.last_used_frame = cur_frame;
 
 #if defined(_WIN32)
-    if (s.font_file_path[0] == '\0') return {};
     IDWriteFactory* factory = ensure_dwrite_factory(&a);
     IDWriteFontFace* face = ensure_dwrite_face(&a, &s);
     if (!factory || !face) {
@@ -597,27 +1133,233 @@ EmojiBitmapEntry get_or_cache_hinted_glyph(Context* ctx, uint16_t slot_idx, uint
     a.hinted_glyphs[idx] = entry;
     ++a.hinted_count;
     return entry;
-#else
-    if (!a.subpixel_is_r8) return {};
-    const float scale = (static_cast<float>(ppem_half) * 0.5f) * s.scale_1px;
-    const float shift_x = static_cast<float>(phase2) * 0.25f;
-    int ix0 = 0, iy0 = 0, ix1 = 0, iy1 = 0;
-    stbtt_GetGlyphBitmapBoxSubpixel(&s.font_info, static_cast<int>(glyph_id), scale, scale, shift_x, 0.0f, &ix0, &iy0, &ix1, &iy1);
-    if (ix1 <= ix0 || iy1 <= iy0) {
+#elif defined(__APPLE__)
+    CGFontRef cg_font = ensure_cg_font(&s);
+    if (!cg_font) {
+        return rasterize_hinted_stbtt(ctx, a, s, idx, entry, glyph_id, ppem_half, phase2);
+    }
+    const float em_size = (static_cast<float>(ppem_half) * 0.5f) * s.scale_1px * static_cast<float>(s.upem);
+    CTFontDescriptorRef var_desc = nullptr;
+    if (s.is_variation && s.axis_count > 0u) {
+        const uint8_t ac = s.axis_count <= 8u ? s.axis_count : 8u;
+        CFNumberRef keys[8] = {};
+        CFNumberRef vals[8] = {};
+        uint8_t valid_n = 0u;
+        for (uint8_t i = 0u; i < ac; ++i) {
+            const int32_t tag_i32 = static_cast<int32_t>(s.axes[i].tag);
+            const float axis_f32 = s.axes[i].value;
+            CFNumberRef k = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &tag_i32);
+            CFNumberRef v = CFNumberCreate(kCFAllocatorDefault, kCFNumberFloat32Type, &axis_f32);
+            if (k && v) {
+                keys[valid_n] = k;
+                vals[valid_n] = v;
+                ++valid_n;
+            } else {
+                if (k) CFRelease(k);
+                if (v) CFRelease(v);
+            }
+        }
+        if (valid_n > 0u) {
+            CFDictionaryRef var_dict = CFDictionaryCreate(
+                kCFAllocatorDefault,
+                reinterpret_cast<const void**>(keys),
+                reinterpret_cast<const void**>(vals),
+                static_cast<CFIndex>(valid_n),
+                &kCFTypeDictionaryKeyCallBacks,
+                &kCFTypeDictionaryValueCallBacks);
+            if (var_dict) {
+                const void* attr_k[1] = { kCTFontVariationAttribute };
+                const void* attr_v[1] = { var_dict };
+                CFDictionaryRef attrs = CFDictionaryCreate(
+                    kCFAllocatorDefault, attr_k, attr_v, 1,
+                    &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+                if (attrs) {
+                    var_desc = CTFontDescriptorCreateWithAttributes(attrs);
+                    CFRelease(attrs);
+                }
+                CFRelease(var_dict);
+            }
+        }
+        for (uint8_t i = 0u; i < valid_n; ++i) {
+            CFRelease(keys[i]);
+            CFRelease(vals[i]);
+        }
+    }
+    CTFontRef ct_font = CTFontCreateWithGraphicsFont(cg_font, static_cast<CGFloat>(em_size), nullptr, var_desc);
+    if (var_desc) CFRelease(var_desc);
+    if (!ct_font) {
+        return rasterize_hinted_stbtt(ctx, a, s, idx, entry, glyph_id, ppem_half, phase2);
+    }
+
+    const CGGlyph cg_glyph = static_cast<CGGlyph>(glyph_id);
+    const CGRect bbox = CTFontGetBoundingRectsForGlyphs(ct_font, kCTFontOrientationDefault, &cg_glyph, nullptr, 1);
+    if (bbox.size.width <= 0.0 || bbox.size.height <= 0.0) {
+        CFRelease(ct_font);
+        a.hinted_glyphs[idx] = entry;
+        ++a.hinted_count;
+        return entry;
+    }
+
+    const CGFloat shift_x = static_cast<CGFloat>(phase2) * 0.25;
+    const int ix0 = static_cast<int>(std::floor(bbox.origin.x + shift_x)) - 1;
+    const int iy_bot = static_cast<int>(std::floor(bbox.origin.y)) - 1;
+    const int ix1 = static_cast<int>(std::ceil(bbox.origin.x + shift_x + bbox.size.width)) + 1;
+    const int iy_top = static_cast<int>(std::ceil(bbox.origin.y + bbox.size.height)) + 1;
+    if (ix1 <= ix0 || iy_top <= iy_bot) {
+        CFRelease(ct_font);
         a.hinted_glyphs[idx] = entry;
         ++a.hinted_count;
         return entry;
     }
     const uint32_t w = static_cast<uint32_t>(ix1 - ix0);
-    const uint32_t h = static_cast<uint32_t>(iy1 - iy0);
-    if (w > 128u || h > 128u) return {};
+    const uint32_t h = static_cast<uint32_t>(iy_top - iy_bot);
+    if (w > 128u || h > 128u) {
+        CFRelease(ct_font);
+        return {};
+    }
+
+    const size_t gray_bytes = size_t(w) * size_t(h);
+    uint8_t stack_gray[4096];
+    uint8_t* gray = nullptr;
+    size_t arena_mark = 0u;
+    bool used_arena = false;
+    bool used_heap = false;
+    if (gray_bytes <= sizeof(stack_gray)) {
+        gray = stack_gray;
+    } else {
+        arena_mark = ctx->frame_arena.mark();
+        gray = ctx->frame_arena.alloc_uninit<uint8_t>(gray_bytes);
+        if (gray) {
+            used_arena = true;
+        } else {
+            gray = static_cast<uint8_t*>(std::malloc(gray_bytes));
+            used_heap = (gray != nullptr);
+        }
+    }
+
+    uint32_t tx = 0u, ty = 0u;
+    if (gray) {
+        std::memset(gray, 0, gray_bytes);
+        CGColorSpaceRef cs = CGColorSpaceCreateDeviceGray();
+        CGContextRef cg = cs
+            ? CGBitmapContextCreate(gray, w, h, 8, w, cs, static_cast<uint32_t>(kCGImageAlphaNone))
+            : nullptr;
+        if (cg && ensure_subpixel_atlas(ctx, w, h, &tx, &ty)) {
+            CGContextSetAllowsAntialiasing(cg, true);
+            CGContextSetShouldAntialias(cg, true);
+            CGContextSetAllowsFontSmoothing(cg, true);
+            CGContextSetShouldSmoothFonts(cg, true);
+            CGContextSetAllowsFontSubpixelPositioning(cg, true);
+            CGContextSetShouldSubpixelPositionFonts(cg, true);
+            CGContextSetAllowsFontSubpixelQuantization(cg, false);
+            CGContextSetShouldSubpixelQuantizeFonts(cg, false);
+            CGContextSetGrayFillColor(cg, 1.0, 1.0);
+            const CGPoint pos = CGPointMake(shift_x - static_cast<CGFloat>(ix0), static_cast<CGFloat>(-iy_bot));
+            CTFontDrawGlyphs(ct_font, &cg_glyph, &pos, 1, cg);
+            if (a.subpixel_is_r8) {
+                for (uint32_t row = 0u; row < h; ++row) {
+                    std::memcpy(a.subpixel_pixels + size_t(ty + row) * a.subpixel_w + tx,
+                                gray + size_t(row) * w, w);
+                }
+            } else {
+                for (uint32_t row = 0u; row < h; ++row) {
+                    const uint8_t* src_row = gray + size_t(row) * w;
+                    uint8_t* dst_row = a.subpixel_pixels + (size_t(ty + row) * a.subpixel_w + tx) * 4u;
+                    for (uint32_t col = 0u; col < w; ++col) {
+                        const uint8_t g = src_row[col];
+                        dst_row[col * 4u + 0u] = g;
+                        dst_row[col * 4u + 1u] = g;
+                        dst_row[col * 4u + 2u] = g;
+                        dst_row[col * 4u + 3u] = g;
+                    }
+                }
+            }
+            a.subpixel_dirty = true;
+            if (ty < a.subpixel_dirty_y0) a.subpixel_dirty_y0 = ty;
+            if (ty + h > a.subpixel_dirty_y1) a.subpixel_dirty_y1 = ty + h;
+            entry.tile_x = tx;
+            entry.tile_y = ty;
+            entry.width_px = w;
+            entry.height_px = h;
+            entry.bearing_x = static_cast<float>(ix0);
+            entry.bearing_y_top = static_cast<float>(iy_top);
+            entry.has_bitmap = true;
+        }
+        if (cg) CGContextRelease(cg);
+        if (cs) CGColorSpaceRelease(cs);
+    }
+    if (used_arena) ctx->frame_arena.rewind(arena_mark);
+    if (used_heap) std::free(gray);
+    CFRelease(ct_font);
+
+    if (!entry.has_bitmap) return {};
+    a.hinted_glyphs[idx] = entry;
+    ++a.hinted_count;
+    return entry;
+#elif defined(ETCH_USE_FREETYPE)
+    FT_Face face = ensure_ft_face(&a, &s);
+    if (!face) {
+        return rasterize_hinted_stbtt(ctx, a, s, idx, entry, glyph_id, ppem_half, phase2);
+    }
+    const float em_size = (static_cast<float>(ppem_half) * 0.5f) * s.scale_1px * static_cast<float>(s.upem);
+    const FT_F26Dot6 em_26_6 = static_cast<FT_F26Dot6>(std::lround(static_cast<double>(em_size) * 64.0));
+    if (em_26_6 <= 0 || FT_Set_Char_Size(face, em_26_6, em_26_6, 72u, 72u) != 0) {
+        return rasterize_hinted_stbtt(ctx, a, s, idx, entry, glyph_id, ppem_half, phase2);
+    }
+    FT_Vector delta = { static_cast<FT_Pos>(phase2) * 16, 0 };
+    FT_Set_Transform(face, nullptr, &delta);
+    const FT_Int32 load_flags = a.subpixel_is_r8
+        ? (FT_LOAD_DEFAULT | FT_LOAD_TARGET_LIGHT)
+        : (FT_LOAD_DEFAULT | FT_LOAD_TARGET_LCD);
+    const FT_Render_Mode render_mode = a.subpixel_is_r8 ? FT_RENDER_MODE_NORMAL : FT_RENDER_MODE_LCD;
+    const FT_Error load_err = FT_Load_Glyph(face, glyph_id, load_flags);
+    FT_Set_Transform(face, nullptr, nullptr);
+    if (load_err != 0 || FT_Render_Glyph(face->glyph, render_mode) != 0) {
+        return {};
+    }
+    const FT_Bitmap& bm = face->glyph->bitmap;
+    if (bm.width == 0u || bm.rows == 0u || !bm.buffer) {
+        a.hinted_glyphs[idx] = entry;
+        ++a.hinted_count;
+        return entry;
+    }
+    const bool lcd_mode = (!a.subpixel_is_r8 && bm.pixel_mode == FT_PIXEL_MODE_LCD);
+    if (a.subpixel_is_r8 && bm.pixel_mode != FT_PIXEL_MODE_GRAY) return {};
+    if (!a.subpixel_is_r8 && bm.pixel_mode != FT_PIXEL_MODE_LCD && bm.pixel_mode != FT_PIXEL_MODE_GRAY) return {};
+    const uint32_t w = lcd_mode ? (bm.width / 3u) : bm.width;
+    const uint32_t h = bm.rows;
+    if (w == 0u || w > 128u || h > 128u) return {};
     uint32_t tx = 0u, ty = 0u;
     if (!ensure_subpixel_atlas(ctx, w, h, &tx, &ty)) return {};
-    stbtt_MakeGlyphBitmapSubpixel(
-        &s.font_info,
-        a.subpixel_pixels + size_t(ty) * a.subpixel_w + tx,
-        static_cast<int>(w), static_cast<int>(h), static_cast<int>(a.subpixel_w),
-        scale, scale, shift_x, 0.0f, static_cast<int>(glyph_id));
+    const int pitch = bm.pitch;
+    for (uint32_t row = 0u; row < h; ++row) {
+        const uint8_t* src_row = (pitch >= 0)
+            ? (bm.buffer + size_t(row) * size_t(pitch))
+            : (bm.buffer + size_t(h - 1u - row) * size_t(-pitch));
+        if (a.subpixel_is_r8) {
+            std::memcpy(a.subpixel_pixels + size_t(ty + row) * a.subpixel_w + tx, src_row, w);
+        } else if (lcd_mode) {
+            uint8_t* dst_row = a.subpixel_pixels + (size_t(ty + row) * a.subpixel_w + tx) * 4u;
+            for (uint32_t col = 0u; col < w; ++col) {
+                const uint8_t cr = src_row[col * 3u + 0u];
+                const uint8_t cg = src_row[col * 3u + 1u];
+                const uint8_t cb = src_row[col * 3u + 2u];
+                dst_row[col * 4u + 0u] = cr;
+                dst_row[col * 4u + 1u] = cg;
+                dst_row[col * 4u + 2u] = cb;
+                dst_row[col * 4u + 3u] = static_cast<uint8_t>((uint32_t(cr) + uint32_t(cg) + uint32_t(cb) + 1u) / 3u);
+            }
+        } else {
+            uint8_t* dst_row = a.subpixel_pixels + (size_t(ty + row) * a.subpixel_w + tx) * 4u;
+            for (uint32_t col = 0u; col < w; ++col) {
+                const uint8_t g = src_row[col];
+                dst_row[col * 4u + 0u] = g;
+                dst_row[col * 4u + 1u] = g;
+                dst_row[col * 4u + 2u] = g;
+                dst_row[col * 4u + 3u] = g;
+            }
+        }
+    }
     a.subpixel_dirty = true;
     if (ty < a.subpixel_dirty_y0) a.subpixel_dirty_y0 = ty;
     if (ty + h > a.subpixel_dirty_y1) a.subpixel_dirty_y1 = ty + h;
@@ -625,12 +1367,14 @@ EmojiBitmapEntry get_or_cache_hinted_glyph(Context* ctx, uint16_t slot_idx, uint
     entry.tile_y = ty;
     entry.width_px = w;
     entry.height_px = h;
-    entry.bearing_x = static_cast<float>(ix0);
-    entry.bearing_y_top = static_cast<float>(-iy0);
+    entry.bearing_x = static_cast<float>(face->glyph->bitmap_left);
+    entry.bearing_y_top = static_cast<float>(face->glyph->bitmap_top);
     entry.has_bitmap = true;
     a.hinted_glyphs[idx] = entry;
     ++a.hinted_count;
     return entry;
+#else
+    return rasterize_hinted_stbtt(ctx, a, s, idx, entry, glyph_id, ppem_half, phase2);
 #endif
 }
 } // namespace

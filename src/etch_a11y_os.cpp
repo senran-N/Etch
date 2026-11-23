@@ -802,12 +802,14 @@ bool uia_read_scroll_geom(WinUiaNode* n, const A11yNode* an, UiaScrollGeom* out)
     WidgetState* ws = state_map_find(&ui->states, an->id);
     if (!ws) return false;
     if (ws->is_virtual_list) {
+        const WidgetCold* c = ws->cold;
         out->v_ws = ws;
         out->is_vlist = true;
-        out->v_pos = ws->vscroll_pos_y;
-        out->v_max = ws->vscroll_max_y;
+        out->v_pos = c ? c->vscroll_pos_y : 0.0;
+        out->v_max = c ? c->vscroll_max_y : 0.0;
         out->v_view = (ws->viewport_dim.y > 0.5f) ? static_cast<double>(ws->viewport_dim.y) : static_cast<double>(an->bounds.h);
-        out->v_content = (ws->vscroll_total_h > out->v_view) ? ws->vscroll_total_h : (out->v_view + out->v_max);
+        const double total_h = c ? c->vscroll_total_h : 0.0;
+        out->v_content = (total_h > out->v_view) ? total_h : (out->v_view + out->v_max);
         out->v_scrollable = (out->v_max > 0.5);
         if (an->role == A11yRole::Table) {
             if (WidgetState* outer_ws = state_map_find(&ui->states, id_index(an->id, 0x7400u))) {
@@ -1948,8 +1950,9 @@ bool uia_capture_text(WinUiaNode* n, const A11yNode* an, UiaTextSnapshot* out) n
     out->is_code_editor = (an->role == A11yRole::CodeEditor);
     out->is_read_only = uia_value_is_readonly(an) || an->role == A11yRole::StaticText;
 
-    if (an->role == A11yRole::CodeEditor && ws && ws->edit_text_buffer && ws->sel_text_epoch == n->slot->ctx->arena_epoch) {
-        const uint32_t total = text_buffer_byte_length(ws->edit_text_buffer);
+    const WidgetCold* c = ws ? ws->cold : nullptr;
+    if (an->role == A11yRole::CodeEditor && c && c->edit_text_buffer && c->sel_text_epoch == n->slot->ctx->arena_epoch) {
+        const uint32_t total = text_buffer_byte_length(c->edit_text_buffer);
         if (total > 0u) {
             char* dst = nullptr;
             if (total < sizeof(out->stack_buf)) {
@@ -1959,7 +1962,7 @@ bool uia_capture_text(WinUiaNode* n, const A11yNode* an, UiaTextSnapshot* out) n
                 dst = out->owned_heap;
             }
             if (dst) {
-                const uint32_t copied = text_buffer_copy_range(ws->edit_text_buffer, 0u, total, dst, total);
+                const uint32_t copied = text_buffer_copy_range(c->edit_text_buffer, 0u, total, dst, total);
                 dst[copied] = '\0';
                 out->utf8 = dst;
                 out->utf8_len = copied;
@@ -1975,20 +1978,20 @@ bool uia_capture_text(WinUiaNode* n, const A11yNode* an, UiaTextSnapshot* out) n
 
     out->total_u16 = uia_utf8_byte_to_utf16(out->utf8, out->utf8_len, out->utf8_len);
 
-    if (ws) {
+    if (c) {
         uint32_t a_u16 = 0u;
         uint32_t c_u16 = 0u;
         if (out->is_password) {
-            if (ws->sel_text_ptr && (ws->sel_text_static || ws->sel_text_epoch == n->slot->ctx->arena_epoch)) {
-                a_u16 = uia_utf8_codepoint_index(ws->sel_text_ptr, ws->sel_text_len, ws->edit_sel_anchor);
-                c_u16 = uia_utf8_codepoint_index(ws->sel_text_ptr, ws->sel_text_len, ws->edit_cursor);
+            if (c->sel_text_ptr && (c->sel_text_static || c->sel_text_epoch == n->slot->ctx->arena_epoch)) {
+                a_u16 = uia_utf8_codepoint_index(c->sel_text_ptr, c->sel_text_len, c->edit_sel_anchor);
+                c_u16 = uia_utf8_codepoint_index(c->sel_text_ptr, c->sel_text_len, c->edit_cursor);
             } else {
                 a_u16 = out->total_u16;
                 c_u16 = out->total_u16;
             }
         } else {
-            a_u16 = uia_utf8_byte_to_utf16(out->utf8, out->utf8_len, ws->edit_sel_anchor);
-            c_u16 = uia_utf8_byte_to_utf16(out->utf8, out->utf8_len, ws->edit_cursor);
+            a_u16 = uia_utf8_byte_to_utf16(out->utf8, out->utf8_len, c->edit_sel_anchor);
+            c_u16 = uia_utf8_byte_to_utf16(out->utf8, out->utf8_len, c->edit_cursor);
         }
         if (a_u16 > out->total_u16) a_u16 = out->total_u16;
         if (c_u16 > out->total_u16) c_u16 = out->total_u16;
@@ -2488,31 +2491,32 @@ HRESULT STDMETHODCALLTYPE uia_tr_select(ITextRangeProvider* This) noexcept {
         if (!an) return kUiaElemNotAvail;
         WindowUiState* ui = uia_window_ui(r->owner->slot);
         WidgetState* ws = ui ? state_map_find(&ui->states, an->id) : nullptr;
-        if (!ws) return E_FAIL;
+        WidgetCold* c = ensure_widget_cold(ws);
+        if (!c) return E_FAIL;
         UiaTextSnapshot snap = {};
         uia_capture_text(r->owner, an, &snap);
         const uint32_t s_u16 = (r->start_u16 <= snap.total_u16) ? r->start_u16 : snap.total_u16;
         const uint32_t e_u16 = (r->end_u16 <= snap.total_u16) ? r->end_u16 : snap.total_u16;
         uint32_t b_start = 0u;
         uint32_t b_end = 0u;
-        if (snap.is_password && ws->sel_text_ptr &&
-            (ws->sel_text_static || ws->sel_text_epoch == r->owner->slot->ctx->arena_epoch))
+        if (snap.is_password && c->sel_text_ptr &&
+            (c->sel_text_static || c->sel_text_epoch == r->owner->slot->ctx->arena_epoch))
         {
-            b_start = uia_utf8_byte_at_codepoint(ws->sel_text_ptr, ws->sel_text_len, s_u16);
-            b_end = uia_utf8_byte_at_codepoint(ws->sel_text_ptr, ws->sel_text_len, e_u16);
+            b_start = uia_utf8_byte_at_codepoint(c->sel_text_ptr, c->sel_text_len, s_u16);
+            b_end = uia_utf8_byte_at_codepoint(c->sel_text_ptr, c->sel_text_len, e_u16);
         } else {
             b_start = uia_utf16_to_utf8_byte(snap.utf8, snap.utf8_len, s_u16);
             b_end = uia_utf16_to_utf8_byte(snap.utf8, snap.utf8_len, e_u16);
         }
-        ws->edit_initialized = true;
-        ws->edit_sel_anchor = b_start;
-        ws->edit_cursor = b_end;
-        ws->edit_preferred_x = -1.0f;
-        ws->edit_wrap_affinity = false;
+        c->edit_initialized = true;
+        c->edit_sel_anchor = b_start;
+        c->edit_cursor = b_end;
+        c->edit_preferred_x = -1.0f;
+        c->edit_wrap_affinity = false;
         if (an->role == A11yRole::CodeEditor) {
-            ws->editor_reveal = true;
+            c->editor_reveal = true;
         } else {
-            ws->edit_reveal_caret = true;
+            c->edit_reveal_caret = true;
         }
         ui->redraw_budget = 2u;
         request_window_redraw(r->owner->slot->ctx, r->owner->slot->window);
@@ -2540,21 +2544,21 @@ HRESULT STDMETHODCALLTYPE uia_tr_scroll_into_view(ITextRangeProvider* This, BOOL
         if (!an) return kUiaElemNotAvail;
         WindowUiState* ui = uia_window_ui(r->owner->slot);
         WidgetState* ws = ui ? state_map_find(&ui->states, an->id) : nullptr;
-        if (ws) {
-            if (an->role == A11yRole::CodeEditor && ws->edit_text_buffer && ws->sel_text_epoch == r->owner->slot->ctx->arena_epoch) {
+        if (WidgetCold* c = ensure_widget_cold(ws)) {
+            if (an->role == A11yRole::CodeEditor && c->edit_text_buffer && c->sel_text_epoch == r->owner->slot->ctx->arena_epoch) {
                 UiaTextSnapshot snap = {};
                 uia_capture_text(r->owner, an, &snap);
                 const uint32_t b_pos = uia_utf16_to_utf8_byte(snap.utf8, snap.utf8_len, r->start_u16);
-                const TextLineCol lc = text_buffer_line_col(ws->edit_text_buffer, b_pos);
-                const double line_y = static_cast<double>(lc.line) * static_cast<double>(ws->vlist_stride);
+                const TextLineCol lc = text_buffer_line_col(c->edit_text_buffer, b_pos);
+                const double line_y = static_cast<double>(lc.line) * static_cast<double>(c->vlist_stride);
                 const double target_y = alignToTop
                     ? line_y
-                    : (line_y - std::fmax(0.0, static_cast<double>(ws->viewport_dim.y) - static_cast<double>(ws->vlist_stride)));
-                ws->vscroll_pos_y = clamp_double(target_y, 0.0, ws->vscroll_max_y);
-                ws->vscroll_vel_y = 0.0;
+                    : (line_y - std::fmax(0.0, static_cast<double>(ws->viewport_dim.y) - static_cast<double>(c->vlist_stride)));
+                c->vscroll_pos_y = clamp_double(target_y, 0.0, c->vscroll_max_y);
+                c->vscroll_vel_y = 0.0;
                 uia_text_snapshot_free(&snap);
             } else {
-                ws->edit_reveal_caret = true;
+                c->edit_reveal_caret = true;
             }
             ui->redraw_budget = 2u;
             request_window_redraw(r->owner->slot->ctx, r->owner->slot->window);
@@ -2760,9 +2764,11 @@ HRESULT STDMETHODCALLTYPE uia_scroll_do(IScrollProvider* This, enum ScrollAmount
             const double delta = uia_scroll_step_delta(verticalAmount, g.v_view);
             const double next_y = clamp_double(g.v_pos + delta, 0.0, g.v_max);
             if (g.is_vlist) {
-                g.v_ws->vscroll_pos_y = next_y;
-                g.v_ws->vscroll_vel_y = 0.0;
-                if (delta < 0.0) g.v_ws->vlist_stuck_bottom = false;
+                if (WidgetCold* c = ensure_widget_cold(g.v_ws)) {
+                    c->vscroll_pos_y = next_y;
+                    c->vscroll_vel_y = 0.0;
+                    if (delta < 0.0) c->vlist_stuck_bottom = false;
+                }
             } else {
                 g.v_ws->scroll_pos.y = static_cast<float>(next_y);
                 g.v_ws->scroll_vel.y = 0.0f;
@@ -2806,9 +2812,11 @@ HRESULT STDMETHODCALLTYPE uia_scroll_set_percent(IScrollProvider* This, double h
         if (set_v && g.v_ws) {
             const double target_y = (verticalPercent / 100.0) * g.v_max;
             if (g.is_vlist) {
-                g.v_ws->vscroll_pos_y = target_y;
-                g.v_ws->vscroll_vel_y = 0.0;
-                g.v_ws->vlist_stuck_bottom = (verticalPercent >= 99.9);
+                if (WidgetCold* c = ensure_widget_cold(g.v_ws)) {
+                    c->vscroll_pos_y = target_y;
+                    c->vscroll_vel_y = 0.0;
+                    c->vlist_stuck_bottom = (verticalPercent >= 99.9);
+                }
             } else {
                 g.v_ws->scroll_pos.y = static_cast<float>(target_y);
                 g.v_ws->scroll_vel.y = 0.0f;
@@ -4569,7 +4577,7 @@ void os_a11y_notify_commit(Context* ctx) noexcept {
     uia->node_count = write;
 
     const bool can_raise = g_win_uia.ok && g_win_uia.clients_listening && g_win_uia.clients_listening() && g_win_uia.raise_event;
-    if (can_raise) {
+    if (can_raise && ui.frame_a11y_actions) {
         for (uint32_t i = 0u; i < ui.frame_a11y_action_count; ++i) {
             const PendingA11yAction& act = ui.frame_a11y_actions[i];
             if (!act.consumed || act.action != A11yAction::Press) {

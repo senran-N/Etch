@@ -123,7 +123,6 @@ DrawCmdNode* append_open_box_draw_cmd(Context* ctx, bool foreground) noexcept {
     if (!node) {
         return nullptr;
     }
-    *node = DrawCmdNode{};
     node->layer = ctx->layout_draw_target ? ctx->active_render_layer : ctx->active_ui->current_layer;
     node->world_scale = ctx->layout_draw_target ? ctx->layout_draw_scale : current_world_scale(ctx);
     if (!foreground) {
@@ -147,10 +146,12 @@ DrawCmdNode* append_open_box_draw_cmd(Context* ctx, bool foreground) noexcept {
 }
 
 Vec2 canvas_screen_to_world(const WidgetState* cws, Vec2 screen) noexcept {
-    const float z = (cws->canvas_zoom > 1e-4f) ? cws->canvas_zoom : 1.0f;
+    const WidgetCold* cc = cws ? cws->cold : nullptr;
+    const float z = (cc && cc->canvas_zoom > 1e-4f) ? cc->canvas_zoom : 1.0f;
+    const Vec2 pan = cc ? cc->canvas_pan : Vec2{};
     return Vec2{
-        (screen.x - cws->last_box_logical.x - cws->canvas_pan.x) / z,
-        (screen.y - cws->last_box_logical.y - cws->canvas_pan.y) / z,
+        (screen.x - cws->last_box_logical.x - pan.x) / z,
+        (screen.y - cws->last_box_logical.y - pan.y) / z,
     };
 }
 
@@ -503,7 +504,9 @@ void emit_draw_list_command(
     float dpi) noexcept
 {
     const uint32_t previous_clip=ctx->render_clip_index;
+    const uint32_t previous_shape=ctx->render_clip_shape;
     ctx->render_clip_index=clip.indexed ? clip.shape : 0;
+    ctx->render_clip_shape=clip.shape;
     const Vec2 origin = { box_px.x, box_px.y };
     const auto* previous_layer=ctx->active_render_layer;
     for (const DrawCmdNode* node = head; node != nullptr; node = node->next) {
@@ -517,8 +520,8 @@ void emit_draw_list_command(
                 BoxExtra target = {};
                 ctx->layout_draw_target = &target;
                 ctx->layout_draw_scale = node->world_scale;
-                push_theme(*node->callback_theme);
-                node->callback({0,0,box_px.w / scale,box_px.h / scale},node->callback_data);
+                push_theme(*node->cb.theme);
+                node->cb.fn({0,0,box_px.w / scale,box_px.h / scale},node->cb.data);
                 pop_theme();
                 ctx->layout_draw_target = nullptr;
                 emit_draw_list_command(ctx,target.draw_head,box_px,clip,dpi);
@@ -637,22 +640,23 @@ void emit_draw_list_command(
                 break;
             }
             case DrawCmdKind::Polyline: {
-                if (!node->poly_points || node->poly_count < 2u || node->poly_color.a == 0u) {
+                const DrawCmdPolyPayload& pl = node->poly;
+                if (!pl.points || pl.count < 2u || pl.color.a == 0u) {
                     break;
                 }
-                const float hw = 0.5f * ((node->poly_thickness * scale > 0.75f) ? (node->poly_thickness * scale) : 0.75f);
-                const float glow = node->poly_glow_px * scale;
-                const uint32_t segs = (node->poly_closed && node->poly_count >= 3u)
-                    ? node->poly_count
-                    : (node->poly_count - 1u);
+                const float hw = 0.5f * ((pl.thickness * scale > 0.75f) ? (pl.thickness * scale) : 0.75f);
+                const float glow = pl.glow_px * scale;
+                const uint32_t segs = (pl.closed && pl.count >= 3u)
+                    ? pl.count
+                    : (pl.count - 1u);
                 for (uint32_t i = 0u; i < segs; ++i) {
-                    const Vec2 a = origin + node->poly_points[i] * scale;
-                    const Vec2 b = origin + node->poly_points[(i + 1u) % node->poly_count] * scale;
+                    const Vec2 a = origin + pl.points[i] * scale;
+                    const Vec2 b = origin + pl.points[(i + 1u) % pl.count] * scale;
                     const Vec2 mid = (a + b) * 0.5f;
                     push_prim(
                         ctx,
                         Prim::make_bezier_wire(
-                            a, mid, b, clip.rect, node->poly_color, node->poly_color, hw, node->poly_glow_color, glow, clip.radius));
+                            a, mid, b, clip.rect, pl.color, pl.color, hw, pl.glow_color, glow, clip.radius));
                 }
                 break;
             }
@@ -752,7 +756,8 @@ void emit_draw_list_command(
                 break;
             }
             case DrawCmdKind::Text: {
-                emit_draw_text_cmd(ctx, node->text_cmd, origin, scale, clip, node->terminal_columns, node->terminal_cell_width);
+                emit_draw_text_cmd(ctx, node->text_payload.cmd, origin, scale, clip,
+                    node->text_payload.terminal_columns, node->text_payload.terminal_cell_width);
                 break;
             }
             case DrawCmdKind::Image: {
@@ -795,6 +800,7 @@ void emit_draw_list_command(
         }
     }
     ctx->render_clip_index=previous_clip;
+    ctx->render_clip_shape=previous_shape;
     ctx->active_render_layer=previous_layer;
 }
 
@@ -802,8 +808,8 @@ void emit_draw_list_command(
 
 bool needs_redraw(const Context* ctx) noexcept {
     if (!ctx) return false;
-    if ((ctx->headless || ctx->claimed_window_count == 0u) &&
-        (ctx->headless_ui.redraw_budget || ctx->headless_ui.active_anim_count))
+    if ((ctx->headless || ctx->claimed_window_count == 0u) && ctx->headless_ui &&
+        (ctx->headless_ui->redraw_budget || ctx->headless_ui->active_anim_count))
     {
         return true;
     }
@@ -819,7 +825,7 @@ bool needs_redraw(const Context* ctx) noexcept {
 
 void request_redraw(Context* ctx_arg) noexcept {
     Context* ctx = ctx_arg ? ctx_arg : current_context();
-    if (ctx) {
+    if (ctx && ctx->active_ui) {
         ctx->active_ui->redraw_budget = 2u;
     }
 }
@@ -833,7 +839,7 @@ void wake_up(Context* ctx_arg) noexcept {
         SDL_Event ev = {};
         ev.type = ctx->wake_event_type;
         SDL_PushEvent(&ev);
-    } else if (ctx->headless) {
+    } else if (ctx->headless && ctx->active_ui) {
         ctx->active_ui->redraw_budget = 2u;
     }
 }
@@ -869,8 +875,8 @@ bool wait_events(Context* ctx, SDL_Event* first_event_out, int32_t timeout_ms) n
                 if (timeout_ms < 0 || rem < timeout_ms) timeout_ms = rem;
             }
         };
-        if (ctx->headless || ctx->claimed_window_count == 0u) {
-            check_tooltip_deadline(ctx->headless_ui);
+        if ((ctx->headless || ctx->claimed_window_count == 0u) && ctx->headless_ui) {
+            check_tooltip_deadline(*ctx->headless_ui);
         }
         for (uint32_t i = 0; i < ctx->claimed_window_cap; ++i) {
             ClaimedWindowSlot* slot = ctx->claimed_windows[i];
@@ -890,7 +896,9 @@ bool wait_events(Context* ctx, SDL_Event* first_event_out, int32_t timeout_ms) n
 bool verify_caret_deadline() noexcept {
     Context* ctx=create_context({.headless=true});
     if(!ctx)return false;
-    auto& ui=ctx->headless_ui;
+    WindowUiState* ui_ptr=ensure_headless_ui(ctx);
+    if(!ui_ptr){destroy_context(ctx);set_current_context(nullptr);return false;}
+    auto& ui=*ui_ptr;
     ui.ime_focused_id=1;
     ui.caret_blink_on=true;
     ui.caret_blink_tick=SDL_GetTicks()-501;
@@ -907,7 +915,7 @@ bool verify_caret_deadline() noexcept {
 
 static void process_window_event(Context* ctx, const SDL_Event& event) noexcept {
     if (event.type == SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED) {
-        if (SDL_Window* window = SDL_GetWindowFromID(event.window.windowID)) sync_desktop_window(window);
+        if (SDL_Window* window = SDL_GetWindowFromID(event.window.windowID)) sync_desktop_window(window, ctx);
     }
     if (ctx->wake_event_type != 0u && event.type == ctx->wake_event_type) {
         request_redraw(ctx);
@@ -1039,7 +1047,7 @@ static void process_window_event(Context* ctx, const SDL_Event& event) noexcept 
                 }
                 if (ctx->active_ui->marquee_canvas_id != 0u) {
                     if (WidgetState* mws = state_map_find(&ctx->active_ui->states, ctx->active_ui->marquee_canvas_id)) {
-                        mws->canvas_marquee_active = false;
+                        if (mws->cold) mws->cold->canvas_marquee_active = false;
                     }
                     ctx->active_ui->marquee_canvas_id = 0u;
                 }
@@ -1065,7 +1073,8 @@ static void process_window_event(Context* ctx, const SDL_Event& event) noexcept 
             } else {
                 const WidgetState* tab_ws=state_map_find(&ctx->active_ui->states,ctx->active_ui->focus_id);
                 const bool tab_shift = (event.key.mod & SDL_KMOD_SHIFT) != 0u;
-                if (event.key.key == SDLK_TAB && !(tab_ws && (tab_ws->edit_text_buffer || tab_ws->suppress_popup_keys || (tab_ws->accept_ghost_on_tab && !tab_shift)))) {
+                const bool tab_has_buf = tab_ws && tab_ws->cold && tab_ws->cold->edit_text_buffer != nullptr;
+                if (event.key.key == SDLK_TAB && !(tab_ws && (tab_has_buf || tab_ws->suppress_popup_keys || (tab_ws->accept_ghost_on_tab && !tab_shift)))) {
                     ctx->active_ui->pending_tab_delta += tab_shift ? -1 : 1;
                 } else {
                     push_pending_text_op(
@@ -1130,7 +1139,7 @@ static void process_window_event(Context* ctx, const SDL_Event& event) noexcept 
             ctx->active_ui->pan_canvas_id = 0u;
             if (ctx->active_ui->marquee_canvas_id != 0u) {
                 if (WidgetState* mws = state_map_find(&ctx->active_ui->states, ctx->active_ui->marquee_canvas_id)) {
-                    mws->canvas_marquee_active = false;
+                    if (mws->cold) mws->cold->canvas_marquee_active = false;
                 }
                 ctx->active_ui->marquee_canvas_id = 0u;
             }
@@ -1170,6 +1179,9 @@ static void process_window_event(Context* ctx, const SDL_Event& event) noexcept 
                 event.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED ||
                 event.type == SDL_EVENT_WINDOW_METAL_VIEW_RESIZED)
             {
+                if (event.type == SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED) {
+                    ctx->atlas.hinted_gc_pending = true;
+                }
                 ctx->active_ui->applied_ime_rect = {-1, -1, 0, 0};
                 ctx->active_ui->applied_ime_cursor = -1;
             }
@@ -1275,7 +1287,8 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
         if (ctx->active_ui->ime_comp_len == 0u) {
             const WidgetState* tab_ws=state_map_find(&ctx->active_ui->states,ctx->active_ui->focus_id);
             const bool tab_shift = (ctx->active_ui->frame_key_mods & Mod_Shift) != 0u;
-            if (desc.key_pressed_code == SDLK_TAB && !(tab_ws && (tab_ws->edit_text_buffer || tab_ws->suppress_popup_keys || (tab_ws->accept_ghost_on_tab && !tab_shift)))) {
+            const bool tab_has_buf = tab_ws && tab_ws->cold && tab_ws->cold->edit_text_buffer != nullptr;
+            if (desc.key_pressed_code == SDLK_TAB && !(tab_ws && (tab_has_buf || tab_ws->suppress_popup_keys || (tab_ws->accept_ghost_on_tab && !tab_shift)))) {
                 ctx->active_ui->pending_tab_delta += tab_shift ? -1 : 1;
             } else if (ctx->active_ui->frame_text_op_count < kMaxTextOpsPerFrame) {
                 ctx->active_ui->frame_text_ops[ctx->active_ui->frame_text_op_count++] = PendingTextOp{
@@ -1372,11 +1385,13 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
     ctx->clip_shape_count = 1u;
     ctx->grad_stop_count = 1u;
     ctx->render_clip_index = 0u;
+    ctx->render_clip_shape = 0u;
     ctx->dyn_slug_curve_count = 0;
     ctx->dyn_slug_band_count = 0;
     ctx->prim_count = 0u;
     ctx->batch_count = 0u;
     ctx->blur_split_count = 0u;
+    ctx->blur_splits_need_load_preserve = false;
     ctx->filter_prim_count = 0u;
     ctx->filter_batch_count = 0u;
     ctx->filter_group_count = 0u;
@@ -1410,8 +1425,10 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
     ctx->active_ui->drag_accepted_this_frame = false;
     if (ctx->active_ui->marquee_finished_canvas_id != 0u) {
         if (WidgetState* mws = state_map_find(&ctx->active_ui->states, ctx->active_ui->marquee_finished_canvas_id)) {
-            mws->canvas_marquee_finished = false;
-            mws->canvas_marquee_world = {};
+            if (mws->cold) {
+                mws->cold->canvas_marquee_finished = false;
+                mws->cold->canvas_marquee_world = {};
+            }
         }
         ctx->active_ui->marquee_finished_canvas_id = 0u;
     }
@@ -1423,6 +1440,10 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
     ctx->active_ui->pixel_snap = desc.pixel_snap;
     if (std::fabs(dpi - ctx->active_ui->applied_dpi_scale) > 1e-4f) {
         ctx->active_ui->applied_dpi_scale = dpi;
+        if (ctx->active_ui->frame_index > 1u && ctx->atlas.hinted_count > 0u) {
+            ctx->atlas.hinted_gc_pending = true;
+            maybe_gc_hinted_atlas(ctx);
+        }
         ctx->active_ui->applied_ime_rect = {-1, -1, 0, 0};
         ctx->active_ui->applied_ime_cursor = -1;
         if (ctx->active_ui->redraw_budget < 1u) {
@@ -1587,7 +1608,7 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
                     const ScrollbarGeom sb=horizontal ? compute_hscrollbar_geom(ws) : compute_vscrollbar_geom(ws);
                     if(!sb.visible || !sb.hit_track.contains(pointer_pos)) continue;
                     ctx->active_ui->active_id=id_index(ws->key,horizontal ? kScrollbarXTag : kScrollbarYTag);
-                    ws->scroll_vel={};ws->vscroll_vel_y=0;
+                    ws->scroll_vel={};if (ws->cold) ws->cold->vscroll_vel_y=0;
                     const float pointer=horizontal ? pointer_pos.x : pointer_pos.y;
                     const float start=horizontal ? sb.thumb.x : sb.thumb.y,length=horizontal ? sb.thumb.w : sb.thumb.h;
                     ctx->active_ui->scrollbar_drag_grab_offset=clamp_range(pointer-start,0,length);
@@ -1626,15 +1647,16 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
                             if (ctx->active_ui->last_mouse_clicks >= 2u) {
                                 ws->double_clicked_this_frame = true;
                             }
-                            if (ws->is_canvas && ws->canvas_interactive) {
-                                if (ws->canvas_marquee_enabled) {
+                            if (ws->is_canvas && ws->cold && ws->cold->canvas_interactive) {
+                                WidgetCold* cc = ws->cold;
+                                if (cc->canvas_marquee_enabled) {
                                     if (ctx->active_ui->marquee_canvas_id == 0u) {
                                         ctx->active_ui->marquee_canvas_id = oid;
                                         const Vec2 start_w = canvas_screen_to_world(ws, pointer_pos);
-                                        ws->canvas_marquee_start_world = start_w;
-                                        ws->canvas_marquee_world = Rect{ start_w.x, start_w.y, 0.0f, 0.0f };
-                                        ws->canvas_marquee_active = true;
-                                        ws->canvas_marquee_finished = false;
+                                        cc->canvas_marquee_start_world = start_w;
+                                        cc->canvas_marquee_world = Rect{ start_w.x, start_w.y, 0.0f, 0.0f };
+                                        cc->canvas_marquee_active = true;
+                                        cc->canvas_marquee_finished = false;
                                         request_redraw(ctx);
                                     }
                                 } else if (ctx->active_ui->pan_canvas_id == 0u) {
@@ -1672,14 +1694,15 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
             }
         }
         if (ctx->active_ui->marquee_canvas_id != 0u && ctx->active_ui->has_pointer) {
-            if (WidgetState* mws = state_map_find(&ctx->active_ui->states, ctx->active_ui->marquee_canvas_id)) {
-                const Vec2 p0 = mws->canvas_marquee_start_world;
+            if (WidgetState* mws = state_map_find(&ctx->active_ui->states, ctx->active_ui->marquee_canvas_id); mws && mws->cold) {
+                WidgetCold* mc = mws->cold;
+                const Vec2 p0 = mc->canvas_marquee_start_world;
                 const Vec2 p1 = canvas_screen_to_world(mws, pointer_pos);
                 const float x0 = (p0.x < p1.x) ? p0.x : p1.x;
                 const float y0 = (p0.y < p1.y) ? p0.y : p1.y;
                 const float x1 = (p0.x > p1.x) ? p0.x : p1.x;
                 const float y1 = (p0.y > p1.y) ? p0.y : p1.y;
-                mws->canvas_marquee_world = Rect{ x0, y0, x1 - x0, y1 - y0 };
+                mc->canvas_marquee_world = Rect{ x0, y0, x1 - x0, y1 - y0 };
                 ctx->active_ui->desired_cursor = Cursor::Crosshair;
                 request_redraw(ctx);
             } else {
@@ -1703,22 +1726,23 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
             ctx->active_ui->mouse_captured = false;
         }
         if (ctx->active_ui->marquee_canvas_id != 0u) {
-            if (WidgetState* mws = state_map_find(&ctx->active_ui->states, ctx->active_ui->marquee_canvas_id)) {
+            if (WidgetState* mws = state_map_find(&ctx->active_ui->states, ctx->active_ui->marquee_canvas_id); mws && mws->cold) {
+                WidgetCold* mc = mws->cold;
                 if (ctx->active_ui->has_pointer) {
-                    const Vec2 p0 = mws->canvas_marquee_start_world;
+                    const Vec2 p0 = mc->canvas_marquee_start_world;
                     const Vec2 p1 = canvas_screen_to_world(mws, pointer_pos);
                     const float x0 = (p0.x < p1.x) ? p0.x : p1.x;
                     const float y0 = (p0.y < p1.y) ? p0.y : p1.y;
                     const float x1 = (p0.x > p1.x) ? p0.x : p1.x;
                     const float y1 = (p0.y > p1.y) ? p0.y : p1.y;
-                    mws->canvas_marquee_world = Rect{ x0, y0, x1 - x0, y1 - y0 };
+                    mc->canvas_marquee_world = Rect{ x0, y0, x1 - x0, y1 - y0 };
                 }
-                mws->canvas_marquee_active = false;
-                if (mws->canvas_marquee_world.w >= 3.0f ||
-                    mws->canvas_marquee_world.h >= 3.0f ||
+                mc->canvas_marquee_active = false;
+                if (mc->canvas_marquee_world.w >= 3.0f ||
+                    mc->canvas_marquee_world.h >= 3.0f ||
                     ctx->active_ui->left_max_drag_dist_sq >= 9.0f)
                 {
-                    mws->canvas_marquee_finished = true;
+                    mc->canvas_marquee_finished = true;
                     ctx->active_ui->marquee_finished_canvas_id = ctx->active_ui->marquee_canvas_id;
                 }
             }
@@ -1758,10 +1782,10 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
                 ctx->active_ui->mouse_captured = true;
             }
         }
-        if (WidgetState* cws = state_map_find(&ctx->active_ui->states, ctx->active_ui->pan_canvas_id)) {
+        if (WidgetState* cws = state_map_find(&ctx->active_ui->states, ctx->active_ui->pan_canvas_id); cws && cws->cold) {
             if (!pan_started_this_frame && ctx->active_ui->had_pointer && ctx->active_ui->has_pointer) {
-                cws->canvas_pan.x += pointer_pos.x - ctx->active_ui->prev_pointer_pos.x;
-                cws->canvas_pan.y += pointer_pos.y - ctx->active_ui->prev_pointer_pos.y;
+                cws->cold->canvas_pan.x += pointer_pos.x - ctx->active_ui->prev_pointer_pos.x;
+                cws->cold->canvas_pan.y += pointer_pos.y - ctx->active_ui->prev_pointer_pos.y;
             }
             ctx->active_ui->desired_cursor = Cursor::Move;
             request_redraw(ctx);
@@ -1786,17 +1810,18 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
             if (!ws || !ws->is_user_element) {
                 continue;
             }
-            if (ws->is_multiline_input && ws->edit_max_scroll_y>0) {
-                ws->edit_scroll_y=clamp_range(ws->edit_scroll_y-scroll.y*48,0,ws->edit_max_scroll_y);
-                ws->edit_reveal_caret=false;request_redraw(ctx);break;
+            WidgetCold* wc = ws->cold;
+            if (ws->is_multiline_input && wc && wc->edit_max_scroll_y>0) {
+                wc->edit_scroll_y=clamp_range(wc->edit_scroll_y-scroll.y*48,0,wc->edit_max_scroll_y);
+                wc->edit_reveal_caret=false;request_redraw(ctx);break;
             }
             if (ws->is_virtual_list) {
                 if (!fallback_scroll) {
                     fallback_scroll = ws;
                 }
-                const bool can_vy = ws->vscroll_max_y > 0.5 &&
-                    ((scroll.y < 0.0f && ws->vscroll_pos_y < ws->vscroll_max_y - 0.5) ||
-                     (scroll.y > 0.0f && ws->vscroll_pos_y > 0.5));
+                const bool can_vy = wc && wc->vscroll_max_y > 0.5 &&
+                    ((scroll.y < 0.0f && wc->vscroll_pos_y < wc->vscroll_max_y - 0.5) ||
+                     (scroll.y > 0.0f && wc->vscroll_pos_y > 0.5));
                 if (can_vy) {
                     target_scroll = ws;
                     break;
@@ -1816,31 +1841,33 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
                     break;
                 }
             }
-            if (ws->is_canvas && ws->canvas_interactive) {
+            if (ws->is_canvas && wc && wc->canvas_interactive) {
                 target_canvas = ws;
                 if (scroll.y != 0.0f) {
                     break;
                 }
-            } else if (!target_canvas && ws->owner_canvas_id != 0u) {
-                WidgetState* cws = state_map_find(&ctx->active_ui->states, ws->owner_canvas_id);
-                if (cws && cws->is_canvas && cws->canvas_interactive) {
+            } else if (!target_canvas && wc && wc->owner_canvas_id != 0u) {
+                WidgetState* cws = state_map_find(&ctx->active_ui->states, wc->owner_canvas_id);
+                if (cws && cws->is_canvas && cws->cold && cws->cold->canvas_interactive) {
                     target_canvas = cws;
                 }
             }
         }
         if (target_scroll) {
             if (target_scroll->is_virtual_list) {
-                target_scroll->vlist_pending_scroll = false;
-                if (scroll.y > 0.0f) {
-                    target_scroll->vlist_stuck_bottom = false;
-                }
-                if (ctx->active_ui->sim_dt <= 0.0f) {
-                    target_scroll->vscroll_pos_y = clamp_double(
-                        target_scroll->vscroll_pos_y - static_cast<double>(scroll.y) * 48.0,
-                        0.0,
-                        target_scroll->vscroll_max_y);
-                } else {
-                    target_scroll->vscroll_vel_y += static_cast<double>(-scroll.y) * 560.0;
+                if (WidgetCold* tc = ensure_widget_cold(target_scroll)) {
+                    tc->vlist_pending_scroll = false;
+                    if (scroll.y > 0.0f) {
+                        tc->vlist_stuck_bottom = false;
+                    }
+                    if (ctx->active_ui->sim_dt <= 0.0f) {
+                        tc->vscroll_pos_y = clamp_double(
+                            tc->vscroll_pos_y - static_cast<double>(scroll.y) * 48.0,
+                            0.0,
+                            tc->vscroll_max_y);
+                    } else {
+                        tc->vscroll_vel_y += static_cast<double>(-scroll.y) * 560.0;
+                    }
                 }
             } else {
                 if (ctx->active_ui->sim_dt <= 0.0f) {
@@ -1874,33 +1901,36 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
                 }
             }
             request_redraw(ctx);
-        } else if (target_canvas && scroll.y != 0.0f) {
-            const float old_z = (target_canvas->canvas_zoom > 1e-4f) ? target_canvas->canvas_zoom : 1.0f;
+        } else if (target_canvas && target_canvas->cold && scroll.y != 0.0f) {
+            WidgetCold* cc = target_canvas->cold;
+            const float old_z = (cc->canvas_zoom > 1e-4f) ? cc->canvas_zoom : 1.0f;
             const float factor = std::pow(1.12f, scroll.y);
-            const float new_z = clamp_range(old_z * factor, target_canvas->canvas_min_zoom, target_canvas->canvas_max_zoom);
+            const float new_z = clamp_range(old_z * factor, cc->canvas_min_zoom, cc->canvas_max_zoom);
             const Rect vp = target_canvas->last_box_logical;
             if (vp.w > 0.0f && vp.h > 0.0f && ctx->active_ui->has_pointer) {
                 const Vec2 local_ptr = Vec2{ pointer_pos.x - vp.x, pointer_pos.y - vp.y };
-                const Vec2 world_under_ptr = (local_ptr - target_canvas->canvas_pan) * (1.0f / old_z);
-                target_canvas->canvas_zoom = new_z;
-                target_canvas->canvas_pan = local_ptr - world_under_ptr * new_z;
+                const Vec2 world_under_ptr = (local_ptr - cc->canvas_pan) * (1.0f / old_z);
+                cc->canvas_zoom = new_z;
+                cc->canvas_pan = local_ptr - world_under_ptr * new_z;
             } else {
-                target_canvas->canvas_zoom = new_z;
+                cc->canvas_zoom = new_z;
             }
             request_redraw(ctx);
         } else if (fallback_scroll) {
             if (fallback_scroll->is_virtual_list) {
-                fallback_scroll->vlist_pending_scroll = false;
-                if (scroll.y > 0.0f) {
-                    fallback_scroll->vlist_stuck_bottom = false;
-                }
-                if (ctx->active_ui->sim_dt <= 0.0f) {
-                    fallback_scroll->vscroll_pos_y = clamp_double(
-                        fallback_scroll->vscroll_pos_y - static_cast<double>(scroll.y) * 48.0,
-                        0.0,
-                        fallback_scroll->vscroll_max_y);
-                } else {
-                    fallback_scroll->vscroll_vel_y += static_cast<double>(-scroll.y) * 560.0;
+                if (WidgetCold* fc = ensure_widget_cold(fallback_scroll)) {
+                    fc->vlist_pending_scroll = false;
+                    if (scroll.y > 0.0f) {
+                        fc->vlist_stuck_bottom = false;
+                    }
+                    if (ctx->active_ui->sim_dt <= 0.0f) {
+                        fc->vscroll_pos_y = clamp_double(
+                            fc->vscroll_pos_y - static_cast<double>(scroll.y) * 48.0,
+                            0.0,
+                            fc->vscroll_max_y);
+                    } else {
+                        fc->vscroll_vel_y += static_cast<double>(-scroll.y) * 560.0;
+                    }
                 }
             } else {
                 if (ctx->active_ui->sim_dt <= 0.0f) {
@@ -1960,11 +1990,11 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
                     ws.scroll_stuck_bottom = true;
                 }
             }
-            if (ws.is_virtual_list) {
+            if (ws.is_virtual_list && ws.cold) {
                 moving |= step_scroll_axis_d(
-                    &ws.vscroll_pos_y,
-                    &ws.vscroll_vel_y,
-                    ws.vscroll_max_y,
+                    &ws.cold->vscroll_pos_y,
+                    &ws.cold->vscroll_vel_y,
+                    ws.cold->vscroll_max_y,
                     static_cast<double>(decay),
                     static_cast<double>(step_factor));
             }
@@ -2076,9 +2106,13 @@ void begin_box(const BoxDesc& desc_in) noexcept {
                 box_ws->scroll_stick_initialized = true;
             }
             box_ws->is_text_input_writable = false;
-            box_ws->owner_canvas_id = (ctx->active_ui->canvas_depth > 0u)
-                ? ctx->active_ui->canvas_stack[ctx->active_ui->canvas_depth - 1u].id
-                : 0u;
+            if (ctx->active_ui->canvas_depth > 0u) {
+                if (WidgetCold* bc = ensure_widget_cold(box_ws)) {
+                    bc->owner_canvas_id = ctx->active_ui->canvas_stack[ctx->active_ui->canvas_depth - 1u].id;
+                }
+            } else if (box_ws->cold) {
+                box_ws->cold->owner_canvas_id = 0u;
+            }
         }
         if (desc.focusable && reserve_focus(ctx->active_ui)) {
             ctx->active_ui->focus_order[ctx->active_ui->focus_count++] = desc.id;
@@ -2298,33 +2332,34 @@ void box(const BoxDesc& desc) noexcept {
 static void register_selectable_text(Context* ctx, uint32_t element_id, const char* full_utf8, uint32_t total_bytes, bool is_static_backing) noexcept {
     auto& ui = *ctx->active_ui;
     WidgetState* ws = state_map_get_or_insert(&ui.states, element_id, ui.frame_index);
-    if (!ws) return;
+    WidgetCold* c = ensure_widget_cold(ws);
+    if (!c) return;
     ws->is_user_element = true; ws->is_text_span = true; ws->is_selectable_text = true; ws->is_focusable = true;
-    ws->edit_text_buffer = nullptr;
+    c->edit_text_buffer = nullptr;
     ws->is_text_input_writable = false; ws->is_scroll_x = false; ws->is_scroll_y = false;
-    ws->owner_canvas_id = ui.canvas_depth ? ui.canvas_stack[ui.canvas_depth-1u].id : 0u;
+    c->owner_canvas_id = ui.canvas_depth ? ui.canvas_stack[ui.canvas_depth-1u].id : 0u;
     ws->focus_scope = ui.modal_scope && focus_scope_contains(ui,ui.modal_scope) ? ui.modal_scope : ui.focus_scope;
     const bool allowed = !ui.modal_scope || focus_scope_contains(ui,ui.modal_scope);
     if (allowed && reserve_focus(&ui)) ui.focus_order[ui.focus_count++] = element_id;
-    ws->sel_text_ptr = full_utf8; ws->sel_text_len = total_bytes;
-    ws->sel_text_epoch = ctx->arena_epoch; ws->sel_text_static = is_static_backing;
-    ws->edit_sel_anchor = utf8_clamp_boundary(full_utf8,total_bytes,ws->edit_sel_anchor);
-    ws->edit_cursor = utf8_clamp_boundary(full_utf8,total_bytes,ws->edit_cursor);
+    c->sel_text_ptr = full_utf8; c->sel_text_len = total_bytes;
+    c->sel_text_epoch = ctx->arena_epoch; c->sel_text_static = is_static_backing;
+    c->edit_sel_anchor = utf8_clamp_boundary(full_utf8,total_bytes,c->edit_sel_anchor);
+    c->edit_cursor = utf8_clamp_boundary(full_utf8,total_bytes,c->edit_cursor);
     if (ws->span_hovered || ui.active_id == element_id) set_cursor(Cursor::IBeam);
-    if (ui.left_pressed_this_frame && ui.active_id != element_id) ws->edit_sel_anchor = ws->edit_cursor = 0u;
+    if (ui.left_pressed_this_frame && ui.active_id != element_id) c->edit_sel_anchor = c->edit_cursor = 0u;
     if (ui.focus_id != element_id || !allowed) return;
     for (uint32_t i = 0; i < ui.frame_text_op_count; ++i) {
         const auto& op = ui.frame_text_ops[i];
         if (op.kind != TextEditOpKind::KeyPress) continue;
         const bool primary = (op.mod & (SDL_KMOD_CTRL | SDL_KMOD_GUI)) != 0u;
         const bool alt = (op.mod & SDL_KMOD_ALT) != 0u;
-        if (primary && !alt && op.key == SDLK_A) { ws->edit_sel_anchor = 0; ws->edit_cursor = total_bytes; request_redraw(ctx); }
+        if (primary && !alt && op.key == SDLK_A) { c->edit_sel_anchor = 0; c->edit_cursor = total_bytes; request_redraw(ctx); }
         if (primary && !alt && op.key == SDLK_C) {
-            const uint32_t a = ws->edit_cursor < ws->edit_sel_anchor ? ws->edit_cursor : ws->edit_sel_anchor;
-            const uint32_t b = ws->edit_cursor > ws->edit_sel_anchor ? ws->edit_cursor : ws->edit_sel_anchor;
+            const uint32_t a = c->edit_cursor < c->edit_sel_anchor ? c->edit_cursor : c->edit_sel_anchor;
+            const uint32_t b = c->edit_cursor > c->edit_sel_anchor ? c->edit_cursor : c->edit_sel_anchor;
             if (b > a) { const Str slice = ctx->frame_arena.push_str(full_utf8+a,b-a); if (slice.chars) (void)set_clipboard_text(slice.chars); }
         }
-        if (op.key == SDLK_ESCAPE) { ws->edit_sel_anchor = ws->edit_cursor; request_redraw(ctx); }
+        if (op.key == SDLK_ESCAPE) { c->edit_sel_anchor = c->edit_cursor; request_redraw(ctx); }
     }
 }
 
@@ -2362,6 +2397,15 @@ void text(Str content, const TextDesc& desc) noexcept {
     cfg.max_lines = desc.max_lines;
     cfg.wrap = desc.wrap;
     cfg.align_x = desc.align_x;
+    cfg.opentype_flags = desc.opentype_flags;
+    if (!desc.font_features.empty()) {
+        const uint32_t fc = desc.font_features.size() > 16u ? 16u : static_cast<uint32_t>(desc.font_features.size());
+        if (FontFeature* copied_feats = ctx->frame_arena.alloc_uninit<FontFeature>(fc)) {
+            std::memcpy(copied_feats, desc.font_features.data(), size_t(fc) * sizeof(FontFeature));
+            cfg.font_features = copied_feats;
+            cfg.font_feature_count = fc;
+        }
+    }
 
     SelectableTextExtra* extra = nullptr;
     if ((desc.selectable && desc.id) || ctx->active_ui->current_layer) {
@@ -2616,7 +2660,9 @@ void image(const ImageDesc& desc_in) noexcept {
     if (desc.id != 0u && ctx->active_ui->canvas_depth > 0u) {
         if (WidgetState* ws = state_map_get_or_insert(&ctx->active_ui->states, desc.id, ctx->active_ui->frame_index)) {
             ws->is_user_element = true;
-            ws->owner_canvas_id = ctx->active_ui->canvas_stack[ctx->active_ui->canvas_depth - 1u].id;
+            if (WidgetCold* c = ensure_widget_cold(ws)) {
+                c->owner_canvas_id = ctx->active_ui->canvas_stack[ctx->active_ui->canvas_depth - 1u].id;
+            }
         }
     }
 
@@ -2662,9 +2708,13 @@ void icon(const IconDesc& desc_in) noexcept {
         if (WidgetState* ws = state_map_get_or_insert(&ctx->active_ui->states, desc.id, ctx->active_ui->frame_index)) {
             ws->is_user_element = true;
             ws->is_text_input_writable = false;
-            ws->owner_canvas_id = (ctx->active_ui->canvas_depth > 0u)
-                ? ctx->active_ui->canvas_stack[ctx->active_ui->canvas_depth - 1u].id
-                : 0u;
+            if (ctx->active_ui->canvas_depth > 0u) {
+                if (WidgetCold* c = ensure_widget_cold(ws)) {
+                    c->owner_canvas_id = ctx->active_ui->canvas_stack[ctx->active_ui->canvas_depth - 1u].id;
+                }
+            } else if (ws->cold) {
+                ws->cold->owner_canvas_id = 0u;
+            }
         }
     }
     if (layout_open(ctx->active_ui->layout, desc.id) == kLayoutInvalidNode) {
@@ -2881,13 +2931,15 @@ void draw_polyline(const PolylineDesc& desc) noexcept {
     std::memcpy(copy, desc.points.data(), n * sizeof(Vec2));
     if (DrawCmdNode* node = append_open_box_draw_cmd(ctx, desc.foreground)) {
         node->kind = DrawCmdKind::Polyline;
-        node->poly_points = copy;
-        node->poly_count = static_cast<uint32_t>(n);
-        node->poly_closed = desc.closed;
-        node->poly_color = desc.color;
-        node->poly_thickness = desc.thickness;
-        node->poly_glow_color = desc.glow_color;
-        node->poly_glow_px = desc.glow_px;
+        node->poly = DrawCmdPolyPayload{
+            .points = copy,
+            .count = static_cast<uint32_t>(n),
+            .closed = desc.closed,
+            .color = desc.color,
+            .thickness = desc.thickness,
+            .glow_color = desc.glow_color,
+            .glow_px = desc.glow_px,
+        };
     }
 }
 
@@ -2950,11 +3002,12 @@ Vec2 measure_text(Str text, uint16_t font_id, float size, float letter_spacing) 
 void draw_after_layout(LayoutDrawFn callback, void* user_data, bool foreground) noexcept {
     Context* ctx=current_context();
     if (!ctx || !ctx->in_frame || !callback || ctx->layout_draw_target) return;
+    Theme* cb_theme = ctx->frame_arena.alloc<Theme>();
+    if (!cb_theme) return;
+    *cb_theme = active_theme(ctx);
     if (DrawCmdNode* node=append_open_box_draw_cmd(ctx,foreground)) {
-        node->callback_theme=ctx->frame_arena.alloc<Theme>();
-        if (!node->callback_theme) return;
-        *node->callback_theme=active_theme(ctx);
-        node->kind=DrawCmdKind::Callback;node->callback=callback;node->callback_data=user_data;
+        node->kind = DrawCmdKind::Callback;
+        node->cb = DrawCmdCallbackPayload{callback, user_data, cb_theme};
     }
 }
 
@@ -2983,7 +3036,7 @@ void draw_text(const TextDrawDesc& desc) noexcept {
             }
         }
         node->kind = DrawCmdKind::Text;
-        node->text_cmd = copied;
+        node->text_payload = DrawCmdTextPayload{.cmd = copied};
     }
 }
 
@@ -3429,14 +3482,15 @@ void set_text_selection(uint32_t element_id, uint32_t anchor_byte, uint32_t curs
         return;
     }
     WidgetState* ws = state_map_get_or_insert(&ctx->active_ui->states, element_id, ctx->active_ui->frame_index);
-    if (!ws) {
+    WidgetCold* c = ensure_widget_cold(ws);
+    if (!c) {
         return;
     }
-    ws->edit_initialized = true;
-    const bool valid_backing = ws->sel_text_ptr && (ws->sel_text_static || ws->sel_text_epoch == ctx->arena_epoch);
-    ws->edit_sel_anchor = valid_backing ? utf8_clamp_boundary(ws->sel_text_ptr,ws->sel_text_len,anchor_byte) : anchor_byte;
-    ws->edit_cursor = valid_backing ? utf8_clamp_boundary(ws->sel_text_ptr,ws->sel_text_len,cursor_byte) : cursor_byte;
-    ws->edit_preferred_x = -1.0f;
+    c->edit_initialized = true;
+    const bool valid_backing = c->sel_text_ptr && (c->sel_text_static || c->sel_text_epoch == ctx->arena_epoch);
+    c->edit_sel_anchor = valid_backing ? utf8_clamp_boundary(c->sel_text_ptr,c->sel_text_len,anchor_byte) : anchor_byte;
+    c->edit_cursor = valid_backing ? utf8_clamp_boundary(c->sel_text_ptr,c->sel_text_len,cursor_byte) : cursor_byte;
+    c->edit_preferred_x = -1.0f;
     request_redraw(ctx);
 }
 
@@ -3444,35 +3498,38 @@ bool has_text_selection(uint32_t element_id) noexcept {
     Context* ctx = current_context();
     if (!ctx) return false;
     auto* ws = state_map_find(&ctx->active_ui->states,element_id ? element_id : ctx->active_ui->focus_id);
-    if (ws && ws->edit_text_buffer && ws->sel_text_epoch == ctx->arena_epoch) {
-        const uint32_t n=text_buffer_byte_length(ws->edit_text_buffer);
-        return (ws->edit_cursor<n?ws->edit_cursor:n) != (ws->edit_sel_anchor<n?ws->edit_sel_anchor:n);
+    const WidgetCold* c = ws ? ws->cold : nullptr;
+    if (c && c->edit_text_buffer && c->sel_text_epoch == ctx->arena_epoch) {
+        const uint32_t n=text_buffer_byte_length(c->edit_text_buffer);
+        return (c->edit_cursor<n?c->edit_cursor:n) != (c->edit_sel_anchor<n?c->edit_sel_anchor:n);
     }
-    if (!ws || !ws->sel_text_ptr || (!ws->sel_text_static && ws->sel_text_epoch != ctx->arena_epoch)) return false;
-    return utf8_clamp_boundary(ws->sel_text_ptr,ws->sel_text_len,ws->edit_cursor) != utf8_clamp_boundary(ws->sel_text_ptr,ws->sel_text_len,ws->edit_sel_anchor);
+    if (!c || !c->sel_text_ptr || (!c->sel_text_static && c->sel_text_epoch != ctx->arena_epoch)) return false;
+    return utf8_clamp_boundary(c->sel_text_ptr,c->sel_text_len,c->edit_cursor) != utf8_clamp_boundary(c->sel_text_ptr,c->sel_text_len,c->edit_sel_anchor);
 }
 Str selected_text(uint32_t element_id, Arena* arena) noexcept {
     Context* ctx = current_context();
     if (!ctx || !has_text_selection(element_id)) return {};
     auto* ws = state_map_find(&ctx->active_ui->states,element_id ? element_id : ctx->active_ui->focus_id);
-    if(ws->edit_text_buffer && ws->sel_text_epoch == ctx->arena_epoch) {
-        const uint32_t nbytes=text_buffer_byte_length(ws->edit_text_buffer);
-        const uint32_t c=ws->edit_cursor<nbytes?ws->edit_cursor:nbytes,a=ws->edit_sel_anchor<nbytes?ws->edit_sel_anchor:nbytes;
+    const WidgetCold* cold = ws ? ws->cold : nullptr;
+    if (!cold) return {};
+    if(cold->edit_text_buffer && cold->sel_text_epoch == ctx->arena_epoch) {
+        const uint32_t nbytes=text_buffer_byte_length(cold->edit_text_buffer);
+        const uint32_t c=cold->edit_cursor<nbytes?cold->edit_cursor:nbytes,a=cold->edit_sel_anchor<nbytes?cold->edit_sel_anchor:nbytes;
         const uint32_t lo=c<a?c:a,hi=c>a?c:a;
         Arena* scratch=arena?arena:&ctx->frame_arena;
         char* p=scratch->alloc<char>(size_t(hi-lo)+1);if(!p)return {};
-        const uint32_t n=text_buffer_copy_range(ws->edit_text_buffer,lo,hi,p,hi-lo);p[n]=0;return {p,n};
+        const uint32_t n=text_buffer_copy_range(cold->edit_text_buffer,lo,hi,p,hi-lo);p[n]=0;return {p,n};
     }
-    const uint32_t a = utf8_clamp_boundary(ws->sel_text_ptr,ws->sel_text_len,ws->edit_sel_anchor);
-    const uint32_t b = utf8_clamp_boundary(ws->sel_text_ptr,ws->sel_text_len,ws->edit_cursor);
+    const uint32_t a = utf8_clamp_boundary(cold->sel_text_ptr,cold->sel_text_len,cold->edit_sel_anchor);
+    const uint32_t b = utf8_clamp_boundary(cold->sel_text_ptr,cold->sel_text_len,cold->edit_cursor);
     const uint32_t lo = a < b ? a : b, hi = a > b ? a : b;
-    return (arena ? arena : &ctx->frame_arena)->push_str(ws->sel_text_ptr+lo,hi-lo);
+    return (arena ? arena : &ctx->frame_arena)->push_str(cold->sel_text_ptr+lo,hi-lo);
 }
 void clear_text_selection(uint32_t element_id) noexcept {
     Context* ctx = current_context();
     if (!ctx) return;
-    if (auto* ws = state_map_find(&ctx->active_ui->states,element_id ? element_id : ctx->active_ui->focus_id)) {
-        ws->edit_sel_anchor = ws->edit_cursor; request_redraw(ctx);
+    if (auto* ws = state_map_find(&ctx->active_ui->states,element_id ? element_id : ctx->active_ui->focus_id); ws && ws->cold) {
+        ws->cold->edit_sel_anchor = ws->cold->edit_cursor; request_redraw(ctx);
     }
 }
 
@@ -3551,17 +3608,21 @@ static TextInputResult text_input_impl(const TextInputDesc& desc_in, const void*
     desc.radius = resolve_theme_corners(desc.radius, Corners::all(thm.radius_input_px));
 
     WidgetState* ws = nullptr;
+    WidgetCold* cold = nullptr;
     if (desc.id != 0u) {
         ws = state_map_get_or_insert(&ctx->active_ui->states, desc.id, ctx->active_ui->frame_index);
+        cold = ensure_widget_cold(ws);
         if (ws) {
             ws->is_user_element = true;
             ws->is_focusable = !desc.disabled;
             ws->focus_scope = ctx->active_ui->modal_scope && focus_scope_contains(*ctx->active_ui, ctx->active_ui->modal_scope) ? ctx->active_ui->modal_scope : ctx->active_ui->focus_scope;
             ws->is_scroll_x = false;
             ws->is_scroll_y = false;
-            ws->owner_canvas_id = (ctx->active_ui->canvas_depth > 0u)
-                ? ctx->active_ui->canvas_stack[ctx->active_ui->canvas_depth - 1u].id
-                : 0u;
+            if (cold) {
+                cold->owner_canvas_id = (ctx->active_ui->canvas_depth > 0u)
+                    ? ctx->active_ui->canvas_stack[ctx->active_ui->canvas_depth - 1u].id
+                    : 0u;
+            }
         }
         if (desc.disabled) {
             if (ctx->active_ui->focus_id == desc.id) {
@@ -3583,11 +3644,13 @@ static TextInputResult text_input_impl(const TextInputDesc& desc_in, const void*
     uint32_t len = 0u;
     const bool writable = (buf != nullptr && cap > 1u && !desc.read_only && !desc.disabled);
     if (ws) {
-        ws->edit_text_buffer = nullptr;
         ws->is_text_input_writable = writable;
         ws->is_multiline_input = desc.multiline;
         ws->suppress_popup_keys = desc.suppress_popup_keys;
-        if (ws->pressed_this_frame || ctx->active_ui->frame_text_op_count || ctx->active_ui->ime_comp_len) ws->edit_reveal_caret = true;
+        if (cold) {
+            cold->edit_text_buffer = nullptr;
+            if (ws->pressed_this_frame || ctx->active_ui->frame_text_op_count || ctx->active_ui->ime_comp_len) cold->edit_reveal_caret = true;
+        }
     }
     if (buf && cap > 0u) {
         while (len < (desc.read_only ? cap : cap - 1u) && buf[len] != '\0') {
@@ -3598,15 +3661,15 @@ static TextInputResult text_input_impl(const TextInputDesc& desc_in, const void*
 
     uint32_t cursor = len;
     uint32_t anchor = len;
-    if (ws) {
-        if (!ws->edit_initialized) {
-            ws->edit_initialized = true;
-            ws->edit_cursor = len;
-            ws->edit_sel_anchor = len;
-            ws->edit_preferred_x = -1.0f;
+    if (cold) {
+        if (!cold->edit_initialized) {
+            cold->edit_initialized = true;
+            cold->edit_cursor = len;
+            cold->edit_sel_anchor = len;
+            cold->edit_preferred_x = -1.0f;
         }
-        cursor = utf8_clamp_boundary(buf, len, ws->edit_cursor);
-        anchor = utf8_clamp_boundary(buf, len, ws->edit_sel_anchor);
+        cursor = utf8_clamp_boundary(buf, len, cold->edit_cursor);
+        anchor = utf8_clamp_boundary(buf, len, cold->edit_sel_anchor);
     }
 
     TextUndoSlot* undo_slot = nullptr;
@@ -3632,6 +3695,7 @@ static TextInputResult text_input_impl(const TextInputDesc& desc_in, const void*
     const bool show_clear=desc.clear_button && writable && len>0;
     uint32_t menu_key=desc.disabled ? 0u : text_input_menu(desc,len,cursor!=anchor);
     ws=desc.id ? state_map_find(&ctx->active_ui->states,desc.id) : nullptr;
+    cold = ensure_widget_cold(ws);
     if (show_clear && (clicked(clear_id) || a11y_take(clear_id,A11yAction::Press))) { request_focus(desc.id);anchor=0;cursor=len;menu_key=SDLK_DELETE; }
     const float orig_pad_left = desc.padding.left;
     const bool has_leading_icon = (desc.leading_icon_id != kInvalidIcon && is_icon_loaded(ctx, desc.leading_icon_id));
@@ -3664,25 +3728,25 @@ static TextInputResult text_input_impl(const TextInputDesc& desc_in, const void*
     }
 
     const float active_wrap_w = (desc.multiline && desc.word_wrap)
-        ? ((ws && ws->edit_wrap_width > 0.0f)
-            ? ws->edit_wrap_width
+        ? ((cold && cold->edit_wrap_width > 0.0f)
+            ? cold->edit_wrap_width
             : ((ws && ws->last_box_logical.w > 0.0f)
                 ? text_input_wrap_width(desc, compute_text_inner_geom(ctx, ws->last_box_logical, desc))
                 : ((desc.width.kind == SizingKind::Fixed && desc.width.value > 0.0f)
                     ? text_input_wrap_width(desc, compute_text_inner_geom(ctx, Rect{ 0.0f, 0.0f, desc.width.value, 100.0f }, desc))
                     : 0.0f)))
         : 0.0f;
-    if (ws && active_wrap_w <= 0.0f) {
-        ws->edit_wrap_affinity = false;
+    if (cold && active_wrap_w <= 0.0f) {
+        cold->edit_wrap_affinity = false;
     }
 
     // Pointer click / double-word / triple-line / drag selection
-    if (!desc.disabled && ws && ws->last_box_logical.w > 0.0f && desc.id != 0u) {
+    if (!desc.disabled && ws && cold && ws->last_box_logical.w > 0.0f && desc.id != 0u) {
         const TextInnerGeom prev_geom = compute_text_inner_geom(ctx, ws->last_box_logical, desc);
         const float ptr_wrap_w = (active_wrap_w > 0.0f) ? active_wrap_w : text_input_wrap_width(desc, prev_geom);
         const float local_x = ctx->active_ui->pointer_pos.x - prev_geom.origin_x +
-            ((ptr_wrap_w > 0.0f) ? 0.0f : ws->edit_scroll_x);
-        const float local_y = ctx->active_ui->pointer_pos.y - prev_geom.origin_y + ws->edit_scroll_y;
+            ((ptr_wrap_w > 0.0f) ? 0.0f : cold->edit_scroll_x);
+        const float local_y = ctx->active_ui->pointer_pos.y - prev_geom.origin_y + cold->edit_scroll_y;
         const Str cur_text = { buf ? buf : "", len };
 
         if (ws->pressed_this_frame) {
@@ -3705,19 +3769,19 @@ static TextInputResult text_input_impl(const TextInputDesc& desc_in, const void*
                     anchor = 0u;
                     cursor = len;
                 }
-                ws->edit_wrap_affinity = false;
+                cold->edit_wrap_affinity = false;
             } else if (ctx->active_ui->last_mouse_clicks == 2u) {
                 utf8_word_bounds_at(buf, len, hit_byte, &anchor, &cursor);
-                ws->edit_wrap_affinity = false;
+                cold->edit_wrap_affinity = false;
             } else {
                 const bool shift_held = (ctx->active_ui->frame_key_mods & Mod_Shift) != 0u;
                 if (!shift_held) {
                     anchor = hit_byte;
                 }
                 cursor = hit_byte;
-                ws->edit_wrap_affinity = (ptr_wrap_w > 0.0f) && hit_aff;
+                cold->edit_wrap_affinity = (ptr_wrap_w > 0.0f) && hit_aff;
             }
-            ws->edit_preferred_x = -1.0f;
+            cold->edit_preferred_x = -1.0f;
         } else if (ctx->active_ui->active_id == desc.id && ws->pressed_down) {
             bool drag_aff = false;
             cursor = visual_point_to_byte(ctx, desc, cur_text, local_x, local_y, ptr_wrap_w, &drag_aff);
@@ -3728,8 +3792,8 @@ static TextInputResult text_input_impl(const TextInputDesc& desc_in, const void*
                     drag_aff = false;
                 }
             }
-            ws->edit_wrap_affinity = (ptr_wrap_w > 0.0f) && drag_aff;
-            ws->edit_preferred_x = -1.0f;
+            cold->edit_wrap_affinity = (ptr_wrap_w > 0.0f) && drag_aff;
+            cold->edit_preferred_x = -1.0f;
             request_redraw(ctx);
         }
     }
@@ -3750,9 +3814,9 @@ static TextInputResult text_input_impl(const TextInputDesc& desc_in, const void*
     while (writable && a11y_take(desc.id, A11yAction::SetValue, &command)) {
         cursor = anchor = insert_utf8_filtered(buf, cap, &len, 0u, len, Str{command.text, command.length}, desc.multiline);
         record_edit(0u);
-        if (ws) {
-            ws->edit_preferred_x = -1.0f;
-            ws->edit_wrap_affinity = false;
+        if (cold) {
+            cold->edit_preferred_x = -1.0f;
+            cold->edit_wrap_affinity = false;
         }
         replaced_by_a11y = true;
     }
@@ -3788,9 +3852,9 @@ static TextInputResult text_input_impl(const TextInputDesc& desc_in, const void*
                         const uint8_t grp = (!has_sel && is_single_nonbreak_utf8_codepoint(ins)) ? 1u : 0u;
                         record_edit(grp);
                     }
-                    if (ws) {
-                        ws->edit_preferred_x = -1.0f;
-                        ws->edit_wrap_affinity = false;
+                    if (cold) {
+                        cold->edit_preferred_x = -1.0f;
+                        cold->edit_wrap_affinity = false;
                     }
                 }
                 continue;
@@ -3809,9 +3873,9 @@ static TextInputResult text_input_impl(const TextInputDesc& desc_in, const void*
                 if (op.key == SDLK_A) {
                     anchor = 0u;
                     cursor = len;
-                    if (ws) {
-                        ws->edit_preferred_x = -1.0f;
-                        ws->edit_wrap_affinity = false;
+                    if (cold) {
+                        cold->edit_preferred_x = -1.0f;
+                        cold->edit_wrap_affinity = false;
                     }
                     continue;
                 }
@@ -3820,17 +3884,17 @@ static TextInputResult text_input_impl(const TextInputDesc& desc_in, const void*
                         if (!shift && undo_slot->cur > 0u) {
                             if (undo_restore(undo_slot, undo_slot->cur - 1u, buf, cap, &len, &cursor, &anchor)) {
                                 changed = true;
-                                if (ws) {
-                                    ws->edit_preferred_x = -1.0f;
-                                    ws->edit_wrap_affinity = false;
+                                if (cold) {
+                                    cold->edit_preferred_x = -1.0f;
+                                    cold->edit_wrap_affinity = false;
                                 }
                             }
                         } else if (shift && (undo_slot->cur + 1u) < undo_slot->count) {
                             if (undo_restore(undo_slot, undo_slot->cur + 1u, buf, cap, &len, &cursor, &anchor)) {
                                 changed = true;
-                                if (ws) {
-                                    ws->edit_preferred_x = -1.0f;
-                                    ws->edit_wrap_affinity = false;
+                                if (cold) {
+                                    cold->edit_preferred_x = -1.0f;
+                                    cold->edit_wrap_affinity = false;
                                 }
                             }
                         }
@@ -3841,9 +3905,9 @@ static TextInputResult text_input_impl(const TextInputDesc& desc_in, const void*
                     if (writable && undo_slot && (undo_slot->cur + 1u) < undo_slot->count) {
                         if (undo_restore(undo_slot, undo_slot->cur + 1u, buf, cap, &len, &cursor, &anchor)) {
                             changed = true;
-                            if (ws) {
-                                ws->edit_preferred_x = -1.0f;
-                                ws->edit_wrap_affinity = false;
+                            if (cold) {
+                                cold->edit_preferred_x = -1.0f;
+                                cold->edit_wrap_affinity = false;
                             }
                         }
                     }
@@ -3861,9 +3925,9 @@ static TextInputResult text_input_impl(const TextInputDesc& desc_in, const void*
                         cursor = erase_text_range(buf, &len, anchor, cursor);
                         anchor = cursor;
                         record_edit(0u);
-                        if (ws) {
-                            ws->edit_preferred_x = -1.0f;
-                            ws->edit_wrap_affinity = false;
+                        if (cold) {
+                            cold->edit_preferred_x = -1.0f;
+                            cold->edit_wrap_affinity = false;
                         }
                     }
                     continue;
@@ -3880,9 +3944,9 @@ static TextInputResult text_input_impl(const TextInputDesc& desc_in, const void*
                             if (has_sel || len != prev_len) {
                                 record_edit(0u);
                             }
-                            if (ws) {
-                                ws->edit_preferred_x = -1.0f;
-                                ws->edit_wrap_affinity = false;
+                            if (cold) {
+                                cold->edit_preferred_x = -1.0f;
+                                cold->edit_wrap_affinity = false;
                             }
                         }
                     }
@@ -3903,9 +3967,9 @@ static TextInputResult text_input_impl(const TextInputDesc& desc_in, const void*
                             anchor = cursor;
                         }
                     }
-                    if (ws) {
-                        ws->edit_preferred_x = -1.0f;
-                        ws->edit_wrap_affinity = false;
+                    if (cold) {
+                        cold->edit_preferred_x = -1.0f;
+                        cold->edit_wrap_affinity = false;
                     }
                     break;
                 case SDLK_RIGHT:
@@ -3920,9 +3984,9 @@ static TextInputResult text_input_impl(const TextInputDesc& desc_in, const void*
                             anchor = cursor;
                         }
                     }
-                    if (ws) {
-                        ws->edit_preferred_x = -1.0f;
-                        ws->edit_wrap_affinity = false;
+                    if (cold) {
+                        cold->edit_preferred_x = -1.0f;
+                        cold->edit_wrap_affinity = false;
                     }
                     break;
                 case SDLK_HOME: {
@@ -3930,7 +3994,7 @@ static TextInputResult text_input_impl(const TextInputDesc& desc_in, const void*
                     if (desc.multiline && !primary && active_wrap_w > 0.0f) {
                         text_wrapped_home_end(
                             ctx, desc, Str{ buf ? buf : "", len }, cursor,
-                            ws ? ws->edit_wrap_affinity : false, false, active_wrap_w, &cursor, &new_aff);
+                            cold ? cold->edit_wrap_affinity : false, false, active_wrap_w, &cursor, &new_aff);
                     } else if (desc.multiline && !primary) {
                         uint32_t ls = 0u;
                         uint32_t le = 0u;
@@ -3942,9 +4006,9 @@ static TextInputResult text_input_impl(const TextInputDesc& desc_in, const void*
                     if (!shift) {
                         anchor = cursor;
                     }
-                    if (ws) {
-                        ws->edit_preferred_x = -1.0f;
-                        ws->edit_wrap_affinity = new_aff;
+                    if (cold) {
+                        cold->edit_preferred_x = -1.0f;
+                        cold->edit_wrap_affinity = new_aff;
                     }
                     break;
                 }
@@ -3953,7 +4017,7 @@ static TextInputResult text_input_impl(const TextInputDesc& desc_in, const void*
                     if (desc.multiline && !primary && active_wrap_w > 0.0f) {
                         text_wrapped_home_end(
                             ctx, desc, Str{ buf ? buf : "", len }, cursor,
-                            ws ? ws->edit_wrap_affinity : false, true, active_wrap_w, &cursor, &new_aff);
+                            cold ? cold->edit_wrap_affinity : false, true, active_wrap_w, &cursor, &new_aff);
                     } else if (desc.multiline && !primary) {
                         uint32_t ls = 0u;
                         uint32_t le = 0u;
@@ -3965,21 +4029,21 @@ static TextInputResult text_input_impl(const TextInputDesc& desc_in, const void*
                     if (!shift) {
                         anchor = cursor;
                     }
-                    if (ws) {
-                        ws->edit_preferred_x = -1.0f;
-                        ws->edit_wrap_affinity = new_aff;
+                    if (cold) {
+                        cold->edit_preferred_x = -1.0f;
+                        cold->edit_wrap_affinity = new_aff;
                     }
                     break;
                 }
                 case SDLK_UP:
                 case SDLK_DOWN:
-                    if (!desc.suppress_popup_keys && desc.multiline && ws) {
-                        ws->edit_cursor = cursor;
-                        ws->edit_sel_anchor = anchor;
+                    if (!desc.suppress_popup_keys && desc.multiline && cold) {
+                        cold->edit_cursor = cursor;
+                        cold->edit_sel_anchor = anchor;
                         move_caret_vertical(
                             ctx, desc, Str{ buf ? buf : "", len }, ws, (op.key == SDLK_UP) ? -1 : 1, shift, active_wrap_w);
-                        cursor = ws->edit_cursor;
-                        anchor = ws->edit_sel_anchor;
+                        cursor = cold->edit_cursor;
+                        anchor = cold->edit_sel_anchor;
                     }
                     break;
                 case SDLK_BACKSPACE:
@@ -3998,9 +4062,9 @@ static TextInputResult text_input_impl(const TextInputDesc& desc_in, const void*
                                 record_edit(word_mod ? 0u : 2u);
                             }
                         }
-                        if (ws) {
-                            ws->edit_preferred_x = -1.0f;
-                            ws->edit_wrap_affinity = false;
+                        if (cold) {
+                            cold->edit_preferred_x = -1.0f;
+                            cold->edit_wrap_affinity = false;
                         }
                     }
                     break;
@@ -4020,9 +4084,9 @@ static TextInputResult text_input_impl(const TextInputDesc& desc_in, const void*
                                 record_edit(word_mod ? 0u : 3u);
                             }
                         }
-                        if (ws) {
-                            ws->edit_preferred_x = -1.0f;
-                            ws->edit_wrap_affinity = false;
+                        if (cold) {
+                            cold->edit_preferred_x = -1.0f;
+                            cold->edit_wrap_affinity = false;
                         }
                     }
                     break;
@@ -4041,9 +4105,9 @@ static TextInputResult text_input_impl(const TextInputDesc& desc_in, const void*
                             if (has_sel || len != prev_len) {
                                 record_edit(0u);
                             }
-                            if (ws) {
-                                ws->edit_preferred_x = -1.0f;
-                                ws->edit_wrap_affinity = false;
+                            if (cold) {
+                                cold->edit_preferred_x = -1.0f;
+                                cold->edit_wrap_affinity = false;
                             }
                         }
                     } else {
@@ -4061,8 +4125,8 @@ static TextInputResult text_input_impl(const TextInputDesc& desc_in, const void*
                 case SDLK_ESCAPE:
                     if (has_sel) anchor = cursor;
                     else if (desc.escape_blurs) { request_focus(0);is_focused=false; }
-                    if (ws) {
-                        ws->edit_wrap_affinity = false;
+                    if (cold) {
+                        cold->edit_wrap_affinity = false;
                     }
                     break;
                 default:
@@ -4072,28 +4136,30 @@ static TextInputResult text_input_impl(const TextInputDesc& desc_in, const void*
     }
 
     const uint32_t clamped_cursor = utf8_clamp_boundary(buf, len, cursor);
-    if (ws && clamped_cursor != cursor) {
-        ws->edit_wrap_affinity = false;
+    if (cold && clamped_cursor != cursor) {
+        cold->edit_wrap_affinity = false;
     }
     cursor = clamped_cursor;
     anchor = utf8_clamp_boundary(buf, len, anchor);
     if (ws) {
-        ws->edit_cursor = cursor;
-        ws->edit_sel_anchor = anchor;
         ws->accept_ghost_on_tab = desc.accept_ghost_on_tab && writable && !desc.password &&
             desc.ghost_text.chars && desc.ghost_text.length > 0u &&
             cursor == len && cursor == anchor && !ghost_accepted;
+    }
+    if (cold) {
+        cold->edit_cursor = cursor;
+        cold->edit_sel_anchor = anchor;
         if (active_wrap_w > 0.0f) {
-            ws->edit_scroll_x = 0.0f;
+            cold->edit_scroll_x = 0.0f;
         }
     }
 
     const Str committed_slice = (buf && len > 0u) ? ctx->frame_arena.push_str(buf, len) : Str{};
-    if (ws) {
-        ws->sel_text_ptr = committed_slice.chars;
-        ws->sel_text_len = committed_slice.length;
-        ws->sel_text_epoch = ctx->arena_epoch;
-        ws->sel_text_static = false;
+    if (cold) {
+        cold->sel_text_ptr = committed_slice.chars;
+        cold->sel_text_len = committed_slice.length;
+        cold->sel_text_epoch = ctx->arena_epoch;
+        cold->sel_text_static = false;
     }
     if (!is_focused && ctx->active_ui->ime_focused_id==desc.id) ctx->active_ui->ime_focused_id=0;
     const bool composing = is_focused && !desc.read_only && !desc.password && ctx->active_ui->ime_comp_len > 0u;
@@ -4510,7 +4576,7 @@ void invalidate_cached_subtree(uint32_t subtree_id, Context* ctx_arg) noexcept {
         }
     };
     if (ctx->active_ui) clear_ui(*ctx->active_ui);
-    clear_ui(ctx->headless_ui);
+    if (ctx->headless_ui) clear_ui(*ctx->headless_ui);
     for (uint32_t i = 0; i < ctx->claimed_window_cap; ++i) {
         if (ctx->claimed_windows[i]) clear_ui(ctx->claimed_windows[i]->ui);
     }
@@ -4761,7 +4827,7 @@ float dpi_scale(const Context* ctx_arg) noexcept {
     if (!ctx) {
         return 1.0f;
     }
-    const WindowUiState* ui = ctx->active_ui ? ctx->active_ui : &ctx->headless_ui;
+    const WindowUiState* ui = ctx->active_ui ? ctx->active_ui : ctx->headless_ui;
     return (ui && std::isfinite(ui->dpi_scale) && ui->dpi_scale > 0.0f) ? ui->dpi_scale : 1.0f;
 }
 
@@ -4867,7 +4933,7 @@ Vec2 scroll_max(uint32_t element_id) noexcept {
         return {};
     }
     if (ws->is_virtual_list) {
-        return Vec2{0.0f, static_cast<float>(ws->vscroll_max_y)};
+        return Vec2{0.0f, ws->cold ? static_cast<float>(ws->cold->vscroll_max_y) : 0.0f};
     }
     return ws->scroll_max;
 }
@@ -4911,7 +4977,7 @@ bool scroll_stuck_to_bottom(uint32_t element_id) noexcept {
         return false;
     }
     if (ws->is_virtual_list) {
-        return ws->vlist_stuck_bottom;
+        return ws->cold ? ws->cold->vlist_stuck_bottom : true;
     }
     return (ws->is_scroll_y || ws->scroll_stick_initialized) ? ws->scroll_stuck_bottom : false;
 }
@@ -4925,14 +4991,18 @@ void set_scroll_stuck_to_bottom(uint32_t element_id, bool stuck) noexcept {
         ws->is_user_element = true;
         ws->scroll_stick_initialized = true;
         ws->scroll_stuck_bottom = stuck;
-        ws->vlist_stick_initialized = true;
-        ws->vlist_stuck_bottom = stuck;
         if (stuck) {
             ws->scroll_pos.y = ws->scroll_max.y;
             ws->scroll_vel.y = 0.0f;
-            ws->vscroll_pos_y = ws->vscroll_max_y;
-            ws->vscroll_vel_y = 0.0;
-            ws->vlist_pending_scroll = false;
+        }
+        if (WidgetCold* vc = ensure_widget_cold(ws)) {
+            vc->vlist_stick_initialized = true;
+            vc->vlist_stuck_bottom = stuck;
+            if (stuck) {
+                vc->vscroll_pos_y = vc->vscroll_max_y;
+                vc->vscroll_vel_y = 0.0;
+                vc->vlist_pending_scroll = false;
+            }
         }
         request_redraw(ctx);
     }

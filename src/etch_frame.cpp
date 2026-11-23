@@ -93,6 +93,7 @@ void end_frame(Context* ctx_arg) noexcept {
         const LayoutCmd* cmd = &cmds[i];
         const ClipEntry& cur_clip = clip_stack.entries[clip_stack.depth - 1u];
         ctx->render_clip_index = cur_clip.indexed ? cur_clip.shape : 0;
+        ctx->render_clip_shape = cur_clip.shape;
         ctx->render_clip_depth = clip_stack.depth + clip_stack.overflow;
         const Rect raw_box_px = {
             .x = cmd->bounds.x * dpi,
@@ -193,7 +194,7 @@ void end_frame(Context* ctx_arg) noexcept {
                         while (bi < ctx->batch_count && pi >= ctx->batches[bi].first_prim + ctx->batches[bi].prim_count) {
                             ++bi;
                         }
-                        if (bi < ctx->batch_count && ctx->batches[bi].is_punch_hole) {
+                        if (bi < ctx->batch_count && (ctx->batches[bi].is_punch_hole || ctx->batches[bi].mask_tex != nullptr)) {
                             tainted = true;
                             break;
                         }
@@ -223,18 +224,22 @@ void end_frame(Context* ctx_arg) noexcept {
                     const Prim& p = ctx->prims[pi];
                     const uint32_t tex_slot = (p.style.x >> 10) & 0xFu;
                     SDL_GPUTexture* ext1 = nullptr;
-                    bool is_additive = false;
+                    uint8_t blend_mode = 0u;
                     if (bi < ctx->batch_count) {
                         const DrawBatch& b = ctx->batches[bi];
                         if (tex_slot >= 1u && tex_slot <= b.ext_count) ext1 = b.ext_textures[tex_slot - 1u];
-                        is_additive = b.is_additive;
+                        blend_mode = b.blend_mode;
                     }
+                    const uint8_t aux_flags = (ctx->prim_aux_flags && pi < ctx->prim_aux_cap)
+                        ? ctx->prim_aux_flags[pi]
+                        : blend_mode;
                     entry->prims[k] = CachedPrimRecord{
                         .prim = p,
                         .ext1 = ext1,
                         .ext2 = nullptr,
+                        .blend_mode = blend_mode,
+                        .aux_flags = aux_flags,
                         .is_punch = false,
-                        .is_additive = is_additive,
                     };
                 }
                 entry->prim_count = p_cnt;
@@ -348,7 +353,14 @@ void end_frame(Context* ctx_arg) noexcept {
                         p.style.z = std::bit_cast<uint32_t>(std::bit_cast<float>(p.style.z) + dx_px);
                         p.style.w = std::bit_cast<uint32_t>(std::bit_cast<float>(p.style.w) + dx_px);
                     }
-                    push_prim(ctx, p, rec.ext1, 2.0f, rec.ext2, rec.is_additive);
+                    push_prim(
+                        ctx,
+                        p,
+                        rec.ext1,
+                        2.0f,
+                        rec.ext2,
+                        static_cast<BlendMode>(rec.blend_mode),
+                        (rec.aux_flags & kPrimAuxHollowBorder) != 0u);
                 }
                 const uint32_t outer_parent_hb = find_parent_hitbox_for_node(ctx, cmd->node_idx);
                 const uint32_t hb_base = ctx->active_ui->hitboxes.count;
@@ -500,8 +512,15 @@ void end_frame(Context* ctx_arg) noexcept {
                         }
                         emit_box_background_and_shadow(ctx, extra, box_px, cur_clip, dpi);
                         if (extra->keyboard_focus_ring) {
-                            push_prim(ctx, Prim::make_rect(box_px, cur_clip.rect, {}, scale_corners_uniform(Corners::all(extra->focus_ring_radius_px), dpi),
-                                extra->focus_ring_color, 2 * dpi, 1, cur_clip.radius));
+                            push_prim(
+                                ctx,
+                                Prim::make_rect(box_px, cur_clip.rect, {}, scale_corners_uniform(Corners::all(extra->focus_ring_radius_px), dpi),
+                                    extra->focus_ring_color, 2 * dpi, 1, cur_clip.radius),
+                                nullptr,
+                                2.0f,
+                                nullptr,
+                                BlendMode::Normal,
+                                true);
                         }
                         if (extra->draw_head) {
                             ClipEntry draw_clip = cur_clip;
@@ -531,10 +550,12 @@ void end_frame(Context* ctx_arg) noexcept {
                             if (std::fabs(ws->viewport_dim.x - cmd->bounds.w) > .5f || std::fabs(ws->viewport_dim.y - cmd->bounds.h) > .5f) request_redraw(ctx);
                             ws->viewport_dim = Vec2{ cmd->bounds.w, cmd->bounds.h };
                             ws->last_box_logical = cmd->bounds;
-                            ws->vscroll_max_y = (ws->vscroll_total_h > view_h)
-                                ? (ws->vscroll_total_h - view_h)
-                                : 0.0;
-                            ws->vscroll_pos_y = clamp_double(ws->vscroll_pos_y, 0.0, ws->vscroll_max_y);
+                            if (WidgetCold* c = ensure_widget_cold(ws)) {
+                                c->vscroll_max_y = (c->vscroll_total_h > view_h)
+                                    ? (c->vscroll_total_h - view_h)
+                                    : 0.0;
+                                c->vscroll_pos_y = clamp_double(c->vscroll_pos_y, 0.0, c->vscroll_max_y);
+                            }
                         }
                     } else if (extra->desc.scroll_x || extra->desc.scroll_y) {
                         if (WidgetState* ws = state_map_find(&ctx->active_ui->states, extra->desc.id)) {
@@ -610,6 +631,7 @@ void end_frame(Context* ctx_arg) noexcept {
                     const ClipEntry scrollbar_clip = has_fade
                         ? make_box_clip(ctx,parent_clip,box_px,scale_corners(d.radius,dpi),d.continuous_corners) : cur_clip;
                     ctx->render_clip_index=scrollbar_clip.indexed ? scrollbar_clip.shape : 0;
+                    ctx->render_clip_shape=scrollbar_clip.shape;
                     if (const WidgetState* ws = state_map_find(&ctx->active_ui->states, d.id)) {
                         for (uint32_t axis = 0u; axis < 2u; ++axis) {
                             const bool horizontal = (axis != 0u);
@@ -625,6 +647,7 @@ void end_frame(Context* ctx_arg) noexcept {
                 if(d.border_beam.color.a>0 || d.border_beam.base_color.a>0 || d.top_rim_alpha>0) {
                     const ClipEntry& parent=any_clip && clip_stack.depth>1u ? clip_stack.entries[clip_stack.depth-2u] : cur_clip;
                     ctx->render_clip_index=parent.indexed ? parent.shape : 0;
+                    ctx->render_clip_shape=parent.shape;
                     emit_border_beam(ctx,box_px,parent,scale_corners(d.radius,dpi),d.border_beam,d.top_rim_alpha,d.continuous_corners,dpi);
                 }
                 if (has_segmented_border(d) && d.border_color.a > 0u &&
@@ -639,6 +662,7 @@ void end_frame(Context* ctx_arg) noexcept {
                         ? clip_stack.entries[clip_stack.depth - 2u]
                         : (clip_stack.overflow > 0u ? cur_clip : clip_stack.entries[0]);
                     ctx->render_clip_index=parent_clip.indexed ? parent_clip.shape : 0;
+                    ctx->render_clip_shape=parent_clip.shape;
                     if (ctx->render_clip_depth > 1u) --ctx->render_clip_depth;
                     Rect border_bounds=box_px;Corners border_corners=scale_corners(d.radius,dpi);
                     align_border_bounds(&border_bounds,&border_corners,d.border_width*dpi,d.border_align);
@@ -652,7 +676,12 @@ void end_frame(Context* ctx_arg) noexcept {
                             d.border_color,
                             d.border_width * dpi,
                             1.0f,
-                            parent_clip.radius), d.continuous_corners));
+                            parent_clip.radius), d.continuous_corners),
+                        nullptr,
+                        2.0f,
+                        nullptr,
+                        d.blend_mode,
+                        true);
                 }
                 break;
             }
@@ -715,7 +744,10 @@ void end_frame(Context* ctx_arg) noexcept {
                                 idesc.border_width * dpi,
                                 img_flags,
                                 cur_clip.radius),
-                            idesc.sprite_id != kInvalidSprite ? nullptr : idesc.texture);
+                            idesc.sprite_id != kInvalidSprite ? nullptr : idesc.texture,
+                            2.0f,
+                            nullptr,
+                            idesc.blend_mode);
                     }
                 }
                 break;
@@ -854,17 +886,18 @@ void end_frame(Context* ctx_arg) noexcept {
         for (uint32_t i = 0u; i < ctx->active_ui->states.capacity; ++i) {
             WidgetState& ws = ctx->active_ui->states.entries[i];
             if (ws.key == 0u || ws.last_seen_frame != ctx->active_ui->frame_index) {
-                if (ws.last_seen_frame != ctx->active_ui->frame_index) ws.edit_text_buffer = nullptr;
+                if (ws.last_seen_frame != ctx->active_ui->frame_index && ws.cold) ws.cold->edit_text_buffer = nullptr;
                 continue;
             }
-            if (ws.is_user_element || ws.split_initialized || ws.is_canvas || ws.is_canvas_node || ws.is_virtual_list) {
+            const bool split_init = ws.cold && ws.cold->split_initialized;
+            if (ws.is_user_element || split_init || ws.is_canvas || ws.is_canvas_node || ws.is_virtual_list) {
                 bool found = false;
                 const Rect bb = layout_engine_bounds(le, ws.key, &found);
                 if (found) {
                     ws.last_box_logical = bb;
-                    if (ws.edit_text_buffer) {
+                    if (ws.cold && ws.cold->edit_text_buffer) {
                         ws.viewport_dim = {bb.w, bb.h};
-                        ws.vscroll_max_y = std::fmax(0.0, ws.vscroll_total_h - bb.h);
+                        ws.cold->vscroll_max_y = std::fmax(0.0, ws.cold->vscroll_total_h - bb.h);
                     }
                 }
             }
@@ -1226,7 +1259,7 @@ void end_frame(Context* ctx_arg) noexcept {
         ctx->active_ui->redraw_budget = 1u;
     }
     // A window-only context consumes global invalidations through its primary pass.
-    if (!ctx->headless && ctx->active_window == ctx->window) ctx->headless_ui.redraw_budget = 0;
+    if (!ctx->headless && ctx->active_window == ctx->window && ctx->headless_ui) ctx->headless_ui->redraw_budget = 0;
     const bool a11y_ok = a11y_commit_snapshot(ctx);
     ctx->active_render_layer=nullptr;
     ctx->active_ui->current_layer=nullptr;
@@ -1270,7 +1303,9 @@ void request_window_redraw(Context* ctx, SDL_Window* window) noexcept {
 void process_event(Context* ctx, const SDL_Event& event) noexcept {
     if (!ctx) return;
     if (event.type == SDL_EVENT_SYSTEM_THEME_CHANGED || event.type == ctx->wake_event_type) {
-        if (ctx->headless || ctx->claimed_window_count == 0u) ctx->headless_ui.redraw_budget = 2;
+        if (ctx->headless || ctx->claimed_window_count == 0u) {
+            if (WindowUiState* hui = ensure_headless_ui(ctx)) hui->redraw_budget = 2;
+        }
         for (uint32_t i = 0; i < ctx->claimed_window_cap; ++i)
             if (ctx->claimed_windows[i]) ctx->claimed_windows[i]->ui.redraw_budget = 2;
         return;
@@ -1309,7 +1344,8 @@ void process_event(Context* ctx, const SDL_Event& event) noexcept {
 void begin_frame(Context* ctx, const FrameDesc& desc) noexcept {
     if (!ctx || ctx->in_frame) return;
     ctx->active_window = ctx->headless ? nullptr : ctx->window;
-    ctx->active_ui = ctx->headless ? &ctx->headless_ui : window_ui(ctx, nullptr);
+    ctx->active_ui = ctx->headless ? ensure_headless_ui(ctx) : window_ui(ctx, nullptr);
+    if (!ctx->active_ui) return;
     begin_bound_frame(ctx, desc);
 }
 void begin_window_frame(Context* ctx, SDL_Window* window, float dt) noexcept {
@@ -1319,7 +1355,7 @@ void begin_window_frame(Context* ctx, SDL_Window* window, const WindowFrameDesc&
     if (!ctx || !window || ctx->in_frame || !claim_window_swapchain(ctx, window)) return;
     ctx->active_window = window; ctx->active_ui = window_ui(ctx, window);
     ctx->active_ui->min_dpi_scale = (desc.min_scale > 0.0f && std::isfinite(desc.min_scale)) ? desc.min_scale : 0.0f;
-    sync_desktop_window(window);
+    sync_desktop_window(window, ctx);
     int w = 0, h = 0;
     SDL_GetWindowSizeInPixels(window, &w, &h);
     float scale = SDL_GetWindowDisplayScale(window);

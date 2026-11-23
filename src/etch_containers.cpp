@@ -22,17 +22,18 @@ SplitResult begin_split(const SplitDesc& desc) noexcept {
     state_map_get_or_insert(&ctx->active_ui->states, desc.id, ctx->active_ui->frame_index);
     WidgetState* ws_div = state_map_get_or_insert(&ctx->active_ui->states, div_id, ctx->active_ui->frame_index);
     WidgetState* ws_split = state_map_find(&ctx->active_ui->states, desc.id);
-    if (!ws_split || !ws_div) {
+    WidgetCold* sc = ensure_widget_cold(ws_split);
+    if (!ws_split || !ws_div || !sc || !ensure_split_stack(ctx->active_ui)) {
         return SplitResult{ .ratio = fallback_ratio, .dragging = false };
     }
 
     ws_split->is_user_element = true;
-    ws_split->owner_canvas_id = (ctx->active_ui->canvas_depth > 0u)
+    sc->owner_canvas_id = (ctx->active_ui->canvas_depth > 0u)
         ? ctx->active_ui->canvas_stack[ctx->active_ui->canvas_depth - 1u].id
         : 0u;
-    if (!ws_split->split_initialized) {
-        ws_split->split_ratio = fallback_ratio;
-        ws_split->split_initialized = true;
+    if (!sc->split_initialized) {
+        sc->split_ratio = fallback_ratio;
+        sc->split_initialized = true;
     }
 
     const float div_sz = std::fmax(0.0f, desc.divider_size_px);
@@ -51,16 +52,16 @@ SplitResult begin_split(const SplitDesc& desc) noexcept {
                 ? (is_first ? (avail * fallback_ratio) : (avail * (1.0f - fallback_ratio)))
                 : std::fmax(is_first ? desc.min_first_px : desc.min_second_px, 240.0f));
         if (desc.extent_px) {
-            if (!ws_split->split_extent_initialized) {
-                ws_split->split_extent_px = (std::isfinite(*desc.extent_px) && *desc.extent_px > 0.0f)
+            if (!sc->split_extent_initialized) {
+                sc->split_extent_px = (std::isfinite(*desc.extent_px) && *desc.extent_px > 0.0f)
                     ? *desc.extent_px : fallback_ext;
-                ws_split->split_extent_initialized = true;
+                sc->split_extent_initialized = true;
             } else if (std::isfinite(*desc.extent_px)) {
-                ws_split->split_extent_px = *desc.extent_px;
+                sc->split_extent_px = *desc.extent_px;
             }
-        } else if (!ws_split->split_extent_initialized) {
-            ws_split->split_extent_px = fallback_ext;
-            ws_split->split_extent_initialized = true;
+        } else if (!sc->split_extent_initialized) {
+            sc->split_extent_px = fallback_ext;
+            sc->split_extent_initialized = true;
         }
 
         float min_ext = is_first ? desc.min_first_px : desc.min_second_px;
@@ -74,27 +75,27 @@ SplitResult begin_split(const SplitDesc& desc) noexcept {
             }
         }
 
-        const float cur_eff = clamp_range(ws_split->split_extent_px, min_ext, max_ext);
+        const float cur_eff = clamp_range(sc->split_extent_px, min_ext, max_ext);
         bool extent_mutated = false;
 
         if (ws_div->pressed_this_frame) {
             if (ctx->active_ui->last_mouse_clicks >= 2u) {
-                ws_split->split_extent_px = clamp_range(fallback_ext, min_ext, max_ext);
-                ws_split->split_grab_offset = 0.0f;
+                sc->split_extent_px = clamp_range(fallback_ext, min_ext, max_ext);
+                sc->split_grab_offset = 0.0f;
                 extent_mutated = true;
                 request_redraw(ctx);
             } else if (avail > 1.0f) {
                 const float origin = (desc.axis == Axis::Row) ? ws_split->last_box_logical.x : ws_split->last_box_logical.y;
                 const float ptr_axis = (desc.axis == Axis::Row) ? ctx->active_ui->pointer_pos.x : ctx->active_ui->pointer_pos.y;
                 const float div_start = origin + (is_first ? cur_eff : (avail - cur_eff));
-                ws_split->split_grab_offset = ptr_axis - div_start;
+                sc->split_grab_offset = ptr_axis - div_start;
             }
         } else if (dragging_div && ctx->active_ui->prev_pointer_down && avail > 1.0f) {
             const float origin = (desc.axis == Axis::Row) ? ws_split->last_box_logical.x : ws_split->last_box_logical.y;
             const float ptr_axis = (desc.axis == Axis::Row) ? ctx->active_ui->pointer_pos.x : ctx->active_ui->pointer_pos.y;
-            const float new_first = (ptr_axis - ws_split->split_grab_offset) - origin;
+            const float new_first = (ptr_axis - sc->split_grab_offset) - origin;
             const float new_ext = is_first ? new_first : (avail - new_first);
-            ws_split->split_extent_px = clamp_range(new_ext, min_ext, max_ext);
+            sc->split_extent_px = clamp_range(new_ext, min_ext, max_ext);
             extent_mutated = true;
             request_redraw(ctx);
         }
@@ -103,10 +104,10 @@ SplitResult begin_split(const SplitDesc& desc) noexcept {
         while (a11y_take_any(div_id, 140u, &action)) {
             if (action.action == A11yAction::SetValue && avail > 1.0f) {
                 const float r = clamp_range(action.number, 0.0f, 1.0f);
-                ws_split->split_extent_px = clamp_range(is_first ? (r * avail) : ((1.0f - r) * avail), min_ext, max_ext);
+                sc->split_extent_px = clamp_range(is_first ? (r * avail) : ((1.0f - r) * avail), min_ext, max_ext);
             } else {
                 const float dir = (action.action == A11yAction::Increment) ? 1.0f : -1.0f;
-                ws_split->split_extent_px = clamp_range(ws_split->split_extent_px + (is_first ? dir : -dir) * desc.keyboard_step_px, min_ext, max_ext);
+                sc->split_extent_px = clamp_range(sc->split_extent_px + (is_first ? dir : -dir) * desc.keyboard_step_px, min_ext, max_ext);
             }
             extent_mutated = true;
             request_redraw(ctx);
@@ -117,54 +118,54 @@ SplitResult begin_split(const SplitDesc& desc) noexcept {
             if (key_pressed(desc.axis == Axis::Row ? SDLK_LEFT : SDLK_UP, true)) delta = -desc.keyboard_step_px;
             if (key_pressed(desc.axis == Axis::Row ? SDLK_RIGHT : SDLK_DOWN, true)) delta = desc.keyboard_step_px;
             if (delta != 0.0f) {
-                ws_split->split_extent_px = clamp_range(ws_split->split_extent_px + (is_first ? delta : -delta), min_ext, max_ext);
+                sc->split_extent_px = clamp_range(sc->split_extent_px + (is_first ? delta : -delta), min_ext, max_ext);
                 extent_mutated = true;
                 request_redraw(ctx);
             }
             if (key_pressed(SDLK_HOME)) {
-                ws_split->split_extent_px = is_first ? min_ext : max_ext;
+                sc->split_extent_px = is_first ? min_ext : max_ext;
                 extent_mutated = true;
                 request_redraw(ctx);
             }
             if (key_pressed(SDLK_END)) {
-                ws_split->split_extent_px = is_first ? max_ext : min_ext;
+                sc->split_extent_px = is_first ? max_ext : min_ext;
                 extent_mutated = true;
                 request_redraw(ctx);
             }
         }
 
-        eff_extent = clamp_range(ws_split->split_extent_px, min_ext, max_ext);
+        eff_extent = clamp_range(sc->split_extent_px, min_ext, max_ext);
         if (desc.extent_px && (extent_mutated || !std::isfinite(*desc.extent_px) || *desc.extent_px <= 0.0f)) {
-            *desc.extent_px = ws_split->split_extent_px;
+            *desc.extent_px = sc->split_extent_px;
         }
         if (avail > 1.0f) {
-            ws_split->split_ratio = clamp_range(is_first ? (eff_extent / avail) : ((avail - eff_extent) / avail), 0.0f, 1.0f);
+            sc->split_ratio = clamp_range(is_first ? (eff_extent / avail) : ((avail - eff_extent) / avail), 0.0f, 1.0f);
         }
     } else {
         if (ws_div->pressed_this_frame) {
             if (ctx->active_ui->last_mouse_clicks >= 2u) {
-                ws_split->split_ratio = fallback_ratio;
-                ws_split->split_grab_offset = 0.0f;
+                sc->split_ratio = fallback_ratio;
+                sc->split_grab_offset = 0.0f;
                 request_redraw(ctx);
             } else if (avail > 1.0f) {
                 const float origin = (desc.axis == Axis::Row) ? ws_split->last_box_logical.x : ws_split->last_box_logical.y;
                 const float ptr_axis = (desc.axis == Axis::Row) ? ctx->active_ui->pointer_pos.x : ctx->active_ui->pointer_pos.y;
-                const float div_start = origin + avail * ws_split->split_ratio;
-                ws_split->split_grab_offset = ptr_axis - div_start;
+                const float div_start = origin + avail * sc->split_ratio;
+                sc->split_grab_offset = ptr_axis - div_start;
             }
         } else if (dragging_div && ctx->active_ui->prev_pointer_down && avail > 1.0f) {
             const float origin = (desc.axis == Axis::Row) ? ws_split->last_box_logical.x : ws_split->last_box_logical.y;
             const float ptr_axis = (desc.axis == Axis::Row) ? ctx->active_ui->pointer_pos.x : ctx->active_ui->pointer_pos.y;
-            const float new_first = (ptr_axis - ws_split->split_grab_offset) - origin;
-            ws_split->split_ratio = clamp_range(new_first / avail, 0.0f, 1.0f);
+            const float new_first = (ptr_axis - sc->split_grab_offset) - origin;
+            sc->split_ratio = clamp_range(new_first / avail, 0.0f, 1.0f);
             request_redraw(ctx);
         }
 
         PendingA11yAction action={};
         while(a11y_take_any(div_id,140u,&action)) {
             const float step=avail>1 ? desc.keyboard_step_px/avail : .01f;
-            if(action.action==A11yAction::SetValue) ws_split->split_ratio=action.number;
-            else ws_split->split_ratio+=action.action==A11yAction::Increment ? step : -step;
+            if(action.action==A11yAction::SetValue) sc->split_ratio=action.number;
+            else sc->split_ratio+=action.action==A11yAction::Increment ? step : -step;
             request_redraw(ctx);
         }
 
@@ -172,9 +173,9 @@ SplitResult begin_split(const SplitDesc& desc) noexcept {
             float delta=0;
             if(key_pressed(desc.axis==Axis::Row ? SDLK_LEFT : SDLK_UP,true)) delta=-desc.keyboard_step_px;
             if(key_pressed(desc.axis==Axis::Row ? SDLK_RIGHT : SDLK_DOWN,true)) delta=desc.keyboard_step_px;
-            if(delta!=0) {ws_split->split_ratio+=delta/avail;request_redraw(ctx);}
-            if(key_pressed(SDLK_HOME)) ws_split->split_ratio=0;
-            if(key_pressed(SDLK_END)) ws_split->split_ratio=1;
+            if(delta!=0) {sc->split_ratio+=delta/avail;request_redraw(ctx);}
+            if(key_pressed(SDLK_HOME)) sc->split_ratio=0;
+            if(key_pressed(SDLK_END)) sc->split_ratio=1;
         }
 
         if (avail > 1.0f) {
@@ -185,12 +186,12 @@ SplitResult begin_split(const SplitDesc& desc) noexcept {
                 min_r = mid;
                 max_r = mid;
             }
-            ws_split->split_ratio = clamp_range(
-                ws_split->split_ratio,
+            sc->split_ratio = clamp_range(
+                sc->split_ratio,
                 clamp_range(min_r, 0.0f, 1.0f),
                 clamp_range(max_r, 0.0f, 1.0f));
         } else {
-            ws_split->split_ratio = clamp_range(ws_split->split_ratio, 0.02f, 0.98f);
+            sc->split_ratio = clamp_range(sc->split_ratio, 0.02f, 0.98f);
         }
     }
 
@@ -202,7 +203,7 @@ SplitResult begin_split(const SplitDesc& desc) noexcept {
     advance_motion(ctx, &ws_div->press_t, &ws_div->press_vel, dragging_div ? 1.0f : 0.0f, SpringSpec::snappy());
 
     const Theme& thm = active_theme(ctx);
-    const float ratio = ws_split->split_ratio;
+    const float ratio = sc->split_ratio;
     const Color grip_idle = resolve_theme_color(desc.grip_color, thm.scrollbar_thumb);
     const Color grip_hover = desc.grip_color.is_theme_auto()
         ? thm.divider_thumb_hover
@@ -370,7 +371,7 @@ float split_ratio(uint32_t split_id) noexcept {
         return 0.5f;
     }
     const WidgetState* ws = state_map_find(&ctx->active_ui->states, split_id);
-    return (ws && ws->split_initialized) ? ws->split_ratio : 0.5f;
+    return (ws && ws->cold && ws->cold->split_initialized) ? ws->cold->split_ratio : 0.5f;
 }
 
 void set_split_ratio(uint32_t split_id, float ratio) noexcept {
@@ -380,8 +381,10 @@ void set_split_ratio(uint32_t split_id, float ratio) noexcept {
     }
     if (WidgetState* ws = state_map_get_or_insert(&ctx->active_ui->states, split_id, ctx->active_ui->frame_index)) {
         ws->is_user_element = true;
-        ws->split_initialized = true;
-        ws->split_ratio = clamp_range(ratio, 0.02f, 0.98f);
+        if (WidgetCold* sc = ensure_widget_cold(ws)) {
+            sc->split_initialized = true;
+            sc->split_ratio = clamp_range(ratio, 0.02f, 0.98f);
+        }
         request_redraw(ctx);
     }
 }
@@ -559,21 +562,23 @@ void update_vlist_height(Context* ctx, VarVirtualListCache* c, uint32_t row, flo
     float old = vlist_height(c,row); if (!c->chunks[row/256]) return;
     const double measured_delta = c->total_stride_sum-previous_total;
     double delta = double(h)-old; c->chunks[row/256][row%256] = h; fenwick_add(c,row/256,delta);
-    if (ws) {
-        ws->vscroll_total_h += measured_delta+delta; ws->vscroll_max_y = ws->vscroll_total_h > ws->viewport_dim.y ? ws->vscroll_total_h-ws->viewport_dim.y : 0;
-        if (ws->vlist_stick_initialized && ws->vlist_stuck_bottom)
-            ws->vscroll_pos_y = ws->vscroll_max_y;
-        else if (row < c->last_anchor_row && ws->vscroll_pos_y > 0.0 && c->last_anchor_row < c->item_count)
-            ws->vscroll_pos_y = clamp_double(ws->vscroll_pos_y + (vlist_current_row_top(c, c->last_anchor_row) - anchor_before), 0.0, ws->vscroll_max_y);
+    if (WidgetCold* vc = ensure_widget_cold(ws)) {
+        vc->vscroll_total_h += measured_delta+delta; vc->vscroll_max_y = vc->vscroll_total_h > ws->viewport_dim.y ? vc->vscroll_total_h-ws->viewport_dim.y : 0;
+        if (vc->vlist_stick_initialized && vc->vlist_stuck_bottom)
+            vc->vscroll_pos_y = vc->vscroll_max_y;
+        else if (row < c->last_anchor_row && vc->vscroll_pos_y > 0.0 && c->last_anchor_row < c->item_count)
+            vc->vscroll_pos_y = clamp_double(vc->vscroll_pos_y + (vlist_current_row_top(c, c->last_anchor_row) - anchor_before), 0.0, vc->vscroll_max_y);
     }
 }
 void sync_vlist_scroll_bounds(Context* ctx, VarVirtualListCache* c, double previous_total) noexcept {
     if (auto* ws = state_map_find(&ctx->active_ui->states, c->list_id)) {
-        ws->vscroll_total_h += c->total_stride_sum - previous_total;
-        ws->vscroll_max_y = std::fmax(ws->vscroll_total_h - ws->viewport_dim.y, 0.0);
-        ws->vscroll_pos_y = (ws->vlist_stick_initialized && ws->vlist_stuck_bottom)
-            ? ws->vscroll_max_y
-            : clamp_double(ws->vscroll_pos_y, 0.0, ws->vscroll_max_y);
+        if (WidgetCold* vc = ensure_widget_cold(ws)) {
+            vc->vscroll_total_h += c->total_stride_sum - previous_total;
+            vc->vscroll_max_y = std::fmax(vc->vscroll_total_h - ws->viewport_dim.y, 0.0);
+            vc->vscroll_pos_y = (vc->vlist_stick_initialized && vc->vlist_stuck_bottom)
+                ? vc->vscroll_max_y
+                : clamp_double(vc->vscroll_pos_y, 0.0, vc->vscroll_max_y);
+        }
     }
 }
 void apply_vlist_scroll_to_row(
@@ -585,6 +590,8 @@ void apply_vlist_scroll_to_row(
     AlignY align,
     double known_view_h) noexcept
 {
+    WidgetCold* vc = ensure_widget_cold(ws);
+    if (!vc) return;
     const double previous_total = cache ? cache->total_stride_sum : 0.0;
     if (cache && cache->dirty) {
         remeasure_vlist_dirty_chunks(cache);
@@ -606,8 +613,8 @@ void apply_vlist_scroll_to_row(
     const float item_h = cache
         ? vlist_height(cache, row_index)
         : (std::isfinite(item_height_px) && item_height_px > 1.0f ? item_height_px : 1.0f);
-    const double stride = (ws->vlist_stride >= item_h)
-        ? static_cast<double>(ws->vlist_stride)
+    const double stride = (vc->vlist_stride >= item_h)
+        ? static_cast<double>(vc->vlist_stride)
         : static_cast<double>(item_h);
     const double view_h = (known_view_h > 1.0)
         ? known_view_h
@@ -616,8 +623,8 @@ void apply_vlist_scroll_to_row(
             : (static_cast<double>(ctx->active_ui->viewport_h) / static_cast<double>(ctx->active_ui->dpi_scale)));
     double target_y = cache ? vlist_row_top(cache, row_index) : static_cast<double>(row_index) * stride;
     if (cache) {
-        ws->vscroll_total_h += cache->total_stride_sum - previous_total;
-        ws->vscroll_max_y = (ws->vscroll_total_h > view_h) ? (ws->vscroll_total_h - view_h) : 0.0;
+        vc->vscroll_total_h += cache->total_stride_sum - previous_total;
+        vc->vscroll_max_y = (vc->vscroll_total_h > view_h) ? (vc->vscroll_total_h - view_h) : 0.0;
     }
     if (align == AlignY::Center) {
         target_y -= 0.5 * (view_h - static_cast<double>(item_h));
@@ -627,11 +634,11 @@ void apply_vlist_scroll_to_row(
     if (target_y < 0.0) {
         target_y = 0.0;
     }
-    if (ws->vscroll_max_y > 0.0 && target_y > ws->vscroll_max_y) {
-        target_y = ws->vscroll_max_y;
+    if (vc->vscroll_max_y > 0.0 && target_y > vc->vscroll_max_y) {
+        target_y = vc->vscroll_max_y;
     }
-    ws->vscroll_pos_y = target_y;
-    ws->vscroll_vel_y = 0.0;
+    vc->vscroll_pos_y = target_y;
+    vc->vscroll_vel_y = 0.0;
 }
 } // namespace
 
@@ -766,10 +773,12 @@ void virtual_list_invalidate_heights(uint32_t id) noexcept {
         const double previous_total = c->total_stride_sum;
         reset_vlist_heights(c);
         if (auto* ws = state_map_find(&ctx->active_ui->states,id)) {
-            ws->vscroll_total_h += c->total_stride_sum-previous_total;
-            ws->vscroll_max_y = std::fmax(ws->vscroll_total_h-ws->viewport_dim.y,0.0);
-            if (ws->vlist_stick_initialized && ws->vlist_stuck_bottom) {
-                ws->vscroll_pos_y = ws->vscroll_max_y;
+            if (WidgetCold* vc = ensure_widget_cold(ws)) {
+                vc->vscroll_total_h += c->total_stride_sum-previous_total;
+                vc->vscroll_max_y = std::fmax(vc->vscroll_total_h-ws->viewport_dim.y,0.0);
+                if (vc->vlist_stick_initialized && vc->vlist_stuck_bottom) {
+                    vc->vscroll_pos_y = vc->vscroll_max_y;
+                }
             }
         }
         request_redraw(ctx); return;
@@ -789,7 +798,8 @@ VirtualListSlice begin_virtual_list_with_c_measure(const VirtualListDesc& desc, 
         return VirtualListSlice{};
     }
     WidgetState* ws = state_map_get_or_insert(&ctx->active_ui->states, desc.id, ctx->active_ui->frame_index);
-    if (!ws) {
+    WidgetCold* vc = ensure_widget_cold(ws);
+    if (!vc) {
         return VirtualListSlice{};
     }
 
@@ -812,10 +822,10 @@ VirtualListSlice begin_virtual_list_with_c_measure(const VirtualListDesc& desc, 
     ws->is_scroll_x = false;
     ws->is_scroll_y = false;
     ws->is_virtual_list = true;
-    ws->vlist_built_frame = ctx->active_ui->frame_index;
+    vc->vlist_built_frame = ctx->active_ui->frame_index;
     ws->show_scrollbar = desc.show_scrollbar;
-    ws->vlist_stride = static_cast<float>(stride);
-    ws->owner_canvas_id = (ctx->active_ui->canvas_depth > 0u)
+    vc->vlist_stride = static_cast<float>(stride);
+    vc->owner_canvas_id = (ctx->active_ui->canvas_depth > 0u)
         ? ctx->active_ui->canvas_stack[ctx->active_ui->canvas_depth - 1u].id
         : 0u;
 
@@ -835,46 +845,46 @@ VirtualListSlice begin_virtual_list_with_c_measure(const VirtualListDesc& desc, 
         }
     }
     const double max_scroll = (total_h > view_h) ? (total_h - view_h) : 0.0;
-    const double prev_max_scroll = ws->vscroll_max_y;
+    const double prev_max_scroll = vc->vscroll_max_y;
     if (desc.stick_to_bottom) {
-        if (!ws->vlist_stick_initialized) {
-            ws->vlist_stick_initialized = true;
-            ws->vlist_stuck_bottom = true;
-        } else if (!ws->vlist_stuck_bottom && !ws->vlist_pending_scroll && ws->vscroll_vel_y >= 0.0 &&
-                   (prev_max_scroll <= 0.5 || ws->vscroll_pos_y >= prev_max_scroll - 2.0)) {
-            ws->vlist_stuck_bottom = true;
+        if (!vc->vlist_stick_initialized) {
+            vc->vlist_stick_initialized = true;
+            vc->vlist_stuck_bottom = true;
+        } else if (!vc->vlist_stuck_bottom && !vc->vlist_pending_scroll && vc->vscroll_vel_y >= 0.0 &&
+                   (prev_max_scroll <= 0.5 || vc->vscroll_pos_y >= prev_max_scroll - 2.0)) {
+            vc->vlist_stuck_bottom = true;
         }
     }
-    ws->vscroll_total_h = total_h;
-    ws->vscroll_max_y = max_scroll;
-    if (ws->vlist_pending_scroll) {
-        ws->vlist_pending_scroll = false;
+    vc->vscroll_total_h = total_h;
+    vc->vscroll_max_y = max_scroll;
+    if (vc->vlist_pending_scroll) {
+        vc->vlist_pending_scroll = false;
         if (desc.item_count > 0u) {
-            const uint32_t pending_row = (ws->vlist_pending_scroll_row >= desc.item_count)
+            const uint32_t pending_row = (vc->vlist_pending_scroll_row >= desc.item_count)
                 ? (desc.item_count - 1u)
-                : ws->vlist_pending_scroll_row;
+                : vc->vlist_pending_scroll_row;
             apply_vlist_scroll_to_row(
                 ctx, ws, cache, pending_row,
-                ws->vlist_pending_scroll_item_h, ws->vlist_pending_scroll_align, view_h);
+                vc->vlist_pending_scroll_item_h, vc->vlist_pending_scroll_align, view_h);
         }
-        ws->vlist_stuck_bottom = (ws->vscroll_max_y <= 0.5) || (ws->vscroll_pos_y >= ws->vscroll_max_y - 2.0);
+        vc->vlist_stuck_bottom = (vc->vscroll_max_y <= 0.5) || (vc->vscroll_pos_y >= vc->vscroll_max_y - 2.0);
     }
     PendingA11yAction lv_cmd = {};
     while(a11y_take_any(desc.id,12u,&lv_cmd)) {
-        ws->vscroll_pos_y += (lv_cmd.action==A11yAction::Increment) ? 40.0 : -40.0;
-        if (lv_cmd.action == A11yAction::Decrement) ws->vlist_stuck_bottom = false;
+        vc->vscroll_pos_y += (lv_cmd.action==A11yAction::Increment) ? 40.0 : -40.0;
+        if (lv_cmd.action == A11yAction::Decrement) vc->vlist_stuck_bottom = false;
         request_redraw(ctx);
     }
-    if (desc.stick_to_bottom && ws->vlist_stuck_bottom) {
-        ws->vscroll_pos_y = ws->vscroll_max_y;
-        ws->vscroll_vel_y = 0.0;
+    if (desc.stick_to_bottom && vc->vlist_stuck_bottom) {
+        vc->vscroll_pos_y = vc->vscroll_max_y;
+        vc->vscroll_vel_y = 0.0;
     } else {
-        ws->vscroll_pos_y = clamp_double(ws->vscroll_pos_y, 0.0, ws->vscroll_max_y);
+        vc->vscroll_pos_y = clamp_double(vc->vscroll_pos_y, 0.0, vc->vscroll_max_y);
     }
     ws->viewport_dim.y = static_cast<float>(view_h);
 
-    const double content_scroll_y = (ws->vscroll_pos_y > static_cast<double>(desc.padding.top))
-        ? (ws->vscroll_pos_y - static_cast<double>(desc.padding.top))
+    const double content_scroll_y = (vc->vscroll_pos_y > static_cast<double>(desc.padding.top))
+        ? (vc->vscroll_pos_y - static_cast<double>(desc.padding.top))
         : 0.0;
     const double inner_view_h = (view_h > pad_v) ? (view_h - pad_v) : view_h;
 
@@ -906,7 +916,7 @@ VirtualListSlice begin_virtual_list_with_c_measure(const VirtualListDesc& desc, 
             const double shift = (adj_content_scroll_y > 0.0) ? (vlist_current_row_top(cache, anchor) - anchor_top_before) : 0.0;
             if (shift != 0.0) {
                 adj_content_scroll_y = (adj_content_scroll_y + shift > 0.0) ? (adj_content_scroll_y + shift) : 0.0;
-                ws->vscroll_pos_y = (ws->vscroll_pos_y + shift > 0.0) ? (ws->vscroll_pos_y + shift) : 0.0;
+                vc->vscroll_pos_y = (vc->vscroll_pos_y + shift > 0.0) ? (vc->vscroll_pos_y + shift) : 0.0;
             }
             first_row_top = vlist_row_top(cache, first_idx);
             double y = first_row_top;
@@ -918,24 +928,24 @@ VirtualListSlice begin_virtual_list_with_c_measure(const VirtualListDesc& desc, 
             uint32_t extra = desc.item_count - end_idx;
             if (extra > desc.overscan_rows) extra = desc.overscan_rows;
             end_idx += extra;
-            ws->vscroll_total_h = cache->total_stride_sum - (desc.item_count ? gap_px : 0) + pad_v;
-            ws->vscroll_max_y = ws->vscroll_total_h > view_h ? ws->vscroll_total_h - view_h : 0;
-            const double before_clamp = ws->vscroll_pos_y;
-            if (desc.stick_to_bottom && ws->vlist_stuck_bottom) {
-                ws->vscroll_pos_y = ws->vscroll_max_y;
+            vc->vscroll_total_h = cache->total_stride_sum - (desc.item_count ? gap_px : 0) + pad_v;
+            vc->vscroll_max_y = vc->vscroll_total_h > view_h ? vc->vscroll_total_h - view_h : 0;
+            const double before_clamp = vc->vscroll_pos_y;
+            if (desc.stick_to_bottom && vc->vlist_stuck_bottom) {
+                vc->vscroll_pos_y = vc->vscroll_max_y;
             } else {
-                ws->vscroll_pos_y = clamp_double(ws->vscroll_pos_y, 0.0, ws->vscroll_max_y);
+                vc->vscroll_pos_y = clamp_double(vc->vscroll_pos_y, 0.0, vc->vscroll_max_y);
             }
             // Shrinking or growing estimates near the bottom can shift the visible slice.
-            if (ws->vscroll_pos_y == before_clamp ||
-                (!(desc.stick_to_bottom && ws->vlist_stuck_bottom) && ws->vscroll_pos_y - desc.padding.top >= first_row_top)) break;
-            adj_content_scroll_y = ws->vscroll_pos_y > desc.padding.top ? ws->vscroll_pos_y - desc.padding.top : 0.0;
+            if (vc->vscroll_pos_y == before_clamp ||
+                (!(desc.stick_to_bottom && vc->vlist_stuck_bottom) && vc->vscroll_pos_y - desc.padding.top >= first_row_top)) break;
+            adj_content_scroll_y = vc->vscroll_pos_y > desc.padding.top ? vc->vscroll_pos_y - desc.padding.top : 0.0;
         }
         auto* rec = ctx->frame_arena.alloc<ActiveVarListRecord>();
         if (rec) { *rec = {desc.id,first_idx,end_idx,ctx->active_ui->active_vlists}; ctx->active_ui->active_vlists = rec; ++ctx->active_ui->active_vlist_count; }
         cache->dirty = false;
     }
-    const float child_offset_y = static_cast<float>(first_row_top - ws->vscroll_pos_y);
+    const float child_offset_y = static_cast<float>(first_row_top - vc->vscroll_pos_y);
 
     const Theme& thm = active_theme(ctx);
     const Color eff_bg = resolve_theme_color(desc.background, thm.bg_surface);
@@ -996,13 +1006,13 @@ VirtualListSlice begin_virtual_list_with_c_measure(const VirtualListDesc& desc, 
     layout_configure_open(ctx->active_ui->layout, decl);
 
     ctx->a11y_parent=a11y_emit(ctx,desc.id,A11yRole::List,{}, {},0,12u);
-    const bool at_bottom = (ws->vscroll_max_y <= 0.5) || (ws->vscroll_pos_y >= ws->vscroll_max_y - 2.0);
+    const bool at_bottom = (vc->vscroll_max_y <= 0.5) || (vc->vscroll_pos_y >= vc->vscroll_max_y - 2.0);
     return VirtualListSlice{
         .first_index = first_idx,
         .end_index = end_idx,
         .total_count = desc.item_count,
-        .scroll_y = ws->vscroll_pos_y,
-        .max_scroll_y = ws->vscroll_max_y,
+        .scroll_y = vc->vscroll_pos_y,
+        .max_scroll_y = vc->vscroll_max_y,
         .viewport_height = static_cast<float>(view_h),
         .at_bottom = at_bottom,
     };
@@ -1022,7 +1032,7 @@ double virtual_list_scroll_offset(uint32_t list_id) noexcept {
         return 0.0;
     }
     const WidgetState* ws = state_map_find(&ctx->active_ui->states, list_id);
-    return ws ? ws->vscroll_pos_y : 0.0;
+    return (ws && ws->cold) ? ws->cold->vscroll_pos_y : 0.0;
 }
 
 void set_virtual_list_scroll_offset(uint32_t list_id, double offset_y, bool stop_momentum) noexcept {
@@ -1033,15 +1043,17 @@ void set_virtual_list_scroll_offset(uint32_t list_id, double offset_y, bool stop
     if (WidgetState* ws = state_map_get_or_insert(&ctx->active_ui->states, list_id, ctx->active_ui->frame_index)) {
         ws->is_user_element = true;
         ws->is_virtual_list = true;
-        ws->vlist_pending_scroll = false;
-        double clamped = (offset_y > 0.0) ? offset_y : 0.0;
-        if (ws->vscroll_max_y > 0.0) {
-            clamped = clamp_double(clamped, 0.0, ws->vscroll_max_y);
-        }
-        ws->vscroll_pos_y = clamped;
-        ws->vlist_stuck_bottom = (ws->vscroll_max_y <= 0.5) || (ws->vscroll_pos_y >= ws->vscroll_max_y - 2.0);
-        if (stop_momentum) {
-            ws->vscroll_vel_y = 0.0;
+        if (WidgetCold* vc = ensure_widget_cold(ws)) {
+            vc->vlist_pending_scroll = false;
+            double clamped = (offset_y > 0.0) ? offset_y : 0.0;
+            if (vc->vscroll_max_y > 0.0) {
+                clamped = clamp_double(clamped, 0.0, vc->vscroll_max_y);
+            }
+            vc->vscroll_pos_y = clamped;
+            vc->vlist_stuck_bottom = (vc->vscroll_max_y <= 0.5) || (vc->vscroll_pos_y >= vc->vscroll_max_y - 2.0);
+            if (stop_momentum) {
+                vc->vscroll_vel_y = 0.0;
+            }
         }
         request_redraw(ctx);
     }
@@ -1053,10 +1065,10 @@ bool virtual_list_is_at_bottom(uint32_t list_id) noexcept {
         return true;
     }
     const WidgetState* ws = state_map_find(&ctx->active_ui->states, list_id);
-    if (!ws) {
+    if (!ws || !ws->cold) {
         return true;
     }
-    return (ws->vscroll_max_y <= 0.5) || (ws->vscroll_pos_y >= ws->vscroll_max_y - 2.0);
+    return (ws->cold->vscroll_max_y <= 0.5) || (ws->cold->vscroll_pos_y >= ws->cold->vscroll_max_y - 2.0);
 }
 
 void virtual_list_scroll_to_bottom(uint32_t list_id, bool stop_momentum) noexcept {
@@ -1067,12 +1079,14 @@ void virtual_list_scroll_to_bottom(uint32_t list_id, bool stop_momentum) noexcep
     if (WidgetState* ws = state_map_get_or_insert(&ctx->active_ui->states, list_id, ctx->active_ui->frame_index)) {
         ws->is_user_element = true;
         ws->is_virtual_list = true;
-        ws->vlist_pending_scroll = false;
-        ws->vlist_stick_initialized = true;
-        ws->vlist_stuck_bottom = true;
-        ws->vscroll_pos_y = ws->vscroll_max_y;
-        if (stop_momentum) {
-            ws->vscroll_vel_y = 0.0;
+        if (WidgetCold* vc = ensure_widget_cold(ws)) {
+            vc->vlist_pending_scroll = false;
+            vc->vlist_stick_initialized = true;
+            vc->vlist_stuck_bottom = true;
+            vc->vscroll_pos_y = vc->vscroll_max_y;
+            if (stop_momentum) {
+                vc->vscroll_vel_y = 0.0;
+            }
         }
         request_redraw(ctx);
     }
@@ -1089,23 +1103,24 @@ void virtual_list_scroll_to_row(
         return;
     }
     WidgetState* ws = state_map_get_or_insert(&ctx->active_ui->states, list_id, ctx->active_ui->frame_index);
-    if (!ws) {
+    WidgetCold* vc = ensure_widget_cold(ws);
+    if (!vc) {
         return;
     }
     ws->is_user_element = true;
     ws->is_virtual_list = true;
-    if (!ctx->in_frame || ws->vlist_built_frame != ctx->active_ui->frame_index) {
-        ws->vlist_pending_scroll = true;
-        ws->vlist_pending_scroll_row = row_index;
-        ws->vlist_pending_scroll_item_h = item_height_px;
-        ws->vlist_pending_scroll_align = align;
+    if (!ctx->in_frame || vc->vlist_built_frame != ctx->active_ui->frame_index) {
+        vc->vlist_pending_scroll = true;
+        vc->vlist_pending_scroll_row = row_index;
+        vc->vlist_pending_scroll_item_h = item_height_px;
+        vc->vlist_pending_scroll_align = align;
     }
     auto* cache = find_vlist(ctx->active_ui, list_id);
     if (cache && cache->item_count == 0u) {
         return;
     }
     apply_vlist_scroll_to_row(ctx, ws, cache, row_index, item_height_px, align, 0.0);
-    ws->vlist_stuck_bottom = (ws->vscroll_max_y <= 0.5) || (ws->vscroll_pos_y >= ws->vscroll_max_y - 2.0);
+    vc->vlist_stuck_bottom = (vc->vscroll_max_y <= 0.5) || (vc->vscroll_pos_y >= vc->vscroll_max_y - 2.0);
     request_redraw(ctx);
 }
 
@@ -1125,30 +1140,31 @@ CanvasState begin_canvas(const CanvasDesc& desc_in) noexcept {
     desc.marquee_border = resolve_theme_color(desc.marquee_border, thm.marquee_border);
 
     WidgetState* ws = state_map_get_or_insert(&ctx->active_ui->states, desc.id, ctx->active_ui->frame_index);
-    if (!ws) {
+    WidgetCold* cc = ensure_widget_cold(ws);
+    if (!cc) {
         return CanvasState{};
     }
 
     const float min_z = (desc.min_zoom > 0.02f) ? desc.min_zoom : 0.02f;
     const float max_z = (desc.max_zoom > min_z) ? desc.max_zoom : min_z;
-    if (!ws->canvas_initialized) {
+    if (!cc->canvas_initialized) {
         const float def_z = (desc.default_zoom > 1e-4f) ? desc.default_zoom : 1.0f;
-        ws->canvas_pan = desc.default_pan;
-        ws->canvas_zoom = clamp_range(def_z, min_z, max_z);
-        ws->canvas_initialized = true;
+        cc->canvas_pan = desc.default_pan;
+        cc->canvas_zoom = clamp_range(def_z, min_z, max_z);
+        cc->canvas_initialized = true;
     }
     ws->is_user_element = true;
     ws->is_canvas = true;
-    ws->canvas_interactive = desc.interactive;
-    ws->canvas_marquee_enabled = desc.marquee_select;
+    cc->canvas_interactive = desc.interactive;
+    cc->canvas_marquee_enabled = desc.marquee_select;
     if (!desc.marquee_select) {
-        ws->canvas_marquee_active = false;
-        ws->canvas_marquee_finished = false;
+        cc->canvas_marquee_active = false;
+        cc->canvas_marquee_finished = false;
     }
-    ws->canvas_min_zoom = min_z;
-    ws->canvas_max_zoom = max_z;
-    ws->canvas_zoom = clamp_range(ws->canvas_zoom, min_z, max_z);
-    ws->owner_canvas_id = (ctx->active_ui->canvas_depth > 0u)
+    cc->canvas_min_zoom = min_z;
+    cc->canvas_max_zoom = max_z;
+    cc->canvas_zoom = clamp_range(cc->canvas_zoom, min_z, max_z);
+    cc->owner_canvas_id = (ctx->active_ui->canvas_depth > 0u)
         ? ctx->active_ui->canvas_stack[ctx->active_ui->canvas_depth - 1u].id
         : 0u;
 
@@ -1158,13 +1174,13 @@ CanvasState begin_canvas(const CanvasDesc& desc_in) noexcept {
     }
 
     const CanvasState cs = {
-        .pan = ws->canvas_pan,
-        .zoom = ws->canvas_zoom,
+        .pan = cc->canvas_pan,
+        .zoom = cc->canvas_zoom,
         .viewport = ws->last_box_logical,
         .panning = panning,
-        .marquee_active = ws->canvas_marquee_active,
-        .marquee_finished = ws->canvas_marquee_finished,
-        .marquee_world = ws->canvas_marquee_world,
+        .marquee_active = cc->canvas_marquee_active,
+        .marquee_finished = cc->canvas_marquee_finished,
+        .marquee_world = cc->canvas_marquee_world,
     };
 
     ctx->active_ui->canvas_stack[ctx->active_ui->canvas_depth++] = CanvasStackEntry{
@@ -1192,8 +1208,8 @@ CanvasState begin_canvas(const CanvasDesc& desc_in) noexcept {
         if (desc.show_grid) {
             CanvasGridExtra* cg = ctx->frame_arena.alloc<CanvasGridExtra>();
             if (cg) {
-                cg->pan = ws->canvas_pan;
-                cg->zoom = ws->canvas_zoom;
+                cg->pan = cc->canvas_pan;
+                cg->zoom = cc->canvas_zoom;
                 cg->grid_step_world = desc.grid_step_world;
                 cg->major_subdiv = desc.major_grid_subdiv;
                 cg->minor_color = desc.minor_grid_color;
@@ -1316,13 +1332,14 @@ CanvasNodeResult begin_canvas_node(const CanvasNodeDesc& desc) noexcept {
     }
     CanvasStackEntry& ce = ctx->active_ui->canvas_stack[ctx->active_ui->canvas_depth - 1u];
     WidgetState* ws = state_map_get_or_insert(&ctx->active_ui->states, desc.id, ctx->active_ui->frame_index);
-    if (!ws) {
+    WidgetCold* nc = ensure_widget_cold(ws);
+    if (!nc) {
         return CanvasNodeResult{};
     }
 
     ws->is_user_element = true;
     ws->is_canvas_node = true;
-    ws->owner_canvas_id = ce.id;
+    nc->owner_canvas_id = ce.id;
 
     Vec2 node_pos = desc.world_pos ? *desc.world_pos : desc.pos_value;
     const bool hovered_node = pointer_over_id(ctx->active_ui, desc.id);
@@ -1332,13 +1349,13 @@ CanvasNodeResult begin_canvas_node(const CanvasNodeDesc& desc) noexcept {
     Vec2 drag_delta_world = {};
     if (can_drag && ws->pressed_this_frame) {
         const Vec2 ptr_world = ce.state.screen_to_world(ctx->active_ui->pointer_pos);
-        ws->drag_grab = node_pos - ptr_world;
+        nc->drag_grab = node_pos - ptr_world;
         ctx->active_ui->desired_cursor = Cursor::Move;
     } else if (dragging) {
         const float inv_z = (ce.state.zoom > 1e-4f) ? (1.0f / ce.state.zoom) : 1.0f;
         drag_delta_world = ctx->active_ui->pointer_delta * inv_z;
         const Vec2 ptr_world = ce.state.screen_to_world(ctx->active_ui->pointer_pos);
-        node_pos = ptr_world + ws->drag_grab;
+        node_pos = ptr_world + nc->drag_grab;
         if (desc.world_pos) {
             *desc.world_pos = node_pos;
         }
@@ -1411,17 +1428,18 @@ CanvasState canvas_state(uint32_t canvas_id) noexcept {
         return CanvasState{};
     }
     const WidgetState* ws = state_map_find(&ctx->active_ui->states, canvas_id);
-    if (!ws || !ws->canvas_initialized) {
+    if (!ws || !ws->cold || !ws->cold->canvas_initialized) {
         return CanvasState{};
     }
+    const WidgetCold* cc = ws->cold;
     return CanvasState{
-        .pan = ws->canvas_pan,
-        .zoom = ws->canvas_zoom,
+        .pan = cc->canvas_pan,
+        .zoom = cc->canvas_zoom,
         .viewport = ws->last_box_logical,
         .panning = (ctx->active_ui->pan_canvas_id == canvas_id),
-        .marquee_active = ws->canvas_marquee_active,
-        .marquee_finished = ws->canvas_marquee_finished,
-        .marquee_world = ws->canvas_marquee_world,
+        .marquee_active = cc->canvas_marquee_active,
+        .marquee_finished = cc->canvas_marquee_finished,
+        .marquee_world = cc->canvas_marquee_world,
     };
 }
 
@@ -1431,11 +1449,13 @@ void set_canvas_view(uint32_t canvas_id, Vec2 pan, float zoom) noexcept {
         return;
     }
     if (WidgetState* ws = state_map_get_or_insert(&ctx->active_ui->states, canvas_id, ctx->active_ui->frame_index)) {
-        const float min_z = (ws->canvas_min_zoom > 0.02f) ? ws->canvas_min_zoom : 0.02f;
-        const float max_z = (ws->canvas_max_zoom > min_z) ? ws->canvas_max_zoom : 16.0f;
-        ws->canvas_pan = pan;
-        ws->canvas_zoom = clamp_range(zoom, min_z, max_z);
-        ws->canvas_initialized = true;
+        if (WidgetCold* cc = ensure_widget_cold(ws)) {
+            const float min_z = (cc->canvas_min_zoom > 0.02f) ? cc->canvas_min_zoom : 0.02f;
+            const float max_z = (cc->canvas_max_zoom > min_z) ? cc->canvas_max_zoom : 16.0f;
+            cc->canvas_pan = pan;
+            cc->canvas_zoom = clamp_range(zoom, min_z, max_z);
+            cc->canvas_initialized = true;
+        }
         request_redraw(ctx);
     }
 }
@@ -1817,7 +1837,7 @@ void paint_table_header(Rect bounds, void* data) noexcept {
     if (!meta || p.column >= kMaxTableColumns) return;
     meta->widths[p.column]=bounds.w;
     if (WidgetState* cws = state_map_find(&ctx->active_ui->states, meta->column_ids[p.column])) {
-        cws->column_width = bounds.w;
+        if (WidgetCold* cwc = ensure_widget_cold(cws)) cwc->column_width = bounds.w;
     }
     if (p.lines) draw_line({.from={bounds.w-1,0},.to={bounds.w-1,bounds.h},.color=p.border});
     if (p.sorted) {
@@ -1833,9 +1853,11 @@ bool table_row_selected(const TableSelection& s,uint32_t row) noexcept {
 namespace {
 void table_select_row(const TableDesc& d,uint32_t row,bool extend,bool toggle) noexcept {
     auto* ws=state_map_find(&current_context()->active_ui->states,d.id);
+    WidgetCold* tc = ensure_widget_cold(ws);
+    if (!tc) return;
     const TableSelection& s=d.selection;
-    uint32_t& focus=s.focused_row ? *s.focused_row : ws->table_focus_row;
-    uint32_t& anchor=s.anchor_row ? *s.anchor_row : ws->table_anchor_row;
+    uint32_t& focus=s.focused_row ? *s.focused_row : tc->table_focus_row;
+    uint32_t& anchor=s.anchor_row ? *s.anchor_row : tc->table_anchor_row;
     if(anchor>=d.item_count || !extend) anchor=row;
     focus=row;
     if(d.selected_row) *d.selected_row=row;
@@ -1879,19 +1901,21 @@ TableResult begin_table(const TableDesc& desc_in) noexcept {
         }
         metadata = &ui.tables[ui.table_count++]; *metadata = {}; metadata->id = desc.id;
     }
-    if (!metadata) return {};
+    if (!metadata || !ensure_table_stack(ctx->active_ui)) return {};
+    auto* ws = state_map_get_or_insert(&ctx->active_ui->states, desc.id, ctx->active_ui->frame_index);
+    WidgetCold* tc = ensure_widget_cold(ws);
+    if (!tc) return {};
     auto& t = ctx->active_ui->table_stack[ctx->active_ui->table_depth++]; t = {}; t.desc = desc; t.count = static_cast<uint32_t>(desc.columns.size());
     for (uint32_t c = 0; c < t.count; ++c) t.columns[c] = desc.columns[c];
     t.desc.columns = {t.columns, t.count};
-    auto* ws = state_map_get_or_insert(&ctx->active_ui->states, desc.id, ctx->active_ui->frame_index);
-    if (!ws->table_initialized || ws->table_sort_column >= t.count) {
-        ws->table_initialized = true; ws->table_sort_column = desc.default_sort_column < t.count ? desc.default_sort_column : 0;
-        ws->table_sort_descending = desc.default_sort_descending;
+    if (!tc->table_initialized || tc->table_sort_column >= t.count) {
+        tc->table_initialized = true; tc->table_sort_column = desc.default_sort_column < t.count ? desc.default_sort_column : 0;
+        tc->table_sort_descending = desc.default_sort_descending;
     }
-    TableResult result = { .sort_column = ws->table_sort_column, .sort_descending = ws->table_sort_descending, .sort_changed = ws->table_sort_changed };
-    ws->table_sort_changed = false;
+    TableResult result = { .sort_column = tc->table_sort_column, .sort_descending = tc->table_sort_descending, .sort_changed = tc->table_sort_changed };
+    tc->table_sort_changed = false;
     if(desc.keyboard_navigation && focused(desc.id) && desc.item_count) {
-        const uint32_t current=desc.selection.focused_row ? *desc.selection.focused_row : desc.selected_row ? *desc.selected_row : ws->table_focus_row;
+        const uint32_t current=desc.selection.focused_row ? *desc.selection.focused_row : desc.selected_row ? *desc.selected_row : tc->table_focus_row;
         uint32_t next=current<desc.item_count ? current : 0;
         const uint32_t page=uint32_t(std::fmax(1,std::floor(ws->viewport_dim.y/(desc.row_height_px+desc.row_gap_px))));
         bool moved=false;
@@ -1904,8 +1928,8 @@ TableResult begin_table(const TableDesc& desc_in) noexcept {
         if(moved) {
             table_select_row(desc,next,(key_mods()&Mod_Shift)!=0,(key_mods()&Mod_Primary)!=0);
             const double top=double(next)*(desc.row_height_px+desc.row_gap_px);
-            if(top<ws->vscroll_pos_y || top+desc.row_height_px>ws->vscroll_pos_y+ws->viewport_dim.y)
-                table_scroll_to_row(desc.id,next,desc.row_height_px,top<ws->vscroll_pos_y ? AlignY::Top : AlignY::Bottom);
+            if(top<tc->vscroll_pos_y || top+desc.row_height_px>tc->vscroll_pos_y+ws->viewport_dim.y)
+                table_scroll_to_row(desc.id,next,desc.row_height_px,top<tc->vscroll_pos_y ? AlignY::Top : AlignY::Bottom);
         }
         if((key_mods()&Mod_Primary) && key_pressed(SDLK_A) && desc.selection.selected_words) {
             const uint32_t words=desc.item_count/64u+(desc.item_count%64u!=0);
@@ -1921,26 +1945,28 @@ TableResult begin_table(const TableDesc& desc_in) noexcept {
         const auto& col = t.columns[c]; const uint32_t cid = table_col_id(desc, c), rid = id_index(cid, 0x7600u);
         state_map_get_or_insert(&ctx->active_ui->states, rid, ctx->active_ui->frame_index);
         auto* cw = state_map_get_or_insert(&ctx->active_ui->states, cid, ctx->active_ui->frame_index);
-        if (metadata->count != 0 && metadata->count != t.count && col.id == 0) cw->column_override = false;
+        WidgetCold* cwc = ensure_widget_cold(cw);
+        if (!cwc) continue;
+        if (metadata->count != 0 && metadata->count != t.count && col.id == 0) cwc->column_override = false;
         const bool active = ctx->active_ui->active_id == rid;
-        const bool ended = cw->column_resizing && !active;
-        cw->column_resizing = active;
+        const bool ended = cwc->column_resizing && !active;
+        cwc->column_resizing = active;
         if (col.resizable) {
-            if (double_clicked(rid)) { cw->column_override = false; request_redraw(ctx); }
-            else if (state_map_find(&ctx->active_ui->states, rid)->pressed_this_frame) { cw->column_grab = ctx->active_ui->pointer_pos.x - (cw->column_width > 0 ? cw->column_width : col.width); }
+            if (double_clicked(rid)) { cwc->column_override = false; request_redraw(ctx); }
+            else if (state_map_find(&ctx->active_ui->states, rid)->pressed_this_frame) { cwc->column_grab = ctx->active_ui->pointer_pos.x - (cwc->column_width > 0 ? cwc->column_width : col.width); }
             else if (active && ctx->active_ui->prev_pointer_down) {
-                cw->column_width = clamp_range(ctx->active_ui->pointer_pos.x - cw->column_grab, col.min_width, col.max_width);
-                cw->column_override = true; request_redraw(ctx);
+                cwc->column_width = clamp_range(ctx->active_ui->pointer_pos.x - cwc->column_grab, col.min_width, col.max_width);
+                cwc->column_override = true; request_redraw(ctx);
             }
             if (active || hovered(rid)) ctx->active_ui->desired_cursor = Cursor::ResizeEW;
         }
         resizing = resizing || active || ended;
-        if (cw->column_override || col.sizing == TableColumnSizing::Fixed) {
-            t.col_widths[c] = clamp_range(cw->column_override ? cw->column_width : col.width, col.min_width, col.max_width);
+        if (cwc->column_override || col.sizing == TableColumnSizing::Fixed) {
+            t.col_widths[c] = clamp_range(cwc->column_override ? cwc->column_width : col.width, col.min_width, col.max_width);
             t.tracks[c] = GridTrack::px(t.col_widths[c]);
         } else {
             t.tracks[c] = GridTrack::fr(col.width > 0 ? col.width : 1,col.min_width,col.max_width);
-            t.col_widths[c] = cw->column_width > 0 ? cw->column_width : col.min_width;
+            t.col_widths[c] = cwc->column_width > 0 ? cwc->column_width : col.min_width;
         }
     }
     float content_min=desc.padding.left+desc.padding.right+gutter;
@@ -1955,7 +1981,8 @@ TableResult begin_table(const TableDesc& desc_in) noexcept {
         .padding = {desc.padding.left, desc.padding.right + gutter, 0, 0}, .background = desc.header_background, .grid_tracks = {t.tracks,t.count}, .shrink_width = true });
     for (uint32_t c = 0; c < t.count; ++c) {
         const auto& col = t.columns[c]; const uint32_t cid = table_col_id(desc, c), hid = id_index(cid, 0x7601u), rid = id_index(cid, 0x7600u);
-        auto* cw = state_map_find(&ctx->active_ui->states, cid); cw->column_width = t.col_widths[c];
+        auto* cw = state_map_find(&ctx->active_ui->states, cid);
+        if (WidgetCold* cwc = ensure_widget_cold(cw)) cwc->column_width = t.col_widths[c];
         const bool header_kbd = focused(hid) && ctx->active_ui->ime_comp_len == 0u &&
             (consume_key_pressed(SDLK_RETURN) || consume_key_pressed(SDLK_KP_ENTER) || consume_key_pressed(SDLK_SPACE));
         if (col.sortable && (clicked(hid) || header_kbd) && !resizing) {
@@ -1976,7 +2003,10 @@ TableResult begin_table(const TableDesc& desc_in) noexcept {
     }
     end_box();
     ws = state_map_find(&ctx->active_ui->states, desc.id);
-    ws->table_sort_column = result.sort_column; ws->table_sort_descending = result.sort_descending; metadata->count = t.count;
+    if (WidgetCold* tcold = ensure_widget_cold(ws)) {
+        tcold->table_sort_column = result.sort_column; tcold->table_sort_descending = result.sort_descending;
+    }
+    metadata->count = t.count;
     for (uint32_t c = 0; c < t.count; ++c) { metadata->widths[c] = t.col_widths[c]; metadata->column_ids[c] = table_col_id(desc,c); metadata->min_widths[c] = t.columns[c].min_width; metadata->max_widths[c] = t.columns[c].max_width; }
     begin_box({ .axis = Axis::Col, .width = Sizing::grow(content_min), .height = Sizing::grow(), .shrink_width = true, .shrink_height=true });
     result.slice = begin_virtual_list({ .id = desc.id, .item_count = desc.item_count, .item_height_px = desc.row_height_px,
@@ -1991,9 +2021,11 @@ TableResult begin_table(const TableDesc& desc_in) noexcept {
     // Rows own the horizontal insets, including the scrollbar gutter. Keep the list's vertical padding.
     ws=state_map_find(&ctx->active_ui->states,desc.id);
     const WidgetState* outer_ws = desc.horizontal_scroll ? state_map_find(&ctx->active_ui->states, outer_id) : nullptr;
-    ws->vscrollbar_right_edge_x = (outer_ws && outer_ws->last_box_logical.w > 1.0f)
-        ? (outer_ws->last_box_logical.x + outer_ws->last_box_logical.w)
-        : 0.0f;
+    if (WidgetCold* tcold = ensure_widget_cold(ws)) {
+        tcold->vscrollbar_right_edge_x = (outer_ws && outer_ws->last_box_logical.w > 1.0f)
+            ? (outer_ws->last_box_logical.x + outer_ws->last_box_logical.w)
+            : 0.0f;
+    }
     ws->is_focusable=desc.keyboard_navigation;
     if(desc.keyboard_navigation && reserve_focus(ctx->active_ui)) ctx->active_ui->focus_order[ctx->active_ui->focus_count++]=desc.id;
     a11y_semantic(desc.id,A11yRole::Table,{},0,desc.keyboard_navigation ? 1u : 0u);
@@ -2056,15 +2088,19 @@ void set_table_column_width(uint32_t id, uint32_t col, float width) noexcept {
     auto* metadata = table_metadata(ctx,id); if (!metadata || col >= metadata->count) return;
     width = clamp_range(width,metadata->min_widths[col],metadata->max_widths[col]); metadata->widths[col] = width;
     const uint32_t cid = metadata->column_ids[col]; auto* cw = state_map_get_or_insert(&ctx->active_ui->states,cid,ctx->active_ui->frame_index);
-    cw->column_width = width; cw->column_override = true; request_redraw(ctx);
+    if (WidgetCold* cwc = ensure_widget_cold(cw)) { cwc->column_width = width; cwc->column_override = true; }
+    request_redraw(ctx);
 }
 void set_table_sort(uint32_t id, uint32_t col, bool descending) noexcept {
     Context* ctx = current_context(); if (!ctx || !id || col >= kMaxTableColumns) return;
     auto* ws = state_map_get_or_insert(&ctx->active_ui->states,id,ctx->active_ui->frame_index);
     const auto* metadata = table_metadata(ctx,id);
     if (metadata && col >= metadata->count) return;
-    ws->table_sort_changed = !ws->table_initialized || ws->table_sort_column != col || ws->table_sort_descending != descending;
-    ws->table_initialized = true; ws->table_sort_column = col; ws->table_sort_descending = descending; request_redraw(ctx);
+    if (WidgetCold* tc = ensure_widget_cold(ws)) {
+        tc->table_sort_changed = !tc->table_initialized || tc->table_sort_column != col || tc->table_sort_descending != descending;
+        tc->table_initialized = true; tc->table_sort_column = col; tc->table_sort_descending = descending;
+    }
+    request_redraw(ctx);
 }
 void table_scroll_to_row(uint32_t id, uint32_t row, float height, AlignY align) noexcept { virtual_list_scroll_to_row(id,row,height,align); }
 bool is_tree_open(uint32_t id) noexcept {
@@ -2172,12 +2208,13 @@ CollapsibleResult begin_collapsible(const CollapsibleDesc& d_in) noexcept {
     const bool toggle = clicked(hdr_id) || (focused(hdr_id) && (key_pressed(SDLK_RETURN) || key_pressed(SDLK_KP_ENTER) || key_pressed(SDLK_SPACE)));
     if (toggle) { ws->collapsible_open = !ws->collapsible_open; request_redraw(ctx); }
     const bool open = ws->collapsible_open;
-    float content_h = ws->collapsible_content_h;
+    WidgetCold* cc = ensure_widget_cold(ws);
+    float content_h = cc ? cc->collapsible_content_h : 0.0f;
     const uint32_t clip_id = id_index(d.id,0xC013u), content_id = id_index(d.id,0xC014u);
     const LayoutScrollData sc = layout_engine_scroll_data(ctx->active_ui->layout, clip_id);
     if (sc.found && sc.content_dim.y > 0.5f) content_h = sc.content_dim.y;
     else if (element_bounds(content_id).h > 0.5f) content_h = element_bounds(content_id).h;
-    ws->collapsible_content_h = content_h;
+    if (cc) cc->collapsible_content_h = content_h;
     // spring/begin_box may rehash StateMap: retain only values across those calls.
     const float t = clamp_range(spring(id_index(d.id,0xC012u),open ? 1.0f : 0.0f,d.spring_spec),0,1);
     const bool visible = open || t > 0.001f;
@@ -2227,7 +2264,8 @@ bool begin_collapse(const CollapseDesc& d) noexcept {
         return false;
     }
     const bool open = d.open;
-    float content_h = ws->collapsible_content_h;
+    WidgetCold* cc = ensure_widget_cold(ws);
+    float content_h = cc ? cc->collapsible_content_h : 0.0f;
     const uint32_t content_id = id_index(d.id, 0xC014u);
     const LayoutScrollData sc = layout_engine_scroll_data(ctx->active_ui->layout, d.id);
     if (sc.found && sc.content_dim.y > 0.5f) {
@@ -2235,7 +2273,7 @@ bool begin_collapse(const CollapseDesc& d) noexcept {
     } else if (element_bounds(content_id).h > 0.5f) {
         content_h = element_bounds(content_id).h;
     }
-    ws->collapsible_content_h = content_h;
+    if (cc) cc->collapsible_content_h = content_h;
 
     // spring/begin_box may rehash StateMap: keep only local values afterwards.
     const float t = clamp_range(spring(id_index(d.id, 0xC012u), open ? 1.0f : 0.0f, d.spring), 0.0f, 1.0f);
@@ -2300,18 +2338,20 @@ static void update_selectable_text_pointer(Context* ctx, WidgetState* ws, std::s
         if (dy < best_y || (dy == best_y && dx < best_x)) { best = cmd; best_y = dy; best_x = dx; }
     }
     if (!best) return;
+    WidgetCold* c = ws ? ws->cold : nullptr;
+    if (!c) return;
     float xa, xb; uint32_t hit;
     const size_t mark = ctx->frame_arena.mark();
     selection_line_geometry(ctx,best,selection_line(best),0,0,p.x,&xa,&xb,&hit);
     ctx->frame_arena.rewind(mark);
-    hit = utf8_clamp_boundary(ws->sel_text_ptr,ws->sel_text_len,hit);
+    hit = utf8_clamp_boundary(c->sel_text_ptr,c->sel_text_len,hit);
     if (ws->pressed_this_frame) {
         if (ctx->active_ui->last_mouse_clicks >= 3u) {
-            if (std::memchr(ws->sel_text_ptr,'\n',ws->sel_text_len)) line_bounds_at(ws->sel_text_ptr,ws->sel_text_len,hit,&ws->edit_sel_anchor,&ws->edit_cursor);
-            else { ws->edit_sel_anchor = 0; ws->edit_cursor = ws->sel_text_len; }
-        } else if (ctx->active_ui->last_mouse_clicks == 2u) utf8_word_bounds_at(ws->sel_text_ptr,ws->sel_text_len,hit,&ws->edit_sel_anchor,&ws->edit_cursor);
-        else { if (!(ctx->active_ui->frame_key_mods & Mod_Shift)) ws->edit_sel_anchor = hit; ws->edit_cursor = hit; }
-    } else ws->edit_cursor = hit;
+            if (std::memchr(c->sel_text_ptr,'\n',c->sel_text_len)) line_bounds_at(c->sel_text_ptr,c->sel_text_len,hit,&c->edit_sel_anchor,&c->edit_cursor);
+            else { c->edit_sel_anchor = 0; c->edit_cursor = c->sel_text_len; }
+        } else if (ctx->active_ui->last_mouse_clicks == 2u) utf8_word_bounds_at(c->sel_text_ptr,c->sel_text_len,hit,&c->edit_sel_anchor,&c->edit_cursor);
+        else { if (!(ctx->active_ui->frame_key_mods & Mod_Shift)) c->edit_sel_anchor = hit; c->edit_cursor = hit; }
+    } else c->edit_cursor = hit;
     request_redraw(ctx);
 }
 

@@ -25,8 +25,8 @@ int32_t shader_surface_timeout(const Context* ctx, SDL_Window* window, bool all_
     for (const ShaderSurfaceSlot& s : ctx->shader_surfaces) {
         if (!s.shader || !s.owner_bound || !s.eval.enabled || !s.continuous_time ||
             (!all_windows && s.window != window) || surface_window_suspended(s.window)) continue;
-        const WindowUiState* ui = s.window ? window_ui(ctx, s.window) : &ctx->headless_ui;
-        if (s.seen_frame != ui->frame_index) continue;
+        const WindowUiState* ui = s.window ? window_ui(ctx, s.window) : ctx->headless_ui;
+        if (!ui || s.seen_frame != ui->frame_index) continue;
         const double remaining = s.initialized ? (double(s.last_render_tick) - double(now)) / freq + 1.0 / s.max_fps : 0;
         const int32_t ms = remaining > 0 ? static_cast<int32_t>(std::ceil(remaining * 1000)) : 0;
         if (timeout < 0 || ms < timeout) timeout = ms;
@@ -249,7 +249,7 @@ ShaderSurfaceId create_shader_surface(Context* ctx, const ShaderSurfaceCreateDes
     if (!shader) return 0;
     if (!ensure_kawase_shaders(ctx)) { SDL_ReleaseGPUShader(ctx->device, shader); return 0; }
     SDL_GPUGraphicsPipeline* pipe = create_graphics_pipeline(ctx->device, ctx->kawase_vs_shader, shader,
-        SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT, BlendMode::Opaque);
+        SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT, GpuBlendMode::Opaque);
     if (!pipe) { SDL_ReleaseGPUShader(ctx->device, shader); return 0; }
     ShaderSurfaceSlot& s = ctx->shader_surfaces[index];
     s.shader = shader;

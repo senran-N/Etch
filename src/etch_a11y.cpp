@@ -41,8 +41,14 @@ A11yBuild* a11y_emit(Context* ctx,uint32_t id,A11yRole role,Str label,Str value,
     return b;
 }
 void a11y_begin(Context* ctx) noexcept {
-    auto& ui=*ctx->active_ui;ui.frame_a11y_action_count=ui.a11y_action_count;
-    std::memcpy(ui.frame_a11y_actions,ui.a11y_actions,size_t(ui.a11y_action_count)*sizeof(PendingA11yAction));ui.a11y_action_count=0;
+    auto& ui=*ctx->active_ui;
+    if(ui.a11y_action_count>0u && ui.a11y_actions && ensure_frame_a11y_actions(&ui)) {
+        ui.frame_a11y_action_count=ui.a11y_action_count;
+        std::memcpy(ui.frame_a11y_actions,ui.a11y_actions,size_t(ui.a11y_action_count)*sizeof(PendingA11yAction));
+    } else {
+        ui.frame_a11y_action_count=0u;
+    }
+    ui.a11y_action_count=0;
     for(uint32_t i=0;i<ui.frame_a11y_action_count;++i) {
         auto& act=ui.frame_a11y_actions[i];if(act.consumed || !act.id || act.action!=A11yAction::Focus)continue;
         const auto* ws=state_map_find(&ui.states,act.id);
@@ -58,7 +64,8 @@ void a11y_begin(Context* ctx) noexcept {
 }
 void a11y_finish_actions(Context* ctx,bool snapshot_updated) noexcept {
     auto& ui=*ctx->active_ui;
-    PendingA11yAction kept[16]={};uint32_t keep_count=0;
+    if(ui.frame_a11y_action_count==0u || !ui.frame_a11y_actions){ui.frame_a11y_action_count=0;return;}
+    PendingA11yAction kept[WindowUiState::kMaxPendingA11yActions]={};uint32_t keep_count=0;
     for(uint32_t i=0;i<ui.frame_a11y_action_count;++i) {
         auto act=ui.frame_a11y_actions[i];
         if(act.consumed || !act.id)continue;
@@ -77,8 +84,8 @@ void a11y_finish_actions(Context* ctx,bool snapshot_updated) noexcept {
         act.age=static_cast<uint8_t>(progress?0u:1u);
         if(keep_count<ETCH_COUNTOF(kept))kept[keep_count++]=act;
     }
-    if(keep_count>0u) {
-        const uint32_t room=uint32_t(ETCH_COUNTOF(ui.a11y_actions))-keep_count;
+    if(keep_count>0u && ensure_a11y_actions(&ui)) {
+        const uint32_t room=WindowUiState::kMaxPendingA11yActions-keep_count;
         const uint32_t tail=(ui.a11y_action_count<room)?ui.a11y_action_count:room;
         if(tail>0u)std::memmove(ui.a11y_actions+keep_count,ui.a11y_actions,size_t(tail)*sizeof(PendingA11yAction));
         std::memcpy(ui.a11y_actions,kept,size_t(keep_count)*sizeof(PendingA11yAction));
@@ -94,7 +101,7 @@ bool a11y_commit_snapshot(Context* ctx) noexcept {
     size_t bytes=size_t(ctx->a11y_count)*sizeof(A11yNode);
     for(auto* b=ctx->a11y_first;b;b=b->next)bytes+=size_t(b->node.label.length)+b->node.value_text.length+2;
     if(bytes>ui.a11y_arena.capacity) {
-        size_t capacity=ui.a11y_arena.capacity?ui.a11y_arena.capacity:65536;while(capacity<bytes)capacity*=2;
+        size_t capacity=ui.a11y_arena.capacity?ui.a11y_arena.capacity:8192;while(capacity<bytes)capacity*=2;
         Arena next=arena_create(capacity);if(!next.base){return false;}arena_destroy(&ui.a11y_arena);ui.a11y_arena=next;
     }
     ui.a11y_arena.reset();ui.a11y_nodes=ui.a11y_arena.alloc<A11yNode>(ctx->a11y_count);ui.a11y_node_count=ctx->a11y_count;
@@ -128,6 +135,7 @@ bool a11y_commit_snapshot(Context* ctx) noexcept {
 bool a11y_take_any(uint32_t id,uint32_t mask,PendingA11yAction* out) noexcept {
     if(!id || !mask)return false;
     auto& ui=*current_context()->active_ui;
+    if(ui.frame_a11y_action_count==0u || !ui.frame_a11y_actions)return false;
     if(ui.modal_scope && id!=ui.modal_scope) {
         const auto* ws=state_map_find(&ui.states,id);
         const auto* mws=(ws && ws->collapsible_initialized)?state_map_find(&ui.states,id_index(id,0xC011u)):ws;
@@ -170,15 +178,15 @@ void set_a11y_override(const A11yOverrideDesc& desc) noexcept {
     if(entry->build)a11y_patch(entry->build->node,p->desc);
 }
 std::span<const A11yNode> frame_a11y_nodes(const Context* ctx,SDL_Window* window) noexcept {
-    if(!ctx) { ctx=current_context(); } if(!ctx) { return {}; } const auto* ui=(!window && ctx->headless)?&ctx->headless_ui:window_ui(ctx,window);return ui?std::span<const A11yNode>(ui->a11y_nodes,ui->a11y_node_count):std::span<const A11yNode>{};
+    if(!ctx) { ctx=current_context(); } if(!ctx) { return {}; } const auto* ui=(!window && ctx->headless)?ctx->headless_ui:window_ui(ctx,window);return ui?std::span<const A11yNode>(ui->a11y_nodes,ui->a11y_node_count):std::span<const A11yNode>{};
 }
 const A11yNode* find_a11y_node(uint32_t id,const Context* ctx,SDL_Window* window) noexcept {
     for(const auto& n:frame_a11y_nodes(ctx,window)) { if(n.id==id) return &n; } return nullptr;
 }
 bool perform_a11y_action(uint32_t id,A11yAction action,float number,Str text,Context* ctx,SDL_Window* window) noexcept {
     if(!ctx) { ctx=current_context(); } if(!ctx || !id || static_cast<uint8_t>(action)>7 || !std::isfinite(number) || (text.length && !text.chars)) { return false; }
-    auto* ui=(!window && ctx->headless)?&ctx->headless_ui:window_ui(ctx,window);const auto* n=find_a11y_node(id,ctx,window);
-    if(!ui || !n || (n->state_flags&A11yState_Disabled) || !(n->actions_mask&a11y_action_bit(action)) || ui->a11y_action_count==16)return false;
+    auto* ui=(!window && ctx->headless)?ctx->headless_ui:window_ui(ctx,window);const auto* n=find_a11y_node(id,ctx,window);
+    if(!ui || !n || (n->state_flags&A11yState_Disabled) || !(n->actions_mask&a11y_action_bit(action)) || ui->a11y_action_count==WindowUiState::kMaxPendingA11yActions || !ensure_a11y_actions(ui))return false;
     auto& c=ui->a11y_actions[ui->a11y_action_count++];c={};c.id=id;c.action=action;c.number=number;
     c.length=utf8_clamp_boundary(text.chars,text.length,text.length<1023?text.length:1023);if(c.length)std::memcpy(c.text,text.chars,c.length);
     ui->redraw_budget=2;request_redraw(ctx);wake_up(ctx);

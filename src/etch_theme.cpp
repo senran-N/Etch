@@ -308,7 +308,7 @@ void set_theme(const Theme& t, Context* ctx) noexcept {
         target->base_theme = t;
         ++target->theme_epoch;
         if (target->headless || target->claimed_window_count == 0u) {
-            target->headless_ui.redraw_budget = 2u;
+            if (target->headless_ui) target->headless_ui->redraw_budget = 2u;
         }
         for (uint32_t i = 0; i < target->claimed_window_cap; ++i) {
             if (ClaimedWindowSlot* slot = target->claimed_windows[i]) {

@@ -4,6 +4,36 @@ All notable changes to Etch are documented here. This file follows
 [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html).
 
+## [0.28.0] - 2026-11-23
+
+- Decompose the legacy monolithic `etch_uber.hlsl` into six focused, low-VGPR GPU
+  micro-shaders (`etch_quad.hlsl`, `etch_subpixel.hlsl`, `etch_slug.hlsl`,
+  `etch_image.hlsl`, `etch_fx.hlsl`, `etch_kawase.hlsl`) backed by a unified lazy PSO
+  cache (`PsoEntry`) and platform-stripped shader data (`src/etch_shaders_data.cpp`
+  shared across both modular and unity builds), cutting PSO compilation overhead and
+  runtime driver memory.
+- Add hardware **Blend Modes** (`BlendMode::Normal`, `Additive`, `Multiply`, `Screen`)
+  on `LayerDesc`, `BoxDesc`, and `ImageDesc` (retaining `LayerDesc::blend_plus_lighter`
+  as a backward-compatible alias for `BlendMode::Additive`).
+- Add composable **Alpha Masks** (`AlphaMaskKind::Rounded`, `LinearGradient`,
+  `RadialSpotlight`, `Texture` sampling `.a`, plus `invert`) on `LayerDesc::alpha_mask`
+  evaluated uniformly across all UI micro-shaders via the indexed `ClipShapeGpu` chain.
+- Add per-text **OpenType features** (`OpenTypeFlags` `NoLiga`/`TabularNums`/
+  `SlashedZero`/`SmallCaps`/`OldstyleNums`/`Fractions`/`StylisticSet01`/`StylisticSet02`,
+  custom `FontFeature` spans, `make_opentype_tag`) with `ShapeCache` and layout
+  text-cache key isolation, plus **Variable Font variations** (`create_font_variation`,
+  `FontAxisValue`, `kAxisWeight`/`kAxisWidth`/`kAxisOptical`/`kAxisSlant`/`kAxisItalic`,
+  deduplicated variation slots), HarfBuzz `hb_font_draw_glyph()` Slug curve extraction,
+  and DirectWrite `IDWriteFontFace5` variable-axis hinted rasterization.
+- Reduce idle RAM & draw-call overhead: split `WidgetState` into hot/cold storage
+  (`WidgetCold`), move deep table/split/A11y stacks to lazy allocation, lower default
+  `ContextDesc::frame_arena_bytes` to `512 KiB`, and add 4-strip hollow-border overlap
+  awareness so clipped bordered card grids coalesce cleanly into single-digit draw calls.
+- Maintain full pure C99 ABI parity (`include/etch/etch_c.h`): `EtchBlendMode`,
+  `EtchAlphaMaskKind`, `EtchAlphaMaskDesc`, `etch_alpha_mask_desc_default()`,
+  `EtchOpenTypeFlags`, `ETCH_OT_TAG`, `ETCH_AXIS_*`, `EtchFontFeature`,
+  `EtchFontAxisValue`, and `etch_create_font_variation()`.
+
 ## [0.27.0] - 2026-11-22
 
 - Add multi-layer elevation shadows (`ShadowLayer`, `Elevation` presets `Sm`/`Md`/`Lg`/`Xl`,

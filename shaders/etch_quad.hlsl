@@ -1,26 +1,7 @@
-// Etch Dedicated Lightweight Quad / Border / Gradient / Shadow Shader (SM 6.0 HLSL -> DXIL & SPIR-V)
-// Zero texture samplers, zero Slug storage buffers -> minimal VGPR pressure + Early-Z depth support.
+// Etch Dedicated Lightweight Quad / Border / Gradient / Shadow Shader (SM 6.0 HLSL -> DXIL, SPIR-V, MSL)
+// Handles PrimKind::Rect, PrimKind::RotatedRect, PrimKind::Shadow with Early-Z & 64B ClipShapeGpu AlphaMask.
 
-#define ETCH_PRIM_RECT        0u
-#define ETCH_PRIM_SHADOW      1u
-#define ETCH_PRIM_ROT_RECT    10u
-
-#define ETCH_FLAG_LINEAR_GRAD   (1u << 0)
-#define ETCH_FLAG_RADIAL_GRAD   (1u << 1)
-#define ETCH_FLAG_ROUNDED_CLIP  (1u << 2)
-#define ETCH_FLAG_ROUND_CAP     (1u << 5)
-
-#define ETCH_GLOBAL_OPAQUE_PASS (1u << 29)
-#define ETCH_GLOBAL_USE_DEPTH   (1u << 30)
-#define ETCH_GLOBAL_MANUAL_SRGB (1u << 31)
-
-struct Prim
-{
-    float4 bounds;
-    float4 clip;
-    uint4  payload;
-    uint4  style;
-};
+#include "etch_common.hlsli"
 
 #ifdef __spirv__
 [[vk::binding(0, 0)]]
@@ -45,17 +26,10 @@ cbuffer GlobalsVS : register(b0, space1)
     uint   g_flags;
 };
 
-struct ClipShape
-{
-    float4 bounds;
-    float4 radii;
-    uint4  meta;
-};
+ETCH_COMBINED_SAMPLER(0) Texture2D<float4> g_mask_tex : register(t0, space2);
+ETCH_COMBINED_SAMPLER(0) SamplerState      g_mask_smp : register(s0, space2);
 
-#ifdef __spirv__
-[[vk::binding(0, 2)]]
-#endif
-StructuredBuffer<ClipShape> g_clip_shapes : register(t0, space2);
+ETCH_FRAG_STORAGE(1) StructuredBuffer<ClipShapeGpu> g_clip_shapes : register(t1, space2);
 
 struct GradientStop
 {
@@ -65,10 +39,7 @@ struct GradientStop
     float p1;
 };
 
-#ifdef __spirv__
-[[vk::binding(1, 2)]]
-#endif
-StructuredBuffer<GradientStop> g_grad_stops : register(t1, space2);
+ETCH_FRAG_STORAGE(2) StructuredBuffer<GradientStop> g_grad_stops : register(t2, space2);
 
 struct VSOut
 {
@@ -85,8 +56,6 @@ struct VSOut
     nointerpolation float2 rotation     : TEXCOORD9;
     nointerpolation uint4  grad_meta    : TEXCOORD10;
 };
-
-#include "etch_common.hlsli"
 
 VSOut vs_main(uint vertex_id : SV_VertexID, uint instance_id : SV_InstanceID)
 {
@@ -296,44 +265,15 @@ float4 ps_main(VSOut input) : SV_Target0
         }
         if ((flags & ETCH_GLOBAL_MANUAL_SRGB) != 0u)
         {
-            out_pm.rgb = linear_to_srgb(saturate(out_pm)).rgb;
+            out_pm.rgb = linear_to_srgb3(saturate(out_pm.rgb));
         }
         return out_pm;
     }
 
-    float clip_r = asfloat(input.meta.w);
-    float2 clip_half   = 0.5f * max(input.clip.zw - input.clip.xy, 0.0f);
-    float2 clip_center = 0.5f * (input.clip.xy + input.clip.zw);
-    float2 clip_rel    = input.pixel_pos - clip_center;
-    float clip_d;
-    if ((flags & ETCH_FLAG_ROUNDED_CLIP) != 0u && clip_r != 0.0f)
-    {
-        clip_d = etch_sd_rounded_box(clip_rel, clip_half, abs(clip_r).xxxx, clip_r < 0.0f);
-    }
-    else
-    {
-        float2 cq = abs(clip_rel) - clip_half;
-        clip_d = max(cq.x, cq.y);
-    }
-    float clip_cov = saturate(0.5f - clip_d);
-    float fade_cov = 1.0f;
-    uint clip_index = input.meta.z;
-    [loop] while (clip_index != 0u)
-    {
-        ClipShape shape = g_clip_shapes[clip_index];
-        float2 half_shape = shape.bounds.zw * 0.5f;
-        float2 relative = input.pixel_pos - shape.bounds.xy - half_shape;
-        float distance = etch_sd_rounded_box(relative, half_shape, shape.radii, shape.meta.y != 0u);
-        clip_cov = min(clip_cov, saturate(0.5f - distance));
-        float2 tb = unpack_f16x2_custom(shape.meta.z);
-        float2 lr = unpack_f16x2_custom(shape.meta.w);
-        if (tb.x > 0.0f) fade_cov *= smoothstep(0.0f, tb.x, input.pixel_pos.y - shape.bounds.y);
-        if (tb.y > 0.0f) fade_cov *= smoothstep(0.0f, tb.y, shape.bounds.y + shape.bounds.w - input.pixel_pos.y);
-        if (lr.x > 0.0f) fade_cov *= smoothstep(0.0f, lr.x, input.pixel_pos.x - shape.bounds.x);
-        if (lr.y > 0.0f) fade_cov *= smoothstep(0.0f, lr.y, shape.bounds.x + shape.bounds.z - input.pixel_pos.x);
-        clip_index = shape.meta.x;
-    }
-    clip_cov *= fade_cov;
+    float clip_cov = etch_eval_clip_chain(
+        input.pixel_pos, input.clip, asfloat(input.meta.w),
+        (flags & ETCH_FLAG_ROUNDED_CLIP) != 0u, input.meta.z,
+        g_clip_shapes, g_mask_tex, g_mask_smp);
     if (clip_cov <= 0.0f) return float4(0.0f, 0.0f, 0.0f, 0.0f);
 
     float2 p_local = float2(
@@ -378,11 +318,5 @@ float4 ps_main(VSOut input) : SV_Target0
         out_pm      = b_pm + f_pm * (inner_cov + border_t * (1.0f - input.border_color.a));
     }
 
-    out_pm *= clip_cov;
-    if ((flags & ETCH_GLOBAL_MANUAL_SRGB) != 0u && out_pm.a > 1e-5f)
-    {
-        float4 straight_lin = saturate(out_pm / out_pm.a);
-        out_pm.rgb = linear_to_srgb(straight_lin).rgb * out_pm.a;
-    }
-    return out_pm;
+    return etch_finalize_manual_srgb(out_pm * clip_cov, flags);
 }

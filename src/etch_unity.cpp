@@ -27,31 +27,7 @@
 #if defined(ETCH_MODULAR_BUILD)
 #    include "etch_shaders_extern.h"
 #else
-#    include "etch_uber_vs_dxil.h"
-#    include "etch_uber_ps_dxil.h"
-#    include "etch_uber_vs_spv.h"
-#    include "etch_uber_ps_spv.h"
-#    include "etch_quad_vs_dxil.h"
-#    include "etch_quad_ps_dxil.h"
-#    include "etch_quad_vs_spv.h"
-#    include "etch_quad_ps_spv.h"
-#    include "etch_subpixel_vs_dxil.h"
-#    include "etch_subpixel_ps_dxil.h"
-#    include "etch_subpixel_vs_spv.h"
-#    include "etch_subpixel_ps_spv.h"
-#    include "etch_kawase_vs_dxil.h"
-#    include "etch_kawase_ps_dxil.h"
-#    include "etch_kawase_vs_spv.h"
-#    include "etch_kawase_ps_spv.h"
-
-#    include "etch_uber_vs_msl.h"
-#    include "etch_uber_ps_msl.h"
-#    include "etch_quad_vs_msl.h"
-#    include "etch_quad_ps_msl.h"
-#    include "etch_subpixel_vs_msl.h"
-#    include "etch_subpixel_ps_msl.h"
-#    include "etch_kawase_vs_msl.h"
-#    include "etch_kawase_ps_msl.h"
+#    include "etch_shaders_data.cpp"
 #endif
 
 #if !defined(ETCH_MODULAR_BUILD)

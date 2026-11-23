@@ -75,6 +75,9 @@ struct LayoutTextConfig {
     bool ellipsis = false;
     bool is_rich = false;
     uint32_t rich_hash = 0;
+    uint32_t opentype_flags = 0u;
+    const FontFeature* font_features = nullptr;
+    uint32_t font_feature_count = 0u;
     void* user_data = nullptr;
 };
 
@@ -304,8 +307,9 @@ struct CachedPrimRecord {
     Prim prim = {};
     SDL_GPUTexture* ext1 = nullptr;
     SDL_GPUTexture* ext2 = nullptr;
+    uint8_t blend_mode = 0;
+    uint8_t aux_flags = 0;
     bool is_punch = false;
-    bool is_additive = false;
 };
 
 struct CachedA11yRecord {
@@ -399,7 +403,7 @@ inline void layout_bounds_map_clear(LayoutBoundsEntry* map, uint32_t cap) noexce
 
 inline bool layout_bounds_map_reserve(LayoutBoundsEntry** map, uint32_t* cap, uint32_t* count, uint32_t needed) noexcept {
     if (*cap > 0u && needed * 2u <= *cap) return true;
-    uint32_t next = *cap ? (*cap * 2u) : 1024u;
+    uint32_t next = *cap ? (*cap * 2u) : 256u;
     while (needed * 2u > next) next *= 2u;
     auto* fresh = static_cast<LayoutBoundsEntry*>(std::calloc(next, sizeof(LayoutBoundsEntry)));
     if (!fresh) return false;
@@ -471,12 +475,12 @@ inline LayoutEngine* layout_engine_create(LayoutMeasureTextFn measure_fn, void* 
     le->culling_enabled = true;
     le->measure_text_fn = measure_fn;
     le->measure_text_user = user_data;
-    le->nodes.reserve(1024u);
+    le->nodes.reserve(256u);
     le->open_stack.reserve(64u);
     le->roots.reserve(32u);
-    le->wrapped_lines.reserve(512u);
-    le->cmds.reserve(1024u);
-    le->cached_words.reserve(2048u);
+    le->wrapped_lines.reserve(128u);
+    le->cmds.reserve(256u);
+    le->cached_words.reserve(512u);
     return le;
 }
 
@@ -562,6 +566,11 @@ inline uint64_t layout_hash_text_key(Str text, const LayoutTextConfig& cfg) noex
     const uint8_t flags = (cfg.wrap ? 1u : 0u) | (cfg.is_rich ? 2u : 0u);
     mix(&flags, 1u);
     if (cfg.is_rich) mix(&cfg.rich_hash, sizeof(cfg.rich_hash));
+    if (cfg.opentype_flags != 0u) mix(&cfg.opentype_flags, sizeof(cfg.opentype_flags));
+    if (cfg.font_features && cfg.font_feature_count > 0u) {
+        mix(&cfg.font_feature_count, sizeof(cfg.font_feature_count));
+        mix(cfg.font_features, size_t(cfg.font_feature_count) * sizeof(FontFeature));
+    }
     return h ? h : 1ull;
 }
 
@@ -588,7 +597,7 @@ inline uint32_t layout_measure_text_cached(LayoutEngine* le, Str text, const Lay
         layout_engine_reset_text_cache(le);
     }
     if (le->text_cache_cap == 0u || (le->text_cache_count + 1u) * 2u > le->text_cache_cap) {
-        const uint32_t next_cap = le->text_cache_cap ? (le->text_cache_cap * 2u) : 2048u;
+        const uint32_t next_cap = le->text_cache_cap ? (le->text_cache_cap * 2u) : 512u;
         auto* fresh = static_cast<LayoutTextCacheEntry*>(std::calloc(next_cap, sizeof(LayoutTextCacheEntry)));
         if (!fresh) return UINT32_MAX;
         const uint32_t mask = next_cap - 1u;

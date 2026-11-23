@@ -25,7 +25,6 @@ inline constexpr uint32_t kInitialSlugCurveCap = 1024u;
 inline constexpr uint32_t kInitialSlugBandCap = 2048u;
 inline constexpr uint32_t kDefaultStateCapacity = 256u;
 inline constexpr uint32_t kMaxClipDepth = 64u;
-inline constexpr uint32_t kMaxCachedPipelines = 4u;
 inline constexpr uint32_t kMaxSplitDepth = 32u;
 inline constexpr uint32_t kMaxCanvasDepth = 8u;
 inline constexpr uint32_t kHudHistorySamples = 64u;
@@ -38,141 +37,155 @@ inline constexpr uint32_t kMaxChromeDragRects = 16u;
 inline constexpr uint32_t kMaxChromeClientRects = 128u;
 inline constexpr uint32_t kMaxDragLabelBytes = 64u;
 
+struct WidgetCold {
+    // Layout / hero / presence / tween animation state
+    Rect     anim_rect = {};
+    Vec2     anim_vel_pos = {}, anim_vel_size = {};
+    uint32_t anim_seen_frame = 0;
+    float    presence_pos = 0.0f, presence_vel = 0.0f;
+    uint32_t presence_frame = 0;
+    float    tween_start = 0.0f, tween_target = 0.0f, tween_elapsed = 0.0f;
+    float    tween_duration = 0.0f, tween_delay = 0.0f, tween_value = 0.0f;
+    uint32_t tween_frame = 0u;
+    bool     presence_initialized = false;
+    bool     tween_initialized = false;
+
+    // Terminal & Sheet
+    Vec2     terminal_cursor = {}, terminal_velocity = {};
+    float    sheet_pos = 0.0f, sheet_velocity = 0.0f, sheet_last_pointer = 0.0f;
+    uint32_t sheet_snap = 0;
+    bool     terminal_initialized = false;
+    bool     sheet_initialized = false, sheet_dragging = false;
+
+    // Collapsible content height
+    float    collapsible_content_h = 0.0f;
+
+    // TextInput / CodeEditor / SelectableText
+    const TextBuffer* edit_text_buffer = nullptr;
+    const char* sel_text_ptr = nullptr;
+    uint64_t sel_text_epoch = 0;
+    uint64_t edit_wrap_version = 0u;
+    uint32_t sel_text_len = 0;
+    uint32_t editor_scroll_line = 0u;
+    uint32_t edit_cursor = 0;
+    uint32_t edit_sel_anchor = 0;
+    uint32_t edit_wrap_lines = 0u;
+    uint32_t edit_wrap_tab_width = 0u;
+    uint32_t edit_wrap_font_revision = 0;
+    float    edit_max_scroll_y = 0.0f;
+    float    edit_scroll_x = 0.0f;
+    float    edit_scroll_y = 0.0f;
+    float    edit_preferred_x = -1.0f;
+    float    edit_wrap_width = 0.0f;
+    float    edit_wrap_font_size = 0.0f;
+    uint16_t edit_wrap_font_id = kInvalidFont;
+    uint8_t  editor_scroll_align = 0u;
+    bool     edit_reveal_caret = true;
+    bool     editor_reveal = false;
+    bool     editor_scroll_pending = false;
+    bool     editor_show_scrollbar = true;
+    bool     edit_initialized = false;
+    bool     edit_wrap_affinity = false;
+    bool     sel_text_static = false;
+
+    // Table / Column / Split
+    uint32_t table_focus_row = UINT32_MAX, table_anchor_row = UINT32_MAX;
+    uint32_t table_sort_column = 0;
+    float    column_width = 0.0f, column_grab = 0.0f;
+    float    split_ratio = 0.5f, split_extent_px = 0.0f, split_grab_offset = 0.0f;
+    bool     table_initialized = false;
+    bool     table_sort_descending = false;
+    bool     table_sort_changed = false;
+    bool     column_override = false;
+    bool     column_resizing = false;
+    bool     split_initialized = false;
+    bool     split_extent_initialized = false;
+
+    // Virtual List state (double-precision scroll prevents float32 ULP degradation past 16.7M px)
+    double   vscroll_pos_y = 0.0;
+    double   vscroll_vel_y = 0.0;
+    double   vscroll_max_y = 0.0;
+    double   vscroll_total_h = 0.0;
+    uint32_t vlist_built_frame = 0;
+    uint32_t vlist_pending_scroll_row = 0;
+    float    vlist_pending_scroll_item_h = 0.0f;
+    float    vlist_stride = 28.0f;
+    float    vscrollbar_right_edge_x = 0.0f;
+    AlignY   vlist_pending_scroll_align = AlignY::Top;
+    bool     vlist_pending_scroll = false;
+    bool     vlist_stick_initialized = false;
+    bool     vlist_stuck_bottom = true;
+
+    // Infinite 2D Canvas & Node Drag state
+    Rect     canvas_marquee_world = {};
+    Vec2     canvas_marquee_start_world = {};
+    Vec2     canvas_pan = {};
+    Vec2     drag_grab = {};
+    uint32_t owner_canvas_id = 0;
+    float    canvas_zoom = 1.0f;
+    float    canvas_min_zoom = 0.15f;
+    float    canvas_max_zoom = 8.0f;
+    bool     canvas_initialized = false;
+    bool     canvas_interactive = true;
+    bool     canvas_marquee_enabled = false;
+    bool     canvas_marquee_active = false;
+    bool     canvas_marquee_finished = false;
+};
+
 struct WidgetState {
+    WidgetCold* cold = nullptr;
     uint32_t key = 0; // 0 marks an empty hash slot
     uint32_t last_seen_frame = 0;
     uint32_t prev_seen_frame = 0;
-    bool     is_user_element = false;
-    bool     is_focusable = false;
-    bool window_drag_passthrough = false;
     uint32_t focus_scope = 0;
     uint32_t popup_owner = 0;
-    bool     pressed_down = false;
-    bool     pressed_this_frame = false;
-    bool     clicked_this_frame = false;
-    bool     right_clicked_this_frame = false;
-    bool     double_clicked_this_frame = false;
-    bool     is_text_input_writable = false;
-    bool     is_multiline_input = false, edit_reveal_caret = true;
-    bool     suppress_popup_keys = false;
-    bool     accept_ghost_on_tab = false;
-    float    edit_max_scroll_y = 0;
-    float hover_t=0, hover_vel=0, press_t=0, press_vel=0;
-    Vec2 terminal_cursor = {}, terminal_velocity = {};
-    bool terminal_initialized = false;
-    float sheet_pos = 0, sheet_velocity = 0, sheet_last_pointer = 0;
-    uint32_t sheet_snap = 0;
-    bool sheet_initialized = false, sheet_dragging = false;
-    Rect anim_rect = {};
-    Vec2 anim_vel_pos = {}, anim_vel_size = {};
-    uint32_t anim_seen_frame=0;
-    bool presence_initialized = false;
-    float presence_pos = 0, presence_vel = 0;
-    uint32_t presence_frame = 0;
-    bool     spring_initialized = false;
-    float    spring_pos = 0.0f;
-    float    spring_vel = 0.0f;
-    bool     tween_initialized = false;
-    float    tween_start = 0.0f;
-    float    tween_target = 0.0f;
-    float    tween_elapsed = 0.0f;
-    float    tween_duration = 0.0f;
-    float    tween_delay = 0.0f;
-    float    tween_value = 0.0f;
-    uint32_t tween_frame = 0u;
-    bool show_scrollbar = true;
-    bool     is_scroll_x = false;
-    bool     is_scroll_y = false;
-    bool     scroll_stuck_bottom = true;
-    bool     scroll_stick_initialized = false;
+    float    hover_t = 0.0f, hover_vel = 0.0f, press_t = 0.0f, press_vel = 0.0f;
+    float    spring_pos = 0.0f, spring_vel = 0.0f;
     Vec2     scroll_pos = {};
     Vec2     scroll_vel = {};
     Vec2     scroll_max = {};
     Vec2     viewport_dim = {};
     Vec2     content_dim = {};
     Rect     last_box_logical = {};
-    const TextBuffer* edit_text_buffer = nullptr;
-    bool editor_reveal = false;
-    bool     editor_scroll_pending = false;
-    uint8_t  editor_scroll_align = 0u;
-    uint32_t editor_scroll_line = 0u;
-    bool editor_show_scrollbar = true;
-    bool     edit_initialized = false;
-    uint32_t edit_cursor = 0;
-    uint32_t edit_sel_anchor = 0;
-    float    edit_scroll_x = 0.0f;
-    float    edit_scroll_y = 0.0f;
-    float    edit_preferred_x = -1.0f;
-    bool     edit_wrap_affinity = false;
-    float    edit_wrap_width = 0.0f;
-    uint64_t edit_wrap_version = 0u;
-    uint32_t edit_wrap_lines = 0u;
-    uint32_t edit_wrap_tab_width = 0u;
-    float    edit_wrap_font_size = 0.0f;
-    uint16_t edit_wrap_font_id = kInvalidFont;
-    uint32_t edit_wrap_font_revision = 0;
-
-    bool is_selectable_text = false;
-    const char* sel_text_ptr = nullptr;
-    uint32_t sel_text_len = 0;
-    uint64_t sel_text_epoch = 0;
-    bool sel_text_static = false;
-    bool collapsible_initialized = false;
-    bool collapsible_open = false;
-    float collapsible_content_h = 0.0f;
-    bool tree_initialized = false;
-    bool tree_open = false;
-    uint32_t table_focus_row = UINT32_MAX, table_anchor_row = UINT32_MAX;
-    bool table_initialized = false;
-    bool table_sort_descending = false;
-    bool table_sort_changed = false;
-    uint32_t table_sort_column = 0;
-    bool column_override = false;
-    float column_width = 0.0f;
-    float column_grab = 0.0f;
-    bool column_resizing = false;
-    // Split Pane state
-    bool     split_initialized = false;
-    bool     split_extent_initialized = false;
-    float    split_ratio = 0.5f;
-    float    split_extent_px = 0.0f;
-    float    split_grab_offset = 0.0f;
-
-    // Virtual List state (double-precision scroll prevents float32 ULP degradation past 16.7M px)
-    bool     is_virtual_list = false;
-    bool     vlist_pending_scroll = false;
-    bool     vlist_stick_initialized = false;
-    bool     vlist_stuck_bottom = true;
-    uint32_t vlist_built_frame = 0;
-    uint32_t vlist_pending_scroll_row = 0;
-    float    vlist_pending_scroll_item_h = 0.0f;
-    AlignY   vlist_pending_scroll_align = AlignY::Top;
-    double   vscroll_pos_y = 0.0;
-    double   vscroll_vel_y = 0.0;
-    double   vscroll_max_y = 0.0;
-    double   vscroll_total_h = 0.0;
-    float    vlist_stride = 28.0f;
-
-    // Infinite 2D Canvas & Node Drag state
-    bool     is_canvas = false;
-    bool     canvas_initialized = false;
-    bool     canvas_interactive = true;
-    bool     canvas_marquee_enabled = false;
-    bool     canvas_marquee_active = false;
-    bool     canvas_marquee_finished = false;
-    bool     is_canvas_node = false;
-    Vec2     canvas_marquee_start_world = {};
-    Rect     canvas_marquee_world = {};
-    uint32_t owner_canvas_id = 0;
-    Vec2     canvas_pan = {};
-    float    canvas_zoom = 1.0f;
-    float    canvas_min_zoom = 0.15f;
-    float    canvas_max_zoom = 8.0f;
-    Vec2     drag_grab = {};
-    bool     is_text_span = false;
-    bool     span_hovered = false;
-    float    vscrollbar_right_edge_x = 0.0f;
+    bool     collapsible_open = false;
+    bool     tree_open = false;
+    bool     is_user_element : 1 = false;
+    bool     is_focusable : 1 = false;
+    bool     window_drag_passthrough : 1 = false;
+    bool     pressed_down : 1 = false;
+    bool     pressed_this_frame : 1 = false;
+    bool     clicked_this_frame : 1 = false;
+    bool     right_clicked_this_frame : 1 = false;
+    bool     double_clicked_this_frame : 1 = false;
+    bool     is_text_input_writable : 1 = false;
+    bool     is_multiline_input : 1 = false;
+    bool     suppress_popup_keys : 1 = false;
+    bool     accept_ghost_on_tab : 1 = false;
+    bool     spring_initialized : 1 = false;
+    bool     show_scrollbar : 1 = true;
+    bool     is_scroll_x : 1 = false;
+    bool     is_scroll_y : 1 = false;
+    bool     scroll_stuck_bottom : 1 = true;
+    bool     scroll_stick_initialized : 1 = false;
+    bool     is_selectable_text : 1 = false;
+    bool     collapsible_initialized : 1 = false;
+    bool     tree_initialized : 1 = false;
+    bool     is_virtual_list : 1 = false;
+    bool     is_canvas : 1 = false;
+    bool     is_canvas_node : 1 = false;
+    bool     is_text_span : 1 = false;
+    bool     span_hovered : 1 = false;
 };
+static_assert(sizeof(WidgetState) <= 128);
+
+inline WidgetCold* ensure_widget_cold(WidgetState* ws) noexcept {
+    if (!ws) return nullptr;
+    if (!ws->cold) {
+        ws->cold = static_cast<WidgetCold*>(std::malloc(sizeof(WidgetCold)));
+        if (ws->cold) *ws->cold = WidgetCold{};
+    }
+    return ws->cold;
+}
 
 struct StateMap {
     WidgetState* entries = nullptr;
@@ -270,6 +283,13 @@ struct FontSlot {
     int32_t        face_index = 0;
     void*          dwrite_face = nullptr;
     bool           dwrite_probed = false;
+    uint16_t       parent_slot = kInvalidFont;
+    FontAxisValue  axes[8] = {};
+    uint8_t        axis_count = 0;
+    FontFeature    default_features[8] = {};
+    uint8_t        default_feature_count = 0;
+    uint64_t       variation_hash = 0;
+    bool           is_variation = false;
 };
 
 inline constexpr uint32_t kMaxVectorIconLayers = 4u;
@@ -366,14 +386,19 @@ struct FontAtlas {
 };
 
 enum class GpuPipelineKind : uint8_t {
-    Uber = 0,
-    QuadOpaque = 1,
-    QuadAlpha = 2,
+    QuadOpaque = 0,
+    QuadAlpha = 1,
+    GrayscaleText = 2,
     SubpixelText = 3,
-    UberPunch = 4,
-    UberAdditive = 5,
-    GrayscaleText = 6,
+    Slug = 4,
+    Image = 5,
+    ImagePunch = 6,
+    Fx = 7,
 };
+
+// Parallel 1-byte/prim metadata flags (keeps Prim strictly 64 bytes).
+inline constexpr uint8_t kPrimAuxBlendMask    = 0x03u; // bits [0..1] = BlendMode
+inline constexpr uint8_t kPrimAuxHollowBorder = 1u << 2; // bit 2 = hollow border (4-strip overlap)
 
 struct DrawBatch {
     uint32_t        first_prim = 0;
@@ -381,9 +406,10 @@ struct DrawBatch {
     SDL_GPUTexture* ext_textures[8] = {}; // Slots 1..8; slot 0 is always FontAtlas::gpu_tex
     uint32_t        ext_count = 0;
     uint32_t        blend_rgba8 = 0; // Packed sRGB RGBA8 text color for SubpixelText CONSTANT_COLOR
-    GpuPipelineKind pipeline = GpuPipelineKind::Uber;
-    bool is_punch_hole = false;
-    bool is_additive = false;
+    SDL_GPUTexture* mask_tex = nullptr; // Active Texture AlphaMask texture for this batch
+    GpuPipelineKind pipeline = GpuPipelineKind::QuadAlpha;
+    uint8_t         blend_mode = 0; // static_cast<uint8_t>(BlendMode)
+    bool            is_punch_hole = false;
 };
 
 enum class TextEditOpKind : uint8_t {
@@ -458,44 +484,60 @@ struct VisualLayerNode {
     mutable float resolved_m[6] = {1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f};
     mutable float resolved_blur_px = 0.0f;
     mutable const VisualLayerNode* resolved_blur_root = nullptr;
-    mutable bool resolved_plus_lighter = false;
+    mutable BlendMode resolved_blend_mode = BlendMode::Normal;
+    mutable bool resolved_has_alpha_mask = false;
     mutable bool resolved_animating = false;
     mutable uint32_t resolved_frame = 0;
+    mutable uint32_t cached_mask_clip_frame = 0;
+    mutable uint32_t cached_mask_clip_parent = UINT32_MAX;
+    mutable uint32_t cached_mask_clip_idx = 0;
 };
 struct BoxBuildStack {
     BoxBuildStack* parent = nullptr;
     const VisualLayerNode* previous_layer = nullptr;
+};
+struct DrawCmdPolyPayload {
+    const Vec2* points = nullptr;
+    uint32_t    count = 0;
+    bool        closed = false;
+    Color       color = {};
+    float       thickness = 1.5f;
+    Color       glow_color = {};
+    float       glow_px = 0.0f;
+};
+struct DrawCmdTextPayload {
+    TextDrawDesc    cmd = {};
+    const uint32_t* terminal_columns = nullptr;
+    float           terminal_cell_width = 0.0f;
+};
+struct DrawCmdCallbackPayload {
+    LayoutDrawFn fn = nullptr;
+    void*        data = nullptr;
+    Theme*       theme = nullptr;
 };
 struct DrawCmdNode {
     const VisualLayerNode* layer = nullptr;
     DrawCmdNode*  next = nullptr;
     DrawCmdKind   kind = DrawCmdKind::Rect;
     float         world_scale = 1.0f;
-    RectDrawDesc  rect = {};
-    MeshRectDrawDesc mesh = {};
-    PunchHoleDesc hole = {};
-    BorderBeamDrawDesc beam = {};
-    LineDesc      line = {};
-    const Vec2*   poly_points = nullptr;
-    uint32_t      poly_count = 0;
-    bool          poly_closed = false;
-    Color         poly_color = {};
-    float         poly_thickness = 1.5f;
-    Color         poly_glow_color = {};
-    float         poly_glow_px = 0.0f;
-    BezierDesc    bezier = {};
-    RingDesc      ring = {};
-    IconDrawDesc  icon = {};
-    TextDrawDesc  text_cmd = {};
-    const uint32_t* terminal_columns = nullptr;
-    float terminal_cell_width = 0;
-    ImageDrawDesc image_cmd = {};
-    FilledPathDesc fill_cmd = {};
-    ShadowDrawCmd shadow_cmd = {};
-    LayoutDrawFn callback = nullptr;
-    void* callback_data = nullptr;
-    Theme* callback_theme = nullptr;
+    union {
+        RectDrawDesc           rect;
+        MeshRectDrawDesc       mesh;
+        PunchHoleDesc          hole;
+        BorderBeamDrawDesc     beam;
+        LineDesc               line;
+        DrawCmdPolyPayload     poly;
+        BezierDesc             bezier;
+        RingDesc               ring;
+        IconDrawDesc           icon;
+        DrawCmdTextPayload     text_payload;
+        ImageDrawDesc          image_cmd;
+        FilledPathDesc         fill_cmd;
+        ShadowDrawCmd          shadow_cmd;
+        DrawCmdCallbackPayload cb;
+    };
 };
+static_assert(sizeof(DrawCmdNode) <= 224u, "DrawCmdNode payload must stay compact in a tagged union");
 
 SDL_HitTestResult SDLCALL etch_sdl_hit_test(SDL_Window* win, const SDL_Point* area, void* data) noexcept;
 
@@ -652,11 +694,25 @@ struct SpanHitRegion {
     bool     has_clip = false;
 };
 
+inline constexpr uint32_t kClipMaskRounded = 0u;
+inline constexpr uint32_t kClipMaskLinear  = 1u;
+inline constexpr uint32_t kClipMaskRadial  = 2u;
+inline constexpr uint32_t kClipMaskTexture = 3u;
+
 struct alignas(16) ClipShapeGpu {
-    Vec4 bounds = {}, radii = {};
-    Uint4 meta = {}; // Parent index, continuous corners, packed f16 top/bottom and left/right fade widths.
+    Vec4  bounds = {};
+    Vec4  radii = {};
+    // meta.x = parent_index;
+    // meta.y = bit0:continuous_corners | bits[1..3]:mask_kind (0..3) | bit4:invert;
+    // meta.z = fade_tb_f16x2 (mask_kind==0) OR pack_f16x2(alpha_start, alpha_end) (mask_kind!=0);
+    // meta.w = fade_lr_f16x2 (mask_kind==0) OR pack_f16x2(start_t, end_t) (mask_kind!=0).
+    Uint4 meta = {};
+    // mask_kind==1 (Linear):  (dir_x, dir_y, origin_dot, inv_len)
+    // mask_kind==2 (Radial):  (cx_px, cy_px, inv_rx_px, inv_ry_px)
+    // mask_kind==3 (Texture): (u0, v0, u1, v1)
+    Vec4  mask_params = {};
 };
-static_assert(sizeof(ClipShapeGpu)==48 && sizeof(ClipShapeGpu)%16==0);
+static_assert(sizeof(ClipShapeGpu) == 64 && sizeof(ClipShapeGpu) % 16 == 0);
 
 struct alignas(16) GradientStopGpu {
     uint32_t rgba8 = 0; // Packed sRGB RGBA8
@@ -703,9 +759,10 @@ struct ClipStack {
     uint32_t  overflow = 0;
 };
 
-struct CachedPipeline {
-    SDL_GPUTextureFormat     format = SDL_GPU_TEXTUREFORMAT_INVALID;
-    SDL_GPUGraphicsPipeline* pipeline = nullptr;
+// Unified lazy PSO cache entry keyed by (GpuShaderKind, GpuBlendMode, DepthMode, TargetFmt).
+struct PsoEntry {
+    uint32_t                 key = 0;
+    SDL_GPUGraphicsPipeline* pipe = nullptr;
 };
 
 struct BlurSplit {
@@ -729,14 +786,42 @@ struct FilterBlurGroup {
     uint32_t slice = 0;
     uint32_t max_level = 3;
     float    blur_px = 0.0f;
-    bool     plus_lighter = false;
+    BlendMode blend_mode = BlendMode::Normal;
     Rect     raw_bounds = {};
     bool     has_bounds = false;
     Rect     padded_bounds = {};
     ClipEntry ancestor_clip = {};
     uint32_t ancestor_clip_index = 0;
+    uint32_t ancestor_clip_shape = 0;
     uint32_t ancestor_clip_depth = 1;
 };
+
+struct KawaseBlurParams {
+    float off_down1;
+    float off_down2;
+    float off_up;
+    float margin_up;
+    float margin_down2;
+    float margin_down1;
+};
+
+inline KawaseBlurParams etch_kawase_blur_params(float radius_px) noexcept {
+    const auto clamp_k = [](float v, float lo, float hi) noexcept -> float {
+        return (v < lo) ? lo : ((v > hi) ? hi : v);
+    };
+    const float off_down1 = clamp_k(1.0f + radius_px * 0.04f, 0.5f, 3.0f);
+    const float off_down2 = clamp_k(1.0f + radius_px * 0.06f, 0.5f, 4.0f);
+    const float off_up    = clamp_k(0.6f + radius_px * 0.03f, 0.5f, 2.5f);
+    // Shrink scissor margins monotonically so every LOADOP_DONT_CARE pass samples strictly inside prior pass's written pixels.
+    const float margin_up    = std::ceil(radius_px * 0.5f + 8.0f);
+    const float margin_down2 = margin_up + std::ceil((off_up + 2.0f) * 4.0f);
+    const float margin_down1 = margin_down2 + std::ceil((off_down2 + 2.0f) * 2.0f);
+    return {off_down1, off_down2, off_up, margin_up, margin_down2, margin_down1};
+}
+
+inline float etch_blur_down1_margin_px(float radius_px) noexcept {
+    return etch_kawase_blur_params(radius_px).margin_down1 + 2.0f;
+}
 
 inline SDL_GPUTexture* filter_tex_sentinel(uint32_t slice, uint32_t level) noexcept {
     static uint8_t s_filter_tex_tags[kMaxFilterSlices][kMaxFilterLevels] = {};
@@ -775,11 +860,6 @@ struct TextUndoSlot {
 inline SDL_GPUTexture* blur_tex_sentinel() noexcept {
     static uint8_t s_blur_tex_tag = 0;
     return reinterpret_cast<SDL_GPUTexture*>(&s_blur_tex_tag);
-}
-
-inline SDL_GPUTexture* subpixel_tex_sentinel() noexcept {
-    static uint8_t s_subpixel_tex_tag = 0;
-    return reinterpret_cast<SDL_GPUTexture*>(&s_subpixel_tex_tag);
 }
 
 inline constexpr uint32_t kMaxTreeDepth = 32u;
@@ -851,11 +931,13 @@ struct A11yBuild { A11yNode node = {}; A11yBuild* next = nullptr; A11yBuild* par
 struct A11yPatch { A11yOverrideDesc desc = {}; A11yPatch* next = nullptr; };
 struct A11yIndexEntry { uint32_t id = 0; A11yBuild* build = nullptr; A11yPatch* patches = nullptr; A11yPatch* tail = nullptr; };
 struct WindowUiState {
+    static constexpr uint32_t kMaxPendingA11yActions = 16u;
+    static constexpr uint32_t kMaxTableDepth = 8u;
     const VisualLayerNode* current_layer = nullptr;
     BoxBuildStack* box_build_stack = nullptr;
     Arena a11y_arena = {}; A11yNode* a11y_nodes = nullptr; uint32_t a11y_node_count = 0;
-    PendingA11yAction a11y_actions[16] = {}; uint32_t a11y_action_count = 0;
-    PendingA11yAction frame_a11y_actions[16] = {}; uint32_t frame_a11y_action_count = 0;
+    PendingA11yAction* a11y_actions = nullptr; uint32_t a11y_action_count = 0;
+    PendingA11yAction* frame_a11y_actions = nullptr; uint32_t frame_a11y_action_count = 0;
 
     uint32_t scrub_id = 0; float scrub_value = 0;
     uint32_t drag_edit_id = 0; uint32_t drag_edit_seen_frame = 0;
@@ -897,6 +979,7 @@ struct WindowUiState {
     SDL_GPUTexture* blur_pong_tex = nullptr;
     uint32_t blur_rt_w = 0;
     uint32_t blur_rt_h = 0;
+    SDL_GPUTextureFormat blur_rt_fmt = SDL_GPU_TEXTUREFORMAT_INVALID;
     uint32_t blur_idle_frames = 0;
     uint32_t depth_idle_frames = 0;
     FilterSliceTargets filter_slices[kMaxFilterSlices] = {};
@@ -979,13 +1062,13 @@ struct WindowUiState {
     DockSpaceSlot* dock_spaces = nullptr; uint32_t dock_space_cap = 0; uint32_t dock_space_count = 0;
     DockCursor dock_cursor = {};
     TableMetadata* tables = nullptr; uint32_t table_cap = 0; uint32_t table_count = 0;
-    TableStackEntry table_stack[8] = {};
+    TableStackEntry* table_stack = nullptr;
     uint32_t table_depth = 0;
     uint32_t tree_depth = 0;
     uint32_t collapsible_depth = 0;
     uint32_t collapse_depth = 0;
     bool collapse_pushed_layer[kMaxCollapsibleDepth] = {};
-    SplitStackEntry  split_stack[kMaxSplitDepth] = {};
+    SplitStackEntry* split_stack = nullptr;
     uint32_t         split_depth = 0;
     CanvasStackEntry canvas_stack[kMaxCanvasDepth] = {};
     uint32_t         canvas_depth = 0;
@@ -1138,7 +1221,7 @@ struct Context {
     A11yBuild* a11y_first = nullptr; A11yBuild* a11y_last = nullptr; A11yBuild* a11y_parent = nullptr;
     A11yPatch* a11y_patches = nullptr; uint32_t a11y_count = 0;
 
-    WindowUiState headless_ui = {};
+    WindowUiState* headless_ui = nullptr;
     WindowUiState* active_ui = nullptr;
     SDL_Window* active_window = nullptr;
     SDL_Window* draw_list_window = nullptr;
@@ -1146,7 +1229,8 @@ struct Context {
     SDL_Window* ime_active_window = nullptr;
     bool in_frame = false;
     ClipShapeGpu* clip_shapes = nullptr;
-    uint32_t clip_shape_count = 1, clip_shape_capacity = 0, render_clip_index = 0, render_clip_depth = 1;
+    SDL_GPUTexture** clip_mask_textures = nullptr; // Parallel to clip_shapes (same capacity)
+    uint32_t clip_shape_count = 1, clip_shape_capacity = 0, render_clip_index = 0, render_clip_shape = 0, render_clip_depth = 1;
     bool clip_shape_sentinel_uploaded = false;
     SDL_GPUBuffer* clip_shape_gpu = nullptr; SDL_GPUTransferBuffer* clip_shape_transfer = nullptr;
     uint32_t clip_shape_gpu_capacity = 0, clip_shape_transfer_capacity = 0;
@@ -1195,8 +1279,13 @@ struct Context {
         bool           initialized = false;
     };
     ShapeCache    shape_cache = {};
+    uint32_t      active_ot_flags = 0u;
+    const FontFeature* active_ot_features = nullptr;
+    uint32_t      active_ot_feature_count = 0u;
 
     Prim*         prims = nullptr;
+    uint8_t*      prim_aux_flags = nullptr; // Parallel 1B/prim (bits[0..1]=BlendMode, bit2=is_hollow_border)
+    uint32_t      prim_aux_cap = 0;
     uint32_t      max_prims = 0;
     uint32_t      prim_count = 0;
     DrawBatch* batches = nullptr;
@@ -1205,7 +1294,10 @@ struct Context {
     BlurSplit* blur_splits = nullptr;
     uint32_t blur_split_cap = 0;
     uint32_t      blur_split_count = 0;
+    bool          blur_splits_need_load_preserve = false;
     Prim*         filter_prims = nullptr;
+    uint8_t*      filter_prim_aux_flags = nullptr;
+    uint32_t      filter_prim_aux_cap = 0;
     uint32_t      filter_prim_cap = 0;
     uint32_t      filter_prim_count = 0;
     DrawBatch*    filter_batches = nullptr;
@@ -1229,6 +1321,7 @@ struct Context {
     BlurSplit*    gpu_blur_splits = nullptr;
     uint32_t      gpu_blur_split_cap = 0;
     uint32_t      gpu_blur_split_count = 0;
+    Arena         opt_scratch = {};
     bool          gpu_use_early_z = false;
     bool          supports_d32_depth = true;
 
@@ -1246,12 +1339,16 @@ struct Context {
     uint32_t                 claimed_window_count = 0;
     bool                     owns_video_init = false;
     bool                     headless = false;
-    SDL_GPUShader*           vs_shader = nullptr;
-    SDL_GPUShader*           ps_shader = nullptr;
     SDL_GPUShader*           quad_vs_shader = nullptr;
     SDL_GPUShader*           quad_ps_shader = nullptr;
     SDL_GPUShader*           subpixel_vs_shader = nullptr;
     SDL_GPUShader*           subpixel_ps_shader = nullptr;
+    SDL_GPUShader*           slug_vs_shader = nullptr;
+    SDL_GPUShader*           slug_ps_shader = nullptr;
+    SDL_GPUShader*           image_vs_shader = nullptr;
+    SDL_GPUShader*           image_ps_shader = nullptr;
+    SDL_GPUShader*           fx_vs_shader = nullptr;
+    SDL_GPUShader*           fx_ps_shader = nullptr;
     SDL_GPUShader*           kawase_vs_shader = nullptr;
     SDL_GPUShader*           kawase_ps_shader = nullptr;
     SDL_GPUSampler*          linear_sampler = nullptr;
@@ -1259,35 +1356,9 @@ struct Context {
     SDL_GPUSampler*          mirror_linear_sampler = nullptr;
     SDL_GPUTexture*          surface_fallback_tex = nullptr;
     uint64_t                 shader_surface_epoch = 0;
-    CachedPipeline           pipelines[kMaxCachedPipelines] = {};
-    uint32_t                 pipeline_count = 0;
-    CachedPipeline           uber_depth_pipelines[kMaxCachedPipelines] = {};
-    uint32_t                 uber_depth_pipeline_count = 0;
-    CachedPipeline           quad_opaque_pipelines[kMaxCachedPipelines] = {};
-    uint32_t                 quad_opaque_pipeline_count = 0;
-    CachedPipeline           quad_alpha_pipelines[kMaxCachedPipelines] = {};
-    uint32_t                 quad_alpha_pipeline_count = 0;
-    CachedPipeline           quad_alpha_depth_pipelines[kMaxCachedPipelines] = {};
-    uint32_t                 quad_alpha_depth_pipeline_count = 0;
-    CachedPipeline           subpixel_pipelines[kMaxCachedPipelines] = {};
-    uint32_t                 subpixel_pipeline_count = 0;
-    CachedPipeline           subpixel_depth_pipelines[kMaxCachedPipelines] = {};
-    uint32_t                 subpixel_depth_pipeline_count = 0;
-    CachedPipeline           grayscale_text_pipelines[kMaxCachedPipelines] = {};
-    uint32_t                 grayscale_text_pipeline_count = 0;
-    CachedPipeline           grayscale_text_depth_pipelines[kMaxCachedPipelines] = {};
-    uint32_t                 grayscale_text_depth_pipeline_count = 0;
-    CachedPipeline punch_pipelines[kMaxCachedPipelines] = {};
-    uint32_t punch_pipeline_count = 0;
-    CachedPipeline additive_pipelines[kMaxCachedPipelines] = {};
-    uint32_t additive_pipeline_count = 0;
-    CachedPipeline additive_depth_pipelines[kMaxCachedPipelines] = {};
-    uint32_t additive_depth_pipeline_count = 0;
-    SDL_GPUGraphicsPipeline* kawase_pipe = nullptr;
-    SDL_GPUGraphicsPipeline* filter_kawase_pipe = nullptr;
-    SDL_GPUGraphicsPipeline* bloom_pipe = nullptr;
-    CachedPipeline           present_pipelines[kMaxCachedPipelines] = {};
-    uint32_t                 present_pipeline_count = 0;
+    PsoEntry*                pso_table = nullptr;
+    uint32_t                 pso_count = 0;
+    uint32_t                 pso_cap = 0;
     uint32_t prim_gpu_cap = 0;
     uint32_t prim_tbuf_cap = 0;
     uint32_t prim_tbuf_cursor = 0;
@@ -1362,14 +1433,86 @@ namespace {
 
 thread_local Context* g_current_context = nullptr;
 
+WindowUiState* ensure_headless_ui(Context* ctx) noexcept {
+    if (!ctx) return nullptr;
+    if (!ctx->headless_ui) {
+        auto* p = static_cast<WindowUiState*>(std::malloc(sizeof(WindowUiState)));
+        if (!p) return nullptr;
+        *p = WindowUiState{};
+        ctx->headless_ui = p;
+    }
+    return ctx->headless_ui;
+}
+
+bool ensure_a11y_actions(WindowUiState* ui) noexcept {
+    if (!ui) return false;
+    if (!ui->a11y_actions) {
+        ui->a11y_actions = static_cast<PendingA11yAction*>(
+            std::calloc(WindowUiState::kMaxPendingA11yActions, sizeof(PendingA11yAction)));
+        if (!ui->a11y_actions) return false;
+    }
+    return true;
+}
+
+bool ensure_frame_a11y_actions(WindowUiState* ui) noexcept {
+    if (!ui) return false;
+    if (!ui->frame_a11y_actions) {
+        ui->frame_a11y_actions = static_cast<PendingA11yAction*>(
+            std::calloc(WindowUiState::kMaxPendingA11yActions, sizeof(PendingA11yAction)));
+        if (!ui->frame_a11y_actions) return false;
+    }
+    return true;
+}
+
+bool ensure_table_stack(WindowUiState* ui) noexcept {
+    if (!ui) return false;
+    if (!ui->table_stack) {
+        ui->table_stack = static_cast<TableStackEntry*>(
+            std::calloc(WindowUiState::kMaxTableDepth, sizeof(TableStackEntry)));
+        if (!ui->table_stack) return false;
+    }
+    return true;
+}
+
+bool ensure_split_stack(WindowUiState* ui) noexcept {
+    if (!ui) return false;
+    if (!ui->split_stack) {
+        ui->split_stack = static_cast<SplitStackEntry*>(
+            std::calloc(kMaxSplitDepth, sizeof(SplitStackEntry)));
+        if (!ui->split_stack) return false;
+    }
+    return true;
+}
+
+void free_window_ui_cold_arrays(WindowUiState* ui) noexcept {
+    if (!ui) return;
+    std::free(ui->a11y_actions); ui->a11y_actions = nullptr; ui->a11y_action_count = 0;
+    std::free(ui->frame_a11y_actions); ui->frame_a11y_actions = nullptr; ui->frame_a11y_action_count = 0;
+    std::free(ui->table_stack); ui->table_stack = nullptr; ui->table_depth = 0;
+    std::free(ui->split_stack); ui->split_stack = nullptr; ui->split_depth = 0;
+}
+
+SDL_GPUTexture* resolve_clip_mask_texture(const Context* ctx, uint32_t clip_index) noexcept {
+    if (!ctx || !ctx->clip_shapes || !ctx->clip_mask_textures || clip_index == 0u) return nullptr;
+    uint32_t cur = clip_index;
+    for (uint32_t guard = 0u; guard < 16u && cur > 0u && cur < ctx->clip_shape_count; ++guard) {
+        if (ctx->clip_mask_textures[cur]) return ctx->clip_mask_textures[cur];
+        cur = ctx->clip_shapes[cur].meta.x;
+    }
+    return nullptr;
+}
+
 WindowUiState* window_ui(Context* ctx, SDL_Window* window) noexcept {
     SDL_Window* target = window ? window : ctx->window;
     for (uint32_t i = 0; i < ctx->claimed_window_cap; ++i)
         if (target && ctx->claimed_windows[i] && ctx->claimed_windows[i]->window == target) return &ctx->claimed_windows[i]->ui;
-    return window ? nullptr : &ctx->headless_ui;
+    return window ? nullptr : ensure_headless_ui(ctx);
 }
 const WindowUiState* window_ui(const Context* ctx, SDL_Window* window) noexcept {
-    return window_ui(const_cast<Context*>(ctx), window);
+    SDL_Window* target = window ? window : ctx->window;
+    for (uint32_t i = 0; i < ctx->claimed_window_cap; ++i)
+        if (target && ctx->claimed_windows[i] && ctx->claimed_windows[i]->window == target) return &ctx->claimed_windows[i]->ui;
+    return window ? nullptr : ctx->headless_ui;
 }
 bool ensure_batch_cap_array(DrawBatch** batches, uint32_t* cap, uint32_t count) noexcept {
     if (count < *cap) return true;
@@ -1523,7 +1666,14 @@ void state_map_destroy(StateMap* map) noexcept {
     if (!map) {
         return;
     }
-    std::free(map->entries);
+    if (map->entries) {
+        for (uint32_t i = 0u; i < map->capacity; ++i) {
+            if (map->entries[i].cold) {
+                std::free(map->entries[i].cold);
+            }
+        }
+        std::free(map->entries);
+    }
     map->entries = nullptr;
     map->capacity = 0;
     map->count = 0;
@@ -1569,11 +1719,17 @@ WidgetState* state_map_find(StateMap* map, uint32_t key) noexcept {
 }
 
 bool state_is_persistent(const WidgetState& ws) noexcept {
-    return ws.is_scroll_x || ws.is_scroll_y || ws.is_virtual_list ||
-           ws.split_initialized || ws.tree_initialized || ws.collapsible_initialized ||
-           ws.edit_initialized || ws.table_initialized || ws.column_override ||
-           ws.canvas_initialized || ws.sheet_initialized || ws.spring_initialized ||
-           ws.presence_initialized || ws.terminal_initialized;
+    if (ws.is_scroll_x || ws.is_scroll_y || ws.is_virtual_list ||
+        ws.tree_initialized || ws.collapsible_initialized || ws.spring_initialized)
+    {
+        return true;
+    }
+    if (const WidgetCold* c = ws.cold) {
+        return c->split_initialized || c->edit_initialized || c->table_initialized ||
+               c->column_override || c->canvas_initialized || c->sheet_initialized ||
+               c->presence_initialized || c->terminal_initialized;
+    }
+    return false;
 }
 
 bool state_map_prune(
@@ -1621,7 +1777,10 @@ bool state_map_prune(
         if (ws.key == 0u) continue;
         const bool keep = ws.last_seen_frame > cutoff || state_is_persistent(ws) ||
             ws.pressed_down || ws.key == keep_a || ws.key == keep_b || ws.key == keep_c || ws.key == keep_d;
-        if (!keep) continue;
+        if (!keep) {
+            if (ws.cold) std::free(ws.cold);
+            continue;
+        }
         uint32_t idx = hash_u32(ws.key) & mask;
         while (next[idx].key != 0u) idx = (idx + 1u) & mask;
         next[idx] = ws;

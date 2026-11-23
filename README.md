@@ -22,30 +22,41 @@ and register custom maximize controls with `window_maximize_button_region(id)`.
   (`-DETCH_UNITY_BUILD=OFF`).
 - **Lean Multi-Pipeline GPU + Indexed Aux Buffers**: 64-byte, `alignas(16)` `etch::Prim`
   (`EtchPrim`) records paired with indexed frame-arena GPU storage buffers
-  (`ClipShapeGpu`, `GradientStopGpu`) and specialized low-VGPR pipelines:
+  (`ClipShapeGpu`, `GradientStopGpu`) and six focused low-VGPR micro-shaders with unified
+  lazy PSO caching, hardware `BlendMode` (`Normal`/`Additive`/`Multiply`/`Screen`), and
+  composable `AlphaMaskDesc` (`Rounded`/`LinearGradient`/`RadialSpotlight`/`Texture`):
   - [etch_quad.hlsl](shaders/etch_quad.hlsl): Early-Z opaque quads, rounded/superellipse
-    boxes, disjoint-area borders, multi-layer elevation & analytic inset shadows, and
-    2-to-8 stop Linear/Radial/Conic Oklab gradients.
+    boxes, disjoint-area hollow borders (4-strip non-occluding batch coalescing),
+    multi-layer elevation & analytic inset shadows, and 2-to-8 stop Linear/Radial/Conic
+    Oklab gradients.
   - [etch_subpixel.hlsl](shaders/etch_subpixel.hlsl): Adaptive small hinted text (`<= 24 px`)
     defaulting to a bounded `R8_UNORM` 4x X-phase grayscale atlas with polarity-calibrated
-    stem darkening (single draw call across all text colors, 1/4 VRAM), with explicit
-    opt-in 3-channel ClearType RGB LCD blending (`set_lcd_subpixel_text`).
-  - [etch_uber.hlsl](shaders/etch_uber.hlsl): Slug GPU quadratic Bezier vectors/large &
-    rotated text, optical vibrancy `BlurGlass` (saturation, brightness, micro-grain),
-    mesh gradients, mipmapped textures (`ImageFit::Fill`/`Contain`/`Cover`), Bezier wires,
-    ring arcs, and animated border beams.
+    stem darkening (single draw call across all text colors, 1/4 VRAM, text wipe, blend
+    modes & alpha masks), with explicit opt-in 3-channel ClearType RGB LCD blending
+    (`set_lcd_subpixel_text`).
+  - [etch_slug.hlsl](shaders/etch_slug.hlsl): Slug GPU quadratic Bezier vectors, large &
+    rotated text, variable font outlines (`hb_font_draw_glyph()`), and SVG icons.
+  - [etch_image.hlsl](shaders/etch_image.hlsl): Mipmapped textures (`ImageFit::Fill`/
+    `Contain`/`Cover`), optical vibrancy `BlurGlass` (saturation, brightness, micro-grain),
+    `LayerBlur` compositing, and `PunchHole` alpha cutouts.
+  - [etch_fx.hlsl](shaders/etch_fx.hlsl): Lazily instantiated special FX (`CanvasGrid`,
+    `BezierWire`, `RingArc`, `MeshGrad`, animated `BorderBeam`).
   - [etch_kawase.hlsl](shaders/etch_kawase.hlsl): Dual-Kawase backdrop/layer blur, bloom,
     and presentation.
 - **Strict Memory & Power Discipline**: Prefers low-power integrated GPU adapters by
-  default (`ContextDesc::prefer_high_performance_gpu = false`), lazy shader/PSO creation,
-  lean initial buffers with geometric growth, ring-slice GPU uploads, bounded LRU glyph
-  atlas reclamation, and automatic idle release for offscreen render/staging targets.
-- HarfBuzz shapes text; [src/etch_slug.cpp](src/etch_slug.cpp) extracts Slug
-  GPU Bezier contours and bands, [src/etch_emoji.cpp](src/etch_emoji.cpp) provides
-  color emoji fallbacks (`COLR v0`, `CBDT`, `sbix`) and hinted small-text rasterization,
-  and multiline `text_input` / `code_editor` support soft word-wrapping plus modern
-  semantic `Theme` tokens and easing/spring motion (`eval_easing`, `tween`, `stagger_delay`,
-  2D subtree `LayerDesc::rotation_rad`).
+  default (`ContextDesc::prefer_high_performance_gpu = false`), platform-stripped shader
+  arrays, lazy shader/PSO creation, hot/cold `WidgetState` split, lean `512 KiB` default
+  frame arena and `2048`-prim initial reserves with geometric growth, ring-slice GPU
+  uploads, bounded LRU glyph atlas reclamation, and automatic idle release for offscreen
+  render/staging targets.
+- HarfBuzz shapes text with per-call OpenType features (`OpenTypeFlags`, `FontFeature`)
+  and deduplicated variable font variations (`create_font_variation`, `FontAxisValue`);
+  [src/etch_slug.cpp](src/etch_slug.cpp) extracts Slug GPU Bezier contours and bands via
+  `hb_font_draw_glyph()`, [src/etch_emoji.cpp](src/etch_emoji.cpp) provides color emoji
+  fallbacks (`COLR v0`, `CBDT`, `sbix`) and hinted small-text rasterization (including
+  DirectWrite variable axes), and multiline `text_input` / `code_editor` support soft
+  word-wrapping plus modern semantic `Theme` tokens and easing/spring motion
+  (`eval_easing`, `tween`, `stagger_delay`, 2D subtree `LayerDesc::rotation_rad`).
 - [src/etch_a11y.cpp](src/etch_a11y.cpp) and [src/etch_a11y_os.cpp](src/etch_a11y_os.cpp)
   expose zero-heap A11y snapshots/actions, smooth live window resize,
   multi-monitor DPI sync, and optional OS accessibility bridges (Windows UIA).
@@ -176,7 +187,7 @@ configuring the consumer. If installation was disabled, reconfigure Etch with
 ```cmake
 cmake_minimum_required(VERSION 3.24)
 project(my_app LANGUAGES C CXX)
-find_package(Etch 0.27 CONFIG REQUIRED)
+find_package(Etch 0.28 CONFIG REQUIRED)
 add_executable(my_app main.cpp)
 target_link_libraries(my_app PRIVATE Etch::etch)
 ```

@@ -137,21 +137,22 @@ void* map_or_load_font_file(const char* path, size_t* out_size, bool* out_mapped
     return raw;
 }
 
+void release_platform_font_face(FontSlot* slot) noexcept;
+void release_platform_font_factory(FontAtlas* atlas) noexcept;
+
 void destroy_font_slot(FontSlot* slot) noexcept {
-#if defined(_WIN32)
-    if (slot->dwrite_face) {
-        static_cast<IDWriteFontFace*>(slot->dwrite_face)->Release();
-    }
-#endif
+    release_platform_font_face(slot);
     if (slot->hb_font) hb_font_destroy(slot->hb_font);
-    if (slot->hb_face) hb_face_destroy(slot->hb_face);
-    if (slot->hb_blob) hb_blob_destroy(slot->hb_blob);
-    if (slot->sbix_blob) hb_blob_destroy(slot->sbix_blob);
-    if (slot->cblc_blob) hb_blob_destroy(slot->cblc_blob);
-    if (slot->cbdt_blob) hb_blob_destroy(slot->cbdt_blob);
-    if (slot->colr_blob) hb_blob_destroy(slot->colr_blob);
-    if (slot->cpal_blob) hb_blob_destroy(slot->cpal_blob);
-    release_font_bytes(slot->font_file_data, slot->font_file_size, slot->font_file_mapped);
+    if (!slot->is_variation) {
+        if (slot->hb_face) hb_face_destroy(slot->hb_face);
+        if (slot->hb_blob) hb_blob_destroy(slot->hb_blob);
+        if (slot->sbix_blob) hb_blob_destroy(slot->sbix_blob);
+        if (slot->cblc_blob) hb_blob_destroy(slot->cblc_blob);
+        if (slot->cbdt_blob) hb_blob_destroy(slot->cbdt_blob);
+        if (slot->colr_blob) hb_blob_destroy(slot->colr_blob);
+        if (slot->cpal_blob) hb_blob_destroy(slot->cpal_blob);
+        release_font_bytes(slot->font_file_data, slot->font_file_size, slot->font_file_mapped);
+    }
     *slot = {};
 }
 
@@ -296,11 +297,16 @@ void update_font_slot_scaled_metrics(FontSlot* slot, uint16_t slot_idx) noexcept
     if (slot->tabular_numbers) {
         mh ^= 0x746E756Du;
     }
+    if (slot->is_variation) {
+        mh = fnv1a_32_step(mh, &slot->variation_hash, sizeof(slot->variation_hash));
+    }
     slot->metric_hash = mh;
 }
 
 void mark_font_redraw(Context* ctx) noexcept {
-    ctx->headless_ui.redraw_budget = 2u;
+    if (ctx->headless_ui) {
+        ctx->headless_ui->redraw_budget = 2u;
+    }
     if (ctx->active_ui) {
         ctx->active_ui->redraw_budget = 2u;
     }
@@ -349,19 +355,34 @@ bool init_font_slot_from_owned_bytes(
     next.hb_blob=blob;next.hb_face=face;next.hb_font=font;
     next.upem=upem;next.num_glyphs=hb_face_get_glyph_count(face);
     init_color_tables(&next);
-    const int offset=stbtt_GetFontOffsetForIndex(bytes,face_index);
-    next.has_outlines=offset>=0 && stbtt_InitFont(&new_info,bytes,offset)!=0;
-    if(next.has_outlines) {
-        next.font_info=new_info;
-        stbtt_GetFontVMetrics(&next.font_info,&next.font_ascent,&next.font_descent,&next.font_line_gap);
-        next.scale_1px=stbtt_ScaleForPixelHeight(&next.font_info,1.0f);
+    const int offset = stbtt_GetFontOffsetForIndex(bytes, face_index);
+    const bool stbtt_ok = (offset >= 0 && stbtt_InitFont(&new_info, bytes, offset) != 0);
+    auto face_has_table = [&](hb_tag_t tag) noexcept -> bool {
+        hb_blob_t* t = hb_face_reference_table(face, tag);
+        const bool ok = (t != nullptr) && (hb_blob_get_length(t) > 0u);
+        if (t) hb_blob_destroy(t);
+        return ok;
+    };
+    next.has_outlines = stbtt_ok ||
+        face_has_table(HB_TAG('g', 'l', 'y', 'f')) ||
+        face_has_table(HB_TAG('C', 'F', 'F', ' ')) ||
+        face_has_table(HB_TAG('C', 'F', 'F', '2'));
+    if (stbtt_ok) {
+        next.font_info = new_info;
+        stbtt_GetFontVMetrics(&next.font_info, &next.font_ascent, &next.font_descent, &next.font_line_gap);
+        next.scale_1px = stbtt_ScaleForPixelHeight(&next.font_info, 1.0f);
     } else {
-        if(!next.has_color_emoji){destroy_font_slot(&next);return false;}
+        if (!next.has_outlines && !next.has_color_emoji) { destroy_font_slot(&next); return false; }
         hb_font_extents_t ext{};
-        if(hb_font_get_h_extents(font,&ext) && ext.ascender>ext.descender) {
-            next.font_ascent=ext.ascender;next.font_descent=ext.descender;next.font_line_gap=ext.line_gap;
-        } else {next.font_ascent=int32_t(upem*4/5);next.font_descent=-int32_t(upem/5);}
-        next.scale_1px=1.0f/float(next.font_ascent-next.font_descent);
+        if (hb_font_get_h_extents(font, &ext) && ext.ascender > ext.descender) {
+            next.font_ascent = ext.ascender;
+            next.font_descent = ext.descender;
+            next.font_line_gap = ext.line_gap;
+        } else {
+            next.font_ascent = int32_t(upem * 4 / 5);
+            next.font_descent = -int32_t(upem / 5);
+        }
+        next.scale_1px = 1.0f / float(next.font_ascent - next.font_descent);
     }
     if(next.scale_1px<=0)next.scale_1px=1.0f/float(upem);
     next.base_scale_1px = next.scale_1px;
@@ -375,6 +396,27 @@ bool init_font_slot_from_owned_bytes(
         hb_font_get_nominal_glyph(font, static_cast<hb_codepoint_t>('*'), &gid);
     }
     next.bullet_glyph_id = gid;
+
+    // Destroy any child variation slots referencing slot_idx before freeing its font bytes.
+    bool dead[kMaxFontSlots] = {};
+    dead[slot_idx] = true;
+    bool destroyed_child = true;
+    while (destroyed_child) {
+        destroyed_child = false;
+        for (uint16_t ci = 0u; ci < kMaxFontSlots; ++ci) {
+            if (!dead[ci] && atlas->slots[ci].loaded && atlas->slots[ci].is_variation &&
+                atlas->slots[ci].parent_slot < kMaxFontSlots && dead[atlas->slots[ci].parent_slot])
+            {
+                const uint8_t child_gen = atlas->slots[ci].generation;
+                evict_font_slot_emoji_bitmaps(atlas, ci);
+                evict_font_slot_hinted_glyphs(atlas, ci);
+                destroy_font_slot(&atlas->slots[ci]);
+                atlas->slots[ci].generation = child_gen;
+                dead[ci] = true;
+                destroyed_child = true;
+            }
+        }
+    }
 
     FontSlot* dst = &atlas->slots[slot_idx];
     const uint8_t prev_gen = dst->generation;
@@ -529,7 +571,7 @@ void rebuild_fallback_order(FontAtlas* atlas) noexcept {
         ordered[oc++] = kFontSans;
     }
     for (uint16_t s = 3u; s < kMaxFontSlots; ++s) {
-        if (atlas->slots[s].loaded) {
+        if (atlas->slots[s].loaded && !atlas->slots[s].is_variation) {
             ordered[oc++] = s;
         }
     }
@@ -678,12 +720,14 @@ void ensure_emoji_fallback_loaded(FontAtlas* atlas) noexcept {
     rebuild_fallback_order(atlas);
 }
 
+constexpr uint32_t kInitialSlugGlyphTableCap = 512u;
+
 bool font_atlas_init(FontAtlas* atlas, const char* preferred_font_path) noexcept {
     if (!atlas) {
         return false;
     }
     *atlas = {};
-    atlas->slug_glyph_cap = kSlugGlyphTableCapacity;
+    atlas->slug_glyph_cap = kInitialSlugGlyphTableCap;
     atlas->slug_glyphs = static_cast<SlugGlyphEntry*>(std::calloc(atlas->slug_glyph_cap, sizeof(SlugGlyphEntry)));
     atlas->slug_curves = static_cast<SlugCurveGpu*>(std::malloc(size_t(kInitialSlugCurveCap) * sizeof(SlugCurveGpu)));
     atlas->slug_curve_cap = atlas->slug_curves ? kInitialSlugCurveCap : 0u;
@@ -731,17 +775,18 @@ void font_atlas_destroy(FontAtlas* atlas) noexcept {
         return;
     }
     if (atlas->hb_buf) hb_buffer_destroy(atlas->hb_buf);
+    // Destroy variation slots first so shared base hb_face / font_file_data remain alive during variation teardown.
     for (uint16_t i = 0u; i < kMaxFontSlots; ++i) {
-        destroy_font_slot(&atlas->slots[i]);
+        if (atlas->slots[i].is_variation) {
+            destroy_font_slot(&atlas->slots[i]);
+        }
     }
-#if defined(_WIN32)
-    if (atlas->dwrite_factory) {
-        static_cast<IDWriteFactory*>(atlas->dwrite_factory)->Release();
+    for (uint16_t i = 0u; i < kMaxFontSlots; ++i) {
+        if (!atlas->slots[i].is_variation) {
+            destroy_font_slot(&atlas->slots[i]);
+        }
     }
-    if (atlas->dwrite_module) {
-        FreeLibrary(static_cast<HMODULE>(atlas->dwrite_module));
-    }
-#endif
+    release_platform_font_factory(atlas);
     std::free(atlas->sprites);
     std::free(atlas->emoji_bitmaps);
     std::free(atlas->hinted_glyphs);
@@ -754,7 +799,7 @@ void font_atlas_destroy(FontAtlas* atlas) noexcept {
 }
 
 bool slug_glyph_rehash(FontAtlas* atlas) noexcept {
-    const uint32_t new_cap = (atlas->slug_glyph_cap > 0u) ? (atlas->slug_glyph_cap * 2u) : kSlugGlyphTableCapacity;
+    const uint32_t new_cap = (atlas->slug_glyph_cap > 0u) ? (atlas->slug_glyph_cap * 2u) : kInitialSlugGlyphTableCap;
     SlugGlyphEntry* next = static_cast<SlugGlyphEntry*>(std::calloc(new_cap, sizeof(SlugGlyphEntry)));
     if (!next) {
         return false;
@@ -980,6 +1025,157 @@ CompiledSlugShape compile_slug_contours(
     return out;
 }
 
+struct SlugHbDrawCtx {
+    FontAtlas*    atlas = nullptr;
+    SlugRawCurve* raw = nullptr;
+    uint32_t      raw_cap = 0u;
+    uint32_t      raw_count = 0u;
+    bool          raw_heap = false;
+    bool          raw_oom = false;
+    bool          subpath_open = false;
+    float         start_x = 0.0f;
+    float         start_y = 0.0f;
+    float         cur_x = 0.0f;
+    float         cur_y = 0.0f;
+    float         cubic_err_sq_limit = 27.0f;
+};
+
+bool slug_hb_push_raw(SlugHbDrawCtx* d, SlugRawCurve c) noexcept {
+    if (d->raw_oom) return false;
+    if (d->raw_count >= d->raw_cap) {
+        const uint32_t new_cap = d->raw_cap * 2u;
+        SlugRawCurve* next = (!d->raw_heap && d->atlas->scratch)
+            ? d->atlas->scratch->alloc_uninit<SlugRawCurve>(new_cap)
+            : nullptr;
+        bool next_heap = false;
+        if (!next) {
+            next = static_cast<SlugRawCurve*>(std::malloc(size_t(new_cap) * sizeof(SlugRawCurve)));
+            if (!next) {
+                d->raw_oom = true;
+                return false;
+            }
+            next_heap = true;
+        }
+        std::memcpy(next, d->raw, size_t(d->raw_count) * sizeof(SlugRawCurve));
+        if (d->raw_heap) {
+            std::free(d->raw);
+        }
+        d->raw = next;
+        d->raw_cap = new_cap;
+        d->raw_heap = next_heap;
+    }
+    d->raw[d->raw_count++] = c;
+    return true;
+}
+
+void slug_hb_emit_line(SlugHbDrawCtx* d, float x0, float y0, float x1, float y1) noexcept {
+    if (x0 == x1 && y0 == y1) return;
+    slug_hb_push_raw(d, SlugRawCurve{
+        x0, y0,
+        0.5f * (x0 + x1), 0.5f * (y0 + y1),
+        x1, y1,
+    });
+}
+
+void slug_hb_emit_cubic(
+    SlugHbDrawCtx* d,
+    float p0x, float p0y,
+    float p1x, float p1y,
+    float p2x, float p2y,
+    float p3x, float p3y) noexcept
+{
+    struct CubicFrame {
+        float p0x, p0y, p1x, p1y, p2x, p2y, p3x, p3y;
+        uint32_t depth;
+    };
+    // Max depth 5 -> at most 32 quadratic segments, stack needs at most 6 frames.
+    CubicFrame stack[8];
+    uint32_t sp = 0u;
+    stack[sp++] = {p0x, p0y, p1x, p1y, p2x, p2y, p3x, p3y, 0u};
+    while (sp > 0u) {
+        const CubicFrame f = stack[--sp];
+        const float dx = (f.p3x - f.p0x) + 3.0f * (f.p1x - f.p2x);
+        const float dy = (f.p3y - f.p0y) + 3.0f * (f.p1y - f.p2y);
+        if (f.depth >= 5u || (dx * dx + dy * dy) <= d->cubic_err_sq_limit) {
+            const float qx = 0.75f * (f.p1x + f.p2x) - 0.25f * (f.p0x + f.p3x);
+            const float qy = 0.75f * (f.p1y + f.p2y) - 0.25f * (f.p0y + f.p3y);
+            if (!slug_hb_push_raw(d, SlugRawCurve{f.p0x, f.p0y, qx, qy, f.p3x, f.p3y})) {
+                return;
+            }
+            continue;
+        }
+        const float l1x = 0.5f * (f.p0x + f.p1x), l1y = 0.5f * (f.p0y + f.p1y);
+        const float hx  = 0.5f * (f.p1x + f.p2x), hy  = 0.5f * (f.p1y + f.p2y);
+        const float l2x = 0.5f * (l1x + hx),      l2y = 0.5f * (l1y + hy);
+        const float r2x = 0.5f * (f.p2x + f.p3x), r2y = 0.5f * (f.p2y + f.p3y);
+        const float r1x = 0.5f * (hx + r2x),      r1y = 0.5f * (hy + r2y);
+        const float mx  = 0.5f * (l2x + r1x),     my  = 0.5f * (l2y + r1y);
+        stack[sp++] = {mx, my, r1x, r1y, r2x, r2y, f.p3x, f.p3y, f.depth + 1u};
+        stack[sp++] = {f.p0x, f.p0y, l1x, l1y, l2x, l2y, mx, my, f.depth + 1u};
+    }
+}
+
+void slug_hb_move_to(hb_draw_funcs_t*, void* draw_data, hb_draw_state_t*, float to_x, float to_y, void*) {
+    auto* d = static_cast<SlugHbDrawCtx*>(draw_data);
+    if (d->subpath_open && (std::fabs(d->cur_x - d->start_x) > 1e-4f || std::fabs(d->cur_y - d->start_y) > 1e-4f)) {
+        slug_hb_emit_line(d, d->cur_x, d->cur_y, d->start_x, d->start_y);
+    }
+    d->start_x = d->cur_x = to_x;
+    d->start_y = d->cur_y = to_y;
+    d->subpath_open = true;
+}
+
+void slug_hb_line_to(hb_draw_funcs_t*, void* draw_data, hb_draw_state_t*, float to_x, float to_y, void*) {
+    auto* d = static_cast<SlugHbDrawCtx*>(draw_data);
+    slug_hb_emit_line(d, d->cur_x, d->cur_y, to_x, to_y);
+    d->cur_x = to_x;
+    d->cur_y = to_y;
+}
+
+void slug_hb_quadratic_to(hb_draw_funcs_t*, void* draw_data, hb_draw_state_t*, float cx, float cy, float to_x, float to_y, void*) {
+    auto* d = static_cast<SlugHbDrawCtx*>(draw_data);
+    slug_hb_push_raw(d, SlugRawCurve{d->cur_x, d->cur_y, cx, cy, to_x, to_y});
+    d->cur_x = to_x;
+    d->cur_y = to_y;
+}
+
+void slug_hb_cubic_to(
+    hb_draw_funcs_t*, void* draw_data, hb_draw_state_t*,
+    float c1x, float c1y, float c2x, float c2y, float to_x, float to_y, void*)
+{
+    auto* d = static_cast<SlugHbDrawCtx*>(draw_data);
+    slug_hb_emit_cubic(d, d->cur_x, d->cur_y, c1x, c1y, c2x, c2y, to_x, to_y);
+    d->cur_x = to_x;
+    d->cur_y = to_y;
+}
+
+void slug_hb_close_path(hb_draw_funcs_t*, void* draw_data, hb_draw_state_t*, void*) {
+    auto* d = static_cast<SlugHbDrawCtx*>(draw_data);
+    if (d->subpath_open) {
+        if (std::fabs(d->cur_x - d->start_x) > 1e-4f || std::fabs(d->cur_y - d->start_y) > 1e-4f) {
+            slug_hb_emit_line(d, d->cur_x, d->cur_y, d->start_x, d->start_y);
+        }
+        d->cur_x = d->start_x;
+        d->cur_y = d->start_y;
+        d->subpath_open = false;
+    }
+}
+
+hb_draw_funcs_t* slug_hb_draw_funcs() noexcept {
+    static hb_draw_funcs_t* s_funcs = []() noexcept -> hb_draw_funcs_t* {
+        hb_draw_funcs_t* df = hb_draw_funcs_create();
+        if (!df) return nullptr;
+        hb_draw_funcs_set_move_to_func(df, slug_hb_move_to, nullptr, nullptr);
+        hb_draw_funcs_set_line_to_func(df, slug_hb_line_to, nullptr, nullptr);
+        hb_draw_funcs_set_quadratic_to_func(df, slug_hb_quadratic_to, nullptr, nullptr);
+        hb_draw_funcs_set_cubic_to_func(df, slug_hb_cubic_to, nullptr, nullptr);
+        hb_draw_funcs_set_close_path_func(df, slug_hb_close_path, nullptr, nullptr);
+        hb_draw_funcs_make_immutable(df);
+        return df;
+    }();
+    return s_funcs;
+}
+
 SlugGlyphEntry slug_get_glyph(FontAtlas* atlas, uint16_t slot_idx, uint32_t glyph_id) noexcept {
     if (!atlas || !atlas->font_valid || !atlas->slug_glyphs || atlas->slug_glyph_cap == 0u ||
         slot_idx >= kMaxFontSlots || !atlas->slots[slot_idx].loaded) {
@@ -1002,108 +1198,68 @@ SlugGlyphEntry slug_get_glyph(FontAtlas* atlas, uint16_t slot_idx, uint32_t glyp
     }
 
     SlugGlyphEntry entry = { .key = key };
-    stbtt_vertex* verts = nullptr;
-    const int nverts = stbtt_GetGlyphShape(&slot.font_info, static_cast<int>(glyph_id), &verts);
-    if (nverts <= 0 || !verts) {
-        if (verts) stbtt_FreeShape(&slot.font_info, verts);
-        if ((atlas->slug_glyph_count + 1u) * 4u >= atlas->slug_glyph_cap * 3u && slug_glyph_rehash(atlas)) {
-            const uint32_t nmask = atlas->slug_glyph_cap - 1u;
-            idx = static_cast<uint32_t>(hash_u64(key)) & nmask;
-            while (atlas->slug_glyphs[idx].key != 0u) idx = (idx + 1u) & nmask;
-        }
-        atlas->slug_glyphs[idx] = entry;
-        ++atlas->slug_glyph_count;
-        return entry;
-    }
-
     const size_t raw_mark = atlas->scratch ? atlas->scratch->mark() : 0u;
     SlugRawCurve stack_raw[kStackRawCap];
-    SlugRawCurve* raw = stack_raw;
-    uint32_t raw_cap = kStackRawCap;
-    uint32_t raw_count = 0u;
-    bool raw_heap = false;
-    bool raw_oom = false;
-
-    auto push_raw = [&](SlugRawCurve c) noexcept -> bool {
-        if (raw_count >= raw_cap) {
-            const uint32_t new_cap = raw_cap * 2u;
-            SlugRawCurve* next = (!raw_heap && atlas->scratch)
-                ? atlas->scratch->alloc_uninit<SlugRawCurve>(new_cap)
-                : nullptr;
-            bool next_heap = false;
-            if (!next) {
-                next = static_cast<SlugRawCurve*>(std::malloc(size_t(new_cap) * sizeof(SlugRawCurve)));
-                if (!next) {
-                    raw_oom = true;
-                    return false;
-                }
-                next_heap = true;
-            }
-            std::memcpy(next, raw, size_t(raw_count) * sizeof(SlugRawCurve));
-            if (raw_heap) {
-                std::free(raw);
-            }
-            raw = next;
-            raw_cap = new_cap;
-            raw_heap = next_heap;
-        }
-        raw[raw_count++] = c;
-        return true;
+    const float cubic_tol = std::fmax(0.25f, static_cast<float>(slot.upem) * 0.00025f);
+    SlugHbDrawCtx draw_ctx = {
+        .atlas = atlas,
+        .raw = stack_raw,
+        .raw_cap = kStackRawCap,
+        .cubic_err_sq_limit = 432.0f * cubic_tol * cubic_tol,
     };
 
-    float cur_x = 0.0f;
-    float cur_y = 0.0f;
-    for (int i = 0; i < nverts; ++i) {
-        const stbtt_vertex& v = verts[i];
-        const float vx = static_cast<float>(v.x);
-        const float vy = static_cast<float>(v.y);
-        if (v.type == STBTT_vmove) {
-            cur_x = vx;
-            cur_y = vy;
-        } else if (v.type == STBTT_vline) {
-            push_raw(SlugRawCurve{
-                cur_x, cur_y,
-                0.5f * (cur_x + vx), 0.5f * (cur_y + vy),
-                vx, vy,
-            });
-            cur_x = vx;
-            cur_y = vy;
-        } else if (v.type == STBTT_vcurve) {
-            push_raw(SlugRawCurve{
-                cur_x, cur_y,
-                static_cast<float>(v.cx), static_cast<float>(v.cy),
-                vx, vy,
-            });
-            cur_x = vx;
-            cur_y = vy;
-        } else if (v.type == STBTT_vcubic) {
-            const float c1x = static_cast<float>(v.cx);
-            const float c1y = static_cast<float>(v.cy);
-            const float c2x = static_cast<float>(v.cx1);
-            const float c2y = static_cast<float>(v.cy1);
-            const float l1x = 0.5f * (cur_x + c1x), l1y = 0.5f * (cur_y + c1y);
-            const float hx  = 0.5f * (c1x + c2x),   hy  = 0.5f * (c1y + c2y);
-            const float l2x = 0.5f * (l1x + hx),    l2y = 0.5f * (l1y + hy);
-            const float r2x = 0.5f * (c2x + vx),    r2y = 0.5f * (c2y + vy);
-            const float r1x = 0.5f * (hx + r2x),    r1y = 0.5f * (hy + r2y);
-            const float mx  = 0.5f * (l2x + r1x),   my  = 0.5f * (l2y + r1y);
-            push_raw(SlugRawCurve{
-                cur_x, cur_y,
-                0.75f * (l1x + l2x) - 0.25f * (cur_x + mx),
-                0.75f * (l1y + l2y) - 0.25f * (cur_y + my),
-                mx, my,
-            });
-            push_raw(SlugRawCurve{
-                mx, my,
-                0.75f * (r1x + r2x) - 0.25f * (mx + vx),
-                0.75f * (r1y + r2y) - 0.25f * (my + vy),
-                vx, vy,
-            });
-            cur_x = vx;
-            cur_y = vy;
+    hb_draw_funcs_t* dfuncs = slot.hb_font ? slug_hb_draw_funcs() : nullptr;
+    if (slot.hb_font && dfuncs) {
+        hb_font_draw_glyph(slot.hb_font, glyph_id, dfuncs, &draw_ctx);
+        if (draw_ctx.subpath_open) {
+            if (std::fabs(draw_ctx.cur_x - draw_ctx.start_x) > 1e-4f ||
+                std::fabs(draw_ctx.cur_y - draw_ctx.start_y) > 1e-4f)
+            {
+                slug_hb_emit_line(&draw_ctx, draw_ctx.cur_x, draw_ctx.cur_y, draw_ctx.start_x, draw_ctx.start_y);
+            }
+            draw_ctx.subpath_open = false;
         }
+    } else if (slot.font_info.data) {
+        stbtt_vertex* verts = nullptr;
+        const int nverts = stbtt_GetGlyphShape(&slot.font_info, static_cast<int>(glyph_id), &verts);
+        if (nverts > 0 && verts) {
+            float cur_x = 0.0f;
+            float cur_y = 0.0f;
+            for (int i = 0; i < nverts; ++i) {
+                const stbtt_vertex& v = verts[i];
+                const float vx = static_cast<float>(v.x);
+                const float vy = static_cast<float>(v.y);
+                if (v.type == STBTT_vmove) {
+                    cur_x = vx;
+                    cur_y = vy;
+                } else if (v.type == STBTT_vline) {
+                    slug_hb_emit_line(&draw_ctx, cur_x, cur_y, vx, vy);
+                    cur_x = vx;
+                    cur_y = vy;
+                } else if (v.type == STBTT_vcurve) {
+                    slug_hb_push_raw(&draw_ctx, SlugRawCurve{
+                        cur_x, cur_y,
+                        static_cast<float>(v.cx), static_cast<float>(v.cy),
+                        vx, vy,
+                    });
+                    cur_x = vx;
+                    cur_y = vy;
+                } else if (v.type == STBTT_vcubic) {
+                    slug_hb_emit_cubic(&draw_ctx, cur_x, cur_y,
+                        static_cast<float>(v.cx), static_cast<float>(v.cy),
+                        static_cast<float>(v.cx1), static_cast<float>(v.cy1),
+                        vx, vy);
+                    cur_x = vx;
+                    cur_y = vy;
+                }
+            }
+        }
+        if (verts) stbtt_FreeShape(&slot.font_info, verts);
     }
-    stbtt_FreeShape(&slot.font_info, verts);
+
+    const SlugRawCurve* raw = draw_ctx.raw;
+    const uint32_t raw_count = draw_ctx.raw_count;
+    const bool raw_oom = draw_ctx.raw_oom;
 
     float min_x = 0.0f, min_y = 0.0f, max_x = 0.0f, max_y = 0.0f;
     if (raw_count > 0u) {
@@ -1119,6 +1275,13 @@ SlugGlyphEntry slug_get_glyph(FontAtlas* atlas, uint16_t slot_idx, uint32_t glyp
             accum_pt(raw[i].p1x, raw[i].p1y);
             accum_pt(raw[i].p2x, raw[i].p2y);
             accum_pt(raw[i].p3x, raw[i].p3y);
+        }
+        if (slot.hb_font) {
+            hb_glyph_extents_t ext = {};
+            if (hb_font_get_glyph_extents(slot.hb_font, glyph_id, &ext) && ext.width > 0 && ext.height < 0) {
+                accum_pt(static_cast<float>(ext.x_bearing), static_cast<float>(ext.y_bearing));
+                accum_pt(static_cast<float>(ext.x_bearing + ext.width), static_cast<float>(ext.y_bearing + ext.height));
+            }
         }
     }
 
@@ -1137,7 +1300,7 @@ SlugGlyphEntry slug_get_glyph(FontAtlas* atlas, uint16_t slot_idx, uint32_t glyp
         entry.num_vbands = compiled.num_vbands;
         entry.has_outline = true;
     }
-    if (raw_heap) std::free(raw);
+    if (draw_ctx.raw_heap) std::free(draw_ctx.raw);
     if (atlas->scratch) atlas->scratch->rewind(raw_mark);
 
     // Never poison atlas->slug_glyphs on a transient compile/allocation failure.
@@ -1311,6 +1474,52 @@ std::span<const ShapedGlyph> store_shaped_glyphs(
     return std::span<const ShapedGlyph>(out, count);
 }
 
+uint32_t build_hb_features(const Context* ctx, const FontSlot& primary, hb_feature_t* out, uint32_t cap) noexcept {
+    uint32_t count = 0u;
+    auto set_feat = [&](hb_tag_t tag, uint32_t value) noexcept {
+        if (tag == 0u) return;
+        for (uint32_t i = 0u; i < count; ++i) {
+            if (out[i].tag == tag) {
+                out[i].value = value;
+                return;
+            }
+        }
+        if (count < cap) {
+            out[count++] = hb_feature_t{ tag, value, HB_FEATURE_GLOBAL_START, HB_FEATURE_GLOBAL_END };
+        }
+    };
+    set_feat(HB_TAG('k', 'e', 'r', 'n'), 1u);
+    set_feat(HB_TAG('l', 'i', 'g', 'a'), 1u);
+    set_feat(HB_TAG('c', 'a', 'l', 't'), 1u);
+    if (primary.tabular_numbers) {
+        set_feat(HB_TAG('t', 'n', 'u', 'm'), 1u);
+    }
+    const uint32_t def_n = primary.default_feature_count <= 8u ? primary.default_feature_count : 8u;
+    for (uint32_t i = 0u; i < def_n; ++i) {
+        set_feat(primary.default_features[i].tag, primary.default_features[i].value);
+    }
+    const uint32_t flags = ctx->active_ot_flags;
+    if (flags != 0u) {
+        if (flags & OpenTypeFlag_NoLiga) {
+            set_feat(HB_TAG('l', 'i', 'g', 'a'), 0u);
+            set_feat(HB_TAG('c', 'a', 'l', 't'), 0u);
+        }
+        if (flags & OpenTypeFlag_TabularNums)    set_feat(HB_TAG('t', 'n', 'u', 'm'), 1u);
+        if (flags & OpenTypeFlag_SlashedZero)    set_feat(HB_TAG('z', 'e', 'r', 'o'), 1u);
+        if (flags & OpenTypeFlag_SmallCaps)      set_feat(HB_TAG('s', 'm', 'c', 'p'), 1u);
+        if (flags & OpenTypeFlag_OldstyleNums)   set_feat(HB_TAG('o', 'n', 'u', 'm'), 1u);
+        if (flags & OpenTypeFlag_Fractions)      set_feat(HB_TAG('f', 'r', 'a', 'c'), 1u);
+        if (flags & OpenTypeFlag_StylisticSet01) set_feat(HB_TAG('s', 's', '0', '1'), 1u);
+        if (flags & OpenTypeFlag_StylisticSet02) set_feat(HB_TAG('s', 's', '0', '2'), 1u);
+    }
+    if (ctx->active_ot_features && ctx->active_ot_feature_count > 0u) {
+        for (uint32_t i = 0u; i < ctx->active_ot_feature_count; ++i) {
+            set_feat(ctx->active_ot_features[i].tag, ctx->active_ot_features[i].value);
+        }
+    }
+    return count;
+}
+
 std::span<const ShapedGlyph> shape_directional_run(
     Context* ctx,
     uint16_t font_id,
@@ -1338,13 +1547,9 @@ std::span<const ShapedGlyph> shape_directional_run(
     hb_buffer_set_direction(buf, direction);
     hb_buffer_set_script(buf, script);
 
-    const hb_feature_t kFeatures[4] = {
-        { HB_TAG('k', 'e', 'r', 'n'), 1u, 0u, static_cast<unsigned int>(-1) },
-        { HB_TAG('l', 'i', 'g', 'a'), 1u, 0u, static_cast<unsigned int>(-1) },
-        { HB_TAG('c', 'a', 'l', 't'), 1u, 0u, static_cast<unsigned int>(-1) },
-        { HB_TAG('t', 'n', 'u', 'm'), 1u, 0u, static_cast<unsigned int>(-1) },
-    };
-    hb_shape(primary.hb_font, buf, kFeatures, primary.tabular_numbers ? 4u : 3u);
+    hb_feature_t features[32];
+    const uint32_t feat_count = build_hb_features(ctx, primary, features, 32u);
+    hb_shape(primary.hb_font, buf, features, feat_count);
 
     hb_segment_properties_t seg_props = {};
     hb_buffer_get_segment_properties(buf, &seg_props);
@@ -1467,7 +1672,7 @@ std::span<const ShapedGlyph> shape_directional_run(
             sr.byte_start,
             static_cast<int>(sr.byte_end - sr.byte_start));
         hb_buffer_set_segment_properties(buf, &seg_props);
-        hb_shape(slot.hb_font, buf, kFeatures, primary.tabular_numbers ? 4u : 3u);
+        hb_shape(slot.hb_font, buf, features, feat_count);
 
         unsigned int sub_gcount = 0u;
         const hb_glyph_info_t* sub_infos = hb_buffer_get_glyph_infos(buf, &sub_gcount);
@@ -1856,7 +2061,7 @@ uint16_t load_font_file(
     }
     const bool loaded = try_load_font_file_into_slot(&ctx->atlas, target_slot, path, face_index);
     if (loaded) {
-        ctx->headless_ui.redraw_budget = 2u;
+        if (ctx->headless_ui) ctx->headless_ui->redraw_budget = 2u;
         for (uint32_t i = 0; i < ctx->claimed_window_cap; ++i)
             if (ctx->claimed_windows[i]) ctx->claimed_windows[i]->ui.redraw_budget = 2u;
     }
@@ -1886,11 +2091,228 @@ uint16_t load_font_memory(
         (static_cast<uint64_t>(face_index) * 0x9E3779B97F4A7C15ULL);
     const bool loaded = init_font_slot_from_owned_bytes(&ctx->atlas, target_slot, copy, size_bytes, source_hash, face_index);
     if (loaded) {
-        ctx->headless_ui.redraw_budget = 2u;
+        if (ctx->headless_ui) ctx->headless_ui->redraw_budget = 2u;
         for (uint32_t i = 0; i < ctx->claimed_window_cap; ++i)
             if (ctx->claimed_windows[i]) ctx->claimed_windows[i]->ui.redraw_budget = 2u;
     }
     return loaded ? target_slot : kInvalidFont;
+}
+
+uint16_t create_font_variation(
+    Context* ctx,
+    uint16_t base_font_id,
+    std::span<const FontAxisValue> axes,
+    std::span<const FontFeature> default_features) noexcept
+{
+    if (!ctx || ctx->in_frame || !is_font_loaded(ctx, base_font_id)) {
+        return kInvalidFont;
+    }
+    const FontSlot& base = ctx->atlas.slots[base_font_id];
+    uint16_t root_id = base_font_id;
+    for (uint32_t hop = 0u; hop < kMaxFontSlots && ctx->atlas.slots[root_id].is_variation; ++hop) {
+        const uint16_t p = ctx->atlas.slots[root_id].parent_slot;
+        if (p >= kMaxFontSlots || !ctx->atlas.slots[p].loaded) {
+            return kInvalidFont;
+        }
+        root_id = p;
+    }
+    const FontSlot& root = ctx->atlas.slots[root_id];
+    if (root.is_variation || !root.hb_face || root.upem == 0u) {
+        return kInvalidFont;
+    }
+
+    FontAxisValue clean_axes[8] = {};
+    uint8_t axis_count = 0u;
+    auto push_axis = [&](uint32_t tag, float value) noexcept {
+        if (tag == 0u || !std::isfinite(value)) return;
+        if (value == 0.0f) value = 0.0f; // Canonicalize -0.0f -> +0.0f
+        for (uint8_t i = 0u; i < axis_count; ++i) {
+            if (clean_axes[i].tag == tag) {
+                clean_axes[i].value = value;
+                return;
+            }
+        }
+        if (axis_count < 8u) {
+            clean_axes[axis_count++] = FontAxisValue{ tag, value };
+        }
+    };
+    if (base.is_variation) {
+        const uint8_t bn = base.axis_count <= 8u ? base.axis_count : 8u;
+        for (uint8_t i = 0u; i < bn; ++i) {
+            push_axis(base.axes[i].tag, base.axes[i].value);
+        }
+    }
+    for (const FontAxisValue& a : axes) {
+        push_axis(a.tag, a.value);
+    }
+    for (uint8_t i = 1u; i < axis_count; ++i) {
+        const FontAxisValue key = clean_axes[i];
+        uint8_t j = i;
+        while (j > 0u && clean_axes[j - 1u].tag > key.tag) {
+            clean_axes[j] = clean_axes[j - 1u];
+            --j;
+        }
+        clean_axes[j] = key;
+    }
+
+    FontFeature clean_feats[8] = {};
+    uint8_t feat_count = 0u;
+    auto push_feat = [&](uint32_t tag, uint32_t value) noexcept {
+        if (tag == 0u) return;
+        for (uint8_t i = 0u; i < feat_count; ++i) {
+            if (clean_feats[i].tag == tag) {
+                clean_feats[i].value = value;
+                return;
+            }
+        }
+        if (feat_count < 8u) {
+            clean_feats[feat_count++] = FontFeature{ tag, value };
+        }
+    };
+    if (base.is_variation) {
+        const uint8_t fn = base.default_feature_count <= 8u ? base.default_feature_count : 8u;
+        for (uint8_t i = 0u; i < fn; ++i) {
+            push_feat(base.default_features[i].tag, base.default_features[i].value);
+        }
+    }
+    for (const FontFeature& f : default_features) {
+        push_feat(f.tag, f.value);
+    }
+    for (uint8_t i = 1u; i < feat_count; ++i) {
+        const FontFeature key = clean_feats[i];
+        uint8_t j = i;
+        while (j > 0u && clean_feats[j - 1u].tag > key.tag) {
+            clean_feats[j] = clean_feats[j - 1u];
+            --j;
+        }
+        clean_feats[j] = key;
+    }
+
+    if (axis_count == 0u && feat_count == 0u) {
+        return root_id;
+    }
+
+    uint64_t vh = 14695981039346656037ULL;
+    auto mix = [&](const void* ptr, size_t n) noexcept {
+        const uint8_t* p = static_cast<const uint8_t*>(ptr);
+        for (size_t i = 0u; i < n; ++i) {
+            vh ^= p[i];
+            vh *= 1099511628211ULL;
+        }
+    };
+    mix(&axis_count, sizeof(axis_count));
+    for (uint8_t i = 0u; i < axis_count; ++i) {
+        mix(&clean_axes[i].tag, sizeof(uint32_t));
+        const uint32_t bits = std::bit_cast<uint32_t>(clean_axes[i].value);
+        mix(&bits, sizeof(uint32_t));
+    }
+    mix(&feat_count, sizeof(feat_count));
+    for (uint8_t i = 0u; i < feat_count; ++i) {
+        mix(&clean_feats[i].tag, sizeof(uint32_t));
+        mix(&clean_feats[i].value, sizeof(uint32_t));
+    }
+    if (vh == 0u) vh = 1u;
+
+    for (uint16_t i = 0u; i < kMaxFontSlots; ++i) {
+        const FontSlot& s = ctx->atlas.slots[i];
+        if (s.loaded && s.is_variation && s.parent_slot == root_id && s.variation_hash == vh &&
+            s.axis_count == axis_count && s.default_feature_count == feat_count)
+        {
+            bool eq = true;
+            for (uint8_t a = 0u; a < axis_count; ++a) {
+                if (s.axes[a].tag != clean_axes[a].tag || s.axes[a].value != clean_axes[a].value) {
+                    eq = false;
+                    break;
+                }
+            }
+            for (uint8_t f = 0u; eq && f < feat_count; ++f) {
+                if (s.default_features[f].tag != clean_feats[f].tag || s.default_features[f].value != clean_feats[f].value) {
+                    eq = false;
+                    break;
+                }
+            }
+            if (eq) return i;
+        }
+    }
+
+    const uint16_t target_slot = resolve_target_font_slot(&ctx->atlas, kInvalidFont);
+    if (target_slot == kInvalidFont) {
+        return kInvalidFont;
+    }
+
+    hb_font_t* var_font = hb_font_create(root.hb_face);
+    if (!var_font) {
+        return kInvalidFont;
+    }
+    hb_ot_font_set_funcs(var_font);
+    hb_font_set_scale(var_font, static_cast<int>(root.upem), static_cast<int>(root.upem));
+    if (axis_count > 0u) {
+        hb_variation_t hb_vars[8] = {};
+        for (uint8_t i = 0u; i < axis_count; ++i) {
+            hb_vars[i] = hb_variation_t{ clean_axes[i].tag, clean_axes[i].value };
+        }
+        hb_font_set_variations(var_font, hb_vars, axis_count);
+    }
+
+    FontSlot next = root;
+    next.hb_font = var_font;
+    next.dwrite_face = nullptr;
+    next.dwrite_probed = false;
+    next.parent_slot = root_id;
+    next.axis_count = axis_count;
+    std::memset(next.axes, 0, sizeof(next.axes));
+    if (axis_count > 0u) {
+        std::memcpy(next.axes, clean_axes, size_t(axis_count) * sizeof(FontAxisValue));
+    }
+    next.default_feature_count = feat_count;
+    std::memset(next.default_features, 0, sizeof(next.default_features));
+    if (feat_count > 0u) {
+        std::memcpy(next.default_features, clean_feats, size_t(feat_count) * sizeof(FontFeature));
+    }
+    next.variation_hash = vh;
+    next.source_hash = root.source_hash ^ vh;
+    next.is_variation = true;
+    next.loaded = true;
+
+    hb_font_extents_t base_ext = {}, var_ext = {};
+    if (root.hb_font &&
+        hb_font_get_h_extents(root.hb_font, &base_ext) &&
+        hb_font_get_h_extents(var_font, &var_ext) &&
+        var_ext.ascender > var_ext.descender)
+    {
+        const int32_t d_asc = var_ext.ascender - base_ext.ascender;
+        const int32_t d_desc = var_ext.descender - base_ext.descender;
+        const int32_t d_gap = var_ext.line_gap - base_ext.line_gap;
+        if (d_asc != 0 || d_desc != 0 || d_gap != 0) {
+            next.font_ascent += d_asc;
+            next.font_descent += d_desc;
+            next.font_line_gap += d_gap;
+            if (next.font_ascent > next.font_descent) {
+                next.base_scale_1px = 1.0f / static_cast<float>(next.font_ascent - next.font_descent);
+                next.scale_1px = next.base_scale_1px * next.scale_adjust;
+            }
+        }
+    }
+
+    FontSlot* dst = &ctx->atlas.slots[target_slot];
+    const uint8_t prev_gen = dst->generation;
+    if (prev_gen != 0u) {
+        evict_font_slot_emoji_bitmaps(&ctx->atlas, target_slot);
+        evict_font_slot_hinted_glyphs(&ctx->atlas, target_slot);
+    }
+    if (prev_gen == 255u && ctx->atlas.slug_glyphs && ctx->atlas.slug_glyph_cap > 0u) {
+        for (uint32_t i = 0u; i < ctx->atlas.slug_glyph_cap; ++i) {
+            ctx->atlas.slug_glyphs[i] = {};
+        }
+        ctx->atlas.slug_glyph_count = 0u;
+    }
+    next.generation = (prev_gen == 255u) ? 1u : static_cast<uint8_t>(prev_gen + 1u);
+    update_font_slot_scaled_metrics(&next, target_slot);
+
+    *dst = next;
+    ++ctx->atlas.font_revision;
+    mark_font_redraw(ctx);
+    return target_slot;
 }
 
 bool set_font_tabular_numbers(Context* ctx, uint16_t font_id, bool enabled) noexcept {
@@ -2641,7 +3063,7 @@ static CompiledSlugShape compile_vector_icon_layer(
 }
 
 static void mark_icon_registry_dirty(Context* ctx) noexcept {
-    ctx->headless_ui.redraw_budget = 2u;
+    if (ctx->headless_ui) ctx->headless_ui->redraw_budget = 2u;
     for (uint32_t i = 0; i < ctx->claimed_window_cap; ++i) {
         if (ctx->claimed_windows[i]) ctx->claimed_windows[i]->ui.redraw_budget = 2u;
     }

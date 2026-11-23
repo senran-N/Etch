@@ -1,6 +1,62 @@
-// Etch Shared HLSL Helpers (included by etch_quad.hlsl and etch_uber.hlsl).
+// Etch Shared HLSL Definitions & Helpers (included by etch_quad, etch_subpixel, etch_slug, etch_image, etch_fx).
 #ifndef ETCH_COMMON_HLSLI
 #define ETCH_COMMON_HLSLI
+
+#define ETCH_PRIM_RECT        0u
+#define ETCH_PRIM_SHADOW      1u
+#define ETCH_PRIM_GLYPH       2u
+#define ETCH_PRIM_TEXTURE     3u
+#define ETCH_PRIM_SLUG_GLYPH  4u
+#define ETCH_PRIM_BLUR_GLASS  5u
+#define ETCH_PRIM_CANVAS_GRID 6u
+#define ETCH_PRIM_BEZIER_WIRE 7u
+#define ETCH_PRIM_RING_ARC    8u
+#define ETCH_PRIM_SLUG_FILL   9u
+#define ETCH_PRIM_ROT_RECT    10u
+#define ETCH_PRIM_MESH_GRAD   11u
+#define ETCH_PRIM_BORDER_BEAM 12u
+#define ETCH_PRIM_PUNCH_HOLE  13u
+#define ETCH_PRIM_LAYER_BLUR  14u
+
+#define ETCH_FLAG_LINEAR_GRAD   (1u << 0)
+#define ETCH_FLAG_RADIAL_GRAD   (1u << 1)
+#define ETCH_FLAG_ROUNDED_CLIP  (1u << 2)
+#define ETCH_FLAG_PREMULTIPLIED (1u << 3)
+#define ETCH_FLAG_STEM_DARKEN   (1u << 4)
+#define ETCH_FLAG_ROUND_CAP     (1u << 5)
+#define ETCH_FLAG_TEXT_CLIP     (1u << 5)
+
+#define ETCH_GLOBAL_TEXT_ATLAS_R8  (1u << 27)
+#define ETCH_GLOBAL_GRAYSCALE_TEXT (1u << 28)
+#define ETCH_GLOBAL_OPAQUE_PASS    (1u << 29)
+#define ETCH_GLOBAL_USE_DEPTH      (1u << 30)
+#define ETCH_GLOBAL_MANUAL_SRGB    (1u << 31)
+
+#ifdef __spirv__
+#define ETCH_COMBINED_SAMPLER(slot) [[vk::combinedImageSampler]] [[vk::binding(slot, 2)]]
+#define ETCH_FRAG_STORAGE(slot)     [[vk::binding(slot, 2)]]
+#else
+#define ETCH_COMBINED_SAMPLER(slot)
+#define ETCH_FRAG_STORAGE(slot)
+#endif
+
+// Strictly 64 bytes matching etch::Prim in include/etch/etch.h.
+struct Prim
+{
+    float4 bounds;   // xy = top-left px, zw = width, height px
+    float4 clip;     // xy = clip min px, zw = clip max px
+    uint4  payload;  // kind-specific payload
+    uint4  style;    // x = header; y = color0 sRGB RGBA8; z = border/color_end; w = f16x2(border_width, softness/angle)
+};
+
+// Strictly 64 bytes matching etch::ClipShapeGpu in src/etch_arena.cpp.
+struct ClipShapeGpu
+{
+    float4 bounds;      // (x, y, w, h)
+    float4 radii;       // (tl, tr, br, bl)
+    uint4  meta;        // x=parent_index; y: bit0=continuous, bits[1..3]=mask_kind (0=RoundedEdgeFade,1=LinearAlphaGrad,2=RadialSpotlight,3=TextureAlphaMask), bit4=invert; z=fade_tb_f16x2 or pack_f16x2(alpha_start,alpha_end); w=fade_lr_f16x2 or pack_f16x2(start_t,end_t)
+    float4 mask_params; // Linear:(dir_x,dir_y,origin_dot,inv_len); Radial:(cx,cy,inv_rx,inv_ry); Texture:(u0,v0,u1,v1)
+};
 
 // Bitwise IEEE-754 binary16 -> float32 decode for portable SM 6.0 DXIL & Vulkan 1.0 SPIR-V.
 float unpack_f16_bits(uint h)
@@ -26,6 +82,11 @@ float2 unpack_f16x2_custom(uint packed)
     return float2(unpack_f16_bits(packed & 0xFFFFu), unpack_f16_bits((packed >> 16) & 0xFFFFu));
 }
 
+float2 unpack_unorm16x2(uint packed)
+{
+    return float2(float(packed & 0xFFFFu), float((packed >> 16) & 0xFFFFu)) * (1.0f / 65535.0f);
+}
+
 float srgb_to_linear_chan(float c)
 {
     return (c <= 0.04045f) ? (c * (1.0f / 12.92f)) : pow(max((c + 0.055f) * (1.0f / 1.055f), 0.0f), 2.4f);
@@ -41,9 +102,14 @@ float4 srgb_to_linear(float4 c)
     return float4(srgb_to_linear_chan(c.r), srgb_to_linear_chan(c.g), srgb_to_linear_chan(c.b), c.a);
 }
 
+float3 linear_to_srgb3(float3 c)
+{
+    return float3(linear_to_srgb_chan(c.r), linear_to_srgb_chan(c.g), linear_to_srgb_chan(c.b));
+}
+
 float4 linear_to_srgb(float4 c)
 {
-    return float4(linear_to_srgb_chan(c.r), linear_to_srgb_chan(c.g), linear_to_srgb_chan(c.b), c.a);
+    return float4(linear_to_srgb3(c.rgb), c.a);
 }
 
 float4 unpack_rgba8_srgb_to_linear(uint packed)
@@ -55,6 +121,16 @@ float4 unpack_rgba8_srgb_to_linear(uint packed)
         float((packed >> 24) & 0xFFu)
     ) * (1.0f / 255.0f);
     return srgb_to_linear(c);
+}
+
+float4 etch_finalize_manual_srgb(float4 out_pm, uint flags)
+{
+    if ((flags & ETCH_GLOBAL_MANUAL_SRGB) != 0u && out_pm.a > 1e-5f)
+    {
+        float3 straight_lin = saturate(out_pm.rgb / out_pm.a);
+        out_pm.rgb = linear_to_srgb3(straight_lin) * out_pm.a;
+    }
+    return out_pm;
 }
 
 // Oklab matrices: Bjorn Ottosson's public-domain reference (see THIRD_PARTY_NOTICES.md).
@@ -127,6 +203,92 @@ float etch_eval_inset_shadow_cov(float2 p_local, float2 half_size, float4 radii,
         outer_r.w > 0.0f ? max(outer_r.w - spread, 0.0f) : 0.0f);
     float d_inner = etch_sd_rounded_box(p_local - offset, raw_inner_hs, inner_r, continuous);
     return outer_cov * saturate(0.5f * (1.0f + erf_approx(d_inner * inv_s2)));
+}
+
+float etch_smooth_range(float x, float start_t, float end_t)
+{
+    float span = end_t - start_t;
+    if (abs(span) > 1e-5f)
+    {
+        float s = saturate((x - start_t) / span);
+        return s * s * (3.0f - 2.0f * s);
+    }
+    return (x >= start_t) ? 1.0f : 0.0f;
+}
+
+float etch_eval_clip_chain(
+    float2 px,
+    float4 clip_rect,
+    float clip_r,
+    bool rounded_clip,
+    uint clip_index,
+    StructuredBuffer<ClipShapeGpu> clip_shapes,
+    Texture2D<float4> mask_tex,
+    SamplerState mask_smp)
+{
+    float2 clip_half   = 0.5f * max(clip_rect.zw - clip_rect.xy, 0.0f);
+    float2 clip_center = 0.5f * (clip_rect.xy + clip_rect.zw);
+    float2 clip_rel    = px - clip_center;
+    float clip_d;
+    if (rounded_clip && clip_r != 0.0f)
+    {
+        clip_d = etch_sd_rounded_box(clip_rel, clip_half, abs(clip_r).xxxx, clip_r < 0.0f);
+    }
+    else
+    {
+        float2 cq = abs(clip_rel) - clip_half;
+        clip_d = max(cq.x, cq.y);
+    }
+    float clip_cov = saturate(0.5f - clip_d);
+    float fade_cov = 1.0f;
+    [loop] while (clip_index != 0u)
+    {
+        ClipShapeGpu shape = clip_shapes[clip_index];
+        uint meta_y = shape.meta.y;
+        uint mask_kind = (meta_y >> 1u) & 0x7u;
+        bool invert = (meta_y & (1u << 4u)) != 0u;
+        if (mask_kind == 0u)
+        {
+            float2 half_shape = shape.bounds.zw * 0.5f;
+            float2 relative = px - shape.bounds.xy - half_shape;
+            float distance = etch_sd_rounded_box(relative, half_shape, shape.radii, (meta_y & 1u) != 0u);
+            float shape_cov = saturate(0.5f - distance);
+            if (invert) shape_cov = 1.0f - shape_cov;
+            clip_cov = min(clip_cov, shape_cov);
+            float2 tb = unpack_f16x2_custom(shape.meta.z);
+            float2 lr = unpack_f16x2_custom(shape.meta.w);
+            if (tb.x > 0.0f) fade_cov *= smoothstep(0.0f, tb.x, px.y - shape.bounds.y);
+            if (tb.y > 0.0f) fade_cov *= smoothstep(0.0f, tb.y, shape.bounds.y + shape.bounds.w - px.y);
+            if (lr.x > 0.0f) fade_cov *= smoothstep(0.0f, lr.x, px.x - shape.bounds.x);
+            if (lr.y > 0.0f) fade_cov *= smoothstep(0.0f, lr.y, shape.bounds.x + shape.bounds.z - px.x);
+        }
+        else
+        {
+            float2 alphas = unpack_f16x2_custom(shape.meta.z);
+            float2 range  = unpack_f16x2_custom(shape.meta.w);
+            float4 mp     = shape.mask_params;
+            float u = 0.0f;
+            if (mask_kind == 1u)
+            {
+                float t = saturate((dot(px, mp.xy) - mp.z) * mp.w);
+                u = etch_smooth_range(t, range.x, range.y);
+            }
+            else if (mask_kind == 2u)
+            {
+                float r = length((px - mp.xy) * mp.zw);
+                u = etch_smooth_range(r, range.x, range.y);
+            }
+            else
+            {
+                float2 uv = lerp(mp.xy, mp.zw, saturate((px - shape.bounds.xy) / max(shape.bounds.zw, float2(1e-4f, 1e-4f))));
+                u = 1.0f - mask_tex.SampleLevel(mask_smp, uv, 0.0f).a;
+            }
+            if (invert) u = 1.0f - u;
+            fade_cov *= saturate(lerp(alphas.x, alphas.y, u));
+        }
+        clip_index = shape.meta.x;
+    }
+    return clip_cov * fade_cov;
 }
 
 #endif // ETCH_COMMON_HLSLI
