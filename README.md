@@ -66,8 +66,14 @@ and register custom maximize controls with `window_maximize_button_region(id)`.
 - Headless contexts defer GPU initialization to `ensure_gpu_device`; CPU
   layout work needs no GPU. Rendering, texture operations, or requesting the
   device initialize it lazily.
-- Backend selection order: `ContextDesc::gpu_driver`, `ETCH_GPU_DRIVER`,
-  `SDL_GPU_DRIVER`, then SDL's default. Use `direct3d12` or `vulkan` on Windows,
+- `gpu_status()` and `gpu_driver_name()` expose the lazy device state to hosts.
+  A newly created headless context reports `Uninitialized`, a usable device
+  reports `Ready`, and a failed creation reports `Failed` with an empty driver
+  name. Between frames, `retry_gpu_initialization()` lets a host retry that
+  failure on the same context, optionally selecting another driver.
+- Use `ContextDesc::gpu_driver` to select a backend per context and
+  `ETCH_GPU_DRIVER` to set the default. SDL's process-wide `SDL_GPU_DRIVER` hint
+  takes priority during device creation. Use `direct3d12` or `vulkan` on Windows,
   `vulkan` on Linux, and `metal` on macOS.
 
 ## Build
@@ -296,6 +302,19 @@ then queue their GPU copies together. Etch flushes the upload command buffer bef
 rendering. If another renderer consumes a texture first, call `flush_texture_uploads(ctx)`
 (`etch_flush_texture_uploads` in C99) on the owning GPU thread before submitting its commands.
 Destroying a texture flushes pending uploads; destroying the context cancels them.
+
+Use `render_headless_pixels` or `etch_render_headless_pixels` to capture a finished
+frame or rectangle in memory. The call waits for GPU completion and lends sRGB
+RGBA8 rows to the callback. Use the supplied pitch to address successive rows.
+The PNG writer uses the same readback path.
+
+Use `render_to_texture` or `etch_render_to_texture` after finishing a frame to
+composite Etch into another GPU view. Create a single-sampled 2D texture with
+`SDL_GPU_TEXTUREUSAGE_COLOR_TARGET` on the device returned by `gpu_device`.
+The target format is the SDL GPU format value. Supported formats are RGBA8 or
+BGRA8, including their sRGB formats, and RGBA16F. The submission is asynchronous
+on the owning GPU thread. Submit the host's sampling pass after Etch's call and
+give the texture sampler usage if it will be sampled.
 
 v0.13 extends C++/C99 descriptors and changes packed `Prim` header bindings while
 preserving its 64-byte size. Recompile downstream consumers and use matching shader

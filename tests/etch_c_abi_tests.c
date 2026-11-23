@@ -320,9 +320,12 @@ static bool test_text_buffer_and_code_editor(EtchContext* ctx) {
         return false;
     }
     bool ok = (etch_text_buffer_line_count(tb) == 2u);
+    const uint64_t revision = etch_text_buffer_revision(tb);
+    const EtchTextUtf16Position start = etch_text_buffer_utf16_position(tb, 11u);
+    ok = ok && start.line == 1u && start.character == 0u && etch_text_buffer_byte_from_utf16(tb, start) == 11u;
     const uint32_t len0 = etch_text_buffer_byte_length(tb);
     ok = ok && etch_text_buffer_replace(tb, len0, len0, ETCH_STR_LIT("\nint b = 2;"), true, len0, len0, len0 + 11u, len0 + 11u, 1u, 0.5);
-    ok = ok && (etch_text_buffer_line_count(tb) == 3u);
+    ok = ok && (etch_text_buffer_line_count(tb) == 3u) && etch_text_buffer_revision(tb) != revision;
     uint32_t cu = 0u;
     uint32_t an = 0u;
     ok = ok && etch_text_buffer_undo(tb, &cu, &an) && (etch_text_buffer_line_count(tb) == 2u);
@@ -1292,6 +1295,17 @@ int main(void) {
         fprintf(stderr, "c99_abi_smoke: etch_create_context failed\n");
         return 1;
     }
+    if (etch_gpu_status(ctx) != ETCH_GPU_UNINITIALIZED || etch_gpu_driver_name(ctx)[0] != '\0') return 1;
+    const EtchReadPixelsDesc capture = etch_read_pixels_desc_default();
+    if (capture.struct_size != sizeof(capture) || etch_render_headless_pixels(ctx, &capture) ||
+        etch_render_headless_pixels(ctx, NULL) || etch_render_to_texture(ctx, NULL) ||
+        etch_gpu_status(ctx) != ETCH_GPU_UNINITIALIZED) return 1;
+    const EtchRenderTargetDesc output = etch_render_target_desc_default();
+    if (output.struct_size != sizeof(output) || etch_render_to_texture(ctx, &output)) {
+        fprintf(stderr, "c99_abi_smoke: invalid texture target accepted\n");
+        etch_destroy_context(ctx);
+        return 1;
+    }
 
     uint32_t selected_focus=70u, selected_anchor=70u;
     uint64_t selected_bits[2]={0u,64u};
@@ -1472,13 +1486,27 @@ int main(void) {
     const bool ok_layout = ok_release && ok_material_defaults && ok_closure && ok_numerals && test_layout_widgets_and_a11y(ctx);
     const bool ok_editor = test_text_buffer_and_code_editor(ctx);
     const bool ok_containers = test_containers_and_canvas(ctx);
+    bool ok_svg_webp = false;
+    {
+        static const char kCSvg[] = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"24\" height=\"24\"><rect width=\"24\" height=\"24\" fill=\"#E59A38\"/></svg>";
+        EtchSvgRasterDesc sdesc = etch_svg_raster_desc_default();
+        EtchLoadedTexture null_svg = etch_load_svg_memory(NULL, kCSvg, sizeof(kCSvg) - 1u, &sdesc);
+        EtchLoadedTexture null_file = etch_load_svg_file(NULL, "missing.svg", &sdesc);
+        const bool font_null_f = !etch_register_svg_font_file("", false, false, NULL);
+        const bool font_null_m = !etch_register_svg_font_memory("", false, false, NULL, 0u);
+        ok_svg_webp = (sdesc.struct_size == sizeof(EtchSvgRasterDesc) &&
+                       sdesc.scale == 2.0f && sdesc.srgb && sdesc.generate_mipmaps &&
+                       null_svg.texture == NULL && null_file.texture == NULL &&
+                       font_null_f && font_null_m &&
+                       !etch_register_svg_font_memory("preview", false, false, kCSvg, sizeof(kCSvg)));
+    }
 
     etch_destroy_context(ctx);
     etch_set_current_context(NULL);
 
-    if (!ok_layout || !ok_editor || !ok_containers) {
-        fprintf(stderr, "c99_abi_smoke: failed (layout=%d editor=%d containers=%d)\n",
-            (int)ok_layout, (int)ok_editor, (int)ok_containers);
+    if (!ok_layout || !ok_editor || !ok_containers || !ok_svg_webp) {
+        fprintf(stderr, "c99_abi_smoke: failed (layout=%d editor=%d containers=%d svg_webp=%d)\n",
+            (int)ok_layout, (int)ok_editor, (int)ok_containers, (int)ok_svg_webp);
         return 1;
     }
     printf("c99_abi_smoke: PASS\n");

@@ -453,7 +453,7 @@ bool ensure_subpixel_atlas(
 void reset_hinted_atlas_cache(FontAtlas* a) noexcept {
     if (!a) return;
     if (a->hinted_glyphs && a->hinted_cap > 0u) {
-        std::memset(a->hinted_glyphs, 0, size_t(a->hinted_cap) * sizeof(EmojiBitmapEntry));
+        std::fill_n(a->hinted_glyphs, a->hinted_cap, EmojiBitmapEntry{});
     }
     a->hinted_count = 0u;
     std::free(a->subpixel_pixels);

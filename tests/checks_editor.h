@@ -13,6 +13,17 @@ static bool verify_editor_checks(etch::Context* restore) noexcept {
     for(uint32_t i=0;i<lines;++i)std::memcpy(source+size_t(i)*stride,"float4 color = float4(1, 0, 0, 1);",stride);
     for(uint32_t i=0;i<lines;++i)source[size_t(i)*stride+stride-1]='\n';
     check(init_text_buffer(&b,{source,lines*stride-1}),__LINE__);std::free(source);if(!b.data)return false;
+    check(!b.undo_ops && !b.undo_blob,__LINE__);
+    TextBuffer multilingual = {};
+    if (init_text_buffer(&multilingual, str_lit("a\r\n中😀z"))) {
+        check(text_buffer_replace(&multilingual, 5u, 5u, str_lit("+")),__LINE__);
+        const auto pos = text_buffer_utf16_position(&multilingual, 8u);
+        check(pos.line == 1u && pos.character == 2u,__LINE__);
+        check(text_buffer_byte_from_utf16(&multilingual, {1u,3u}) == 6u,__LINE__);
+        check(text_buffer_byte_from_utf16(&multilingual, {1u,4u}) == 10u,__LINE__);
+        check(text_buffer_byte_from_utf16(&multilingual, {3u,0u}) == 11u,__LINE__);
+        free_text_buffer(&multilingual);
+    } else check(false,__LINE__);
     check(text_buffer_line_count(&b)==lines && text_buffer_line_start(&b,999985)==999985*stride,__LINE__);
     const uint32_t at=999985*stride+5;
     check(text_buffer_replace(&b,at,at,str_lit("x")),__LINE__);
@@ -21,12 +32,39 @@ static bool verify_editor_checks(etch::Context* restore) noexcept {
     check(b.line_gap_end==suffix && b.line_data[suffix]==encoded,__LINE__);
     check(text_buffer_line_start(&b,999986)==999986*stride+1001,__LINE__);
     check(text_buffer_undo(&b) && text_buffer_redo(&b),__LINE__);
+    check(b.undo_blob_cap <= 4096u && b.undo_cap <= 16u,__LINE__);
     check(text_buffer_replace(&b,at,at+1001,{}),__LINE__);
     check(text_buffer_line_start(&b,999986)==999986*stride,__LINE__);
     check(text_buffer_replace(&b,at,at,str_lit("\r\n")),__LINE__);
     check(text_buffer_line_count(&b)==lines+1 && text_buffer_line_start(&b,999986)==at+1,__LINE__);
     check(text_buffer_undo(&b) && text_buffer_line_count(&b)==lines,__LINE__);
     Context* test=create_context({.headless=true});if(!test){free_text_buffer(&b);return false;}set_current_context(test);
+    {
+        const uint32_t input_id = id("queued_text_input");
+        char buffer[4096] = {};
+        char commit[1537] = {};
+        std::memset(commit, 'x', sizeof(commit) - 1u);
+        const auto input_frame = [&]() noexcept {
+            begin_frame(test, {.viewport_w = 640, .viewport_h = 240});
+            const auto edit = text_input({.id = input_id, .buffer = buffer, .capacity = sizeof(buffer)});
+            end_frame(test);
+            return edit;
+        };
+        input_frame();
+        request_focus(input_id);
+        input_frame();
+        SDL_Event event = {};
+        event.type = SDL_EVENT_TEXT_INPUT;
+        event.text.text = commit;
+        process_event(test, event);
+        event.text.text = "y";
+        for (uint32_t i = 0; i < 40u; ++i) process_event(test, event);
+        check(input_frame().byte_length == 1576u &&
+            std::memcmp(buffer, commit, 1536u) == 0 && buffer[1536] == 'y' && buffer[1575] == 'y', __LINE__);
+        event.text.text = "z";
+        process_event(test, event);
+        check(input_frame().byte_length == 1577u && buffer[1576] == 'z', __LINE__);
+    }
     const uint32_t eid=id("v24_editor"); CodeEditorResult result={};
     const auto step=[&](uint32_t key=0,uint16_t mods=0,Vec2 pointer=Vec2{-1,-1},bool down=false,uint8_t clicks=1,bool mutate=false) noexcept {
         begin_frame(test,{.viewport_w=800,.viewport_h=500,.dt_seconds=1.f/60,.pointer_pos=pointer,.pointer_down=down,.pointer_clicks=clicks,.key_mods=mods,.key_pressed_code=key});

@@ -35,12 +35,13 @@ function(etch_configure_orthodox_cpp target)
     endif ()
 endfunction()
 
-# Prefer a vendored SDL3 SDK or source tree under third_party/SDL3 before falling back to system packages.
-if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/SDL3/cmake")
+# The bundled SDL3 SDK contains only Windows binaries. Other hosts can use a
+# vendored source tree or an SDL3 package built for their target.
+if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/SDL3/CMakeLists.txt")
+    add_subdirectory(third_party/SDL3 EXCLUDE_FROM_ALL)
+elseif (WIN32 AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/SDL3/cmake")
     list(PREPEND CMAKE_PREFIX_PATH "${CMAKE_CURRENT_SOURCE_DIR}/third_party/SDL3")
     find_package(SDL3 CONFIG REQUIRED)
-elseif (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/SDL3/CMakeLists.txt")
-    add_subdirectory(third_party/SDL3 EXCLUDE_FROM_ALL)
 else ()
     find_package(SDL3 CONFIG REQUIRED)
 endif ()
@@ -51,11 +52,13 @@ set(ETCH_GENERATED_SHADER_HEADERS "")
 
 # Auto-discover DXC (vendored SPIR-V-capable DXC first, then Windows SDK / PATH)
 # to compile Etch HLSL micro-shaders offline into DXIL, SPIR-V & MSL C headers.
-find_program(ETCH_DXC_EXE
-    NAMES dxc dxc.exe
-    PATHS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/dxc/bin/x64"
-    NO_DEFAULT_PATH
-)
+if (CMAKE_HOST_WIN32)
+    find_program(ETCH_DXC_EXE
+        NAMES dxc dxc.exe
+        PATHS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/dxc/bin/x64"
+        NO_DEFAULT_PATH
+    )
+endif ()
 if (NOT ETCH_DXC_EXE)
     set(_etch_dxc_hints "")
     if (WIN32)
@@ -272,6 +275,72 @@ if (NOT ETCH_HB_LIB_TARGET)
     message(FATAL_ERROR "HarfBuzz not found. Provide a vendored archive/source tree or install system HarfBuzz.")
 endif ()
 
+add_library(etch_plutovg OBJECT
+    third_party/plutovg/source/plutovg-blend.c
+    third_party/plutovg/source/plutovg-canvas.c
+    third_party/plutovg/source/plutovg-font.c
+    third_party/plutovg/source/plutovg-ft-math.c
+    third_party/plutovg/source/plutovg-ft-raster.c
+    third_party/plutovg/source/plutovg-ft-stroker.c
+    third_party/plutovg/source/plutovg-matrix.c
+    third_party/plutovg/source/plutovg-paint.c
+    third_party/plutovg/source/plutovg-path.c
+    third_party/plutovg/source/plutovg-rasterize.c
+    third_party/plutovg/source/plutovg-surface.c
+)
+set_target_properties(etch_plutovg PROPERTIES C_STANDARD 99 C_STANDARD_REQUIRED ON POSITION_INDEPENDENT_CODE ON)
+target_include_directories(etch_plutovg PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/plutovg/include"
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/plutovg/source")
+target_compile_definitions(etch_plutovg PRIVATE PLUTOVG_BUILD_STATIC PLUTOVG_BUILD)
+if (CMAKE_C_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC" OR (NOT CMAKE_C_COMPILER_FRONTEND_VARIANT AND MSVC))
+    target_compile_options(etch_plutovg PRIVATE /W0 /utf-8)
+    target_compile_definitions(etch_plutovg PRIVATE _CRT_SECURE_NO_WARNINGS)
+else ()
+    target_compile_options(etch_plutovg PRIVATE -w)
+endif ()
+
+add_library(etch_lunasvg OBJECT
+    third_party/lunasvg/source/graphics.cpp
+    third_party/lunasvg/source/lunasvg.cpp
+    third_party/lunasvg/source/svgelement.cpp
+    third_party/lunasvg/source/svggeometryelement.cpp
+    third_party/lunasvg/source/svglayoutstate.cpp
+    third_party/lunasvg/source/svgpaintelement.cpp
+    third_party/lunasvg/source/svgparser.cpp
+    third_party/lunasvg/source/svgproperty.cpp
+    third_party/lunasvg/source/svgrenderstate.cpp
+    third_party/lunasvg/source/svgtextelement.cpp
+    third_party/lunasvg/etch_svg_bridge.cpp
+)
+target_compile_features(etch_lunasvg PRIVATE cxx_std_17)
+set_target_properties(etch_lunasvg PROPERTIES CXX_EXTENSIONS OFF POSITION_INDEPENDENT_CODE ON)
+target_include_directories(etch_lunasvg PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/lunasvg/include"
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/lunasvg/source"
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/lunasvg"
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/plutovg/include")
+target_compile_definitions(etch_lunasvg PRIVATE LUNASVG_BUILD_STATIC LUNASVG_BUILD PLUTOVG_BUILD_STATIC)
+if (CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC" OR (NOT CMAKE_CXX_COMPILER_FRONTEND_VARIANT AND MSVC))
+    target_compile_options(etch_lunasvg PRIVATE /W0 /utf-8 /GR- /EHs-c-)
+    target_compile_definitions(etch_lunasvg PRIVATE _HAS_EXCEPTIONS=0 _CRT_SECURE_NO_WARNINGS NOMINMAX)
+else ()
+    target_compile_options(etch_lunasvg PRIVATE -w -fno-exceptions -fno-rtti)
+endif ()
+
+add_library(etch_simplewebp OBJECT
+    third_party/simplewebp/simplewebp_impl.c
+)
+set_target_properties(etch_simplewebp PROPERTIES C_STANDARD 99 C_STANDARD_REQUIRED ON POSITION_INDEPENDENT_CODE ON)
+target_include_directories(etch_simplewebp PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/simplewebp")
+if (CMAKE_C_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC" OR (NOT CMAKE_C_COMPILER_FRONTEND_VARIANT AND MSVC))
+    target_compile_options(etch_simplewebp PRIVATE /W0 /utf-8)
+    target_compile_definitions(etch_simplewebp PRIVATE _CRT_SECURE_NO_WARNINGS)
+else ()
+    target_compile_options(etch_simplewebp PRIVATE -w)
+endif ()
+
 if (ETCH_UNITY_BUILD)
     set(_etch_sources src/etch_unity.cpp)
 else ()
@@ -283,7 +352,7 @@ else ()
         src/etch_c.cpp
     )
 endif ()
-add_library(etch STATIC ${_etch_sources})
+add_library(etch STATIC ${_etch_sources} $<TARGET_OBJECTS:etch_plutovg> $<TARGET_OBJECTS:etch_lunasvg> $<TARGET_OBJECTS:etch_simplewebp>)
 add_library(Etch::etch ALIAS etch)
 etch_configure_orthodox_cpp(etch)
 if (NOT ETCH_UNITY_BUILD)
@@ -299,6 +368,8 @@ target_include_directories(etch
     PRIVATE ${_etch_shader_inc_dirs}
             "${CMAKE_CURRENT_SOURCE_DIR}/src"
             "${CMAKE_CURRENT_SOURCE_DIR}/third_party"
+            "${CMAKE_CURRENT_SOURCE_DIR}/third_party/lunasvg"
+            "${CMAKE_CURRENT_SOURCE_DIR}/third_party/simplewebp"
             ${ETCH_HB_INCLUDE_DIRS})
 target_link_libraries(etch PUBLIC SDL3::SDL3 PRIVATE ${ETCH_HB_LIB_TARGET})
 target_compile_definitions(etch PRIVATE ETCH_ENABLE_OS_A11Y=$<BOOL:${ETCH_ENABLE_OS_A11Y}>)

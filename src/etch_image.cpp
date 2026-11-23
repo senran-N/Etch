@@ -13,13 +13,107 @@ void free_decoded_image(DecodedImage* p) noexcept {
         std::free(p->rgba);
     *p = {};
 }
+bool looks_like_svg_bytes(const uint8_t* bytes, size_t size) noexcept {
+    if (!bytes || size < 5u) return false;
+    size_t i = 0u;
+    if (size >= 3u && bytes[0] == 0xEFu && bytes[1] == 0xBBu && bytes[2] == 0xBFu) i = 3u;
+    auto skip_ws = [&]() noexcept {
+        while (i < size && (bytes[i] == ' ' || bytes[i] == '\t' || bytes[i] == '\r' || bytes[i] == '\n')) ++i;
+    };
+    auto match_ci = [&](const char* lit, size_t len) noexcept -> bool {
+        if (i + len > size) return false;
+        for (size_t k = 0u; k < len; ++k) {
+            char c = static_cast<char>(bytes[i + k]);
+            if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+            if (c != lit[k]) return false;
+        }
+        return true;
+    };
+    for (int iter = 0; iter < 8; ++iter) {
+        skip_ws();
+        if (i >= size) return false;
+        if (match_ci("<svg", 4u)) {
+            if (i + 4u == size) return true;
+            const char next = static_cast<char>(bytes[i + 4u]);
+            return next == ' ' || next == '\t' || next == '\r' || next == '\n' || next == '>' || next == '/';
+        }
+        if (match_ci("<?xml", 5u)) {
+            while (i + 1u < size && !(bytes[i] == '?' && bytes[i + 1u] == '>')) ++i;
+            if (i + 1u >= size) return false;
+            i += 2u;
+            continue;
+        }
+        if (match_ci("<!--", 4u)) {
+            while (i + 2u < size && !(bytes[i] == '-' && bytes[i + 1u] == '-' && bytes[i + 2u] == '>')) ++i;
+            if (i + 2u >= size) return false;
+            i += 3u;
+            continue;
+        }
+        if (match_ci("<!doctype", 9u)) {
+            while (i < size && bytes[i] != '>') ++i;
+            if (i >= size) return false;
+            ++i;
+            continue;
+        }
+        break;
+    }
+    return false;
+}
+
+bool decode_webp_memory(const uint8_t* bytes, size_t size, DecodedImage* out) noexcept {
+    if (!bytes || size < 12u || std::memcmp(bytes, "RIFF", 4u) != 0 || std::memcmp(bytes + 8u, "WEBP", 4u) != 0) {
+        return false;
+    }
+    simplewebp* swebp = nullptr;
+    if (simplewebp_load_from_memory(const_cast<uint8_t*>(bytes), size, nullptr, &swebp) != SIMPLEWEBP_NO_ERROR || !swebp) {
+        return false;
+    }
+    size_t w = 0u, h = 0u;
+    simplewebp_get_dimensions(swebp, &w, &h);
+    if (w == 0u || h == 0u || w > 8192u || h > 8192u) {
+        simplewebp_unload(swebp);
+        return false;
+    }
+    uint8_t* rgba = static_cast<uint8_t*>(std::malloc(w * h * 4u));
+    if (!rgba) {
+        simplewebp_unload(swebp);
+        return false;
+    }
+    const simplewebp_error dec_err = simplewebp_decode(swebp, rgba, nullptr);
+    simplewebp_unload(swebp);
+    if (dec_err != SIMPLEWEBP_NO_ERROR) {
+        std::free(rgba);
+        return false;
+    }
+    *out = {rgba, static_cast<uint32_t>(w), static_cast<uint32_t>(h), false};
+    return true;
+}
+
+bool decode_svg_memory(const void* data, size_t size, uint32_t target_w, uint32_t target_h, float scale, DecodedImage* out) noexcept {
+    *out = {};
+    if (!data || size == 0u) return false;
+    uint8_t* rgba = nullptr;
+    uint32_t w = 0u, h = 0u;
+    if (!etch_svg_rasterize_memory(data, size, target_w, target_h, scale, &rgba, &w, &h, nullptr, nullptr)) {
+        return false;
+    }
+    *out = {rgba, w, h, false};
+    return true;
+}
+
 bool decode_image_memory(const void* data, size_t size, DecodedImage* out) noexcept {
     *out = {};
     if (!data || !size || size > 0x7FFFFFFFu)
         return false;
+    const auto* bytes = static_cast<const uint8_t*>(data);
+    if (decode_webp_memory(bytes, size, out)) {
+        return true;
+    }
+    if (looks_like_svg_bytes(bytes, size)) {
+        return decode_svg_memory(data, size, 0u, 0u, 2.0f, out);
+    }
     auto* io = SDL_IOFromConstMem(data, size);
     auto* surf = io ? SDL_LoadPNG_IO(io, false) : nullptr;
-    const auto* bytes = static_cast<const uint8_t*>(data);
     if (!surf && io && size >= 2 && bytes[0] == 'B' && bytes[1] == 'M') {
         SDL_SeekIO(io, 0, SDL_IO_SEEK_SET);
         surf = SDL_LoadBMP_IO(io, false);

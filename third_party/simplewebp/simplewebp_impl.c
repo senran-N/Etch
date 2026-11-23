@@ -1,0 +1,3 @@
+#define SIMPLEWEBP_DISABLE_STDIO
+#define SIMPLEWEBP_IMPLEMENTATION
+#include "simplewebp.h"

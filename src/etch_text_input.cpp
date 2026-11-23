@@ -307,23 +307,39 @@ uint32_t insert_utf8_filtered(
     return pos + write_bytes;
 }
 
+bool reserve_text_ops(PendingTextOp*& ops, uint32_t& capacity, uint32_t count) noexcept {
+    if (count < capacity) return true;
+    if (capacity == kMaxTextOpsPerFrame) return false;
+    const uint32_t next = capacity ? capacity * 2u : 32u;
+    auto* grown = static_cast<PendingTextOp*>(std::realloc(ops, size_t(next) * sizeof(PendingTextOp)));
+    if (!grown) return false;
+    ops = grown;
+    capacity = next;
+    return true;
+}
+
 void push_pending_text_op(Context* ctx, PendingTextOp op, Str utf8) noexcept {
-    if (!ctx || ctx->active_ui->pending_text_op_count >= kMaxTextOpsPerFrame) {
+    auto& ui = *ctx->active_ui;
+    if (utf8.length > kMaxPendingTextBytes - ui.pending_text_utf8_len ||
+        !reserve_text_ops(ui.pending_text_ops, ui.pending_text_op_capacity, ui.pending_text_op_count)) {
         return;
     }
     if (utf8.chars && utf8.length > 0u) {
-        const uint32_t avail = kMaxPendingTextBytes - ctx->active_ui->pending_text_utf8_len;
-        const uint32_t max_copy = (utf8.length < avail) ? utf8.length : avail;
-        const uint32_t copy_len = utf8_clamp_boundary(utf8.chars, utf8.length, max_copy);
-        if (copy_len == 0u) {
-            return;
+        const uint32_t needed = ui.pending_text_utf8_len + utf8.length;
+        if (needed > ui.pending_text_utf8_capacity) {
+            uint32_t next = ui.pending_text_utf8_capacity ? ui.pending_text_utf8_capacity : 1024u;
+            while (next < needed) next *= 2u;
+            auto* grown = static_cast<char*>(std::realloc(ui.pending_text_utf8, next));
+            if (!grown) return;
+            ui.pending_text_utf8 = grown;
+            ui.pending_text_utf8_capacity = next;
         }
-        op.text_offset = static_cast<uint16_t>(ctx->active_ui->pending_text_utf8_len);
-        op.text_len = static_cast<uint16_t>(copy_len);
-        std::memcpy(ctx->active_ui->pending_text_utf8 + ctx->active_ui->pending_text_utf8_len, utf8.chars, copy_len);
-        ctx->active_ui->pending_text_utf8_len += copy_len;
+        op.text_offset = ui.pending_text_utf8_len;
+        op.text_len = utf8.length;
+        std::memcpy(ui.pending_text_utf8 + op.text_offset, utf8.chars, op.text_len);
+        ui.pending_text_utf8_len = needed;
     }
-    ctx->active_ui->pending_text_ops[ctx->active_ui->pending_text_op_count++] = op;
+    ui.pending_text_ops[ui.pending_text_op_count++] = op;
 }
 
 void clear_ime_composition(Context* ctx) noexcept {
@@ -1604,7 +1620,7 @@ void emit_selection_bands(
             base_px, letter_spacing, mask_bullets, spacing_between_glyphs_only,
             nullptr, nullptr, &total_w, tab_width,
             (sel_b > sel_a)
-                ? [](void* data, uint32_t a, uint32_t b, float pen, float advance, bool rtl) noexcept {
+                ? +[](void* data, uint32_t a, uint32_t b, float pen, float advance, bool rtl) noexcept {
                       auto& visual = *static_cast<SelBandState*>(data);
                       if (visual.first >= b || visual.last <= a || advance <= 0.0f) return;
                       float left = pen;

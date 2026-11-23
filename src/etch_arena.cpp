@@ -29,8 +29,8 @@ inline constexpr uint32_t kMaxSplitDepth = 32u;
 inline constexpr uint32_t kMaxCanvasDepth = 8u;
 inline constexpr uint32_t kHudHistorySamples = 64u;
 inline constexpr uint32_t kCursorCount = 10u;
-inline constexpr uint32_t kMaxTextOpsPerFrame = 32u;
-inline constexpr uint32_t kMaxPendingTextBytes = 1024u;
+inline constexpr uint32_t kMaxTextOpsPerFrame = 16384u;
+inline constexpr uint32_t kMaxPendingTextBytes = 16u * 1024u * 1024u;
 inline constexpr uint32_t kMaxImeCompBytes = 256u;
 inline constexpr uint32_t kMaxKeyEventsPerFrame = 32u;
 inline constexpr uint32_t kMaxChromeDragRects = 16u;
@@ -430,8 +430,8 @@ struct PendingTextOp {
     uint8_t        pad0 = 0;
     uint16_t       mod = 0;
     uint32_t       key = 0;
-    uint16_t       text_offset = 0;
-    uint16_t       text_len = 0;
+    uint32_t       text_offset = 0;
+    uint32_t       text_len = 0;
 };
 
 struct TextInputExtra {
@@ -994,6 +994,7 @@ struct WindowUiState {
     uint32_t filter_rt_w = 0;
     uint32_t filter_rt_h = 0;
     uint32_t filter_idle_frames = 0;
+    uint64_t transient_gpu_deadline = 0;
     bool keyboard_focus_active = false;
     uint32_t focus_scope = 0;
     uint32_t focus_scopes[32] = {};
@@ -1110,14 +1111,18 @@ struct WindowUiState {
 
     TextUndoSlot* undo_pool = nullptr; uint32_t undo_cap = 0;
 
-    PendingTextOp pending_text_ops[kMaxTextOpsPerFrame] = {};
+    PendingTextOp* pending_text_ops = nullptr;
+    uint32_t       pending_text_op_capacity = 0;
     uint32_t      pending_text_op_count = 0;
-    char          pending_text_utf8[kMaxPendingTextBytes] = {};
+    char*         pending_text_utf8 = nullptr;
+    uint32_t      pending_text_utf8_capacity = 0;
     uint32_t      pending_text_utf8_len = 0;
 
-    PendingTextOp frame_text_ops[kMaxTextOpsPerFrame] = {};
+    PendingTextOp* frame_text_ops = nullptr;
+    uint32_t       frame_text_op_capacity = 0;
     uint32_t      frame_text_op_count = 0;
-    char          frame_text_utf8[kMaxPendingTextBytes] = {};
+    char*         frame_text_utf8 = nullptr;
+    uint32_t      frame_text_utf8_capacity = 0;
     uint32_t      frame_text_utf8_len = 0;
 
     char          ime_comp_utf8[kMaxImeCompBytes] = {};
@@ -1946,7 +1951,9 @@ void os_a11y_attach_window(Context* ctx, ClaimedWindowSlot* slot) noexcept;
 void os_a11y_detach_window(Context* ctx, ClaimedWindowSlot* slot) noexcept;
 void os_a11y_notify_commit(Context* ctx) noexcept;
 void apply_platform_window_chrome(Context* ctx, ClaimedWindowSlot* slot) noexcept;
+#if defined(_WIN32)
 void apply_win32_chrome(Context* ctx, ClaimedWindowSlot* slot) noexcept;
+#endif
 void detach_win32_chrome(ClaimedWindowSlot* slot) noexcept;
 bool win32_is_zoomed(SDL_Window* window) noexcept;
 void win32_maximize_window(SDL_Window* window) noexcept;
@@ -1956,6 +1963,7 @@ void sync_window_event_watch(Context* ctx) noexcept;
 void detach_window_event_watch(Context* ctx) noexcept;
 bool sync_window_metrics_from_os(WindowUiState* ui, SDL_Window* window) noexcept;
 int32_t shader_surface_timeout(const Context* ctx, SDL_Window* window, bool all_windows, int32_t timeout) noexcept;
+int32_t idle_gpu_timeout(Context* ctx, uint64_t now, int32_t timeout) noexcept;
 bool surface_texture_premultiplied(const Context* ctx, SDL_GPUTexture* texture) noexcept;
 bool record_shader_surfaces(Context* ctx, SDL_GPUCommandBuffer* cmd) noexcept;
 void complete_shader_surfaces(Context* ctx, SDL_Window* window, bool submitted) noexcept;

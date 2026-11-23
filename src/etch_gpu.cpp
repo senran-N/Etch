@@ -27,7 +27,7 @@ inline float srgb_u8_to_linear(uint8_t u) noexcept {
 }
 
 inline SDL_FColor make_clear_fcolor(Color c, SDL_GPUTextureFormat target_fmt) noexcept {
-    if (is_srgb_gpu_format(target_fmt)) {
+    if (is_srgb_gpu_format(target_fmt) || is_linear_float_format(target_fmt)) {
         return SDL_FColor{
             srgb_u8_to_linear(c.r),
             srgb_u8_to_linear(c.g),
@@ -472,21 +472,22 @@ bool ensure_white_fallback_tex(Context* ctx) noexcept {
     return true;
 }
 
-void release_depth_target(Context* ctx) noexcept {
-    if (ctx->active_ui->depth_tex) {
-        SDL_ReleaseGPUTexture(ctx->device, ctx->active_ui->depth_tex);
-        ctx->active_ui->depth_tex = nullptr;
+void release_depth_target(SDL_GPUDevice* device, WindowUiState& ui) noexcept {
+    if (ui.depth_tex) {
+        SDL_ReleaseGPUTexture(device, ui.depth_tex);
+        ui.depth_tex = nullptr;
     }
-    ctx->active_ui->depth_w = 0u;
-    ctx->active_ui->depth_h = 0u;
-    ctx->active_ui->depth_fmt = SDL_GPU_TEXTUREFORMAT_INVALID;
+    ui.depth_w = 0u;
+    ui.depth_h = 0u;
+    ui.depth_fmt = SDL_GPU_TEXTUREFORMAT_INVALID;
+    ui.depth_idle_frames = 0u;
 }
 
 bool ensure_depth_target(Context* ctx, uint32_t width, uint32_t height) noexcept {
     if (ctx->active_ui->depth_tex && ctx->active_ui->depth_w == width && ctx->active_ui->depth_h == height) {
         return true;
     }
-    release_depth_target(ctx);
+    release_depth_target(ctx->device, *ctx->active_ui);
     const SDL_GPUTextureCreateInfo info = {
         .type = SDL_GPU_TEXTURETYPE_2D,
         .format = SDL_GPU_TEXTUREFORMAT_D32_FLOAT,
@@ -506,23 +507,23 @@ bool ensure_depth_target(Context* ctx, uint32_t width, uint32_t height) noexcept
     return true;
 }
 
-void release_filter_targets(Context* ctx) noexcept {
+void release_filter_targets(SDL_GPUDevice* device, WindowUiState& ui) noexcept {
     for (uint32_t s = 0u; s < kMaxFilterSlices; ++s) {
         for (uint32_t l = 0u; l < kMaxFilterLevels; ++l) {
-            if (ctx->active_ui->filter_slices[s].levels[l]) {
-                SDL_ReleaseGPUTexture(ctx->device, ctx->active_ui->filter_slices[s].levels[l]);
-                ctx->active_ui->filter_slices[s].levels[l] = nullptr;
+            if (ui.filter_slices[s].levels[l]) {
+                SDL_ReleaseGPUTexture(device, ui.filter_slices[s].levels[l]);
+                ui.filter_slices[s].levels[l] = nullptr;
             }
         }
     }
-    ctx->active_ui->filter_rt_w = 0u;
-    ctx->active_ui->filter_rt_h = 0u;
-    ctx->active_ui->filter_idle_frames = 0u;
+    ui.filter_rt_w = 0u;
+    ui.filter_rt_h = 0u;
+    ui.filter_idle_frames = 0u;
 }
 
 bool ensure_filter_slice_targets(Context* ctx, uint32_t width, uint32_t height, uint32_t slice, uint32_t max_level) noexcept {
     if (ctx->active_ui->filter_rt_w != width || ctx->active_ui->filter_rt_h != height) {
-        release_filter_targets(ctx);
+        release_filter_targets(ctx->device, *ctx->active_ui);
         ctx->active_ui->filter_rt_w = width;
         ctx->active_ui->filter_rt_h = height;
     }
@@ -548,22 +549,23 @@ bool ensure_filter_slice_targets(Context* ctx, uint32_t width, uint32_t height, 
     return true;
 }
 
-void release_blur_targets(Context* ctx) noexcept {
-    if (ctx->active_ui->scene_tex) {
-        SDL_ReleaseGPUTexture(ctx->device, ctx->active_ui->scene_tex);
-        ctx->active_ui->scene_tex = nullptr;
+void release_blur_targets(SDL_GPUDevice* device, WindowUiState& ui) noexcept {
+    if (ui.scene_tex) {
+        SDL_ReleaseGPUTexture(device, ui.scene_tex);
+        ui.scene_tex = nullptr;
     }
-    if (ctx->active_ui->blur_ping_tex) {
-        SDL_ReleaseGPUTexture(ctx->device, ctx->active_ui->blur_ping_tex);
-        ctx->active_ui->blur_ping_tex = nullptr;
+    if (ui.blur_ping_tex) {
+        SDL_ReleaseGPUTexture(device, ui.blur_ping_tex);
+        ui.blur_ping_tex = nullptr;
     }
-    if (ctx->active_ui->blur_pong_tex) {
-        SDL_ReleaseGPUTexture(ctx->device, ctx->active_ui->blur_pong_tex);
-        ctx->active_ui->blur_pong_tex = nullptr;
+    if (ui.blur_pong_tex) {
+        SDL_ReleaseGPUTexture(device, ui.blur_pong_tex);
+        ui.blur_pong_tex = nullptr;
     }
-    ctx->active_ui->blur_rt_w = 0u;
-    ctx->active_ui->blur_rt_h = 0u;
-    ctx->active_ui->blur_rt_fmt = SDL_GPU_TEXTUREFORMAT_INVALID;
+    ui.blur_rt_w = 0u;
+    ui.blur_rt_h = 0u;
+    ui.blur_rt_fmt = SDL_GPU_TEXTUREFORMAT_INVALID;
+    ui.blur_idle_frames = 0u;
 }
 
 bool ensure_blur_targets(Context* ctx, uint32_t width, uint32_t height, SDL_GPUTextureFormat scene_fmt) noexcept {
@@ -573,7 +575,7 @@ bool ensure_blur_targets(Context* ctx, uint32_t width, uint32_t height, SDL_GPUT
     {
         return true;
     }
-    release_blur_targets(ctx);
+    release_blur_targets(ctx->device, *ctx->active_ui);
 
     const uint32_t half_w = (width > 1u) ? (width / 2u) : 1u;
     const uint32_t half_h = (height > 1u) ? (height / 2u) : 1u;
@@ -599,7 +601,7 @@ bool ensure_blur_targets(Context* ctx, uint32_t width, uint32_t height, SDL_GPUT
     ctx->active_ui->blur_ping_tex = make_rt(half_w, half_h, kBlurTexFormat);
     ctx->active_ui->blur_pong_tex = make_rt(quarter_w, quarter_h, kBlurTexFormat);
     if (!ctx->active_ui->scene_tex || !ctx->active_ui->blur_ping_tex || !ctx->active_ui->blur_pong_tex) {
-        release_blur_targets(ctx);
+        release_blur_targets(ctx->device, *ctx->active_ui);
         return false;
     }
     ctx->active_ui->blur_rt_w = width;
@@ -1053,6 +1055,8 @@ void destroy_window_ui_state(Context*, WindowUiState* ui) noexcept {
     std::free(ui->undo_pool);
     std::free(ui->drag_heap);
     std::free(ui->pending_drop_records);std::free(ui->pending_text_drop_records);std::free(ui->pending_drop_buf);
+    std::free(ui->pending_text_ops); std::free(ui->frame_text_ops);
+    std::free(ui->pending_text_utf8); std::free(ui->frame_text_utf8);
     std::free(ui->dock_spaces); std::free(ui->dock_cursor.stack); std::free(ui->tables);
     std::free(ui->focus_order); std::free(ui->prev_focus_order);
     std::free(ui->span_hits); std::free(ui->drop_hits);
@@ -1147,12 +1151,14 @@ bool record_frame_commands(
     if (!ctx || !cmd || !target_tex || target_w == 0u || target_h == 0u) {
         return false;
     }
+    ctx->active_ui->transient_gpu_deadline = SDL_GetTicks() + 2000u;
     if (!flush_texture_uploads(ctx)) return false;
     if (!ensure_white_fallback_tex(ctx)) return false;
     if (!record_shader_surfaces(ctx, cmd)) return false;
     clear_color = resolve_theme_color(clear_color, active_theme(ctx).bg_canvas);
     if (ctx->prim_count > 0u && (ctx->gpu_batch_count == 0u || (ctx->gpu_use_early_z && !ctx->supports_d32_depth))) {
         optimize_render_batches(ctx);
+        if (ctx->gpu_batch_count == 0u) return SDL_SetError("Etch could not build a complete GPU batch list");
     }
 
     const bool use_seg0_depth = ctx->gpu_use_early_z && ctx->supports_d32_depth;
@@ -1673,21 +1679,19 @@ bool record_frame_commands(
         cleanup_filter_split();
     } else if (ctx->active_ui->filter_rt_w != 0u) {
         if (++ctx->active_ui->filter_idle_frames >= 120u) {
-            release_filter_targets(ctx);
+            release_filter_targets(ctx->device, *ctx->active_ui);
         }
     }
 
     if (use_seg0_depth) {
         ctx->active_ui->depth_idle_frames = 0u;
     } else if (ctx->active_ui->depth_tex && ++ctx->active_ui->depth_idle_frames >= 120u) {
-        release_depth_target(ctx);
-        ctx->active_ui->depth_idle_frames = 0u;
+        release_depth_target(ctx->device, *ctx->active_ui);
     }
 
     if (ctx->gpu_blur_split_count == 0u && !bloom) {
         if (ctx->active_ui->scene_tex && ++ctx->active_ui->blur_idle_frames >= 120u) {
-            release_blur_targets(ctx);
-            ctx->active_ui->blur_idle_frames = 0u;
+            release_blur_targets(ctx->device, *ctx->active_ui);
         }
         return run_gpu_render_pass(
             ctx,
@@ -1870,11 +1874,7 @@ bool record_frame_commands(
         0.0f, 2u);
 }
 
-bool ensure_headless_resources(Context* ctx, uint32_t width, uint32_t height, uint32_t stride_bytes) noexcept {
-    if (!ctx || !ctx->device) {
-        return false;
-    }
-
+bool ensure_headless_resources(Context* ctx, uint32_t width, uint32_t height, uint32_t needed_dl) noexcept {
     if (!ctx->headless_tex || ctx->headless_w != width || ctx->headless_h != height) {
         if (ctx->headless_tex) {
             SDL_ReleaseGPUTexture(ctx->device, ctx->headless_tex);
@@ -1900,7 +1900,6 @@ bool ensure_headless_resources(Context* ctx, uint32_t width, uint32_t height, ui
         ctx->headless_h = height;
     }
 
-    const uint32_t needed_dl = stride_bytes * height;
     if (!ctx->headless_dl_buf || ctx->headless_dl_size < needed_dl) {
         if (ctx->headless_dl_buf) {
             SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->headless_dl_buf);
@@ -2923,6 +2922,26 @@ void emit_spatial_segment(
 
 void release_window_impl(Context* ctx, SDL_Window* window, bool destroying) noexcept;
 
+int32_t idle_gpu_timeout(Context* ctx, uint64_t now, int32_t timeout) noexcept {
+    if (!ctx->device) return timeout;
+    auto check = [&](WindowUiState& ui) noexcept {
+        if (!ui.depth_tex && !ui.scene_tex && !ui.filter_rt_w) return;
+        if (now >= ui.transient_gpu_deadline) {
+            release_depth_target(ctx->device, ui);
+            release_blur_targets(ctx->device, ui);
+            if (ui.filter_rt_w) release_filter_targets(ctx->device, ui);
+        } else {
+            const auto remaining = static_cast<int32_t>(ui.transient_gpu_deadline - now);
+            if (timeout < 0 || remaining < timeout) timeout = remaining;
+        }
+    };
+    if (ctx->headless_ui) check(*ctx->headless_ui);
+    for (uint32_t i = 0; i < ctx->claimed_window_cap; ++i) {
+        if (ClaimedWindowSlot* slot = ctx->claimed_windows[i]) check(slot->ui);
+    }
+    return timeout;
+}
+
 } // namespace
 
 void optimize_render_batches(Context* ctx) noexcept {
@@ -2975,6 +2994,14 @@ void optimize_render_batches(Context* ctx) noexcept {
         }
     }
     const size_t opt_mark = scratch->mark();
+    const auto finish = [&](uint32_t emitted) noexcept {
+        scratch->rewind(opt_mark);
+        if (emitted != ctx->prim_count) {
+            ctx->gpu_batch_count = 0u;
+            ctx->gpu_blur_split_count = 0u;
+            ctx->gpu_use_early_z = false;
+        }
+    };
     OptPrimItem* items = (scratch->remaining() >= size_t(ctx->prim_count) * sizeof(OptPrimItem) + 64u)
         ? scratch->alloc_uninit<OptPrimItem>(ctx->prim_count) : nullptr;
     const bool lcd_subpixel = !ctx->atlas.subpixel_is_r8;
@@ -3053,7 +3080,7 @@ void optimize_render_batches(Context* ctx) noexcept {
             ctx->gpu_blur_splits[ctx->gpu_blur_split_count++] = mapped;
             ++next_split;
         }
-        scratch->rewind(opt_mark);
+        finish(out_prim_cursor);
         return;
     }
 
@@ -3138,7 +3165,7 @@ void optimize_render_batches(Context* ctx) noexcept {
         ++next_split;
     }
 
-    scratch->rewind(opt_mark);
+    finish(out_prim_cursor);
 }
 
 Context* create_context(const ContextDesc& desc) noexcept {
@@ -3270,6 +3297,31 @@ SDL_GPUDevice* gpu_device(Context* ctx) noexcept {
     return ctx->device;
 }
 
+GpuStatus gpu_status(const Context* ctx) noexcept {
+    if (!ctx) return GpuStatus::Failed;
+    if (ctx->device) return GpuStatus::Ready;
+    return ctx->gpu_init_failed ? GpuStatus::Failed : GpuStatus::Uninitialized;
+}
+
+const char* gpu_driver_name(const Context* ctx) noexcept {
+    if (!ctx || !ctx->device) return "";
+    const char* name = SDL_GetGPUDeviceDriver(ctx->device);
+    return name ? name : "";
+}
+
+bool retry_gpu_initialization(Context* ctx, const char* driver) noexcept {
+    if (!ctx || !ctx->gpu_init_failed || ctx->in_frame) return false;
+    if (driver) {
+        const size_t len = std::strlen(driver);
+        if (len >= sizeof(ctx->gpu_driver)) return false;
+        std::memcpy(ctx->gpu_driver, driver, len + 1u);
+    }
+    ctx->gpu_init_failed = false;
+    if (!ensure_gpu_device(ctx)) return false;
+    request_redraw(ctx);
+    return true;
+}
+
 void destroy_context(Context* ctx) noexcept {
     if (!ctx) {
         return;
@@ -3329,9 +3381,9 @@ void destroy_context(Context* ctx) noexcept {
         if (ctx->atlas.gpu_tex) SDL_ReleaseGPUTexture(ctx->device, ctx->atlas.gpu_tex);
         if (ctx->atlas.subpixel_gpu_tex) SDL_ReleaseGPUTexture(ctx->device, ctx->atlas.subpixel_gpu_tex);
         if (ctx->active_ui) {
-            release_blur_targets(ctx);
-            release_filter_targets(ctx);
-            release_depth_target(ctx);
+            release_blur_targets(ctx->device, *ctx->active_ui);
+            release_filter_targets(ctx->device, *ctx->active_ui);
+            release_depth_target(ctx->device, *ctx->active_ui);
         }
         if (ctx->headless_tex) SDL_ReleaseGPUTexture(ctx->device, ctx->headless_tex);
         if (ctx->headless_dl_buf) SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->headless_dl_buf);
@@ -3456,14 +3508,54 @@ bool render_window(Context* ctx, Color clear_color, SDL_Window* window_override)
     return submitted;
 }
 
-bool render_headless_png(
-    Context* ctx,
-    uint32_t width,
-    uint32_t height,
-    const char* out_png_path,
-    Color clear_color) noexcept
-{
-    if (!ensure_gpu_device(ctx) || width == 0u || height == 0u || !out_png_path || out_png_path[0] == '\0') {
+bool render_to_texture(Context* ctx, const RenderTargetDesc& desc) noexcept {
+    if (!ctx || ctx->in_frame || !desc.texture || !desc.width || !desc.height) return false;
+    switch (desc.sdl_texture_format) {
+        case SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM:
+        case SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB:
+        case SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM:
+        case SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM_SRGB:
+        case SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT:
+            break;
+        default:
+            return SDL_SetError("Unsupported Etch render target format");
+    }
+    if (!ensure_gpu_device(ctx)) return false;
+    SDL_Window* draw_window = ctx->draw_list_window;
+    WindowUiState* draw_ui = draw_window ? window_ui(ctx, draw_window) : ctx->headless_ui;
+    if (!draw_ui) return false;
+    const uint64_t start = SDL_GetPerformanceCounter();
+    SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(ctx->device);
+    if (!cmd) return false;
+
+    WindowUiState* saved_ui = ctx->active_ui;
+    SDL_Window* saved_window = ctx->active_window;
+    ctx->active_ui = draw_ui;
+    ctx->active_window = draw_window;
+    const bool recorded = record_frame_commands(ctx, cmd, desc.texture,
+        static_cast<SDL_GPUTextureFormat>(desc.sdl_texture_format), desc.width, desc.height, desc.clear_color);
+    ctx->active_ui = saved_ui;
+    ctx->active_window = saved_window;
+    if (!recorded) {
+        SDL_CancelGPUCommandBuffer(cmd);
+        complete_shader_surfaces(ctx, draw_window, false);
+        return false;
+    }
+    const bool submitted = SDL_SubmitGPUCommandBuffer(cmd);
+    complete_shader_surfaces(ctx, draw_window, submitted);
+    ctx->stats.draw_call_count = ctx->gpu_batch_count;
+    ctx->stats.gpu_submit_ms = double(SDL_GetPerformanceCounter() - start) * 1000.0 /
+        double(SDL_GetPerformanceFrequency());
+    return submitted;
+}
+
+bool render_headless_pixels(Context* ctx, const ReadPixelsDesc& desc) noexcept {
+    if (!ctx || ctx->in_frame || !desc.receive || desc.frame_width > 16384u || desc.frame_height > 16384u ||
+        desc.x >= desc.frame_width || desc.y >= desc.frame_height) return false;
+    const uint32_t remaining_w = desc.frame_width - desc.x, remaining_h = desc.frame_height - desc.y;
+    const uint32_t width = desc.width ? desc.width : remaining_w;
+    const uint32_t height = desc.height ? desc.height : remaining_h;
+    if (width > remaining_w || height > remaining_h || !ensure_gpu_device(ctx)) {
         return false;
     }
     if (!ctx->active_ui) {
@@ -3474,7 +3566,7 @@ bool render_headless_png(
     // Align row pitch to 64 pixels (256 bytes) to satisfy D3D12 copy pitch alignment without extra copies.
     const uint32_t aligned_pixels_per_row = (width + 63u) & ~63u;
     const uint32_t stride_bytes = aligned_pixels_per_row * 4u;
-    if (!ensure_headless_resources(ctx, width, height, stride_bytes)) {
+    if (!ensure_headless_resources(ctx, desc.frame_width, desc.frame_height, stride_bytes * height)) {
         return false;
     }
 
@@ -3489,9 +3581,9 @@ bool render_headless_png(
             cmd,
             ctx->headless_tex,
             SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB,
-            width,
-            height,
-            clear_color))
+            desc.frame_width,
+            desc.frame_height,
+            desc.clear_color))
     {
         SDL_CancelGPUCommandBuffer(cmd);
         complete_shader_surfaces(ctx, ctx->active_window, false);
@@ -3509,8 +3601,8 @@ bool render_headless_png(
         .texture = ctx->headless_tex,
         .mip_level = 0u,
         .layer = 0u,
-        .x = 0u,
-        .y = 0u,
+        .x = desc.x,
+        .y = desc.y,
         .z = 0u,
         .w = width,
         .h = height,
@@ -3540,13 +3632,7 @@ bool render_headless_png(
     if (!pixels) {
         return false;
     }
-    const int wrote = stbi_write_png(
-        out_png_path,
-        static_cast<int>(width),
-        static_cast<int>(height),
-        4,
-        pixels,
-        static_cast<int>(stride_bytes));
+    const bool received = desc.receive(static_cast<const uint8_t*>(pixels), width, height, stride_bytes, desc.user_data);
     SDL_UnmapGPUTransferBuffer(ctx->device, ctx->headless_dl_buf);
 
     const uint64_t t1 = SDL_GetPerformanceCounter();
@@ -3556,7 +3642,19 @@ bool render_headless_png(
         ? (static_cast<double>(t1 - t0) * 1000.0 / static_cast<double>(freq))
         : 0.0;
 
-    return wrote != 0;
+    return received;
+}
+
+bool render_headless_png(Context* ctx, uint32_t width, uint32_t height, const char* path, Color clear_color) noexcept {
+    if (!path || !path[0]) return false;
+    return render_headless_pixels(ctx, {
+        .frame_width = width, .frame_height = height, .clear_color = clear_color,
+        .receive = [](const uint8_t* rgba, uint32_t w, uint32_t h, uint32_t pitch, void* data) {
+            return stbi_write_png(*static_cast<const char**>(data), static_cast<int>(w), static_cast<int>(h),
+                                  4, rgba, static_cast<int>(pitch)) != 0;
+        },
+        .user_data = &path,
+    });
 }
 
 namespace {
@@ -3685,9 +3783,9 @@ void release_window_impl(Context* ctx, SDL_Window* window, bool destroying) noex
         WindowUiState* saved = ctx->active_ui;
         const bool was_active_ui = (saved == &slot.ui);
         ctx->active_ui = &slot.ui;
-        release_blur_targets(ctx);
-        release_filter_targets(ctx);
-        release_depth_target(ctx);
+        release_blur_targets(ctx->device, *ctx->active_ui);
+        release_filter_targets(ctx->device, *ctx->active_ui);
+        release_depth_target(ctx->device, *ctx->active_ui);
         destroy_window_ui_state(ctx, &slot.ui);
         SDL_ReleaseWindowFromGPUDevice(ctx->device, window);
         slot.window = nullptr;
@@ -3835,19 +3933,81 @@ bool update_texture_region_rgba(Context* ctx, SDL_GPUTexture* texture,
     return true;
 }
 
+namespace {
+void ensure_svg_fonts_registered(Context* ctx) noexcept {
+    static bool s_svg_fonts_registered = false;
+    if (s_svg_fonts_registered || !ctx) return;
+    s_svg_fonts_registered = true;
+    auto reg_slot = [&](uint16_t slot_idx, const char* family, bool bold, bool italic) noexcept {
+        if (slot_idx >= kMaxFontSlots) return;
+        const FontSlot& fs = ctx->atlas.slots[slot_idx];
+        if (!fs.loaded) return;
+        if (fs.font_file_data && fs.font_file_size > 0u) {
+            etch_svg_register_font_memory(family, bold, italic, fs.font_file_data, fs.font_file_size);
+        }
+    };
+    resolve_font_slot_idx(&ctx->atlas, kFontSans);
+    resolve_font_slot_idx(&ctx->atlas, kFontBold);
+    resolve_font_slot_idx(&ctx->atlas, kFontMono);
+    resolve_font_slot_idx(&ctx->atlas, kFontItalic);
+    // Register default fallback ("") and standard CSS generic families from Etch's loaded faces.
+    reg_slot(kFontSans,   "",           false, false);
+    reg_slot(kFontSans,   "sans-serif", false, false);
+    reg_slot(kFontSans,   "system-ui",  false, false);
+    reg_slot(kFontBold,   "",           true,  false);
+    reg_slot(kFontBold,   "sans-serif", true,  false);
+    reg_slot(kFontItalic, "",           false, true);
+    reg_slot(kFontMono,   "monospace",  false, false);
+}
+} // namespace
+
 LoadedTexture load_texture_file(Context* ctx, const char* path, bool srgb) noexcept {
     if (!ctx) return {};
+    ensure_svg_fonts_registered(ctx);
     DecodedImage image{};
     if (!decode_image_file(path, &image)) return {};
-    const auto result = create_texture_rgba(ctx, {.rgba_pixels=image.rgba, .width=image.width, .height=image.height, .srgb=srgb});
+    const auto result = create_texture_rgba(ctx, {.rgba_pixels=image.rgba, .width=image.width, .height=image.height, .srgb=srgb, .generate_mipmaps=true});
     free_decoded_image(&image); return result;
 }
 LoadedTexture load_texture_memory(Context* ctx, const void* data, size_t size_bytes, bool srgb) noexcept {
     if (!ctx) return {};
+    if (looks_like_svg_bytes(static_cast<const uint8_t*>(data), size_bytes)) {
+        ensure_svg_fonts_registered(ctx);
+    }
     DecodedImage image{};
     if (!decode_image_memory(data, size_bytes, &image)) return {};
-    const auto result = create_texture_rgba(ctx, {.rgba_pixels=image.rgba, .width=image.width, .height=image.height, .srgb=srgb});
+    const auto result = create_texture_rgba(ctx, {.rgba_pixels=image.rgba, .width=image.width, .height=image.height, .srgb=srgb, .generate_mipmaps=true});
     free_decoded_image(&image); return result;
+}
+LoadedTexture load_svg_memory(Context* ctx, const void* data, size_t size_bytes, const SvgRasterDesc& desc) noexcept {
+    if (!ctx || !data || size_bytes == 0u) return {};
+    ensure_svg_fonts_registered(ctx);
+    DecodedImage image{};
+    if (!decode_svg_memory(data, size_bytes, desc.width_px, desc.height_px, desc.scale, &image)) return {};
+    const auto result = create_texture_rgba(ctx, {
+        .rgba_pixels = image.rgba,
+        .width = image.width,
+        .height = image.height,
+        .srgb = desc.srgb,
+        .generate_mipmaps = desc.generate_mipmaps,
+    });
+    free_decoded_image(&image);
+    return result;
+}
+LoadedTexture load_svg_file(Context* ctx, const char* path, const SvgRasterDesc& desc) noexcept {
+    if (!ctx || !path || !path[0]) return {};
+    size_t size = 0u;
+    void* raw = SDL_LoadFile(path, &size);
+    if (!raw) return {};
+    const LoadedTexture result = load_svg_memory(ctx, raw, size, desc);
+    SDL_free(raw);
+    return result;
+}
+bool register_svg_font_file(const char* family, bool bold, bool italic, const char* path) noexcept {
+    return etch_svg_register_font_file(family, bold, italic, path);
+}
+bool register_svg_font_memory(const char* family, bool bold, bool italic, const void* data, size_t size_bytes) noexcept {
+    return etch_svg_register_font_memory(family, bold, italic, data, size_bytes);
 }
 
 void destroy_texture(Context* ctx, LoadedTexture* tex) noexcept {

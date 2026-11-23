@@ -1417,6 +1417,15 @@ typedef struct EtchLoadedTexture {
     uint32_t height;
 } EtchLoadedTexture;
 
+typedef struct EtchSvgRasterDesc {
+    uint32_t struct_size;
+    uint32_t width_px;
+    uint32_t height_px;
+    float    scale;
+    bool     srgb;
+    bool     generate_mipmaps;
+} EtchSvgRasterDesc;
+
 typedef enum EtchWindowBackdrop {
     ETCH_BACKDROP_OPAQUE, ETCH_BACKDROP_TRANSPARENT, ETCH_BACKDROP_SYSTEM_MICA, ETCH_BACKDROP_SYSTEM_ACRYLIC
 } EtchWindowBackdrop;
@@ -1444,6 +1453,9 @@ typedef struct EtchTextLineCol {
     uint32_t line;
     uint32_t col_byte;
 } EtchTextLineCol;
+typedef struct EtchTextUtf16Position {
+    uint32_t line, character;
+} EtchTextUtf16Position;
 
 typedef struct EtchSyntaxToken {
     uint32_t byte_start;
@@ -2074,6 +2086,7 @@ ETCH_API EtchIconDrawDesc etch_icon_draw_desc_default(void);
 ETCH_API EtchTextDrawDesc etch_text_draw_desc_default(void);
 ETCH_API EtchImageDrawDesc etch_image_draw_desc_default(void);
 ETCH_API EtchTextureDesc etch_texture_desc_default(void);
+ETCH_API EtchSvgRasterDesc etch_svg_raster_desc_default(void);
 ETCH_API EtchWindowChromeDesc etch_window_chrome_desc_default(void);
 ETCH_API EtchCodeEditorDesc etch_code_editor_desc_default(void);
 ETCH_API EtchTextInputHighlight etch_text_input_highlight_default(void);
@@ -2220,6 +2233,16 @@ ETCH_API void etch_destroy_context(EtchContext* ctx);
 ETCH_API EtchContext* etch_current_context(void);
 ETCH_API void etch_set_current_context(EtchContext* ctx);
 ETCH_API struct SDL_GPUDevice* etch_gpu_device(EtchContext* ctx);
+typedef enum EtchGpuStatus {
+    ETCH_GPU_UNINITIALIZED = 0,
+    ETCH_GPU_READY = 1,
+    ETCH_GPU_FAILED = 2
+} EtchGpuStatus;
+ETCH_API EtchGpuStatus etch_gpu_status(const EtchContext* ctx);
+ETCH_API const char* etch_gpu_driver_name(const EtchContext* ctx);
+/* Retry a failed lazy initialization between frames. NULL keeps the previous
+   driver selection and "" selects the default. */
+ETCH_API bool etch_retry_gpu_initialization(EtchContext* ctx, const char* driver);
 
 typedef enum EtchFontWeight {
     ETCH_FONT_WEIGHT_REGULAR = 0,
@@ -2296,8 +2319,33 @@ ETCH_API bool etch_get_frame_prim(const EtchContext* ctx, uint32_t index, EtchPr
 ETCH_API EtchFrameStats etch_frame_stats(const EtchContext* ctx);
 
 ETCH_API bool etch_render_window(EtchContext* ctx, EtchColor clear_color, struct SDL_Window* window_override);
+typedef struct EtchRenderTargetDesc {
+    uint32_t struct_size;
+    struct SDL_GPUTexture* texture;
+    uint32_t width;
+    uint32_t height;
+    uint32_t sdl_texture_format;
+    EtchColor clear_color;
+} EtchRenderTargetDesc;
+ETCH_API EtchRenderTargetDesc etch_render_target_desc_default(void);
+/* Submits the finished UI frame to mip zero of a same-device 2D color target. */
+ETCH_API bool etch_render_to_texture(EtchContext*, const EtchRenderTargetDesc*);
 ETCH_API void etch_release_window(EtchContext* ctx, struct SDL_Window* window);
 ETCH_API uint32_t etch_claimed_window_count(const EtchContext* ctx);
+typedef bool (*EtchReadPixelsFn)(const uint8_t* rgba, uint32_t width, uint32_t height,
+                                 uint32_t pitch_bytes, void* user_data);
+typedef struct EtchReadPixelsDesc {
+    uint32_t struct_size;
+    uint32_t frame_width, frame_height;
+    uint32_t x, y, width, height;
+    EtchColor clear_color;
+    EtchReadPixelsFn receive;
+    void* user_data;
+} EtchReadPixelsDesc;
+ETCH_API EtchReadPixelsDesc etch_read_pixels_desc_default(void);
+/* Synchronous sRGB RGBA8 readback. Zero extent reaches the frame edge.
+   Rows are borrowed until receive returns. Do not reenter the context. */
+ETCH_API bool etch_render_headless_pixels(EtchContext* ctx, const EtchReadPixelsDesc* desc);
 ETCH_API bool etch_render_headless_png(EtchContext* ctx, uint32_t width, uint32_t height, const char* out_png_path, EtchColor clear_color);
 
 ETCH_API void etch_set_window_refresh_callback(EtchContext* ctx, EtchWindowRefreshFn fn, void* user_data);
@@ -2384,6 +2432,10 @@ ETCH_API bool etch_update_texture_rgba(EtchContext* ctx, struct SDL_GPUTexture* 
 ETCH_API bool etch_update_texture_region_rgba(EtchContext* ctx, struct SDL_GPUTexture* texture, uint32_t x, uint32_t y, uint32_t width, uint32_t height, const void* rgba_pixels, uint32_t row_pitch_bytes);
 ETCH_API EtchLoadedTexture etch_load_texture_file(EtchContext* ctx, const char* path, bool srgb);
 ETCH_API EtchLoadedTexture etch_load_texture_memory(EtchContext* ctx, const void* data, size_t size_bytes, bool srgb);
+ETCH_API EtchLoadedTexture etch_load_svg_file(EtchContext* ctx, const char* path, const EtchSvgRasterDesc* desc);
+ETCH_API EtchLoadedTexture etch_load_svg_memory(EtchContext* ctx, const void* data, size_t size_bytes, const EtchSvgRasterDesc* desc);
+ETCH_API bool etch_register_svg_font_file(const char* family, bool bold, bool italic, const char* path);
+ETCH_API bool etch_register_svg_font_memory(const char* family, bool bold, bool italic, const void* data, size_t size_bytes);
 ETCH_API void etch_destroy_loaded_texture(EtchContext* ctx, EtchLoadedTexture* tex);
 ETCH_API void etch_destroy_gpu_texture(EtchContext* ctx, struct SDL_GPUTexture* tex);
 
@@ -2442,6 +2494,10 @@ ETCH_API EtchStr etch_text_buffer_line(const EtchTextBuffer* buf, uint32_t line,
 ETCH_API uint32_t etch_text_buffer_copy_range(const EtchTextBuffer* buf, uint32_t byte_start, uint32_t byte_end, char* out_buf, uint32_t cap);
 ETCH_API EtchTextLineCol etch_text_buffer_line_col(const EtchTextBuffer* buf, uint32_t byte_offset);
 ETCH_API uint32_t etch_text_buffer_byte_offset(const EtchTextBuffer* buf, uint32_t line, uint32_t col_byte);
+/* Zero-based UTF-16 code units. A position within a surrogate pair rounds down. */
+ETCH_API EtchTextUtf16Position etch_text_buffer_utf16_position(const EtchTextBuffer* buf, uint32_t byte_offset);
+ETCH_API uint32_t etch_text_buffer_byte_from_utf16(const EtchTextBuffer* buf, EtchTextUtf16Position position);
+ETCH_API uint64_t etch_text_buffer_revision(const EtchTextBuffer* buf);
 ETCH_API bool etch_text_buffer_undo(EtchTextBuffer* buf, uint32_t* out_cursor, uint32_t* out_anchor);
 ETCH_API bool etch_text_buffer_redo(EtchTextBuffer* buf, uint32_t* out_cursor, uint32_t* out_anchor);
 ETCH_API void etch_text_buffer_clear_undo(EtchTextBuffer* buf);

@@ -1905,7 +1905,10 @@ TableResult begin_table(const TableDesc& desc_in) noexcept {
     auto* ws = state_map_get_or_insert(&ctx->active_ui->states, desc.id, ctx->active_ui->frame_index);
     WidgetCold* tc = ensure_widget_cold(ws);
     if (!tc) return {};
-    auto& t = ctx->active_ui->table_stack[ctx->active_ui->table_depth++]; t = {}; t.desc = desc; t.count = static_cast<uint32_t>(desc.columns.size());
+    auto& t = ctx->active_ui->table_stack[ctx->active_ui->table_depth++];
+    t = TableStackEntry{};
+    t.desc = desc;
+    t.count = static_cast<uint32_t>(desc.columns.size());
     for (uint32_t c = 0; c < t.count; ++c) t.columns[c] = desc.columns[c];
     t.desc.columns = {t.columns, t.count};
     if (!tc->table_initialized || tc->table_sort_column >= t.count) {

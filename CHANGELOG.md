@@ -4,6 +4,24 @@ All notable changes to Etch are documented here. This file follows
 [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+- Load static SVG and WebP images, rasterize SVGs directly into the upload
+  bitmap and transfer ownership of memory-backed SVG fonts to the renderer.
+- Render completed frames into caller-owned, same-device SDL GPU textures.
+- Read full frames or pixel rectangles into a synchronous sRGB RGBA8 callback.
+  Query the lazy device initialization state and active driver from C or C++,
+  and retry failed initialization on the same context.
+- Keep long and multiple SDL text commits intact within the input queue limit.
+- Allocate editor undo storage on the first recorded edit and grow it up to
+  1,024 operations and 4 MiB of text per buffer.
+- Query native editor revisions and convert between UTF-8 byte offsets and
+  zero-based UTF-16 language-service positions directly on the gap buffer.
+- Release idle transient render targets while the event loop is waiting and
+  report incomplete GPU batch construction as a render failure.
+- Build against a native SDL3 package on Linux and macOS and exercise the
+  platform backends in the GPU test suites.
+
 ## [0.28.0] - 2026-11-23
 
 - Decompose the legacy monolithic `etch_uber.hlsl` into six focused, low-VGPR GPU

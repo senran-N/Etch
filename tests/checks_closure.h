@@ -66,7 +66,8 @@ inline bool verify_closure_controls() noexcept {
     const auto table_frame=[&](uint32_t key=0,uint16_t mods=0) noexcept {
         begin_frame(ctx,{.viewport_w=500,.viewport_h=300,.key_mods=mods,.key_pressed_code=key});
         begin_table({.id=table,.columns=cols,.item_count=100,.width=Sizing::fixed(260),.height=Sizing::fixed(180),.selection=selection});
-        while(table_next_row())while(table_next_column())text("data");end_table();end_frame(ctx);
+        while(table_next_row())while(table_next_column())text("data");
+        end_table();end_frame(ctx);
     };
     table_frame();check(table_column_width(table,0)>=219,__LINE__);
     check(perform_a11y_action(table,A11yAction::Focus,0,{},ctx),__LINE__);table_frame(SDLK_DOWN);check(focus==0 && table_row_selected(selection,0),__LINE__);
@@ -79,7 +80,8 @@ inline bool verify_closure_controls() noexcept {
     const Rect before=element_bounds(rid);
     begin_frame(ctx,{.viewport_w=500,.viewport_h=300,.pointer_pos={100,10},.scroll_delta={-2,0}});
     begin_table({.id=table,.columns=cols,.item_count=100,.width=Sizing::fixed(260),.height=Sizing::fixed(180),.selection=selection});
-    while(table_next_row())while(table_next_column())text("data");end_table();end_frame(ctx);
+    while(table_next_row())while(table_next_column())text("data");
+    end_table();end_frame(ctx);
     check(element_bounds(rid).x<before.x-50,__LINE__);
     // The multi-selection bitmap is authoritative when legacy focus state is also supplied.
     uint32_t legacy=0;uint64_t mixed_bits=0;
@@ -89,7 +91,8 @@ inline bool verify_closure_controls() noexcept {
         begin_frame(ctx,{.viewport_w=500,.viewport_h=300});
         begin_table({.id=id("mixed.selection"),.columns=cols,.item_count=1,.width=Sizing::fixed(260),.height=Sizing::fixed(180),
             .selected_row=&legacy,.selected_row_color=selection_color,.selection={nullptr,nullptr,&mixed_bits,1}});
-        while(table_next_row())while(table_next_column())text("data");end_table();end_frame(ctx);
+        while(table_next_row())while(table_next_column())text("data");
+        end_table();end_frame(ctx);
         bool painted=false;
         for(const auto& prim:frame_prims(ctx)) painted |= prim.style.y==selection_color.pack_rgba8();
         check(painted==(pass==1),__LINE__);

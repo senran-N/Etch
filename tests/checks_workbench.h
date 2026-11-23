@@ -201,7 +201,8 @@ inline bool verify_workbench_checks() noexcept {
         begin_frame(ctx,{.viewport_w=400,.viewport_h=200});
         code_editor({.id=id("token.boundary"),.buffer=&document,.width=Sizing::fixed(120),.height=Sizing::fixed(60),.word_wrap=wrap,
             .tokenizer=[](uint32_t,Str line,SyntaxToken* out,uint32_t cap,void*) noexcept -> uint32_t {
-                for(uint32_t i=0;i<cap;++i)out[i]={0,line.length,Color::white(),kFontMono};return UINT32_MAX;
+                for(uint32_t i=0;i<cap;++i)out[i]={0,line.length,Color::white(),kFontMono};
+                return UINT32_MAX;
             }});end_frame(ctx);
         check(frame_stats(ctx).slug_glyph_count>0,__LINE__);
     }

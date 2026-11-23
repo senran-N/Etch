@@ -849,6 +849,7 @@ bool wait_events(Context* ctx, SDL_Event* first_event_out, int32_t timeout_ms) n
         return false;
     }
     const uint64_t now = SDL_GetTicks();
+    if (ctx) timeout_ms = idle_gpu_timeout(ctx, now, timeout_ms);
     WindowUiState* caret_ui = ctx ? window_ui(ctx, ctx->ime_active_window) : nullptr;
     if (caret_ui && caret_ui->ime_focused_id != 0u && caret_ui->caret_blink_cycles < 20u) {
         if (!caret_ui->caret_blink_tick) caret_ui->caret_blink_tick = now;
@@ -890,7 +891,9 @@ bool wait_events(Context* ctx, SDL_Event* first_event_out, int32_t timeout_ms) n
     if (timeout_ms < 0) {
         return SDL_WaitEvent(first_event_out);
     }
-    return SDL_WaitEventTimeout(first_event_out, timeout_ms);
+    const bool received = SDL_WaitEventTimeout(first_event_out, timeout_ms);
+    if (ctx) idle_gpu_timeout(ctx, SDL_GetTicks(), 0);
+    return received;
 }
 
 bool verify_caret_deadline() noexcept {
@@ -1250,16 +1253,19 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
     ctx->active_ui->prev_ime_focused_id = ctx->active_ui->ime_focused_id;
     ctx->active_ui->ime_focused_id = 0u;
     ctx->active_ui->ime_focused_password = false;
-    ctx->active_ui->frame_text_op_count = ctx->active_ui->pending_text_op_count;
-    if (ctx->active_ui->frame_text_op_count > 0u) {
-        std::memcpy(ctx->active_ui->frame_text_ops, ctx->active_ui->pending_text_ops, size_t(ctx->active_ui->frame_text_op_count) * sizeof(PendingTextOp));
+    auto& input_ui = *ctx->active_ui;
+    if (input_ui.pending_text_op_count) {
+        std::swap(input_ui.frame_text_ops, input_ui.pending_text_ops);
+        std::swap(input_ui.frame_text_op_capacity, input_ui.pending_text_op_capacity);
     }
-    ctx->active_ui->frame_text_utf8_len = ctx->active_ui->pending_text_utf8_len;
-    if (ctx->active_ui->pending_text_utf8_len > 0u) {
-        std::memcpy(ctx->active_ui->frame_text_utf8, ctx->active_ui->pending_text_utf8, ctx->active_ui->pending_text_utf8_len);
+    if (input_ui.pending_text_utf8_len) {
+        std::swap(input_ui.frame_text_utf8, input_ui.pending_text_utf8);
+        std::swap(input_ui.frame_text_utf8_capacity, input_ui.pending_text_utf8_capacity);
     }
-    ctx->active_ui->pending_text_op_count = 0u;
-    ctx->active_ui->pending_text_utf8_len = 0u;
+    input_ui.frame_text_op_count = input_ui.pending_text_op_count;
+    input_ui.frame_text_utf8_len = input_ui.pending_text_utf8_len;
+    input_ui.pending_text_op_count = 0u;
+    input_ui.pending_text_utf8_len = 0u;
 
     uint16_t kmods = static_cast<uint16_t>(desc.key_mods | ctx->active_ui->event_key_mods);
     ctx->active_ui->frame_key_mods = kmods;
@@ -1290,7 +1296,8 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
             const bool tab_has_buf = tab_ws && tab_ws->cold && tab_ws->cold->edit_text_buffer != nullptr;
             if (desc.key_pressed_code == SDLK_TAB && !(tab_ws && (tab_has_buf || tab_ws->suppress_popup_keys || (tab_ws->accept_ghost_on_tab && !tab_shift)))) {
                 ctx->active_ui->pending_tab_delta += tab_shift ? -1 : 1;
-            } else if (ctx->active_ui->frame_text_op_count < kMaxTextOpsPerFrame) {
+            } else if (reserve_text_ops(input_ui.frame_text_ops, input_ui.frame_text_op_capacity,
+                                        input_ui.frame_text_op_count)) {
                 ctx->active_ui->frame_text_ops[ctx->active_ui->frame_text_op_count++] = PendingTextOp{
                     .kind = TextEditOpKind::KeyPress,
                     .mod = etch_mod_to_sdl(ctx->active_ui->frame_key_mods),

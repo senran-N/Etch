@@ -398,7 +398,7 @@ inline float layout_sizing_max(const Sizing& s) noexcept {
 }
 
 inline void layout_bounds_map_clear(LayoutBoundsEntry* map, uint32_t cap) noexcept {
-    if (map && cap) std::memset(map, 0, size_t(cap) * sizeof(LayoutBoundsEntry));
+    if (map && cap) std::fill_n(map, cap, LayoutBoundsEntry{});
 }
 
 inline bool layout_bounds_map_reserve(LayoutBoundsEntry** map, uint32_t* cap, uint32_t* count, uint32_t needed) noexcept {
@@ -462,7 +462,7 @@ inline LayoutBoundsEntry* layout_bounds_map_find_mut(LayoutBoundsEntry* map, uin
 inline void layout_engine_reset_text_cache(LayoutEngine* le) noexcept {
     if (!le) return;
     if (le->text_cache && le->text_cache_cap) {
-        std::memset(le->text_cache, 0, size_t(le->text_cache_cap) * sizeof(LayoutTextCacheEntry));
+        std::fill_n(le->text_cache, le->text_cache_cap, LayoutTextCacheEntry{});
     }
     le->text_cache_count = 0;
     le->cached_words.clear();

@@ -70,3 +70,24 @@ has been dedicated to the public domain and requires credit when distributing
 software that uses the code. Etch retains the credit above for its Slug GPU
 Bezier rendering implementation. No patent number is specified in these
 bundled license, notice, or README files.
+
+## PlutoVG
+
+[third_party/plutovg/LICENSE](third_party/plutovg/LICENSE) is the MIT license,
+`Copyright (c) 2020-2026 Samuel Ugochukwu <sammycageagle@gmail.com>`. The
+bundled FreeType rasterizer/stroker subset retains [third_party/plutovg/source/FTL.TXT](third_party/plutovg/source/FTL.TXT).
+Etch uses PlutoVG as the 2D vector rasterization backend for SVG documents.
+
+## LunaSVG
+
+[third_party/lunasvg/LICENSE](third_party/lunasvg/LICENSE) is the MIT license,
+`Copyright (c) 2020-2026 Samuel Ugochukwu <sammycageagle@gmail.com>`.
+Etch uses LunaSVG for static SVG 1.1 / SVG 1.2 Tiny document parsing and rasterization.
+
+## SimpleWebP
+
+[third_party/simplewebp/LICENSE.md](third_party/simplewebp/LICENSE.md) and
+[third_party/simplewebp/PATENTS.md](third_party/simplewebp/PATENTS.md) cover
+SimpleWebP (`Copyright (c) Google Inc., Miku AuahDark, and contributors`) under
+the MIT / WebM BSD-compatible license terms. Etch uses SimpleWebP for lossy
+(VP8), lossless (VP8L), and alpha WebP image decoding.

@@ -5,6 +5,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <new>
 
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_gpu.h>
@@ -22,6 +23,7 @@
 #    pragma GCC diagnostic ignored "-Wextra"
 #    pragma GCC diagnostic ignored "-Wpedantic"
 #    pragma GCC diagnostic ignored "-Wmissing-field-initializers"
+#    pragma GCC diagnostic ignored "-Wunused-value"
 #endif
 
 #if defined(ETCH_MODULAR_BUILD)
@@ -46,6 +48,10 @@
 #define STBI_ONLY_GIF
 #define STBI_ONLY_TGA
 #include "stb_image.h"
+
+#define SIMPLEWEBP_DISABLE_STDIO
+#include "simplewebp.h"
+#include "etch_svg_bridge.h"
 
 #if defined(_MSC_VER)
 #    pragma warning(pop)

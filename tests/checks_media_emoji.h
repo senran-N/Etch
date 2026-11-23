@@ -449,7 +449,8 @@ inline bool verify_sprite_recycling_gpu() noexcept {
     ok &= render_headless_png(ctx,100,50,"sprite_recycling.png");
     SDL_Surface* rendered=SDL_LoadPNG("sprite_recycling.png");
     ok &= media_emoji_checks::pixel(rendered,10,10,0x1455EE) && media_emoji_checks::pixel(rendered,50,10,0xEE3311);
-    if(rendered)SDL_DestroySurface(rendered);std::remove("sprite_recycling.png");
+    if (rendered) SDL_DestroySurface(rendered);
+    std::remove("sprite_recycling.png");
     destroy_sprite(ctx,keep);destroy_sprite(ctx,moving);
     const uint32_t reset=create_sprite_rgba(ctx,{.rgba_pixels=red,.width=1600,.height=1600});ok &= reset!=kInvalidSprite;
     std::free(red);destroy_context(ctx);set_current_context(saved);return ok;

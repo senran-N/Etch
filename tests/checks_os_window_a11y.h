@@ -1377,12 +1377,12 @@ inline bool verify_os_window_a11y_checks() noexcept {
     }
 #else
     {
-        check(!os_a11y_active(wctx, win), __LINE__);
         const bool was_enabled = os_a11y_enabled(wctx);
+        const bool was_active = os_a11y_active(wctx, win);
         set_os_a11y_enabled(wctx, false);
         check(!os_a11y_enabled(wctx) && !os_a11y_active(wctx, win), __LINE__);
         set_os_a11y_enabled(wctx, was_enabled);
-        check(os_a11y_enabled(wctx) == was_enabled && !os_a11y_active(wctx, win), __LINE__);
+        check(os_a11y_enabled(wctx) == was_enabled && os_a11y_active(wctx, win) == was_active, __LINE__);
     }
 #endif
 

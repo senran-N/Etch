@@ -620,7 +620,29 @@ static int finish_tests(int rc) noexcept {
 
 static bool gpu_suite() noexcept {
     ensure_test_video();
-    const bool media_ok=v019_regression() && verify_v021_gpu() && verify_v022_gpu() && verify_v027() && verify_v028() && verify_phase1_gpu() && verify_phase2_cached_subtree_gpu() && verify_workbench_materials_gpu() && verify_shader_surface_gpu() && verify_texture_regions_gpu() && verify_mesh_gpu() && verify_punch_gpu() && verify_beam_fade_gpu() && verify_media_emoji_checks() && verify_sprite_recycling_gpu() && verify_border_coverage() && verify_visual_quality_gpu() && verify_closure_gpu();
+    const auto checked = [](bool ok, const char* name) noexcept {
+        if (!ok) std::fprintf(stderr, "GPU suite failed in %s\n", name);
+        return ok;
+    };
+    const bool media_ok =
+        checked(v019_regression(), "v019_regression") &&
+        checked(verify_v021_gpu(), "verify_v021_gpu") &&
+        checked(verify_v022_gpu(), "verify_v022_gpu") &&
+        checked(verify_v027(), "verify_v027") &&
+        checked(verify_v028(), "verify_v028") &&
+        checked(verify_phase1_gpu(), "verify_phase1_gpu") &&
+        checked(verify_phase2_cached_subtree_gpu(), "verify_phase2_cached_subtree_gpu") &&
+        checked(verify_workbench_materials_gpu(), "verify_workbench_materials_gpu") &&
+        checked(verify_shader_surface_gpu(), "verify_shader_surface_gpu") &&
+        checked(verify_texture_regions_gpu(), "verify_texture_regions_gpu") &&
+        checked(verify_mesh_gpu(), "verify_mesh_gpu") &&
+        checked(verify_punch_gpu(), "verify_punch_gpu") &&
+        checked(verify_beam_fade_gpu(), "verify_beam_fade_gpu") &&
+        checked(verify_media_emoji_checks(), "verify_media_emoji_checks") &&
+        checked(verify_sprite_recycling_gpu(), "verify_sprite_recycling_gpu") &&
+        checked(verify_border_coverage(), "verify_border_coverage") &&
+        checked(verify_visual_quality_gpu(), "verify_visual_quality_gpu") &&
+        checked(verify_closure_gpu(), "verify_closure_gpu");
     const bool v070_ok=verify_theme_wrap_checks();
     static_assert(sizeof(Prim)==64);
     bool ok=source_ok(g_etch_quad_vs_msl,sizeof(g_etch_quad_vs_msl),"vertex vs_main_out vs_main(")
@@ -685,18 +707,35 @@ static bool gpu_suite() noexcept {
     ok &= std::strstr(kps,"KawaseFS [[buffer(0)]]")!=nullptr
        && std::strstr(kps,"g_src_tex [[texture(0)]]")!=nullptr
        && std::strstr(kps,"g_src_texSmplr [[sampler(0)]]")!=nullptr;
+    checked(ok, "Metal shader bindings");
     Context* bad=create_context({.headless=true,.gpu_driver="nonexistent_driver_xyz"});
     if(!bad)return false;
-    ok &= gpu_device(bad)==nullptr;
+    const char* forced_driver = SDL_GetHint(SDL_HINT_GPU_DRIVER);
+    if (forced_driver && *forced_driver)
+        ok &= checked(gpu_device(bad) && std::strcmp(gpu_driver_name(bad),forced_driver)==0, "SDL driver override");
+    else {
+        ok &= checked(gpu_device(bad)==nullptr && gpu_status(bad)==GpuStatus::Failed && !*gpu_driver_name(bad), "invalid GPU driver rejection");
+        ok &= checked(!retry_gpu_initialization(bad), "retry invalid driver");
+        begin_frame(bad,{.viewport_w=64,.viewport_h=64});
+        ok &= checked(!retry_gpu_initialization(bad,""), "reject retry during frame");
+        end_frame(bad);
+        ok &= checked(retry_gpu_initialization(bad,"") && gpu_status(bad)==GpuStatus::Ready &&
+                      *gpu_driver_name(bad) && !retry_gpu_initialization(bad), "recover failed device initialization");
+    }
     destroy_context(bad);set_current_context(nullptr);
     Context* vk=create_context({.headless=true,.gpu_driver="vulkan"});
     if(!vk)return false;
-    if(SDL_GPUDevice* vdev=gpu_device(vk);vdev!=nullptr)ok &= std::strcmp(SDL_GetGPUDeviceDriver(vdev),"vulkan")==0;
+    if(SDL_GPUDevice* vdev=gpu_device(vk);vdev!=nullptr) {
+        const char* hint=SDL_GetHint(SDL_HINT_GPU_DRIVER);
+        ok &= checked(std::strcmp(SDL_GetGPUDeviceDriver(vdev),hint && *hint ? hint : "vulkan")==0, "explicit Vulkan driver");
+    }
     destroy_context(vk);set_current_context(nullptr);
     Context* c=create_context({.headless=true});if(!c)return false;
-    ok &= gpu_device(c)!=nullptr;
+    ok &= checked(gpu_device(c)!=nullptr && gpu_status(c)==GpuStatus::Ready && *gpu_driver_name(c), "default GPU device");
     for(uint32_t i=0;i<4;++i){begin_frame(c,{.viewport_w=320,.viewport_h=200});button({.id=id("gpu"),.label=str_lit("GPU")});end_frame(c);}
-    ok &= frame_stats(c).idle_sleeping && render_headless_png(c,320,200,"etch_ctest_gpu.png") && frame_stats(c).draw_call_count>0 && frame_stats(c).draw_call_count<=8;
+    ok &= checked(frame_stats(c).idle_sleeping, "idle redraw budget") &&
+        checked(render_headless_png(c,320,200,"etch_ctest_gpu.png"), "headless PNG") &&
+        checked(frame_stats(c).draw_call_count>0 && frame_stats(c).draw_call_count<=8, "draw-call budget");
     ok &= media_ok && v070_ok;
     std::remove("etch_ctest_gpu.png");destroy_context(c);set_current_context(nullptr);return ok;
 }

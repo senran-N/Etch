@@ -632,7 +632,7 @@ struct alignas(16) Prim {
         return {.bounds={rect.x,rect.y,rect.w,rect.h},
             .clip={clip_rect.x,clip_rect.y,clip_rect.x+clip_rect.w,clip_rect.y+clip_rect.h},
             .payload={br.pack_rgba8(),bl.pack_rgba8(),pack_f16x2(radius.tl,radius.tr),pack_f16x2(radius.br,radius.bl)},
-            .style={pack_header(PrimKind::MeshGrad,uint8_t((oklab ? 1u : 0u)|(continuous ? PrimFlag_Continuous : 0u)|(clip_radius!=0 ? PrimFlag_RoundedClip : 0u)),0,clip_radius),
+            .style={pack_header(PrimKind::MeshGrad,uint8_t((oklab ? 1u : 0u)|(continuous ? uint8_t(PrimFlag_Continuous) : 0u)|(clip_radius!=0 ? uint8_t(PrimFlag_RoundedClip) : 0u)),0,clip_radius),
                 tl.pack_rgba8(),tr.pack_rgba8(),pack_f16x2(grain,phase)}};
     }
 
@@ -641,7 +641,7 @@ struct alignas(16) Prim {
         return {.bounds={rect.x,rect.y,rect.w,rect.h},
             .clip={clip_rect.x,clip_rect.y,clip_rect.x+clip_rect.w,clip_rect.y+clip_rect.h},
             .payload={0,0,pack_f16x2(radius.tl,radius.tr),pack_f16x2(radius.br,radius.bl)},
-            .style={pack_header(PrimKind::PunchHole,uint8_t((continuous ? PrimFlag_Continuous : 0u)|(clip_radius!=0 ? PrimFlag_RoundedClip : 0u)),0,clip_radius),
+            .style={pack_header(PrimKind::PunchHole,uint8_t((continuous ? uint8_t(PrimFlag_Continuous) : 0u)|(clip_radius!=0 ? uint8_t(PrimFlag_RoundedClip) : 0u)),0,clip_radius),
                 Color::white().pack_rgba8(),0,pack_f16x2(0,softness)}};
     }
 
@@ -652,7 +652,7 @@ struct alignas(16) Prim {
         return {.bounds={rect.x,rect.y,rect.w,rect.h},
             .clip={clip_rect.x,clip_rect.y,clip_rect.x+clip_rect.w,clip_rect.y+clip_rect.h},
             .payload={pack_f16x2(angle_rad,sweep_fraction),pack_f16x2(width,glow_px),pack_f16x2(radius.tl,radius.tr),pack_f16x2(radius.br,radius.bl)},
-            .style={pack_header(PrimKind::BorderBeam,uint8_t((symmetric_dual ? 1u : 0u)|(top_rim_alpha>0 ? 2u : 0u)|(continuous ? PrimFlag_Continuous : 0u)|(clip_radius!=0 ? PrimFlag_RoundedClip : 0u)),0,clip_radius),
+            .style={pack_header(PrimKind::BorderBeam,uint8_t((symmetric_dual ? 1u : 0u)|(top_rim_alpha>0 ? 2u : 0u)|(continuous ? uint8_t(PrimFlag_Continuous) : 0u)|(clip_radius!=0 ? uint8_t(PrimFlag_RoundedClip) : 0u)),0,clip_radius),
                 color.pack_rgba8(),base_color.pack_rgba8(),pack_f16x2(top_rim_alpha,softness)}};
     }
 
@@ -1968,6 +1968,7 @@ struct DragPayloadView {
 };
 
 struct TextLineCol { uint32_t line = 0; uint32_t col_byte = 0; };
+struct TextUtf16Position { uint32_t line = 0; uint32_t character = 0; };
 struct TextBufferEdit;
 // Caller owns this POD. Initialize once, free explicitly; do not shallow-copy ownership.
 struct TextBuffer {
@@ -1993,6 +1994,11 @@ Str text_buffer_line(const TextBuffer*, uint32_t, Arena* scratch = nullptr) noex
 uint32_t text_buffer_copy_range(const TextBuffer*, uint32_t, uint32_t, char*, uint32_t) noexcept;
 TextLineCol text_buffer_line_col(const TextBuffer*, uint32_t) noexcept;
 uint32_t text_buffer_byte_offset(const TextBuffer*, uint32_t, uint32_t) noexcept;
+// Zero-based positions for language services. Out-of-range positions clamp to
+// the line or document end. An offset inside a scalar rounds to its start.
+TextUtf16Position text_buffer_utf16_position(const TextBuffer*, uint32_t byte_offset) noexcept;
+uint32_t text_buffer_byte_from_utf16(const TextBuffer*, TextUtf16Position) noexcept;
+uint64_t text_buffer_revision(const TextBuffer*) noexcept;
 bool text_buffer_undo(TextBuffer*, uint32_t* out_cursor = nullptr, uint32_t* out_anchor = nullptr) noexcept;
 bool text_buffer_redo(TextBuffer*, uint32_t* out_cursor = nullptr, uint32_t* out_anchor = nullptr) noexcept;
 void text_buffer_clear_undo(TextBuffer*) noexcept;
@@ -2470,6 +2476,12 @@ void set_current_context(Context* ctx) noexcept;
 
 Arena* frame_arena(Context* ctx) noexcept;
 SDL_GPUDevice* gpu_device(Context* ctx) noexcept;
+enum class GpuStatus : uint8_t { Uninitialized = 0, Ready = 1, Failed = 2 };
+GpuStatus gpu_status(const Context* ctx) noexcept;
+const char* gpu_driver_name(const Context* ctx) noexcept;
+// Retry a failed lazy initialization between frames. nullptr keeps the original
+// driver selection and "" uses the default. A ready device cannot be replaced.
+bool retry_gpu_initialization(Context* ctx, const char* driver = nullptr) noexcept;
 
 // Multi-font registry & automatic cluster-safe fallback chain
 enum class FontWeight : uint8_t {
@@ -2609,6 +2621,16 @@ bool render_window(
     Context* ctx,
     Color clear_color = Color::theme_auto(),
     SDL_Window* window_override = nullptr) noexcept;
+
+struct RenderTargetDesc {
+    SDL_GPUTexture* texture = nullptr;
+    uint32_t width = 0u;
+    uint32_t height = 0u;
+    uint32_t sdl_texture_format = 0u;
+    Color clear_color = Color::theme_auto();
+};
+// Submits the finished UI frame to mip zero of a same-device 2D color target.
+bool render_to_texture(Context* ctx, const RenderTargetDesc& desc) noexcept;
 void release_window(Context* ctx, SDL_Window* window) noexcept;
 uint32_t claimed_window_count(const Context* ctx) noexcept;
 
@@ -2629,6 +2651,19 @@ bool set_window_fullscreen(bool fullscreen, SDL_Window* window = nullptr) noexce
 bool is_window_fullscreen(const Context* ctx = nullptr, SDL_Window* window = nullptr) noexcept;
 Padding window_safe_insets(const Context* ctx = nullptr, SDL_Window* window = nullptr) noexcept;
 
+using ReadPixelsFn = bool (*)(const uint8_t* rgba, uint32_t width, uint32_t height,
+                              uint32_t pitch_bytes, void* user_data);
+struct ReadPixelsDesc {
+    uint32_t frame_width = 0, frame_height = 0;
+    uint32_t x = 0, y = 0, width = 0, height = 0;
+    Color clear_color = Color::theme_auto();
+    ReadPixelsFn receive = nullptr;
+    void* user_data = nullptr;
+};
+// Synchronously render the finished frame and download its requested rectangle.
+// Zero extent reaches the corresponding frame edge. The callback borrows mapped
+// sRGB RGBA8 rows until it returns and must not reenter the context.
+bool render_headless_pixels(Context* ctx, const ReadPixelsDesc& desc) noexcept;
 bool render_headless_png(
     Context* ctx,
     uint32_t width,
@@ -2775,8 +2810,20 @@ bool update_texture_rgba(
 bool update_texture_region_rgba(Context* ctx, SDL_GPUTexture* texture,
     uint32_t x, uint32_t y, uint32_t width, uint32_t height,
     const void* rgba_pixels, uint32_t row_pitch_bytes = 0) noexcept;
+struct SvgRasterDesc {
+    uint32_t width_px = 0;         // 0 = intrinsic width * scale (or aspect-matched to height_px)
+    uint32_t height_px = 0;        // 0 = intrinsic height * scale (or aspect-matched to width_px)
+    float    scale = 2.0f;         // HiDPI scale factor when width_px == 0 && height_px == 0
+    bool     srgb = true;
+    bool     generate_mipmaps = true;
+};
+
 LoadedTexture load_texture_file(Context* ctx, const char* path, bool srgb = true) noexcept;
 LoadedTexture load_texture_memory(Context* ctx, const void* data, size_t size_bytes, bool srgb = true) noexcept;
+LoadedTexture load_svg_file(Context* ctx, const char* path, const SvgRasterDesc& desc = {}) noexcept;
+LoadedTexture load_svg_memory(Context* ctx, const void* data, size_t size_bytes, const SvgRasterDesc& desc = {}) noexcept;
+bool register_svg_font_file(const char* family, bool bold, bool italic, const char* path) noexcept;
+bool register_svg_font_memory(const char* family, bool bold, bool italic, const void* data, size_t size_bytes) noexcept;
 void destroy_texture(Context* ctx, LoadedTexture* tex) noexcept;
 void destroy_texture(Context* ctx, SDL_GPUTexture* tex) noexcept;
 

@@ -393,5 +393,12 @@ inline bool verify_v022_driver(const char* driver) noexcept {
 }
 
 inline bool verify_v022_gpu() noexcept {
+    if (const char* forced = SDL_GetHint(SDL_HINT_GPU_DRIVER); forced && *forced) return verify_v022_driver(forced);
+#if defined(_WIN32)
     return verify_v022_driver("direct3d12") && verify_v022_driver("vulkan");
+#elif defined(__APPLE__)
+    return verify_v022_driver("metal");
+#else
+    return verify_v022_driver("vulkan");
+#endif
 }

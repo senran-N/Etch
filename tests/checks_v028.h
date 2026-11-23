@@ -596,6 +596,112 @@ inline bool verify_v028_driver(const char* driver) noexcept {
         if (win1) SDL_DestroyWindow(win1);
     }
 
+    // ------------------------------------------------------------------
+    // (f) Native SVG document rasterization (LunaSVG+PlutoVG) & WebP decoding (SimpleWebP)
+    // ------------------------------------------------------------------
+    {
+        static const char kTestSvg[] =
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"80\" height=\"40\" viewBox=\"0 0 80 40\">"
+            "<rect width=\"80\" height=\"40\" rx=\"6\" fill=\"#E59A38\"/>"
+            "<circle cx=\"20\" cy=\"20\" r=\"10\" fill=\"#2E9A74\"/>"
+            "<text x=\"36\" y=\"25\" font-size=\"14\" fill=\"#121214\">OK</text>"
+            "</svg>";
+        LoadedTexture svg_tex = load_svg_memory(c, kTestSvg, sizeof(kTestSvg) - 1u, {.scale = 2.0f});
+        check(svg_tex.texture != nullptr && svg_tex.width == 160u && svg_tex.height == 80u, __LINE__);
+        LoadedTexture auto_svg = load_texture_memory(c, kTestSvg, sizeof(kTestSvg) - 1u, true);
+        check(auto_svg.texture != nullptr && auto_svg.width == 160u && auto_svg.height == 80u, __LINE__);
+
+        // 2x2 solid RGBA(40, 200, 120, 255) lossless WebP fixture
+        static const uint8_t kTestWebp[38] = {
+            0x52,0x49,0x46,0x46,0x1E,0x00,0x00,0x00,0x57,0x45,0x42,0x50,0x56,0x50,0x38,0x4C,
+            0x11,0x00,0x00,0x00,0x2F,0x01,0x40,0x00,0x00,0x07,0x50,0xE4,0xA2,0x14,0xAF,0xFF,
+            0x81,0x88,0xE8,0x7F,0x00,0x00
+        };
+        LoadedTexture webp_tex = load_texture_memory(c, kTestWebp, sizeof(kTestWebp), true);
+        check(webp_tex.texture != nullptr && webp_tex.width == 2u && webp_tex.height == 2u, __LINE__);
+
+        begin_frame(c, {.viewport_w = 220, .viewport_h = 100});
+        begin_box({.axis = Axis::Row, .width = Sizing::fixed(220.0f), .height = Sizing::fixed(100.0f),
+                   .padding = Padding::all(10.0f), .gap = 10.0f, .background = Color::rgb_hex(0x101014)});
+        if (svg_tex.texture) {
+            image({.texture = svg_tex.texture, .width = Sizing::fixed(120.0f), .height = Sizing::fixed(60.0f)});
+        }
+        if (webp_tex.texture) {
+            image({.texture = webp_tex.texture, .width = Sizing::fixed(60.0f), .height = Sizing::fixed(60.0f)});
+        }
+        end_box();
+        end_frame(c);
+        check(render_headless_png(c, 220u, 100u, png_path, Color::rgb_hex(0x101014)), __LINE__);
+        if (SDL_Surface* img = SDL_LoadPNG(png_path)) {
+            Uint8 r = 0, g = 0, b = 0, a = 0;
+            // Center of WebP swatch at (140 + 30, 10 + 30) -> expected ~(40, 200, 120)
+            check(SDL_ReadSurfacePixel(img, 170, 40, &r, &g, &b, &a), __LINE__);
+            check(r < 65 && g > 175 && b > 95 && b < 145, __LINE__);
+            // Green circle center inside SVG at x = 10 + 120*(20/80) = 40, y = 10 + 60*(20/40) = 40 -> expected ~(46, 154, 116)
+            check(SDL_ReadSurfacePixel(img, 40, 40, &r, &g, &b, &a), __LINE__);
+            check(g > r + 40 && g > 120, __LINE__);
+            SDL_DestroySurface(img);
+        }
+        destroy_texture(c, &webp_tex);
+        destroy_texture(c, &auto_svg);
+        destroy_texture(c, &svg_tex);
+    }
+
+    {
+        SDL_GPUTextureCreateInfo info = {};
+        info.type = SDL_GPU_TEXTURETYPE_2D;
+        info.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB;
+        info.usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER;
+        info.width = 64u;
+        info.height = 64u;
+        info.layer_count_or_depth = 1u;
+        info.num_levels = 1u;
+        info.sample_count = SDL_GPU_SAMPLECOUNT_1;
+        if (SDL_GPUTexture* target = SDL_CreateGPUTexture(dev, &info)) {
+            const RenderTargetDesc output = {.texture = target, .width = 64u, .height = 64u,
+                .sdl_texture_format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB,
+                .clear_color = Color::rgb_hex(0x101010)};
+            begin_frame(c, {.viewport_w = 64u, .viewport_h = 64u});
+            box({.width = Sizing::fixed(32.f), .height = Sizing::fixed(32.f),
+                 .background = Color::rgb_hex(0xF02020)});
+            check(!render_to_texture(c, output), __LINE__);
+            end_frame(c);
+            check(render_to_texture(c, output), __LINE__);
+            begin_frame(c, {.viewport_w = 64u, .viewport_h = 64u});
+            begin_box({.width = Sizing::fixed(64.f), .height = Sizing::fixed(64.f)});
+            draw_image({.texture = target, .rect = {0.f, 0.f, 64.f, 64.f}});
+            end_box();
+            end_frame(c);
+            uint32_t received = 0u;
+            ReadPixelsDesc capture = {.frame_width = 64u, .frame_height = 64u,
+                .x = 16u, .y = 28u, .width = 19u, .height = 8u,
+                .receive = [](const uint8_t* rgba, uint32_t w, uint32_t h, uint32_t pitch, void* user) {
+                    ++*static_cast<uint32_t*>(user);
+                    return w == 19u && h == 8u && pitch >= w * 4u &&
+                           rgba[0] > 200u && rgba[1] < 55u && rgba[2] < 55u &&
+                           rgba[18u * 4u] < 50u && rgba[7u * pitch] < 50u;
+                }, .user_data = &received};
+            check(render_headless_pixels(c, capture) && received == 1u, __LINE__);
+            capture.x = 60u;
+            check(!render_headless_pixels(c, capture) && received == 1u, __LINE__);
+            capture.width = 0u;
+            check(!render_headless_pixels(c, capture) && received == 2u, __LINE__);
+            check(render_headless_png(c, 64u, 64u, png_path), __LINE__);
+            if (SDL_Surface* img = SDL_LoadPNG(png_path)) {
+                Uint8 r = 0u, g = 0u, b = 0u, a = 0u;
+                check(SDL_ReadSurfacePixel(img, 16, 16, &r, &g, &b, &a) &&
+                      r > 200u && g < 55u && b < 55u, __LINE__);
+                check(SDL_ReadSurfacePixel(img, 48, 48, &r, &g, &b, &a) &&
+                      r < 50u && g < 50u && b < 50u, __LINE__);
+                SDL_DestroySurface(img);
+            } else {
+                check(false, __LINE__);
+            }
+            SDL_ReleaseGPUTexture(dev, target);
+        } else {
+            check(false, __LINE__);
+        }
+    }
     std::remove(png_path);
     destroy_context(c);
     set_current_context(nullptr);

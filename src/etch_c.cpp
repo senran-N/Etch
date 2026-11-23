@@ -725,6 +725,12 @@ ETCH_API EtchTextureDesc etch_texture_desc_default(void) {
             d.debug_name, d.premultiplied_alpha, d.generate_mipmaps};
 }
 
+ETCH_API EtchSvgRasterDesc etch_svg_raster_desc_default(void) {
+    const etch::SvgRasterDesc d{};
+    return {static_cast<uint32_t>(sizeof(EtchSvgRasterDesc)),
+            d.width_px, d.height_px, d.scale, d.srgb, d.generate_mipmaps};
+}
+
 ETCH_API EtchWindowChromeDesc etch_window_chrome_desc_default(void) {
     const etch::WindowChromeDesc d{};
     return {static_cast<uint32_t>(sizeof(EtchWindowChromeDesc)),
@@ -1078,6 +1084,15 @@ ETCH_API void etch_destroy_context(EtchContext* ctx) { etch::destroy_context(to_
 ETCH_API EtchContext* etch_current_context(void) { return from_ctx(etch::current_context()); }
 ETCH_API void etch_set_current_context(EtchContext* ctx) { etch::set_current_context(to_ctx(ctx)); }
 ETCH_API struct SDL_GPUDevice* etch_gpu_device(EtchContext* ctx) { return etch::gpu_device(to_ctx(ctx)); }
+ETCH_API EtchGpuStatus etch_gpu_status(const EtchContext* ctx) {
+    return static_cast<EtchGpuStatus>(etch::gpu_status(to_ctx(ctx)));
+}
+ETCH_API const char* etch_gpu_driver_name(const EtchContext* ctx) {
+    return etch::gpu_driver_name(to_ctx(ctx));
+}
+ETCH_API bool etch_retry_gpu_initialization(EtchContext* ctx, const char* driver) {
+    return etch::retry_gpu_initialization(to_ctx(ctx), driver);
+}
 
 ETCH_API uint16_t etch_load_system_font(EtchContext* ctx, EtchStr family_name, EtchFontWeight weight, uint16_t slot_hint) {
     return etch::load_system_font(to_ctx(ctx), to_cpp(family_name), static_cast<etch::FontWeight>(weight), slot_hint);
@@ -1256,8 +1271,41 @@ ETCH_API EtchFrameStats etch_frame_stats(const EtchContext* ctx) {
 ETCH_API bool etch_render_window(EtchContext* ctx, EtchColor clear_color, struct SDL_Window* window_override) {
     return etch::render_window(to_ctx(ctx), to_cpp(clear_color), window_override);
 }
+ETCH_API EtchRenderTargetDesc etch_render_target_desc_default(void) {
+    EtchRenderTargetDesc desc = {};
+    desc.struct_size = sizeof(desc);
+    desc.clear_color = etch_color_theme_auto();
+    return desc;
+}
+ETCH_API bool etch_render_to_texture(EtchContext* ctx, const EtchRenderTargetDesc* input) {
+    if (!input) return false;
+    EtchRenderTargetDesc scratch = {};
+    const auto* desc = resolve_c_desc(input, &scratch, etch_render_target_desc_default);
+    if (!desc) return false;
+    return etch::render_to_texture(to_ctx(ctx), {
+        .texture = desc->texture, .width = desc->width, .height = desc->height,
+        .sdl_texture_format = desc->sdl_texture_format, .clear_color = to_cpp(desc->clear_color),
+    });
+}
 ETCH_API void etch_release_window(EtchContext* ctx, struct SDL_Window* window) { etch::release_window(to_ctx(ctx), window); }
 ETCH_API uint32_t etch_claimed_window_count(const EtchContext* ctx) { return etch::claimed_window_count(to_ctx(ctx)); }
+ETCH_API EtchReadPixelsDesc etch_read_pixels_desc_default(void) {
+    EtchReadPixelsDesc desc = {};
+    desc.struct_size = sizeof(desc);
+    desc.clear_color = etch_color_theme_auto();
+    return desc;
+}
+ETCH_API bool etch_render_headless_pixels(EtchContext* ctx, const EtchReadPixelsDesc* input) {
+    if (!input) return false;
+    EtchReadPixelsDesc scratch = {};
+    const auto* desc = resolve_c_desc(input, &scratch, etch_read_pixels_desc_default);
+    if (!desc) return false;
+    return etch::render_headless_pixels(to_ctx(ctx), {
+        .frame_width = desc->frame_width, .frame_height = desc->frame_height,
+        .x = desc->x, .y = desc->y, .width = desc->width, .height = desc->height,
+        .clear_color = to_cpp(desc->clear_color), .receive = desc->receive, .user_data = desc->user_data,
+    });
+}
 ETCH_API bool etch_render_headless_png(EtchContext* ctx, uint32_t width, uint32_t height, const char* out_png_path, EtchColor clear_color) {
     return etch::render_headless_png(to_ctx(ctx), width, height, out_png_path, to_cpp(clear_color));
 }
@@ -1562,6 +1610,40 @@ ETCH_API EtchLoadedTexture etch_load_texture_memory(EtchContext* ctx, const void
     const etch::LoadedTexture t = etch::load_texture_memory(to_ctx(ctx), data, size_bytes, srgb);
     return {t.texture, t.width, t.height};
 }
+ETCH_API EtchLoadedTexture etch_load_svg_file(EtchContext* ctx, const char* path, const EtchSvgRasterDesc* desc) {
+    EtchSvgRasterDesc scratch{};
+    const EtchSvgRasterDesc* d = desc ? resolve_c_desc(desc, &scratch, etch_svg_raster_desc_default) : nullptr;
+    etch::SvgRasterDesc cpp_desc{};
+    if (d) {
+        cpp_desc.width_px = d->width_px;
+        cpp_desc.height_px = d->height_px;
+        cpp_desc.scale = d->scale;
+        cpp_desc.srgb = d->srgb;
+        cpp_desc.generate_mipmaps = d->generate_mipmaps;
+    }
+    const etch::LoadedTexture t = etch::load_svg_file(to_ctx(ctx), path, cpp_desc);
+    return {t.texture, t.width, t.height};
+}
+ETCH_API EtchLoadedTexture etch_load_svg_memory(EtchContext* ctx, const void* data, size_t size_bytes, const EtchSvgRasterDesc* desc) {
+    EtchSvgRasterDesc scratch{};
+    const EtchSvgRasterDesc* d = desc ? resolve_c_desc(desc, &scratch, etch_svg_raster_desc_default) : nullptr;
+    etch::SvgRasterDesc cpp_desc{};
+    if (d) {
+        cpp_desc.width_px = d->width_px;
+        cpp_desc.height_px = d->height_px;
+        cpp_desc.scale = d->scale;
+        cpp_desc.srgb = d->srgb;
+        cpp_desc.generate_mipmaps = d->generate_mipmaps;
+    }
+    const etch::LoadedTexture t = etch::load_svg_memory(to_ctx(ctx), data, size_bytes, cpp_desc);
+    return {t.texture, t.width, t.height};
+}
+ETCH_API bool etch_register_svg_font_file(const char* family, bool bold, bool italic, const char* path) {
+    return etch::register_svg_font_file(family, bold, italic, path);
+}
+ETCH_API bool etch_register_svg_font_memory(const char* family, bool bold, bool italic, const void* data, size_t size_bytes) {
+    return etch::register_svg_font_memory(family, bold, italic, data, size_bytes);
+}
 ETCH_API void etch_destroy_loaded_texture(EtchContext* ctx, EtchLoadedTexture* tex) {
     if (!tex) return;
     etch::LoadedTexture t = {tex->texture, tex->width, tex->height};
@@ -1707,6 +1789,14 @@ ETCH_API EtchTextLineCol etch_text_buffer_line_col(const EtchTextBuffer* buf, ui
 ETCH_API uint32_t etch_text_buffer_byte_offset(const EtchTextBuffer* buf, uint32_t line, uint32_t col_byte) {
     return etch::text_buffer_byte_offset(to_tb(buf), line, col_byte);
 }
+ETCH_API EtchTextUtf16Position etch_text_buffer_utf16_position(const EtchTextBuffer* buf, uint32_t byte_offset) {
+    const auto p = etch::text_buffer_utf16_position(to_tb(buf), byte_offset);
+    return {p.line, p.character};
+}
+ETCH_API uint32_t etch_text_buffer_byte_from_utf16(const EtchTextBuffer* buf, EtchTextUtf16Position position) {
+    return etch::text_buffer_byte_from_utf16(to_tb(buf), {position.line, position.character});
+}
+ETCH_API uint64_t etch_text_buffer_revision(const EtchTextBuffer* buf) { return etch::text_buffer_revision(to_tb(buf)); }
 ETCH_API bool etch_text_buffer_undo(EtchTextBuffer* buf, uint32_t* out_cursor, uint32_t* out_anchor) {
     return etch::text_buffer_undo(to_tb(buf), out_cursor, out_anchor);
 }

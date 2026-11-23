@@ -58,12 +58,41 @@ void tb_move(TextBuffer* b, uint32_t p) noexcept {
     }
     b->gap_start=p;
 }
-void tb_drop_oldest(TextBuffer* b) noexcept {
-    const uint32_t n=b->undo_ops[0].removed+b->undo_ops[0].inserted;
-    std::memmove(b->undo_blob,b->undo_blob+n,b->undo_blob_used-n); b->undo_blob_used-=n;
-    --b->undo_count; if(b->undo_cursor) --b->undo_cursor;
-    std::memmove(b->undo_ops,b->undo_ops+1,size_t(b->undo_count)*sizeof(TextBufferEdit));
-    for(uint32_t i=0;i<b->undo_count;++i) b->undo_ops[i].blob-=n;
+constexpr uint32_t kEditorUndoEntries = 1024u;
+constexpr uint32_t kEditorUndoBytes = 4u * 1024u * 1024u;
+
+bool tb_prepare_undo(TextBuffer* b, uint32_t bytes) noexcept {
+    const uint32_t count = b->undo_cursor;
+    const uint32_t used = count < b->undo_count ? b->undo_ops[count].blob : b->undo_blob_used;
+    if (count == b->undo_cap && count < kEditorUndoEntries) {
+        const uint32_t cap = count ? count * 2u : 16u;
+        auto* ops = static_cast<TextBufferEdit*>(std::realloc(b->undo_ops, cap * sizeof(TextBufferEdit)));
+        if (!ops) return false;
+        b->undo_ops = ops;
+        b->undo_cap = cap;
+    }
+    const uint32_t needed = std::min(kEditorUndoBytes, used + bytes);
+    if (!b->undo_blob || needed > b->undo_blob_cap) {
+        uint32_t cap = b->undo_blob_cap ? b->undo_blob_cap : 256u;
+        while (cap < needed) cap *= 2u;
+        char* blob = static_cast<char*>(std::realloc(b->undo_blob, cap));
+        if (!blob) return false;
+        b->undo_blob = blob;
+        b->undo_blob_cap = cap;
+    }
+    uint32_t drop = 0, skipped = 0;
+    while (count - drop == kEditorUndoEntries || used - skipped > kEditorUndoBytes - bytes) {
+        const auto& op = b->undo_ops[drop++];
+        skipped = op.blob + op.removed + op.inserted;
+    }
+    b->undo_blob_used = used - skipped;
+    b->undo_count = b->undo_cursor = count - drop;
+    if (drop) {
+        std::memmove(b->undo_blob, b->undo_blob + skipped, b->undo_blob_used);
+        std::memmove(b->undo_ops, b->undo_ops + drop, b->undo_count * sizeof(TextBufferEdit));
+        for (uint32_t i = 0; i < b->undo_count; ++i) b->undo_ops[i].blob -= skipped;
+    }
+    return true;
 }
 }
 uint32_t text_buffer_byte_length(const TextBuffer* b) noexcept { return b && b->data ? tb_len(b) : 0; }
@@ -76,12 +105,10 @@ void text_buffer_clear_undo(TextBuffer* b) noexcept { if(b) b->undo_count=b->und
 bool init_text_buffer(TextBuffer* b, Str s, uint32_t cap) noexcept {
     if(!b || b->data || (!s.chars && s.length) || s.length>0x7FFFFFFFu) return false;
     TextBuffer v={}; v.cap=cap>4096?cap:4096; v.gap_end=v.cap;
-    v.line_cap=64; v.line_gap_end=64; v.undo_cap=1024; v.undo_blob_cap=4u*1024u*1024u;
+    v.line_cap=64; v.line_gap_end=64;
     v.data=static_cast<char*>(std::malloc(v.cap));
     v.line_data=static_cast<uint32_t*>(std::malloc(size_t(v.line_cap)*sizeof(uint32_t)));
-    v.undo_ops=static_cast<TextBufferEdit*>(std::calloc(v.undo_cap,sizeof(TextBufferEdit)));
-    v.undo_blob=static_cast<char*>(std::malloc(v.undo_blob_cap));
-    if(!v.data || !v.line_data || !v.undo_ops || !v.undo_blob) { free_text_buffer(&v); return false; }
+    if(!v.data || !v.line_data) { free_text_buffer(&v); return false; }
     v.line_data[0]=0; v.line_gap_start=1; *b=v;
     if(!text_buffer_replace(b,0,0,s,false)) {free_text_buffer(b);return false;} return true;
 }
@@ -125,6 +152,48 @@ uint32_t text_buffer_byte_offset(const TextBuffer* b,uint32_t i,uint32_t col) no
     const uint32_t a=tb_start(b,i),n=text_buffer_line_end(b,i)-a;return tb_clamp(b,a+(col<n?col:n));
 }
 namespace {
+// Each side of the gap ends on a scalar boundary. Walk the two physical
+// spans without materializing the line in an arena.
+uint32_t tb_walk_utf16(const TextBuffer* b, uint32_t start, uint32_t end, uint32_t limit, uint32_t& units) noexcept {
+    uint32_t byte = start;
+    units = 0u;
+    while (byte < end && units < limit) {
+        const bool prefix = byte < b->gap_start;
+        const uint32_t stop = prefix ? std::min(end, b->gap_start) : end;
+        const char* p = b->data + (prefix ? byte : b->gap_end + (byte - b->gap_start));
+        const char* last = p + (stop - byte);
+        while (p != last) {
+            const char* prev = p;
+            const uint32_t width = next_utf8_codepoint(p, last) > 0xffffu ? 2u : 1u;
+            if (width > limit - units) return byte;
+            units += width;
+            byte += static_cast<uint32_t>(p - prev);
+            if (units == limit) return byte;
+        }
+    }
+    return byte;
+}
+}
+
+TextUtf16Position text_buffer_utf16_position(const TextBuffer* b, uint32_t byte) noexcept {
+    if (!b || !b->data) return {};
+    const auto lc = text_buffer_line_col(b, byte);
+    const uint32_t start = tb_start(b, lc.line);
+    uint32_t units;
+    tb_walk_utf16(b, start, start + lc.col_byte, UINT32_MAX, units);
+    return {lc.line, units};
+}
+
+uint32_t text_buffer_byte_from_utf16(const TextBuffer* b, TextUtf16Position position) noexcept {
+    if (!b || !b->data) return 0u;
+    if (position.line >= tb_lines(b)) return tb_len(b);
+    uint32_t units;
+    return tb_walk_utf16(b, tb_start(b, position.line), text_buffer_line_end(b, position.line), position.character, units);
+}
+
+uint64_t text_buffer_revision(const TextBuffer* b) noexcept { return b && b->data ? b->version : 0u; }
+
+namespace {
 bool tb_replace_impl(TextBuffer* b,uint32_t a,uint32_t z,Str s,bool normalize_crlf,bool record,uint32_t bc,uint32_t ba,uint32_t ac,uint32_t aa,uint8_t group,double time) noexcept {
     bc=tb_clamp(b,bc);ba=tb_clamp(b,ba);
     a=tb_clamp(b,a);z=tb_clamp(b,z);if(z<a){const uint32_t t=a;a=z;z=t;}
@@ -135,18 +204,16 @@ bool tb_replace_impl(TextBuffer* b,uint32_t a,uint32_t z,Str s,bool normalize_cr
     uint32_t n=0,nl=0;
     for(uint32_t i=0;i<s.length;++i){if(normalize_crlf && s.chars[i]=='\r' && i+1<s.length && s.chars[i+1]=='\n')continue;++n;if(s.chars[i]=='\n')++nl;}
     if(!tb_reserve(b,tb_len(b)-(z-a)+n+64,tb_lines(b)+nl+1)){std::free(alias);return false;}
-    tb_move(b,a);
     if(group==1 && (!is_single_nonbreak_utf8_codepoint(s) || utf8_char_class(utf8_decode_at(s.chars,s.length,0))==0))group=0;
     TextBufferEdit* edit=nullptr;
     if(record){
-        if(b->undo_cursor<b->undo_count){b->undo_blob_used=b->undo_ops[b->undo_cursor].blob;b->undo_count=b->undo_cursor;}
-        const uint32_t need=z-a+n;
-        if(need<=b->undo_blob_cap){
-            while(b->undo_count && (b->undo_count==b->undo_cap || need>b->undo_blob_cap-b->undo_blob_used))tb_drop_oldest(b);
+        if(n <= kEditorUndoBytes && z-a <= kEditorUndoBytes-n){
+            if (!tb_prepare_undo(b, z-a+n)) { std::free(alias); return false; }
             edit=&b->undo_ops[b->undo_count++];*edit={a,z-a,n,b->undo_blob_used,bc,ba,ac,aa,time,group};
             tb_copy(b,a,z,b->undo_blob+b->undo_blob_used);b->undo_blob_used+=z-a;
         }else text_buffer_clear_undo(b);
     }
+    tb_move(b,a);
     const uint32_t oldlen=tb_len(b);
     while(b->line_gap_end<b->line_cap && oldlen-b->line_data[b->line_gap_end]<=z)++b->line_gap_end;
     b->gap_end+=z-a;

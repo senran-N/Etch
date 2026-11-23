@@ -13,6 +13,7 @@
 #    pragma GCC diagnostic ignored "-Wextra"
 #    pragma GCC diagnostic ignored "-Wpedantic"
 #    pragma GCC diagnostic ignored "-Wmissing-field-initializers"
+#    pragma GCC diagnostic ignored "-Wunused-value"
 #endif
 
 #define STB_TRUETYPE_IMPLEMENTATION

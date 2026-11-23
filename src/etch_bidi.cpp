@@ -45,7 +45,7 @@ bool shape_cache_ensure(Context* ctx) noexcept {
 
 void shape_cache_clear_bank(Context::ShapeCacheBank& b) noexcept {
     if (b.entries && b.entry_count > 0u) {
-        std::memset(b.entries, 0, kShapeCacheEntryCap * sizeof(Context::ShapeCacheEntry));
+        std::fill_n(b.entries, kShapeCacheEntryCap, Context::ShapeCacheEntry{});
     }
     b.entry_count = 0u;
     b.glyph_used = 0u;

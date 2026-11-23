@@ -188,10 +188,7 @@ LRESULT CALLBACK chrome_subclass_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM
     return DefSubclassProc(hwnd, msg, wparam, lparam);
 }
 
-#endif
-
 void apply_win32_chrome(Context* ctx, ClaimedWindowSlot* slot) noexcept {
-#if defined(_WIN32)
     HWND hwnd = static_cast<HWND>(SDL_GetPointerProperty(SDL_GetWindowProperties(slot->window), SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr));
     if (!hwnd) return;
     slot->chrome_context = ctx;
@@ -253,10 +250,8 @@ void apply_win32_chrome(Context* ctx, ClaimedWindowSlot* slot) noexcept {
         slot->applied_border_ref = border_u32;
     }
     slot->dwm_attrs_initialized = true;
-#else
-    (void)ctx; (void)slot;
-#endif
 }
+#endif
 void detach_win32_chrome(ClaimedWindowSlot* slot) noexcept {
 #if defined(_WIN32)
     if (!slot->chrome_subclass_attached) return;

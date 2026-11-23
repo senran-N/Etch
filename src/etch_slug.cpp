@@ -726,7 +726,7 @@ bool font_atlas_init(FontAtlas* atlas, const char* preferred_font_path) noexcept
     if (!atlas) {
         return false;
     }
-    *atlas = {};
+    ::new (atlas) FontAtlas{};
     atlas->slug_glyph_cap = kInitialSlugGlyphTableCap;
     atlas->slug_glyphs = static_cast<SlugGlyphEntry*>(std::calloc(atlas->slug_glyph_cap, sizeof(SlugGlyphEntry)));
     atlas->slug_curves = static_cast<SlugCurveGpu*>(std::malloc(size_t(kInitialSlugCurveCap) * sizeof(SlugCurveGpu)));
@@ -795,7 +795,7 @@ void font_atlas_destroy(FontAtlas* atlas) noexcept {
     std::free(atlas->slug_bands);
     std::free(atlas->slug_curves);
     std::free(atlas->slug_glyphs);
-    *atlas = {};
+    ::new (atlas) FontAtlas{};
 }
 
 bool slug_glyph_rehash(FontAtlas* atlas) noexcept {
@@ -2260,12 +2260,12 @@ uint16_t create_font_variation(
     next.dwrite_probed = false;
     next.parent_slot = root_id;
     next.axis_count = axis_count;
-    std::memset(next.axes, 0, sizeof(next.axes));
+    std::fill_n(next.axes, ETCH_COUNTOF(next.axes), FontAxisValue{});
     if (axis_count > 0u) {
         std::memcpy(next.axes, clean_axes, size_t(axis_count) * sizeof(FontAxisValue));
     }
     next.default_feature_count = feat_count;
-    std::memset(next.default_features, 0, sizeof(next.default_features));
+    std::fill_n(next.default_features, ETCH_COUNTOF(next.default_features), FontFeature{});
     if (feat_count > 0u) {
         std::memcpy(next.default_features, clean_feats, size_t(feat_count) * sizeof(FontFeature));
     }
