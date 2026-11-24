@@ -1300,6 +1300,11 @@ void end_frame(Context* ctx_arg) noexcept {
     ctx->active_ui->has_delivered_drop_pos = false;
     ctx->active_ui->pointer_state.pinch_delta = 0.0f;
     ctx->active_ui->pointer_state.precise_scroll = false;
+    if (ctx->active_ui->gesture_phase == PointerGesturePhase::End ||
+        ctx->active_ui->gesture_phase == PointerGesturePhase::Cancel)
+    {
+        ctx->active_ui->gesture_phase = PointerGesturePhase::None;
+    }
     if (ctx->active_ui->states.count > 128u &&
         (ctx->active_ui->states.count * 4u >= ctx->active_ui->states.capacity * 3u ||
          (ctx->active_ui->frame_index & 127u) == 0u))
@@ -1403,6 +1408,52 @@ SystemPreferences system_preferences(const Context* ctx) noexcept {
     prefs.layout_direction = locale_is_rtl(prefs.locale) ? LayoutDirection::Rtl : LayoutDirection::Ltr;
     return prefs;
 }
+namespace {
+void sync_system_preferences(Context* c) noexcept {
+    const SystemPreferences prefs = system_preferences(c);
+    const float raw_scale = std::isfinite(prefs.text_scale) ? prefs.text_scale : 1.0f;
+    const float next_scale = c->auto_sys_text_scale ? clamp_range(raw_scale, 0.75f, 2.5f) : 1.0f;
+    const LayoutDirection next_dir = c->auto_sys_rtl ? prefs.layout_direction : LayoutDirection::Ltr;
+    const bool layout_changed =
+        (std::fabs(c->effective_text_scale - next_scale) > 1e-4f) ||
+        (c->effective_layout_direction != next_dir);
+    c->effective_text_scale = next_scale;
+    c->effective_layout_direction = next_dir;
+    if (layout_changed) {
+        invalidate_cached_subtree(0u, c);
+        request_redraw(c);
+    }
+    if (c->auto_sys_theme) {
+        if (prefs.high_contrast) {
+            set_theme(Theme::high_contrast(), c);
+        } else if (prefs.theme == SystemTheme::Dark) {
+            set_theme(Theme::dark(), c);
+        } else if (prefs.theme == SystemTheme::Light) {
+            set_theme(Theme::light(), c);
+        }
+    }
+}
+} // namespace
+
+void apply_system_preferences(Context* ctx, bool auto_theme, bool auto_text_scale, bool auto_rtl) noexcept {
+    Context* c = ctx ? ctx : current_context();
+    if (!c) return;
+    c->auto_sys_theme = auto_theme;
+    c->auto_sys_text_scale = auto_text_scale;
+    c->auto_sys_rtl = auto_rtl;
+    sync_system_preferences(c);
+}
+
+float active_text_scale(const Context* ctx) noexcept {
+    const Context* c = ctx ? ctx : current_context();
+    return c ? c->effective_text_scale : 1.0f;
+}
+
+LayoutDirection active_layout_direction(const Context* ctx) noexcept {
+    const Context* c = ctx ? ctx : current_context();
+    return c ? c->effective_layout_direction : LayoutDirection::Ltr;
+}
+
 void set_system_preferences_override(Context* ctx, const SystemPreferences* override_prefs) noexcept {
     Context* c = ctx ? ctx : current_context();
     if (!c) return;
@@ -1421,6 +1472,9 @@ void set_system_preferences_override(Context* ctx, const SystemPreferences* over
         c->sys_prefs_override = p;
         c->has_sys_prefs_override = true;
     }
+    if (c->auto_sys_theme || c->auto_sys_text_scale || c->auto_sys_rtl) {
+        sync_system_preferences(c);
+    }
     request_redraw(c);
 }
 bool needs_window_redraw(const Context* ctx, SDL_Window* window) noexcept {
@@ -1433,7 +1487,15 @@ void request_window_redraw(Context* ctx, SDL_Window* window) noexcept {
 }
 void process_event(Context* ctx, const SDL_Event& event) noexcept {
     if (!ctx) return;
-    if (event.type == SDL_EVENT_SYSTEM_THEME_CHANGED || event.type == ctx->wake_event_type) {
+    if (event.type == SDL_EVENT_SYSTEM_THEME_CHANGED ||
+        event.type == SDL_EVENT_LOCALE_CHANGED ||
+        event.type == ctx->wake_event_type)
+    {
+        if ((event.type == SDL_EVENT_SYSTEM_THEME_CHANGED || event.type == SDL_EVENT_LOCALE_CHANGED) &&
+            (ctx->auto_sys_theme || ctx->auto_sys_text_scale || ctx->auto_sys_rtl))
+        {
+            sync_system_preferences(ctx);
+        }
         if (ctx->headless || ctx->claimed_window_count == 0u) {
             if (WindowUiState* hui = ensure_headless_ui(ctx)) hui->redraw_budget = 2;
         }

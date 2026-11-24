@@ -193,7 +193,7 @@ configuring the consumer. If installation was disabled, reconfigure Etch with
 ```cmake
 cmake_minimum_required(VERSION 3.24)
 project(my_app LANGUAGES C CXX)
-find_package(Etch 0.28 CONFIG REQUIRED)
+find_package(Etch 0.29 CONFIG REQUIRED)
 add_executable(my_app main.cpp)
 target_link_libraries(my_app PRIVATE Etch::etch)
 ```
@@ -206,9 +206,9 @@ Keep SDL3 and HarfBuzz discoverable via the dependency package manager or
 
 Etch is [MIT licensed](LICENSE), Copyright (c) 2026 Etch Contributors.
 See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for bundled dependencies
-and the full license-file references. Include those applicable licenses and
-notices with redistributed software; `cmake --install` currently installs
-the library, headers, and CMake package, so package notices alongside them.
+and the full license-file references. `cmake --install` installs `LICENSE` and
+`THIRD_PARTY_NOTICES.md` under `${CMAKE_INSTALL_DOCDIR}` alongside the library,
+headers, and CMake package; include them when redistributing software.
 
 Slug is available under MIT or Apache-2.0. Its README states that the patent
 has been dedicated to the public domain and requires credit for distribution:
@@ -357,16 +357,27 @@ editor. `code_editor` also supports inline ghost-text completion (`Tab` accept /
 `Escape` dismiss), search highlights, line folding, and multi-cursor atomic edits.
 
 For desktop resilience, tooling, and accessibility, Etch provides in-place GPU
-device recovery (`recreate_gpu_device`, `gpu_device_generation`,
-`set_gpu_device_reset_callback`), structured frame/memory tracing with JSON
-export (`set_trace_enabled`, `trace_export_json`), semantic A11y roles and live
-announcements (`emit_a11y_node`, `announce_a11y`), OS appearance/i18n queries
-(`system_preferences`), extended pen/touch/pinch `pointer_state`, an application
-command registry (`register_command`, `find_command_shortcut_conflict`),
-pixel-free semantic automation (`automation_find_nodes`, `automation_assert_node`,
-input recording), cross-window dock tear-off/transfer (`dock_detach_pane`,
-`dock_poll_tear_off`, `dock_transfer_pane`), and multi-MIME drag negotiation —
-all mirrored in `<etch/etch_c.h>`.
+device recovery (`mark_gpu_device_lost`, `recreate_gpu_device`,
+`gpu_device_generation`, `set_gpu_device_reset_callback`), non-blocking async
+readback (`begin_async_readback`, `poll_async_readback`), pure-CPU thread-safe
+image/SVG decoding (`decode_image_memory`, `rasterize_svg_memory`), structured
+frame/memory tracing with JSON export and P50/P95/P99 percentiles
+(`set_trace_enabled`, `trace_export_json`, `trace_compute_percentiles`),
+semantic A11y roles/scroll actions and live announcements (`emit_a11y_node`,
+`announce_a11y`, `ScrollUp`/`ScrollDown`), OS appearance/i18n queries and
+opt-in automatic propagation (`system_preferences`, `apply_system_preferences`),
+extended pen/touch/pinch gesture-phase `pointer_state`, scoped and chorded
+application commands with runtime rebinding (`register_command`,
+`rebind_command_shortcut`, `find_command_shortcut_conflict`), pixel-free
+semantic automation with full input replay and failure reports
+(`automation_find_nodes`, `automation_assert_node`, `automation_replay_frame`,
+`automation_export_failure_report_json`), dock layout JSON persistence and
+cross-window tear-off/redock (`dock_save_layout_json`, `dock_load_layout_json`,
+`dock_detach_pane`, `dock_transfer_pane`, `dock_redock_window_panes`), table
+frozen columns and column reordering (`table_set_frozen_columns`,
+`table_set_column_order`), and cross-app multi-MIME drag and clipboard
+negotiation (`set_clipboard_mime`, `get_clipboard_mime`) — all mirrored in
+`<etch/etch_c.h>`.
 
 `punch_hole` erases previously drawn color and alpha inside a rounded shape.
 Draw overlays afterward to keep them above the transparent opening. Hole runs
@@ -414,8 +425,9 @@ and visual layers. Captured drags may map points outside the box. Visible bounds
 intersect ancestor clip bounding rectangles; rounded masks and sibling overlap
 still require the host's hit-testing policy. Outputs remain unchanged on failure.
 
-Release candidate scope: Etch 0.28 pairs with Inlay 0.13 using public C++20/C99
-APIs. Windows Vulkan and D3D12 are the locally verified Tier-1 targets. Metal and
+Release candidate scope: Etch 0.29 pairs with Inlay 0.14 using public C++20/C99
+APIs (`SameMinorVersion` package compatibility). Windows Vulkan and D3D12 are
+the locally verified Tier-1 targets. Metal and
 Linux Vulkan Wayland/X11 backends (including FreeType hinting, Fontconfig/CoreText
 system font lookup, macOS `NSAccessibility` hierarchy, and Linux AT-SPI2 / optional
 AccessKit C bridges) are implemented in-tree and still await real-hardware CI

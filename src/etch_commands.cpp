@@ -13,22 +13,42 @@ struct CommandRecord {
     uint32_t category_len = 0u;
     uint16_t shortcut_mods = 0u;
     uint32_t shortcut_keycode = 0u;
+    uint32_t scope_id = 0u;
+    uint16_t chord_mods = 0u;
+    uint32_t chord_keycode = 0u;
     bool enabled = true;
     bool allow_when_typing = false;
 };
 
 struct CommandRegistry {
     static constexpr uint32_t kMaxRecent = 32u;
+    static constexpr uint64_t kChordTimeoutMs = 1500u;
     CommandRecord* records = nullptr;
     uint32_t count = 0u;
     uint32_t cap = 0u;
     uint32_t recent[kMaxRecent] = {};
     uint32_t recent_count = 0u;
+    uint16_t pending_chord_mods = 0u;
+    uint32_t pending_chord_keycode = 0u;
+    uint64_t pending_chord_tick = 0u;
 };
 
 namespace {
 
 constexpr uint16_t kCommandModMask = static_cast<uint16_t>(Mod_Shift | Mod_Ctrl | Mod_Alt | Mod_Super);
+
+bool cmd_is_modifier_key(uint32_t keycode) noexcept {
+    return keycode == SDLK_LCTRL || keycode == SDLK_RCTRL ||
+           keycode == SDLK_LSHIFT || keycode == SDLK_RSHIFT ||
+           keycode == SDLK_LALT || keycode == SDLK_RALT ||
+           keycode == SDLK_LGUI || keycode == SDLK_RGUI;
+}
+
+void cmd_clear_pending_chord(CommandRegistry* reg) noexcept {
+    reg->pending_chord_mods = 0u;
+    reg->pending_chord_keycode = 0u;
+    reg->pending_chord_tick = 0u;
+}
 
 char* cmd_dup_str(Str s, uint32_t* out_len) noexcept {
     if (!s.chars || s.length == 0u) {
@@ -159,6 +179,9 @@ bool register_command(Context* ctx, const CommandDesc& desc) noexcept {
     slot->category_len = category_len;
     slot->shortcut_mods = static_cast<uint16_t>(desc.shortcut_mods & kCommandModMask);
     slot->shortcut_keycode = desc.shortcut_keycode;
+    slot->scope_id = desc.scope_id;
+    slot->chord_mods = static_cast<uint16_t>(desc.chord_mods & kCommandModMask);
+    slot->chord_keycode = desc.chord_keycode;
     slot->enabled = desc.enabled;
     slot->allow_when_typing = desc.allow_when_typing;
     return true;
@@ -177,6 +200,7 @@ bool unregister_command(Context* ctx, uint32_t command_id) noexcept {
         std::memmove(reg->records + idx, reg->records + idx + 1u, size_t(tail) * sizeof(CommandRecord));
     }
     --reg->count;
+    cmd_clear_pending_chord(reg);
     return true;
 }
 
@@ -194,6 +218,27 @@ bool is_command_enabled(const Context* ctx, uint32_t command_id) noexcept {
     if (!c || !c->commands || command_id == 0u) return false;
     const CommandRecord* rec = cmd_find_const(c->commands, command_id);
     return rec && rec->enabled;
+}
+
+bool rebind_command_shortcut(
+    Context* ctx,
+    uint32_t command_id,
+    uint16_t mods,
+    uint32_t keycode,
+    uint16_t chord_mods,
+    uint32_t chord_keycode) noexcept
+{
+    Context* c = ctx ? ctx : current_context();
+    if (!c || !c->commands || command_id == 0u) return false;
+    CommandRegistry* reg = c->commands;
+    CommandRecord* rec = cmd_find(reg, command_id);
+    if (!rec) return false;
+    rec->shortcut_mods = static_cast<uint16_t>(mods & kCommandModMask);
+    rec->shortcut_keycode = keycode;
+    rec->chord_mods = static_cast<uint16_t>(chord_mods & kCommandModMask);
+    rec->chord_keycode = chord_keycode;
+    cmd_clear_pending_chord(reg);
+    return true;
 }
 
 uint32_t find_command_shortcut_conflict(
@@ -218,23 +263,113 @@ uint32_t find_command_shortcut_conflict(
 
 uint32_t poll_triggered_command(Context* ctx) noexcept {
     Context* c = ctx ? ctx : current_context();
-    if (!c || !c->commands) return 0u;
+    if (!c || !c->commands || !c->active_ui) return 0u;
+    WindowUiState* ui = c->active_ui;
+    if (ui->ime_comp_len > 0u) return 0u;
+
     CommandRegistry* reg = c->commands;
-    Context* prev = current_context();
-    if (prev != c) set_current_context(c);
-    uint32_t triggered = 0u;
-    for (uint32_t i = 0u; i < reg->count; ++i) {
-        const CommandRecord& r = reg->records[i];
-        if (!r.enabled || r.shortcut_keycode == 0u) continue;
-        if (consume_shortcut(static_cast<uint16_t>(r.shortcut_mods & kCommandModMask),
-                             r.shortcut_keycode, r.allow_when_typing)) {
-            cmd_push_recent(reg, r.id);
-            triggered = r.id;
-            break;
+    const uint64_t now_ms = SDL_GetTicks();
+    if (reg->pending_chord_keycode != 0u &&
+        (now_ms < reg->pending_chord_tick || (now_ms - reg->pending_chord_tick) > CommandRegistry::kChordTimeoutMs)) {
+        cmd_clear_pending_chord(reg);
+    }
+
+    const WidgetState* focused_ws = (ui->focus_id != 0u) ? state_map_find(&ui->states, ui->focus_id) : nullptr;
+    const bool typing = focused_ws != nullptr && focused_ws->is_text_input_writable &&
+                        (focused_ws->last_seen_frame + 1u >= ui->frame_index);
+    const bool modal_in_scope = (ui->modal_scope == 0u) ||
+                                focus_scope_contains(*ui, ui->modal_scope) ||
+                                (focused_ws != nullptr && focused_ws->focus_scope == ui->modal_scope);
+
+    const auto scope_matches = [&](uint32_t scope_id) noexcept -> bool {
+        if (scope_id == 0u) return modal_in_scope;
+        if (ui->modal_scope != 0u && scope_id != ui->modal_scope && !modal_in_scope) return false;
+        if (ui->focus_id == scope_id) return true;
+        if (focus_scope_contains(*ui, scope_id)) return true;
+        if (focused_ws != nullptr && focused_ws->focus_scope == scope_id) return true;
+        return false;
+    };
+
+    for (uint32_t ki = 0u; ki < ui->frame_key_count; ++ki) {
+        KeyEventEntry& ev = ui->frame_keys[ki];
+        if (ev.consumed || ev.repeat || ev.key == 0u || cmd_is_modifier_key(ev.key)) continue;
+        const uint16_t ev_mods = static_cast<uint16_t>(ev.mods & kCommandModMask);
+
+        if (reg->pending_chord_keycode != 0u) {
+            uint32_t scoped_chord_id = 0u;
+            uint32_t global_chord_id = 0u;
+            for (uint32_t i = 0u; i < reg->count; ++i) {
+                const CommandRecord& r = reg->records[i];
+                if (!r.enabled || r.chord_keycode == 0u) continue;
+                if (typing && !r.allow_when_typing) continue;
+                if (!scope_matches(r.scope_id)) continue;
+                if (r.shortcut_mods == reg->pending_chord_mods &&
+                    r.shortcut_keycode == reg->pending_chord_keycode &&
+                    r.chord_mods == ev_mods &&
+                    r.chord_keycode == ev.key) {
+                    if (r.scope_id != 0u) {
+                        scoped_chord_id = r.id;
+                        break;
+                    }
+                    if (global_chord_id == 0u) global_chord_id = r.id;
+                }
+            }
+            cmd_clear_pending_chord(reg);
+            const uint32_t matched_chord = scoped_chord_id ? scoped_chord_id : global_chord_id;
+            if (matched_chord != 0u) {
+                ev.consumed = true;
+                cmd_push_recent(reg, matched_chord);
+                return matched_chord;
+            }
+        }
+
+        uint32_t scoped_single_id = 0u;
+        uint32_t global_single_id = 0u;
+        bool scoped_chord_prefix = false;
+        bool global_chord_prefix = false;
+
+        for (uint32_t i = 0u; i < reg->count; ++i) {
+            const CommandRecord& r = reg->records[i];
+            if (!r.enabled || r.shortcut_keycode == 0u) continue;
+            if (typing && !r.allow_when_typing) continue;
+            if (!scope_matches(r.scope_id)) continue;
+            if (r.shortcut_mods != ev_mods || r.shortcut_keycode != ev.key) continue;
+
+            if (r.chord_keycode != 0u) {
+                if (r.scope_id != 0u) scoped_chord_prefix = true;
+                else global_chord_prefix = true;
+            } else {
+                if (r.scope_id != 0u && scoped_single_id == 0u) scoped_single_id = r.id;
+                else if (r.scope_id == 0u && global_single_id == 0u) global_single_id = r.id;
+            }
+        }
+
+        if (scoped_chord_prefix) {
+            reg->pending_chord_mods = ev_mods;
+            reg->pending_chord_keycode = ev.key;
+            reg->pending_chord_tick = now_ms;
+            ev.consumed = true;
+            return 0u;
+        }
+        if (scoped_single_id != 0u) {
+            ev.consumed = true;
+            cmd_push_recent(reg, scoped_single_id);
+            return scoped_single_id;
+        }
+        if (global_chord_prefix) {
+            reg->pending_chord_mods = ev_mods;
+            reg->pending_chord_keycode = ev.key;
+            reg->pending_chord_tick = now_ms;
+            ev.consumed = true;
+            return 0u;
+        }
+        if (global_single_id != 0u) {
+            ev.consumed = true;
+            cmd_push_recent(reg, global_single_id);
+            return global_single_id;
         }
     }
-    if (prev != c) set_current_context(prev);
-    return triggered;
+    return 0u;
 }
 
 bool dispatch_command(Context* ctx, uint32_t command_id) noexcept {
@@ -275,6 +410,9 @@ bool get_command(const Context* ctx, uint32_t index, CommandDesc* out_desc) noex
         .shortcut_keycode = r.shortcut_keycode,
         .enabled = r.enabled,
         .allow_when_typing = r.allow_when_typing,
+        .scope_id = r.scope_id,
+        .chord_mods = r.chord_mods,
+        .chord_keycode = r.chord_keycode,
     };
     return true;
 }

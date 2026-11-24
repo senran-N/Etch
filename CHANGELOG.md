@@ -6,6 +6,21 @@ All notable changes to Etch are documented here. This file follows
 
 ## [Unreleased]
 
+## [0.29.0] - 2026-11-24
+
+- Propagate OS `system_preferences` end-to-end (`apply_system_preferences`,
+  `active_text_scale`, `active_layout_direction` with Row RTL mirroring and
+  high-contrast switching), add `ScrollUp`/`ScrollDown` A11y actions, multi-modal
+  gesture phase & per-finger `active_touch_points`, cross-app multi-MIME
+  clipboard (`set_clipboard_mime`/`get_clipboard_mime`/`has_clipboard_mime`),
+  and install `LICENSE` + `THIRD_PARTY_NOTICES.md`.
+- Add dock workspace JSON save/load & window-close re-docking, data table frozen
+  columns & column ordering, scoped/chorded/rebindable commands, deterministic
+  input replay & failure report export, non-blocking async GPU readback,
+  `mark_gpu_device_lost`, trace P50/P95/P99 percentile summaries, pure-CPU
+  thread-safe `decode_image_memory`/`rasterize_svg_memory`, and refined light
+  theme contrast.
+
 - Apply revision-checked editor patches atomically, expose revision-bound
   diagnostics (with owned message copies, severity precedence, and non-bleeding
   half-open line matching), buffer search (`text_buffer_find`/`find_all`),

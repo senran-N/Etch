@@ -691,6 +691,249 @@ static bool verify_editor_checks(etch::Context* restore) noexcept {
               ae.size == 7u && std::memcmp(ae.bytes, "{\"k\":1}", 7u) == 0, __LINE__);
         check(!accept_mime_drag_payload(m_dst, str_lit("text/plain"), &ae), __LINE__);
         end_frame(test);
+
+        // E09: dock layout JSON save/load roundtrip, malformed preservation & window pane re-dock
+        {
+            const uint32_t dk_src = id("e3_e09_dock_src");
+            const uint32_t dk_dst = id("e3_e09_dock_dst");
+            const uint32_t jp1 = id("e3_e09_p1");
+            const uint32_t jp2 = id("e3_e09_p2");
+            const uint32_t jp3 = id("e3_e09_p3");
+            const uint32_t r0 = dock_reset_root(dk_src);
+            uint32_t l1 = 0u, l2 = 0u;
+            check(r0 != 0u && dock_split_node(dk_src, r0, Axis::Row, 0.35f, &l1, &l2), __LINE__);
+            check(dock_add_pane(dk_src, l1, {.id = jp1, .title = str_lit("Alpha \"Quoted\"")}) &&
+                  dock_add_pane(dk_src, l2, {.id = jp2, .title = str_lit("Beta")}) &&
+                  dock_add_pane(dk_src, l2, {.id = jp3, .title = str_lit("Gamma"), .default_open = false}), __LINE__);
+
+            const uint32_t req = dock_save_layout_json(dk_src, nullptr, 0u);
+            char jbuf[2048] = {};
+            char trunc_buf[16] = {};
+            check(req > 20u && req < sizeof(jbuf), __LINE__);
+            check(dock_save_layout_json(dk_src, trunc_buf, sizeof(trunc_buf)) == req &&
+                  trunc_buf[sizeof(trunc_buf) - 1u] == '\0', __LINE__);
+            check(dock_save_layout_json(dk_src, jbuf, sizeof(jbuf)) == req &&
+                  jbuf[req] == '\0' && std::strstr(jbuf, "\"nodes\"") != nullptr &&
+                  std::strstr(jbuf, "\"is_split\":true") != nullptr &&
+                  std::strstr(jbuf, "\"tabs\"") != nullptr, __LINE__);
+
+            check(dock_load_layout_json(dk_dst, str_cstr(jbuf)), __LINE__);
+            check(dock_space_initialized(dk_dst) &&
+                  dock_find_pane_leaf(dk_dst, jp1) != 0u &&
+                  dock_find_pane_leaf(dk_dst, jp2) != 0u &&
+                  dock_find_pane_leaf(dk_dst, jp1) != dock_find_pane_leaf(dk_dst, jp2) &&
+                  dock_is_pane_open(dk_dst, jp1) && dock_is_pane_open(dk_dst, jp2) &&
+                  !dock_is_pane_open(dk_dst, jp3), __LINE__);
+
+            // Malformed JSON must fail and preserve existing dock_dst layout intact
+            check(!dock_load_layout_json(dk_dst, str_lit("{malformed")), __LINE__);
+            check(!dock_load_layout_json(dk_dst, str_lit("{\"nodes\":[]}")), __LINE__);
+            check(!dock_load_layout_json(dk_dst, str_lit(
+                "{\"root\":0,\"nodes\":[{\"is_split\":true,\"axis\":0,\"ratio\":0.5,\"first_child\":0,\"second_child\":0}]}")), __LINE__);
+            check(dock_find_pane_leaf(dk_dst, jp1) != 0u &&
+                  dock_find_pane_leaf(dk_dst, jp2) != 0u &&
+                  dock_is_pane_open(dk_dst, jp1), __LINE__);
+
+            // Re-dock all open panes from dk_src into a fresh target dock
+            const uint32_t dk_home = id("e3_e09_dock_home");
+            const uint32_t hp = id("e3_e09_home_pane");
+            const uint32_t hr = dock_reset_root(dk_home);
+            check(hr != 0u && dock_add_pane(dk_home, hr, {.id = hp, .title = str_lit("Home")}), __LINE__);
+            check(dock_redock_window_panes(nullptr, dk_src, dk_home, hp, DockZone::Right, nullptr) == 2u, __LINE__);
+            check(dock_find_pane_leaf(dk_src, jp1) == 0u && dock_find_pane_leaf(dk_src, jp2) == 0u &&
+                  dock_find_pane_leaf(dk_src, jp3) != 0u &&
+                  dock_find_pane_leaf(dk_home, jp1) != 0u && dock_find_pane_leaf(dk_home, jp2) != 0u, __LINE__);
+        }
+
+        // E10: table frozen columns & column order permutation
+        {
+            const uint32_t tid = id("e3_e10_table");
+            const uint32_t c0_id = id("e3_e10_c0");
+            const uint32_t c1_id = id("e3_e10_c1");
+            const uint32_t c2_id = id("e3_e10_c2");
+            const TableColumnDesc cols[3] = {
+                {.id = c0_id, .title = str_lit("Col0"), .sizing = TableColumnSizing::Fixed, .width = 120.0f},
+                {.id = c1_id, .title = str_lit("Col1"), .sizing = TableColumnSizing::Fixed, .width = 140.0f},
+                {.id = c2_id, .title = str_lit("Col2"), .sizing = TableColumnSizing::Fixed, .width = 160.0f},
+            };
+
+            check(table_frozen_columns(tid) == 0u, __LINE__);
+            table_set_frozen_columns(tid, 99u);
+            check(table_frozen_columns(tid) == kMaxTableColumns, __LINE__);
+            table_set_frozen_columns(tid, 1u);
+            check(table_frozen_columns(tid) == 1u, __LINE__);
+
+            const uint32_t bad_dup[3] = {0u, 0u, 1u};
+            const uint32_t bad_oor[3] = {0u, 3u, 1u};
+            const uint32_t good_order[3] = {2u, 0u, 1u};
+            check(!table_set_column_order(tid, bad_dup), __LINE__);
+            check(!table_set_column_order(tid, bad_oor), __LINE__);
+            check(table_set_column_order(tid, good_order), __LINE__);
+            uint32_t got_order[3] = {};
+            check(table_get_column_order(tid, got_order, 3u) == 3u &&
+                  got_order[0] == 2u && got_order[1] == 0u && got_order[2] == 1u, __LINE__);
+
+            const auto run_tbl = [&]() noexcept {
+                begin_frame(test, {.viewport_w = 500, .viewport_h = 260});
+                (void)begin_table({
+                    .id = tid, .columns = cols, .item_count = 3u,
+                    .width = Sizing::fixed(260.0f), .height = Sizing::fixed(180.0f),
+                    .horizontal_scroll = true
+                });
+                uint32_t row = 0u;
+                while (table_next_row(&row)) {
+                    while (table_next_column()) {
+                        text(str_lit("cell"), {.font_size_px = 12.0f});
+                    }
+                }
+                end_table();
+                end_frame(test);
+            };
+
+            run_tbl();
+            const uint32_t h0 = id_index(c0_id, 0x7601u);
+            const uint32_t h1 = id_index(c1_id, 0x7601u);
+            const uint32_t h2 = id_index(c2_id, 0x7601u);
+            const uint32_t row0_id = id_index(tid, 0x100000u);
+            const uint32_t cell_frozen_id = id_index(row0_id, 2u);
+            const uint32_t cell_scroll_id = id_index(row0_id, 0u);
+            // Visual order is {2, 0, 1}: Col2 leftmost, then Col0, then Col1
+            check(element_bounds(h2).x < element_bounds(h0).x &&
+                  element_bounds(h0).x < element_bounds(h1).x, __LINE__);
+            ElementGeometry g_frozen_0 = {}, g_scroll_0 = {}, g_cf_0 = {}, g_cs_0 = {};
+            check(element_geometry(h2, &g_frozen_0) && element_geometry(h0, &g_scroll_0) &&
+                  element_geometry(cell_frozen_id, &g_cf_0) && element_geometry(cell_scroll_id, &g_cs_0), __LINE__);
+
+            const uint32_t outer_id = id_index(tid, 0x7400u);
+            set_scroll_offset(outer_id, {80.0f, 0.0f});
+            run_tbl();
+            ElementGeometry g_frozen_1 = {}, g_scroll_1 = {}, g_cf_1 = {}, g_cs_1 = {};
+            check(element_geometry(h2, &g_frozen_1) && element_geometry(h0, &g_scroll_1) &&
+                  element_geometry(cell_frozen_id, &g_cf_1) && element_geometry(cell_scroll_id, &g_cs_1), __LINE__);
+            check(std::fabs(g_frozen_1.bounds.x - g_frozen_0.bounds.x) < 1.0f &&
+                  g_scroll_1.bounds.x < g_scroll_0.bounds.x - 40.0f &&
+                  std::fabs(g_cf_1.bounds.x - g_cf_0.bounds.x) < 1.0f &&
+                  g_cs_1.bounds.x < g_cs_0.bounds.x - 40.0f, __LINE__);
+        }
+
+        // E12: scoped commands, IME composition suppression, two-step chord & shortcut rebinding
+        {
+            const uint32_t scope_a = id("e3_e12_scope_a");
+            check(register_command(test, {
+                .id = 201u, .name = str_lit("e12.global"), .title = str_lit("Global D"),
+                .shortcut_mods = Mod_Ctrl, .shortcut_keycode = SDLK_D, .allow_when_typing = true, .scope_id = 0u
+            }), __LINE__);
+            check(register_command(test, {
+                .id = 202u, .name = str_lit("e12.scoped"), .title = str_lit("Scoped D"),
+                .shortcut_mods = Mod_Ctrl, .shortcut_keycode = SDLK_D, .allow_when_typing = true, .scope_id = scope_a
+            }), __LINE__);
+            check(register_command(test, {
+                .id = 203u, .name = str_lit("e12.chord"), .title = str_lit("Chord KC"),
+                .shortcut_mods = Mod_Ctrl, .shortcut_keycode = SDLK_K, .allow_when_typing = true,
+                .chord_mods = Mod_Ctrl, .chord_keycode = SDLK_C
+            }), __LINE__);
+
+            CommandDesc cinfo = {};
+            check(get_command(test, 1u, &cinfo) && cinfo.scope_id == scope_a, __LINE__);
+            check(get_command(test, 2u, &cinfo) && cinfo.chord_mods == Mod_Ctrl && cinfo.chord_keycode == SDLK_C, __LINE__);
+
+            // Outside scope_a: global command triggers
+            begin_frame(test, {.viewport_w = 320, .viewport_h = 160, .key_mods = Mod_Ctrl, .key_pressed_code = SDLK_D});
+            check(poll_triggered_command(test) == 201u, __LINE__);
+            end_frame(test);
+
+            // Inside scope_a: scoped command overrides global on equal shortcut
+            begin_frame(test, {.viewport_w = 320, .viewport_h = 160, .key_mods = Mod_Ctrl, .key_pressed_code = SDLK_D});
+            begin_focus_scope(scope_a, false);
+            check(poll_triggered_command(test) == 202u, __LINE__);
+            end_focus_scope();
+            end_frame(test);
+
+            // IME composition active: suppress command shortcuts
+            SDL_Event ime_on = {};
+            ime_on.type = SDL_EVENT_TEXT_EDITING;
+            ime_on.edit.text = "ni";
+            ime_on.edit.start = 0;
+            ime_on.edit.length = 2;
+            process_event(test, ime_on);
+            begin_frame(test, {.viewport_w = 320, .viewport_h = 160, .key_mods = Mod_Ctrl, .key_pressed_code = SDLK_D});
+            check(poll_triggered_command(test) == 0u, __LINE__);
+            end_frame(test);
+            SDL_Event ime_off = {};
+            ime_off.type = SDL_EVENT_TEXT_EDITING;
+            ime_off.edit.text = "";
+            process_event(test, ime_off);
+
+            // Two-step key chord: Ctrl+K arms, Ctrl+C triggers
+            begin_frame(test, {.viewport_w = 320, .viewport_h = 160, .key_mods = Mod_Ctrl, .key_pressed_code = SDLK_K});
+            check(poll_triggered_command(test) == 0u, __LINE__);
+            end_frame(test);
+            begin_frame(test, {.viewport_w = 320, .viewport_h = 160, .key_mods = Mod_Ctrl, .key_pressed_code = SDLK_C});
+            check(poll_triggered_command(test) == 203u, __LINE__);
+            end_frame(test);
+
+            // Rebind shortcut to single-key Ctrl+Shift+B and trigger
+            check(rebind_command_shortcut(test, 203u, static_cast<uint16_t>(Mod_Ctrl | Mod_Shift), SDLK_B, 0u, 0u), __LINE__);
+            check(get_command(test, 2u, &cinfo) && cinfo.shortcut_keycode == SDLK_B && cinfo.chord_keycode == 0u, __LINE__);
+            begin_frame(test, {.viewport_w = 320, .viewport_h = 160,
+                               .key_mods = static_cast<uint16_t>(Mod_Ctrl | Mod_Shift), .key_pressed_code = SDLK_B});
+            check(poll_triggered_command(test) == 203u, __LINE__);
+            end_frame(test);
+
+            check(unregister_command(test, 201u) && unregister_command(test, 202u) &&
+                  unregister_command(test, 203u) && command_count(test) == 0u, __LINE__);
+        }
+
+        // E17: automation typed_utf8 capture, deterministic replay & JSON failure report export
+        {
+            const uint32_t rep_in = id("e3_e17_input");
+            const uint32_t rep_btn = id("e3_e17_btn");
+            char live_buf[64] = {};
+            char replay_buf[64] = {};
+            begin_frame(test, {.viewport_w = 480, .viewport_h = 200});
+            text_input({.id = rep_in, .buffer = live_buf, .capacity = sizeof(live_buf)});
+            button({.id = rep_btn, .label = str_lit("ReplayBtn")});
+            end_frame(test);
+            request_focus(rep_in);
+
+            automation_clear_recording(test);
+            automation_set_recording(test, true);
+            SDL_Event replay_tev = {};
+            replay_tev.type = SDL_EVENT_TEXT_INPUT;
+            replay_tev.text.text = "Hi!";
+            process_event(test, replay_tev);
+            begin_frame(test, {.viewport_w = 480, .viewport_h = 200, .dt_seconds = 1.0f / 60.0f,
+                               .pointer_pos = {42.0f, 24.0f}, .pointer_down = false});
+            text_input({.id = rep_in, .buffer = live_buf, .capacity = sizeof(live_buf)});
+            button({.id = rep_btn, .label = str_lit("ReplayBtn")});
+            end_frame(test);
+
+            RecordedFrameInput r0 = {};
+            check(automation_recorded_count(test) == 1u &&
+                  automation_get_recorded(test, 0u, &r0) &&
+                  r0.typed_utf8_len == 3u && std::memcmp(r0.typed_utf8, "Hi!", 3u) == 0, __LINE__);
+
+            // Replay while recording is still enabled must NOT self-append to the recording ring
+            request_focus(rep_in);
+            check(automation_replay_frame(test, 0u, 480u, 200u, 1.0f), __LINE__);
+            text_input({.id = rep_in, .buffer = replay_buf, .capacity = sizeof(replay_buf)});
+            button({.id = rep_btn, .label = str_lit("ReplayBtn")});
+            end_frame(test);
+            check(std::strcmp(replay_buf, "Hi!") == 0 && automation_recorded_count(test) == 1u, __LINE__);
+
+            const uint32_t rep_len = automation_export_failure_report_json(test, nullptr, 0u);
+            char report_json[4096] = {};
+            check(rep_len > 32u && rep_len < sizeof(report_json), __LINE__);
+            check(automation_export_failure_report_json(test, report_json, sizeof(report_json)) == rep_len &&
+                  report_json[rep_len] == '\0' &&
+                  std::strstr(report_json, "\"recorded_frames\"") != nullptr &&
+                  std::strstr(report_json, "\"a11y_nodes\"") != nullptr &&
+                  std::strstr(report_json, "ReplayBtn") != nullptr &&
+                  std::strstr(report_json, "Hi!") != nullptr, __LINE__);
+
+            automation_set_recording(test, false);
+            automation_clear_recording(test);
+        }
     }
 
     destroy_context(test);set_current_context(restore);free_text_buffer(&b);return ok;

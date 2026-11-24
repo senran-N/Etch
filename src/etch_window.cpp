@@ -377,4 +377,242 @@ void inject_file_dialog_result(Context* ctx, uint32_t request_tag, std::span<con
     enqueue_dialog_event(q, ev);
 }
 
+// ============================================================================
+// Multi-MIME Clipboard (Deterministic Local Store + Live SDL3 OS Clipboard)
+// ============================================================================
+
+namespace {
+
+constexpr uint32_t kMaxClipboardMimeEntries = 16u;
+
+struct OwnedMimeEntry {
+    char* mime = nullptr;
+    uint32_t mime_len = 0u;
+    uint8_t* bytes = nullptr;
+    uint32_t size = 0u;
+};
+
+struct OwnedMimeBundle {
+    OwnedMimeEntry entries[kMaxClipboardMimeEntries] = {};
+    const char* mime_ptrs[kMaxClipboardMimeEntries] = {};
+    uint32_t count = 0u;
+    bool* sync_cleaned = nullptr;
+};
+
+OwnedMimeBundle g_clipboard_mime_store = {};
+bool g_clipboard_mime_atexit_registered = false;
+
+void free_mime_bundle_contents(OwnedMimeBundle* b) noexcept {
+    for (uint32_t i = 0u; i < b->count; ++i) {
+        SDL_free(b->entries[i].mime);
+        SDL_free(b->entries[i].bytes);
+        b->entries[i] = {};
+        b->mime_ptrs[i] = nullptr;
+    }
+    b->count = 0u;
+}
+
+void cleanup_global_clipboard_mime_store() noexcept {
+    free_mime_bundle_contents(&g_clipboard_mime_store);
+}
+
+bool clone_mime_bundle(std::span<const MimeDragEntry> src, OwnedMimeBundle* dst) noexcept {
+    const uint32_t n = (src.size() > kMaxClipboardMimeEntries)
+        ? kMaxClipboardMimeEntries
+        : static_cast<uint32_t>(src.size());
+    for (uint32_t i = 0u; i < n; ++i) {
+        const MimeDragEntry& e = src[i];
+        if (!e.mime_type.chars || e.mime_type.length == 0u || (e.size > 0u && !e.bytes)) {
+            free_mime_bundle_contents(dst);
+            return false;
+        }
+        char* mime_copy = static_cast<char*>(SDL_malloc(static_cast<size_t>(e.mime_type.length) + 1u));
+        if (!mime_copy) {
+            free_mime_bundle_contents(dst);
+            return false;
+        }
+        std::memcpy(mime_copy, e.mime_type.chars, e.mime_type.length);
+        mime_copy[e.mime_type.length] = '\0';
+
+        uint8_t* bytes_copy = nullptr;
+        if (e.size > 0u) {
+            bytes_copy = static_cast<uint8_t*>(SDL_malloc(e.size));
+            if (!bytes_copy) {
+                SDL_free(mime_copy);
+                free_mime_bundle_contents(dst);
+                return false;
+            }
+            std::memcpy(bytes_copy, e.bytes, e.size);
+        }
+        dst->entries[dst->count] = OwnedMimeEntry{
+            .mime = mime_copy,
+            .mime_len = e.mime_type.length,
+            .bytes = bytes_copy,
+            .size = e.size,
+        };
+        dst->mime_ptrs[dst->count] = mime_copy;
+        ++dst->count;
+    }
+    return true;
+}
+
+const OwnedMimeEntry* find_local_mime_entry(Str mime_type) noexcept {
+    for (uint32_t i = 0u; i < g_clipboard_mime_store.count; ++i) {
+        const OwnedMimeEntry& e = g_clipboard_mime_store.entries[i];
+        if (e.mime_len == mime_type.length &&
+            std::memcmp(e.mime, mime_type.chars, mime_type.length) == 0)
+        {
+            return &e;
+        }
+    }
+    return nullptr;
+}
+
+const void* SDLCALL sdl_clipboard_mime_data_cb(void* userdata, const char* mime_type, size_t* size) {
+    if (size) *size = 0u;
+    const auto* bundle = static_cast<const OwnedMimeBundle*>(userdata);
+    if (!bundle || !mime_type) return nullptr;
+    static const uint8_t kEmptyMimePayload = 0u;
+    for (uint32_t i = 0u; i < bundle->count; ++i) {
+        if (bundle->entries[i].mime && std::strcmp(bundle->entries[i].mime, mime_type) == 0) {
+            if (size) *size = static_cast<size_t>(bundle->entries[i].size);
+            return bundle->entries[i].bytes ? static_cast<const void*>(bundle->entries[i].bytes)
+                                            : static_cast<const void*>(&kEmptyMimePayload);
+        }
+    }
+    return nullptr;
+}
+
+void SDLCALL sdl_clipboard_mime_cleanup_cb(void* userdata) {
+    auto* bundle = static_cast<OwnedMimeBundle*>(userdata);
+    if (!bundle) return;
+    if (bundle->sync_cleaned) {
+        *bundle->sync_cleaned = true;
+    }
+    free_mime_bundle_contents(bundle);
+    SDL_free(bundle);
+}
+
+bool copy_mime_to_cstr(Str mime_type, char* out_buf, size_t out_cap) noexcept {
+    if (!mime_type.chars || mime_type.length == 0u || static_cast<size_t>(mime_type.length) >= out_cap) {
+        return false;
+    }
+    std::memcpy(out_buf, mime_type.chars, mime_type.length);
+    out_buf[mime_type.length] = '\0';
+    return true;
+}
+
+ClipboardMimeData copy_bytes_to_arena(const void* raw, size_t sz, Arena* dst_arena) noexcept {
+    if (sz == 0u) {
+        return ClipboardMimeData{};
+    }
+    if (!raw || !dst_arena || sz > static_cast<size_t>(UINT32_MAX) || sz > dst_arena->remaining()) {
+        return ClipboardMimeData{};
+    }
+    uint8_t* copy = dst_arena->alloc_uninit<uint8_t>(sz);
+    if (!copy) {
+        return ClipboardMimeData{};
+    }
+    std::memcpy(copy, raw, sz);
+    return ClipboardMimeData{ .bytes = copy, .size_bytes = static_cast<uint32_t>(sz) };
+}
+
+} // namespace
+
+bool set_clipboard_mime(std::span<const MimeDragEntry> entries) noexcept {
+    Context* ctx = current_context();
+    if (entries.empty()) {
+        free_mime_bundle_contents(&g_clipboard_mime_store);
+        if ((!ctx || !ctx->headless) && SDL_WasInit(SDL_INIT_VIDEO) != 0u) {
+            return SDL_ClearClipboardData();
+        }
+        return true;
+    }
+
+    OwnedMimeBundle next_local = {};
+    if (!clone_mime_bundle(entries, &next_local)) {
+        return false;
+    }
+    if (!g_clipboard_mime_atexit_registered) {
+        g_clipboard_mime_atexit_registered = true;
+        std::atexit(cleanup_global_clipboard_mime_store);
+    }
+    free_mime_bundle_contents(&g_clipboard_mime_store);
+    g_clipboard_mime_store = next_local;
+
+    if ((!ctx || !ctx->headless) && SDL_WasInit(SDL_INIT_VIDEO) != 0u) {
+        auto* sdl_bundle = static_cast<OwnedMimeBundle*>(SDL_calloc(1u, sizeof(OwnedMimeBundle)));
+        if (!sdl_bundle) {
+            return false;
+        }
+        if (!clone_mime_bundle(entries, sdl_bundle)) {
+            SDL_free(sdl_bundle);
+            return false;
+        }
+        bool cleaned_in_call = false;
+        sdl_bundle->sync_cleaned = &cleaned_in_call;
+        const bool sdl_ok = SDL_SetClipboardData(
+            sdl_clipboard_mime_data_cb,
+            sdl_clipboard_mime_cleanup_cb,
+            sdl_bundle,
+            sdl_bundle->mime_ptrs,
+            static_cast<size_t>(sdl_bundle->count));
+        if (sdl_ok) {
+            if (!cleaned_in_call) {
+                sdl_bundle->sync_cleaned = nullptr;
+            }
+        } else if (!cleaned_in_call) {
+            free_mime_bundle_contents(sdl_bundle);
+            SDL_free(sdl_bundle);
+        }
+        return sdl_ok;
+    }
+    return true;
+}
+
+bool has_clipboard_mime(Str mime_type) noexcept {
+    if (!mime_type.chars || mime_type.length == 0u) {
+        return false;
+    }
+    const Context* ctx = current_context();
+    if ((!ctx || !ctx->headless) && SDL_WasInit(SDL_INIT_VIDEO) != 0u) {
+        char mime_cstr[256] = {};
+        if (!copy_mime_to_cstr(mime_type, mime_cstr, sizeof(mime_cstr))) {
+            return false;
+        }
+        return SDL_HasClipboardData(mime_cstr);
+    }
+    return find_local_mime_entry(mime_type) != nullptr;
+}
+
+ClipboardMimeData get_clipboard_mime(Str mime_type, Arena* arena) noexcept {
+    if (!mime_type.chars || mime_type.length == 0u) {
+        return ClipboardMimeData{};
+    }
+    Context* ctx = current_context();
+    Arena* dst_arena = arena ? arena : (ctx ? &ctx->frame_arena : nullptr);
+    if (!dst_arena) {
+        return ClipboardMimeData{};
+    }
+    if ((!ctx || !ctx->headless) && SDL_WasInit(SDL_INIT_VIDEO) != 0u) {
+        char mime_cstr[256] = {};
+        if (!copy_mime_to_cstr(mime_type, mime_cstr, sizeof(mime_cstr))) {
+            return ClipboardMimeData{};
+        }
+        size_t sz = 0u;
+        void* raw = SDL_GetClipboardData(mime_cstr, &sz);
+        if (!raw) {
+            return ClipboardMimeData{};
+        }
+        const ClipboardMimeData out = copy_bytes_to_arena(raw, sz, dst_arena);
+        SDL_free(raw);
+        return out;
+    }
+    const OwnedMimeEntry* e = find_local_mime_entry(mime_type);
+    if (!e) {
+        return ClipboardMimeData{};
+    }
+    return copy_bytes_to_arena(e->bytes, static_cast<size_t>(e->size), dst_arena);
+}
+
 } // namespace etch

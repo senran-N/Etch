@@ -1817,6 +1817,967 @@ bool dock_transfer_pane(
     request_redraw(ctx);
     return true;
 }
+
+namespace {
+
+struct DockJsonWriter {
+    char* buf = nullptr;
+    uint32_t cap = 0u;
+    uint32_t total = 0u;
+
+    void append_raw(const char* src, uint32_t len) noexcept {
+        if (buf && cap > 1u && total < cap - 1u) {
+            const uint32_t avail = (cap - 1u) - total;
+            const uint32_t copy_n = (len < avail) ? len : avail;
+            if (copy_n > 0u) std::memcpy(buf + total, src, copy_n);
+        }
+        total += len;
+    }
+
+    void append_char(char ch) noexcept {
+        append_raw(&ch, 1u);
+    }
+
+    void append_cstr(const char* src) noexcept {
+        append_raw(src, static_cast<uint32_t>(std::strlen(src)));
+    }
+
+    void append_u32(uint32_t v) noexcept {
+        char tmp[16];
+        const int n = std::snprintf(tmp, sizeof(tmp), "%u", v);
+        if (n > 0) append_raw(tmp, static_cast<uint32_t>(n));
+    }
+
+    void append_float(float v, const char* fmt) noexcept {
+        const double d = std::isfinite(v) ? static_cast<double>(v) : 0.0;
+        char tmp[32];
+        const int n = std::snprintf(tmp, sizeof(tmp), fmt, d);
+        if (n > 0) {
+            const uint32_t clamped = static_cast<uint32_t>(
+                static_cast<size_t>(n) < sizeof(tmp) ? static_cast<size_t>(n) : (sizeof(tmp) - 1u));
+            append_raw(tmp, clamped);
+        }
+    }
+
+    void append_escaped(Str s) noexcept {
+        append_char('"');
+        if (s.chars && s.length > 0u) {
+            for (uint32_t i = 0u; i < s.length; ++i) {
+                const unsigned char ch = static_cast<unsigned char>(s.chars[i]);
+                switch (ch) {
+                    case '"':  append_raw("\\\"", 2u); break;
+                    case '\\': append_raw("\\\\", 2u); break;
+                    case '\b': append_raw("\\b", 2u); break;
+                    case '\f': append_raw("\\f", 2u); break;
+                    case '\n': append_raw("\\n", 2u); break;
+                    case '\r': append_raw("\\r", 2u); break;
+                    case '\t': append_raw("\\t", 2u); break;
+                    default:
+                        if (ch < 0x20u) {
+                            char esc[7];
+                            std::snprintf(esc, sizeof(esc), "\\u%04X", static_cast<unsigned int>(ch));
+                            append_raw(esc, 6u);
+                        } else {
+                            const char out_c = static_cast<char>(ch);
+                            append_raw(&out_c, 1u);
+                        }
+                        break;
+                }
+            }
+        }
+        append_char('"');
+    }
+
+    void finish() noexcept {
+        if (buf && cap > 0u) {
+            const uint32_t term = (total < cap - 1u) ? total : (cap - 1u);
+            buf[term] = '\0';
+        }
+    }
+};
+
+struct ParsedDockNode {
+    bool is_split = false;
+    uint32_t axis = 0u;
+    float ratio = 0.5f;
+    float min_first = 120.0f;
+    float min_second = 120.0f;
+    uint32_t first_child = 0u;
+    uint32_t second_child = 0u;
+    bool has_first = false;
+    bool has_second = false;
+    uint32_t active_tab = 0u;
+};
+
+struct ParsedDockTab {
+    uint32_t id = 0u;
+    uint32_t leaf_zero = 0u;
+    char* title = nullptr;
+    uint32_t title_len = 0u;
+    uint16_t icon_id = kInvalidIcon;
+    bool closable = true;
+    bool open = true;
+};
+
+struct DockJsonParser {
+    const char* data = nullptr;
+    uint32_t len = 0u;
+    uint32_t pos = 0u;
+
+    void skip_ws() noexcept {
+        while (pos < len) {
+            const char ch = data[pos];
+            if (ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n') ++pos;
+            else break;
+        }
+    }
+
+    bool consume(char expected) noexcept {
+        skip_ws();
+        if (pos < len && data[pos] == expected) {
+            ++pos;
+            return true;
+        }
+        return false;
+    }
+
+    bool peek(char expected) noexcept {
+        skip_ws();
+        return pos < len && data[pos] == expected;
+    }
+
+    bool parse_hex4(uint32_t* out_val) noexcept {
+        if (pos + 4u > len) return false;
+        uint32_t v = 0u;
+        for (uint32_t i = 0u; i < 4u; ++i) {
+            const char ch = data[pos + i];
+            uint32_t d = 0u;
+            if (ch >= '0' && ch <= '9') d = static_cast<uint32_t>(ch - '0');
+            else if (ch >= 'a' && ch <= 'f') d = 10u + static_cast<uint32_t>(ch - 'a');
+            else if (ch >= 'A' && ch <= 'F') d = 10u + static_cast<uint32_t>(ch - 'A');
+            else return false;
+            v = (v << 4u) | d;
+        }
+        pos += 4u;
+        *out_val = v;
+        return true;
+    }
+
+    static bool append_utf8(char** buf, uint32_t* out_len, uint32_t* out_cap, uint32_t cp) noexcept {
+        char tmp[4];
+        uint32_t n = 0u;
+        if (cp <= 0x7Fu) {
+            tmp[0] = static_cast<char>(cp);
+            n = 1u;
+        } else if (cp <= 0x7FFu) {
+            tmp[0] = static_cast<char>(0xC0u | (cp >> 6u));
+            tmp[1] = static_cast<char>(0x80u | (cp & 0x3Fu));
+            n = 2u;
+        } else if (cp <= 0xFFFFu) {
+            tmp[0] = static_cast<char>(0xE0u | (cp >> 12u));
+            tmp[1] = static_cast<char>(0x80u | ((cp >> 6u) & 0x3Fu));
+            tmp[2] = static_cast<char>(0x80u | (cp & 0x3Fu));
+            n = 3u;
+        } else if (cp <= 0x10FFFFu) {
+            tmp[0] = static_cast<char>(0xF0u | (cp >> 18u));
+            tmp[1] = static_cast<char>(0x80u | ((cp >> 12u) & 0x3Fu));
+            tmp[2] = static_cast<char>(0x80u | ((cp >> 6u) & 0x3Fu));
+            tmp[3] = static_cast<char>(0x80u | (cp & 0x3Fu));
+            n = 4u;
+        } else {
+            return false;
+        }
+        if (*out_len + n + 1u > *out_cap) {
+            uint32_t next_cap = *out_cap ? (*out_cap * 2u) : 64u;
+            while (next_cap < *out_len + n + 1u) next_cap *= 2u;
+            void* p = std::realloc(*buf, next_cap);
+            if (!p) return false;
+            *buf = static_cast<char*>(p);
+            *out_cap = next_cap;
+        }
+        std::memcpy(*buf + *out_len, tmp, n);
+        *out_len += n;
+        (*buf)[*out_len] = '\0';
+        return true;
+    }
+
+    bool parse_string(char** out_str, uint32_t* out_len) noexcept {
+        skip_ws();
+        if (pos >= len || data[pos] != '"') return false;
+        ++pos;
+        char* buf = nullptr;
+        uint32_t blen = 0u;
+        uint32_t bcap = 0u;
+        auto push_byte = [&](char ch) noexcept -> bool {
+            if (!out_str) return true;
+            if (blen + 2u > bcap) {
+                const uint32_t next_cap = bcap ? (bcap * 2u) : 64u;
+                void* p = std::realloc(buf, next_cap);
+                if (!p) return false;
+                buf = static_cast<char*>(p);
+                bcap = next_cap;
+            }
+            buf[blen++] = ch;
+            buf[blen] = '\0';
+            return true;
+        };
+        while (pos < len) {
+            const unsigned char uch = static_cast<unsigned char>(data[pos++]);
+            if (uch == '"') {
+                if (out_str) {
+                    *out_str = buf;
+                    if (out_len) *out_len = blen;
+                } else {
+                    std::free(buf);
+                }
+                return true;
+            }
+            if (uch < 0x20u) {
+                std::free(buf);
+                return false;
+            }
+            if (uch != '\\') {
+                if (!push_byte(static_cast<char>(uch))) {
+                    std::free(buf);
+                    return false;
+                }
+                continue;
+            }
+            if (pos >= len) {
+                std::free(buf);
+                return false;
+            }
+            const char esc = data[pos++];
+            switch (esc) {
+                case '"':  if (!push_byte('"'))  { std::free(buf); return false; } break;
+                case '\\': if (!push_byte('\\')) { std::free(buf); return false; } break;
+                case '/':  if (!push_byte('/'))  { std::free(buf); return false; } break;
+                case 'b':  if (!push_byte('\b')) { std::free(buf); return false; } break;
+                case 'f':  if (!push_byte('\f')) { std::free(buf); return false; } break;
+                case 'n':  if (!push_byte('\n')) { std::free(buf); return false; } break;
+                case 'r':  if (!push_byte('\r')) { std::free(buf); return false; } break;
+                case 't':  if (!push_byte('\t')) { std::free(buf); return false; } break;
+                case 'u': {
+                    uint32_t u1 = 0u;
+                    if (!parse_hex4(&u1)) { std::free(buf); return false; }
+                    uint32_t cp = u1;
+                    if (u1 >= 0xD800u && u1 <= 0xDBFFu) {
+                        if (pos + 2u > len || data[pos] != '\\' || data[pos + 1u] != 'u') {
+                            std::free(buf);
+                            return false;
+                        }
+                        pos += 2u;
+                        uint32_t u2 = 0u;
+                        if (!parse_hex4(&u2) || u2 < 0xDC00u || u2 > 0xDFFFu) {
+                            std::free(buf);
+                            return false;
+                        }
+                        cp = 0x10000u + (((u1 - 0xD800u) << 10u) | (u2 - 0xDC00u));
+                    } else if (u1 >= 0xDC00u && u1 <= 0xDFFFu) {
+                        std::free(buf);
+                        return false;
+                    }
+                    if (out_str && !append_utf8(&buf, &blen, &bcap, cp)) {
+                        std::free(buf);
+                        return false;
+                    }
+                    break;
+                }
+                default:
+                    std::free(buf);
+                    return false;
+            }
+        }
+        std::free(buf);
+        return false;
+    }
+
+    bool parse_bool(bool* out_val) noexcept {
+        skip_ws();
+        if (pos + 4u <= len && std::memcmp(data + pos, "true", 4u) == 0) {
+            pos += 4u;
+            *out_val = true;
+            return true;
+        }
+        if (pos + 5u <= len && std::memcmp(data + pos, "false", 5u) == 0) {
+            pos += 5u;
+            *out_val = false;
+            return true;
+        }
+        return false;
+    }
+
+    bool parse_u32(uint32_t* out_val) noexcept {
+        skip_ws();
+        if (pos >= len || data[pos] < '0' || data[pos] > '9') return false;
+        if (data[pos] == '0' && pos + 1u < len && data[pos + 1u] >= '0' && data[pos + 1u] <= '9') return false;
+        uint64_t acc = 0u;
+        while (pos < len && data[pos] >= '0' && data[pos] <= '9') {
+            acc = acc * 10u + static_cast<uint64_t>(data[pos] - '0');
+            if (acc > UINT32_MAX) return false;
+            ++pos;
+        }
+        *out_val = static_cast<uint32_t>(acc);
+        return true;
+    }
+
+    bool parse_float(float* out_val) noexcept {
+        skip_ws();
+        if (pos >= len) return false;
+        bool neg = false;
+        if (data[pos] == '-') {
+            neg = true;
+            ++pos;
+        }
+        if (pos >= len || data[pos] < '0' || data[pos] > '9') return false;
+        if (data[pos] == '0' && pos + 1u < len && data[pos + 1u] >= '0' && data[pos + 1u] <= '9') return false;
+        double acc = 0.0;
+        while (pos < len && data[pos] >= '0' && data[pos] <= '9') {
+            acc = acc * 10.0 + static_cast<double>(data[pos] - '0');
+            ++pos;
+        }
+        if (pos < len && data[pos] == '.') {
+            ++pos;
+            if (pos >= len || data[pos] < '0' || data[pos] > '9') return false;
+            double scale = 0.1;
+            while (pos < len && data[pos] >= '0' && data[pos] <= '9') {
+                acc += static_cast<double>(data[pos] - '0') * scale;
+                scale *= 0.1;
+                ++pos;
+            }
+        }
+        if (pos < len && (data[pos] == 'e' || data[pos] == 'E')) {
+            ++pos;
+            bool exp_neg = false;
+            if (pos < len && (data[pos] == '+' || data[pos] == '-')) {
+                exp_neg = (data[pos] == '-');
+                ++pos;
+            }
+            if (pos >= len || data[pos] < '0' || data[pos] > '9') return false;
+            int exp_val = 0;
+            while (pos < len && data[pos] >= '0' && data[pos] <= '9') {
+                if (exp_val < 1000) exp_val = exp_val * 10 + (data[pos] - '0');
+                ++pos;
+            }
+            const double factor = std::pow(10.0, exp_neg ? -exp_val : exp_val);
+            acc *= factor;
+        }
+        if (neg) acc = -acc;
+        const float f = static_cast<float>(acc);
+        if (!std::isfinite(f)) return false;
+        *out_val = f;
+        return true;
+    }
+
+    bool skip_value(uint32_t depth) noexcept {
+        if (depth >= 32u) return false;
+        skip_ws();
+        if (pos >= len) return false;
+        const char ch = data[pos];
+        if (ch == '"') {
+            return parse_string(nullptr, nullptr);
+        }
+        if (ch == '{') {
+            ++pos;
+            if (consume('}')) return true;
+            for (;;) {
+                if (!parse_string(nullptr, nullptr)) return false;
+                if (!consume(':')) return false;
+                if (!skip_value(depth + 1u)) return false;
+                if (consume('}')) return true;
+                if (!consume(',')) return false;
+            }
+        }
+        if (ch == '[') {
+            ++pos;
+            if (consume(']')) return true;
+            for (;;) {
+                if (!skip_value(depth + 1u)) return false;
+                if (consume(']')) return true;
+                if (!consume(',')) return false;
+            }
+        }
+        if (ch == 't' || ch == 'f') {
+            bool b = false;
+            return parse_bool(&b);
+        }
+        if (ch == 'n') {
+            if (pos + 4u <= len && std::memcmp(data + pos, "null", 4u) == 0) {
+                pos += 4u;
+                return true;
+            }
+            return false;
+        }
+        if (ch == '-' || (ch >= '0' && ch <= '9')) {
+            float f = 0.0f;
+            return parse_float(&f);
+        }
+        return false;
+    }
+};
+
+void free_parsed_dock_tabs(ParsedDockTab* tabs, uint32_t count) noexcept {
+    if (!tabs) return;
+    for (uint32_t i = 0u; i < count; ++i) std::free(tabs[i].title);
+    std::free(tabs);
+}
+
+void free_dock_tab_array(DockTabSlot* tabs, uint32_t cap) noexcept {
+    if (!tabs) return;
+    for (uint32_t i = 0u; i < cap; ++i) std::free(tabs[i].title_heap);
+    std::free(tabs);
+}
+
+} // namespace
+
+uint32_t dock_save_layout_json(uint32_t dock_id, char* out_buf, uint32_t cap) noexcept {
+    Context* ctx = current_context();
+    if (!ctx || !ctx->active_ui || dock_id == 0u) {
+        if (out_buf && cap > 0u) out_buf[0] = '\0';
+        return 0u;
+    }
+    DockSpaceSlot* slot = dock_slot(ctx, dock_id);
+    if (!slot || slot->root == 0u || slot->root > slot->node_cap || !slot->nodes[slot->root - 1u].used) {
+        if (out_buf && cap > 0u) out_buf[0] = '\0';
+        return 0u;
+    }
+
+    uint32_t stack_map[129];
+    uint32_t stack_order[128];
+    uint32_t* node_map = stack_map;
+    uint32_t* order = stack_order;
+    bool heap_alloc = false;
+    if (slot->node_cap > 128u) {
+        node_map = static_cast<uint32_t*>(std::malloc(size_t(slot->node_cap + 1u) * sizeof(uint32_t)));
+        order = static_cast<uint32_t*>(std::malloc(size_t(slot->node_cap) * sizeof(uint32_t)));
+        if (!node_map || !order) {
+            std::free(node_map);
+            std::free(order);
+            if (out_buf && cap > 0u) out_buf[0] = '\0';
+            return 0u;
+        }
+        heap_alloc = true;
+    }
+    for (uint32_t i = 0u; i <= slot->node_cap; ++i) node_map[i] = UINT32_MAX;
+
+    uint32_t order_count = 0u;
+    node_map[slot->root] = 0u;
+    order[order_count++] = slot->root;
+    for (uint32_t cursor = 0u; cursor < order_count; ++cursor) {
+        const DockNode& dn = slot->nodes[order[cursor] - 1u];
+        if (dn.first != 0u) {
+            const uint32_t children[2] = {dn.first, dn.second};
+            for (uint32_t ci = 0u; ci < 2u; ++ci) {
+                const uint32_t child = children[ci];
+                if (child > 0u && child <= slot->node_cap && slot->nodes[child - 1u].used &&
+                    node_map[child] == UINT32_MAX && order_count < slot->node_cap) {
+                    node_map[child] = order_count;
+                    order[order_count++] = child;
+                }
+            }
+        }
+    }
+
+    DockJsonWriter w{out_buf, cap, 0u};
+    w.append_cstr("{\"root\":0,\"nodes\":[");
+    for (uint32_t k = 0u; k < order_count; ++k) {
+        if (k > 0u) w.append_char(',');
+        const uint32_t node_idx = order[k];
+        const DockNode& dn = slot->nodes[node_idx - 1u];
+        const bool valid_split = dn.first != 0u && dn.second != 0u &&
+                                 dn.first <= slot->node_cap && dn.second <= slot->node_cap &&
+                                 node_map[dn.first] != UINT32_MAX && node_map[dn.second] != UINT32_MAX;
+        if (valid_split) {
+            w.append_cstr("{\"is_split\":true,\"axis\":");
+            w.append_u32(static_cast<uint32_t>(dn.axis));
+            w.append_cstr(",\"ratio\":");
+            w.append_float(split_ratio(dn.split_id), "%.4f");
+            w.append_cstr(",\"min_first\":");
+            w.append_float(dn.min_first, "%.2f");
+            w.append_cstr(",\"min_second\":");
+            w.append_float(dn.min_second, "%.2f");
+            w.append_cstr(",\"first_child\":");
+            w.append_u32(node_map[dn.first]);
+            w.append_cstr(",\"second_child\":");
+            w.append_u32(node_map[dn.second]);
+            w.append_char('}');
+        } else {
+            w.append_cstr("{\"is_split\":false,\"active_tab\":");
+            w.append_u32(dn.active);
+            w.append_cstr(",\"tabs\":[");
+            bool first_tab = true;
+            for (const auto& tab : std::span(slot->tabs, slot->tab_cap)) {
+                if (tab.id == 0u || tab.leaf != node_idx) continue;
+                if (!first_tab) w.append_char(',');
+                first_tab = false;
+                w.append_cstr("{\"id\":");
+                w.append_u32(tab.id);
+                w.append_cstr(",\"title\":");
+                w.append_escaped(dock_tab_title(tab));
+                w.append_cstr(",\"open\":");
+                w.append_cstr(tab.open ? "true" : "false");
+                w.append_cstr(",\"closable\":");
+                w.append_cstr(tab.closable ? "true" : "false");
+                w.append_cstr(",\"icon_id\":");
+                w.append_u32(static_cast<uint32_t>(tab.icon_id));
+                w.append_char('}');
+            }
+            w.append_cstr("]}");
+        }
+    }
+    w.append_cstr("]}");
+    w.finish();
+
+    if (heap_alloc) {
+        std::free(node_map);
+        std::free(order);
+    }
+    return w.total;
+}
+
+bool dock_load_layout_json(uint32_t dock_id, Str json) noexcept {
+    Context* ctx = current_context();
+    if (!ctx || !ctx->active_ui || dock_id == 0u || ctx->active_ui->dock_cursor.space) return false;
+    if (!json.chars || json.length == 0u) return false;
+
+    DockJsonParser parser{json.chars, json.length, 0u};
+    ParsedDockNode* parsed_nodes = nullptr;
+    uint32_t node_count = 0u;
+    uint32_t node_cap = 0u;
+    ParsedDockTab* parsed_tabs = nullptr;
+    uint32_t tab_count = 0u;
+    uint32_t tab_cap = 0u;
+    uint32_t root_idx = 0u;
+    bool has_nodes = false;
+
+    auto cleanup_parsed = [&]() noexcept {
+        std::free(parsed_nodes);
+        free_parsed_dock_tabs(parsed_tabs, tab_count);
+    };
+
+    if (!parser.consume('{')) return false;
+    if (!parser.peek('}')) {
+        for (;;) {
+            char* key = nullptr;
+            uint32_t key_len = 0u;
+            if (!parser.parse_string(&key, &key_len) || !parser.consume(':')) {
+                std::free(key);
+                cleanup_parsed();
+                return false;
+            }
+            const bool is_root = (key_len == 4u && key && std::memcmp(key, "root", 4u) == 0);
+            const bool is_nodes = (key_len == 5u && key && std::memcmp(key, "nodes", 5u) == 0);
+            std::free(key);
+
+            if (is_root) {
+                if (!parser.parse_u32(&root_idx)) {
+                    cleanup_parsed();
+                    return false;
+                }
+            } else if (is_nodes) {
+                if (has_nodes || !parser.consume('[')) {
+                    cleanup_parsed();
+                    return false;
+                }
+                has_nodes = true;
+                if (!parser.peek(']')) {
+                    for (;;) {
+                        if (!parser.consume('{')) {
+                            cleanup_parsed();
+                            return false;
+                        }
+                        if (node_count == node_cap) {
+                            const uint32_t next_cap = node_cap ? (node_cap * 2u) : 16u;
+                            void* p = std::realloc(parsed_nodes, size_t(next_cap) * sizeof(ParsedDockNode));
+                            if (!p) {
+                                cleanup_parsed();
+                                return false;
+                            }
+                            parsed_nodes = static_cast<ParsedDockNode*>(p);
+                            node_cap = next_cap;
+                        }
+                        const uint32_t cur_node_idx = node_count++;
+                        parsed_nodes[cur_node_idx] = {};
+                        ParsedDockNode& cur = parsed_nodes[cur_node_idx];
+
+                        if (!parser.peek('}')) {
+                            for (;;) {
+                                char* nkey = nullptr;
+                                uint32_t nkey_len = 0u;
+                                if (!parser.parse_string(&nkey, &nkey_len) || !parser.consume(':')) {
+                                    std::free(nkey);
+                                    cleanup_parsed();
+                                    return false;
+                                }
+                                auto key_eq = [&](const char* lit, uint32_t llen) noexcept -> bool {
+                                    return nkey_len == llen && nkey && std::memcmp(nkey, lit, llen) == 0;
+                                };
+                                bool field_ok = true;
+                                if (key_eq("is_split", 8u)) {
+                                    field_ok = parser.parse_bool(&cur.is_split);
+                                } else if (key_eq("axis", 4u)) {
+                                    field_ok = parser.parse_u32(&cur.axis) && cur.axis <= 1u;
+                                } else if (key_eq("ratio", 5u)) {
+                                    field_ok = parser.parse_float(&cur.ratio);
+                                } else if (key_eq("min_first", 9u)) {
+                                    field_ok = parser.parse_float(&cur.min_first) && cur.min_first >= 0.0f;
+                                } else if (key_eq("min_second", 10u)) {
+                                    field_ok = parser.parse_float(&cur.min_second) && cur.min_second >= 0.0f;
+                                } else if (key_eq("first_child", 11u)) {
+                                    field_ok = parser.parse_u32(&cur.first_child);
+                                    cur.has_first = field_ok;
+                                } else if (key_eq("second_child", 12u)) {
+                                    field_ok = parser.parse_u32(&cur.second_child);
+                                    cur.has_second = field_ok;
+                                } else if (key_eq("active_tab", 10u)) {
+                                    field_ok = parser.parse_u32(&cur.active_tab);
+                                } else if (key_eq("tabs", 4u)) {
+                                    if (!parser.consume('[')) {
+                                        field_ok = false;
+                                    } else if (!parser.peek(']')) {
+                                        for (;;) {
+                                            if (!parser.consume('{')) {
+                                                field_ok = false;
+                                                break;
+                                            }
+                                            if (tab_count == tab_cap) {
+                                                const uint32_t next_cap = tab_cap ? (tab_cap * 2u) : 16u;
+                                                void* p = std::realloc(parsed_tabs, size_t(next_cap) * sizeof(ParsedDockTab));
+                                                if (!p) {
+                                                    field_ok = false;
+                                                    break;
+                                                }
+                                                parsed_tabs = static_cast<ParsedDockTab*>(p);
+                                                tab_cap = next_cap;
+                                            }
+                                            ParsedDockTab& t = parsed_tabs[tab_count++];
+                                            t = {};
+                                            t.leaf_zero = cur_node_idx;
+                                            if (!parser.peek('}')) {
+                                                for (;;) {
+                                                    char* tkey = nullptr;
+                                                    uint32_t tkey_len = 0u;
+                                                    if (!parser.parse_string(&tkey, &tkey_len) || !parser.consume(':')) {
+                                                        std::free(tkey);
+                                                        field_ok = false;
+                                                        break;
+                                                    }
+                                                    auto tkey_eq = [&](const char* lit, uint32_t llen) noexcept -> bool {
+                                                        return tkey_len == llen && tkey && std::memcmp(tkey, lit, llen) == 0;
+                                                    };
+                                                    bool tok = true;
+                                                    if (tkey_eq("id", 2u)) {
+                                                        tok = parser.parse_u32(&t.id);
+                                                    } else if (tkey_eq("title", 5u)) {
+                                                        std::free(t.title);
+                                                        t.title = nullptr;
+                                                        t.title_len = 0u;
+                                                        tok = parser.parse_string(&t.title, &t.title_len);
+                                                    } else if (tkey_eq("open", 4u)) {
+                                                        tok = parser.parse_bool(&t.open);
+                                                    } else if (tkey_eq("closable", 8u)) {
+                                                        tok = parser.parse_bool(&t.closable);
+                                                    } else if (tkey_eq("icon_id", 7u)) {
+                                                        uint32_t icon_u32 = 0u;
+                                                        tok = parser.parse_u32(&icon_u32) && icon_u32 <= 0xFFFFu;
+                                                        if (tok) t.icon_id = static_cast<uint16_t>(icon_u32);
+                                                    } else {
+                                                        tok = parser.skip_value(0u);
+                                                    }
+                                                    std::free(tkey);
+                                                    if (!tok) { field_ok = false; break; }
+                                                    if (parser.consume('}')) break;
+                                                    if (!parser.consume(',')) { field_ok = false; break; }
+                                                }
+                                            } else {
+                                                (void)parser.consume('}');
+                                            }
+                                            if (!field_ok) break;
+                                            if (parser.consume(']')) break;
+                                            if (!parser.consume(',')) { field_ok = false; break; }
+                                        }
+                                    } else {
+                                        (void)parser.consume(']');
+                                    }
+                                } else {
+                                    field_ok = parser.skip_value(0u);
+                                }
+                                std::free(nkey);
+                                if (!field_ok) {
+                                    cleanup_parsed();
+                                    return false;
+                                }
+                                if (parser.consume('}')) break;
+                                if (!parser.consume(',')) {
+                                    cleanup_parsed();
+                                    return false;
+                                }
+                            }
+                        } else {
+                            (void)parser.consume('}');
+                        }
+                        if (parser.consume(']')) break;
+                        if (!parser.consume(',')) {
+                            cleanup_parsed();
+                            return false;
+                        }
+                    }
+                } else {
+                    (void)parser.consume(']');
+                }
+            } else {
+                if (!parser.skip_value(0u)) {
+                    cleanup_parsed();
+                    return false;
+                }
+            }
+
+            if (parser.consume('}')) break;
+            if (!parser.consume(',')) {
+                cleanup_parsed();
+                return false;
+            }
+        }
+    } else {
+        (void)parser.consume('}');
+    }
+
+    parser.skip_ws();
+    if (parser.pos != parser.len || !has_nodes || node_count == 0u || root_idx >= node_count) {
+        cleanup_parsed();
+        return false;
+    }
+
+    // Validate binary tree structure (acyclic, reachable, valid children) and unique non-zero tab IDs.
+    uint8_t* visited = static_cast<uint8_t*>(std::calloc(node_count, 1u));
+    uint32_t* parents = static_cast<uint32_t*>(std::calloc(node_count, sizeof(uint32_t)));
+    uint32_t* stack = static_cast<uint32_t*>(std::malloc(size_t(node_count) * sizeof(uint32_t)));
+    if (!visited || !parents || !stack) {
+        std::free(visited);
+        std::free(parents);
+        std::free(stack);
+        cleanup_parsed();
+        return false;
+    }
+
+    bool valid = true;
+    uint32_t sp = 0u;
+    uint32_t visited_count = 0u;
+    visited[root_idx] = 1u;
+    parents[root_idx] = 0u;
+    stack[sp++] = root_idx;
+    while (sp > 0u && valid) {
+        const uint32_t idx = stack[--sp];
+        ++visited_count;
+        const ParsedDockNode& pn = parsed_nodes[idx];
+        if (pn.is_split) {
+            if (!pn.has_first || !pn.has_second || pn.first_child >= node_count ||
+                pn.second_child >= node_count || pn.first_child == pn.second_child ||
+                visited[pn.first_child] || visited[pn.second_child]) {
+                valid = false;
+                break;
+            }
+            visited[pn.first_child] = 1u;
+            visited[pn.second_child] = 1u;
+            parents[pn.first_child] = idx + 1u;
+            parents[pn.second_child] = idx + 1u;
+            stack[sp++] = pn.first_child;
+            stack[sp++] = pn.second_child;
+        }
+    }
+    if (visited_count != node_count) valid = false;
+
+    for (uint32_t i = 0u; i < tab_count && valid; ++i) {
+        const ParsedDockTab& t = parsed_tabs[i];
+        if (t.id == 0u || t.leaf_zero >= node_count || parsed_nodes[t.leaf_zero].is_split) {
+            valid = false;
+            break;
+        }
+        for (uint32_t j = 0u; j < i; ++j) {
+            if (parsed_tabs[j].id == t.id) {
+                valid = false;
+                break;
+            }
+        }
+    }
+
+    std::free(visited);
+    std::free(stack);
+    if (!valid) {
+        std::free(parents);
+        cleanup_parsed();
+        return false;
+    }
+
+    // Build complete replacement arrays BEFORE mutating existing dock state.
+    uint32_t new_node_cap = 32u;
+    while (new_node_cap < node_count) new_node_cap *= 2u;
+    uint32_t new_tab_cap = 32u;
+    while (new_tab_cap < tab_count) new_tab_cap *= 2u;
+
+    DockNode* new_nodes = static_cast<DockNode*>(std::malloc(size_t(new_node_cap) * sizeof(DockNode)));
+    DockTabSlot* new_tabs = static_cast<DockTabSlot*>(std::malloc(size_t(new_tab_cap) * sizeof(DockTabSlot)));
+    if (!new_nodes || !new_tabs) {
+        std::free(new_nodes);
+        std::free(new_tabs);
+        std::free(parents);
+        cleanup_parsed();
+        return false;
+    }
+    for (uint32_t i = 0u; i < new_node_cap; ++i) new_nodes[i] = {};
+    for (uint32_t i = 0u; i < new_tab_cap; ++i) new_tabs[i] = {};
+
+    uint32_t split_seq = 0u;
+    for (uint32_t i = 0u; i < node_count; ++i) {
+        const ParsedDockNode& pn = parsed_nodes[i];
+        DockNode& dn = new_nodes[i];
+        dn.used = true;
+        dn.parent = parents[i];
+        if (pn.is_split) {
+            dn.first = pn.first_child + 1u;
+            dn.second = pn.second_child + 1u;
+            dn.axis = pn.axis == 1u ? Axis::Col : Axis::Row;
+            dn.min_first = pn.min_first;
+            dn.min_second = pn.min_second;
+            dn.split_id = id_index(dock_id, kDockSplitTagBase + split_seq++);
+            dn.active = 0u;
+        } else {
+            dn.active = pn.active_tab;
+        }
+    }
+
+    bool tabs_alloc_ok = true;
+    for (uint32_t i = 0u; i < tab_count; ++i) {
+        const ParsedDockTab& pt = parsed_tabs[i];
+        DockTabSlot& dt = new_tabs[i];
+        dt.id = pt.id;
+        dt.leaf = pt.leaf_zero + 1u;
+        dt.icon_id = pt.icon_id;
+        dt.closable = pt.closable;
+        dt.open = pt.open;
+        if (pt.title_len >= sizeof(dt.title_inline)) {
+            uint32_t tcap = 64u;
+            while (tcap <= pt.title_len) tcap *= 2u;
+            dt.title_heap = static_cast<char*>(std::calloc(tcap, 1u));
+            if (!dt.title_heap) {
+                tabs_alloc_ok = false;
+                break;
+            }
+            dt.title_cap = tcap;
+        }
+        char* dst_title = dt.title_heap ? dt.title_heap : dt.title_inline;
+        if (pt.title_len > 0u && pt.title) std::memcpy(dst_title, pt.title, pt.title_len);
+        dst_title[pt.title_len] = '\0';
+    }
+    std::free(parents);
+
+    if (!tabs_alloc_ok) {
+        std::free(new_nodes);
+        free_dock_tab_array(new_tabs, new_tab_cap);
+        cleanup_parsed();
+        return false;
+    }
+
+    // Ensure destination slot exists before freeing any old buffers.
+    auto& ui = *ctx->active_ui;
+    DockSpaceSlot* slot = dock_slot(ctx, dock_id);
+    if (!slot) {
+        if (ui.dock_space_count == ui.dock_space_cap) {
+            const uint32_t next_cap = ui.dock_space_cap ? (ui.dock_space_cap * 2u) : 4u;
+            void* p = std::realloc(ui.dock_spaces, size_t(next_cap) * sizeof(DockSpaceSlot));
+            if (!p) {
+                std::free(new_nodes);
+                free_dock_tab_array(new_tabs, new_tab_cap);
+                cleanup_parsed();
+                return false;
+            }
+            ui.dock_spaces = static_cast<DockSpaceSlot*>(p);
+            ui.dock_space_cap = next_cap;
+        }
+        slot = &ui.dock_spaces[ui.dock_space_count++];
+        *slot = {};
+    }
+
+    // Atomic commit.
+    free_dock_tab_array(slot->tabs, slot->tab_cap);
+    std::free(slot->nodes);
+    slot->id = dock_id;
+    slot->root = root_idx + 1u;
+    slot->split_seq = split_seq;
+    slot->nodes = new_nodes;
+    slot->node_cap = new_node_cap;
+    slot->tabs = new_tabs;
+    slot->tab_cap = new_tab_cap;
+
+    for (uint32_t i = 0u; i < node_count; ++i) {
+        if (parsed_nodes[i].is_split) {
+            set_split_ratio(slot->nodes[i].split_id, parsed_nodes[i].ratio);
+        } else {
+            slot->nodes[i].active = dock_visible(slot, i + 1u);
+        }
+    }
+
+    cleanup_parsed();
+    request_redraw(ctx);
+    return true;
+}
+
+uint32_t dock_redock_window_panes(
+    SDL_Window* closing_window,
+    uint32_t src_dock_id,
+    uint32_t dst_dock_id,
+    uint32_t target_pane_id,
+    DockZone zone,
+    SDL_Window* dst_window) noexcept
+{
+    Context* ctx = current_context();
+    if (!ctx || !src_dock_id || !dst_dock_id) return 0u;
+    if (zone < DockZone::None || zone > DockZone::Bottom) return 0u;
+    WindowUiState* src_ui = resolve_dock_ui(ctx, closing_window);
+    WindowUiState* dst_ui = resolve_dock_ui(ctx, dst_window);
+    if (!src_ui || !dst_ui || src_ui->dock_cursor.space || dst_ui->dock_cursor.space) return 0u;
+    if (src_ui == dst_ui && src_dock_id == dst_dock_id) return 0u;
+
+    DockSpaceSlot* src_slot = dock_slot_in(src_ui, src_dock_id);
+    if (!src_slot || !src_slot->tabs || src_slot->tab_cap == 0u) return 0u;
+
+    uint32_t open_count = 0u;
+    for (const auto& tab : std::span(src_slot->tabs, src_slot->tab_cap)) {
+        if (tab.id != 0u && tab.open) ++open_count;
+    }
+    if (open_count == 0u) return 0u;
+
+    uint32_t stack_ids[64];
+    uint32_t* pane_ids = stack_ids;
+    bool heap_ids = false;
+    if (open_count > 64u) {
+        pane_ids = static_cast<uint32_t*>(std::malloc(size_t(open_count) * sizeof(uint32_t)));
+        if (!pane_ids) return 0u;
+        heap_ids = true;
+    }
+    uint32_t idx = 0u;
+    for (const auto& tab : std::span(src_slot->tabs, src_slot->tab_cap)) {
+        if (tab.id != 0u && tab.open) pane_ids[idx++] = tab.id;
+    }
+
+    uint32_t moved = 0u;
+    uint32_t first_moved_pane = 0u;
+    for (uint32_t i = 0u; i < open_count; ++i) {
+        const uint32_t pid = pane_ids[i];
+        const bool group_into_first = (moved > 0u && first_moved_pane != 0u &&
+                                       zone != DockZone::Center && zone != DockZone::None);
+        const uint32_t cur_target = group_into_first ? first_moved_pane : target_pane_id;
+        const DockZone cur_zone = group_into_first ? DockZone::Center : zone;
+        if (dock_transfer_pane(src_dock_id, dst_dock_id, pid, cur_target, cur_zone, 0.5f,
+                               closing_window, dst_window)) {
+            if (moved == 0u) first_moved_pane = pid;
+            ++moved;
+        }
+    }
+
+    if (heap_ids) std::free(pane_ids);
+    return moved;
+}
 void begin_dock_space(const DockSpaceDesc& desc_in) noexcept {
     Context* ctx = current_context(); if (!ctx || !ctx->in_frame || !desc_in.id || ctx->active_ui->dock_cursor.space) return;
     const Theme& thm = active_theme(ctx);
@@ -1999,11 +2960,64 @@ TableMetadata* table_metadata(Context* ctx, uint32_t id) noexcept {
     for (auto& m : std::span(ctx->active_ui->tables, ctx->active_ui->table_count)) if (m.id == id) return &m;
     return nullptr;
 }
+TableMetadata* table_metadata_get_or_create(Context* ctx, uint32_t id) noexcept {
+    if (TableMetadata* existing = table_metadata(ctx, id)) return existing;
+    auto& ui = *ctx->active_ui;
+    if (ui.table_count == ui.table_cap) {
+        const uint32_t cap = ui.table_cap ? ui.table_cap * 2u : 16u;
+        void* p = std::realloc(ui.tables, size_t(cap) * sizeof(TableMetadata));
+        if (!p) return nullptr;
+        ui.tables = static_cast<TableMetadata*>(p);
+        ui.table_cap = cap;
+    }
+    TableMetadata* created = &ui.tables[ui.table_count++];
+    *created = {};
+    created->id = id;
+    return created;
+}
+void table_build_visual_order(const TableMetadata* meta, uint32_t count, uint32_t out_order[kMaxTableColumns]) noexcept {
+    if (meta && meta->has_custom_order && count > 0u && count <= kMaxTableColumns) {
+        uint32_t seen = 0u;
+        bool valid = true;
+        for (uint32_t i = 0u; i < count; ++i) {
+            const uint32_t orig = meta->column_order[i];
+            if (orig >= count || (seen & (1u << orig)) != 0u) {
+                valid = false;
+                break;
+            }
+            seen |= (1u << orig);
+            out_order[i] = orig;
+        }
+        if (valid) return;
+    }
+    for (uint32_t i = 0u; i < count; ++i) out_order[i] = i;
+}
+float table_hscroll_x(Context* ctx, const TableDesc& d) noexcept {
+    if (!d.horizontal_scroll) return 0.0f;
+    const WidgetState* outer_ws = state_map_find(&ctx->active_ui->states, id_index(d.id, kTableOuterTag));
+    return (outer_ws && outer_ws->scroll_pos.x > 0.0f) ? outer_ws->scroll_pos.x : 0.0f;
+}
+uint32_t table_effective_frozen(Context* ctx, const TableStackEntry& t) noexcept {
+    if (!t.desc.horizontal_scroll) return 0u;
+    const TableMetadata* meta = table_metadata(ctx, t.desc.id);
+    if (!meta || meta->frozen_columns == 0u) return 0u;
+    return meta->frozen_columns < t.count ? meta->frozen_columns : t.count;
+}
 uint32_t table_col_id(const TableDesc& d, uint32_t c) noexcept {
     return d.columns[c].id ? d.columns[c].id : id_index(d.id, kTableColTagBase + c);
 }
-void table_close_row(TableStackEntry& t) noexcept {
-    if (t.cell_open) { end_box(); t.cell_open = false; }
+void table_close_cell(Context* ctx, TableStackEntry& t) noexcept {
+    if (!t.cell_open) return;
+    end_box();
+    t.cell_open = false;
+    const uint32_t prev_vis = t.col_cursor - 1u;
+    const uint32_t frozen_count = table_effective_frozen(ctx, t);
+    if (prev_vis < frozen_count && table_hscroll_x(ctx, t.desc) > 0.0f) {
+        pop_layer();
+    }
+}
+void table_close_row(Context* ctx, TableStackEntry& t) noexcept {
+    table_close_cell(ctx, t);
     if (t.row_open) { end_box(); t.row_open = false; }
 }
 }
@@ -2072,17 +3086,7 @@ TableResult begin_table(const TableDesc& desc_in) noexcept {
     desc.hover_row_color = resolve_theme_color(desc.hover_row_color, thm.selection_hover);
     desc.border_color = resolve_theme_color(desc.border_color, thm.border_line);
     desc.radius = resolve_theme_corners(desc.radius, Corners::all(thm.radius_table_px));
-    auto* metadata = table_metadata(ctx, desc.id);
-    if (!metadata) {
-        auto& ui = *ctx->active_ui;
-        if (ui.table_count == ui.table_cap) {
-            const uint32_t cap = ui.table_cap ? ui.table_cap * 2u : 16u;
-            void* p = std::realloc(ui.tables, size_t(cap) * sizeof(TableMetadata));
-            if (!p) return {};
-            ui.tables = static_cast<TableMetadata*>(p); ui.table_cap = cap;
-        }
-        metadata = &ui.tables[ui.table_count++]; *metadata = {}; metadata->id = desc.id;
-    }
+    auto* metadata = table_metadata_get_or_create(ctx, desc.id);
     if (!metadata || !ensure_table_stack(ctx->active_ui)) return {};
     auto* ws = state_map_get_or_insert(&ctx->active_ui->states, desc.id, ctx->active_ui->frame_index);
     WidgetCold* tc = ensure_widget_cold(ws);
@@ -2091,7 +3095,12 @@ TableResult begin_table(const TableDesc& desc_in) noexcept {
     t = TableStackEntry{};
     t.desc = desc;
     t.count = static_cast<uint32_t>(desc.columns.size());
-    for (uint32_t c = 0; c < t.count; ++c) t.columns[c] = desc.columns[c];
+    if (metadata->count != 0u && metadata->count != t.count && metadata->column_ids[0] != 0u) {
+        metadata->has_custom_order = false;
+    }
+    uint32_t vis_order[kMaxTableColumns] = {};
+    table_build_visual_order(metadata, t.count, vis_order);
+    for (uint32_t vis = 0u; vis < t.count; ++vis) t.columns[vis] = desc_in.columns[vis_order[vis]];
     t.desc.columns = {t.columns, t.count};
     if (!tc->table_initialized || tc->table_sort_column >= t.count) {
         tc->table_initialized = true; tc->table_sort_column = desc.default_sort_column < t.count ? desc.default_sort_column : 0;
@@ -2126,8 +3135,9 @@ TableResult begin_table(const TableDesc& desc_in) noexcept {
     const uint32_t outer_id = id_index(desc.id, kTableOuterTag);
     const float gutter = desc.show_scrollbar ? 10.0f : 0;
     bool resizing = false;
-    for (uint32_t c = 0; c < t.count; ++c) {
-        const auto& col = t.columns[c]; const uint32_t cid = table_col_id(desc, c), rid = id_index(cid, 0x7600u);
+    for (uint32_t vis = 0u; vis < t.count; ++vis) {
+        const uint32_t orig = vis_order[vis];
+        const auto& col = t.columns[vis]; const uint32_t cid = table_col_id(desc_in, orig), rid = id_index(cid, 0x7600u);
         state_map_get_or_insert(&ctx->active_ui->states, rid, ctx->active_ui->frame_index);
         auto* cw = state_map_get_or_insert(&ctx->active_ui->states, cid, ctx->active_ui->frame_index);
         WidgetCold* cwc = ensure_widget_cold(cw);
@@ -2147,44 +3157,53 @@ TableResult begin_table(const TableDesc& desc_in) noexcept {
         }
         resizing = resizing || active || ended;
         if (cwc->column_override || col.sizing == TableColumnSizing::Fixed) {
-            t.col_widths[c] = clamp_range(cwc->column_override ? cwc->column_width : col.width, col.min_width, col.max_width);
-            t.tracks[c] = GridTrack::px(t.col_widths[c]);
+            t.col_widths[vis] = clamp_range(cwc->column_override ? cwc->column_width : col.width, col.min_width, col.max_width);
+            t.tracks[vis] = GridTrack::px(t.col_widths[vis]);
         } else {
-            t.tracks[c] = GridTrack::fr(col.width > 0 ? col.width : 1,col.min_width,col.max_width);
-            t.col_widths[c] = cwc->column_width > 0 ? cwc->column_width : col.min_width;
+            t.tracks[vis] = GridTrack::fr(col.width > 0 ? col.width : 1,col.min_width,col.max_width);
+            t.col_widths[vis] = cwc->column_width > 0 ? cwc->column_width : col.min_width;
         }
     }
     float content_min=desc.padding.left+desc.padding.right+gutter;
-    for(uint32_t c=0;c<t.count;++c) content_min+=t.tracks[c].kind==SizingKind::Fixed ? t.col_widths[c] : t.columns[c].min_width;
+    for(uint32_t vis=0u;vis<t.count;++vis) content_min+=t.tracks[vis].kind==SizingKind::Fixed ? t.col_widths[vis] : t.columns[vis].min_width;
     if(!desc.horizontal_scroll) content_min=0;
     begin_box({ .id = id_index(desc.id,0x7402u), .axis = Axis::Col, .width = desc.width.kind == SizingKind::Grow ? Sizing::percent(1) : desc.width, .height = desc.height, .shrink_height = true });
     begin_box({ .id = outer_id, .axis = Axis::Col, .width = desc.width, .height = desc.height,
         .padding={0,0,0,desc.horizontal_scroll ? 12.0f : 0.0f},
         .background = desc.background, .border_color = desc.border_color, .border_width = desc.border_width, .radius = desc.radius,
         .clip_children = true, .scroll_x=desc.horizontal_scroll,.show_scrollbar=desc.show_scrollbar, .shrink_height = true });
+    const float hscroll_x = table_hscroll_x(ctx, desc);
+    const uint32_t frozen_count = table_effective_frozen(ctx, t);
     begin_box({ .id = id_index(desc.id, kTableHeaderTag), .width = Sizing::grow(content_min), .height = Sizing::fixed(desc.header_height_px),
         .padding = {desc.padding.left, desc.padding.right + gutter, 0, 0}, .background = desc.header_background, .grid_tracks = {t.tracks,t.count}, .shrink_width = true });
-    for (uint32_t c = 0; c < t.count; ++c) {
-        const auto& col = t.columns[c]; const uint32_t cid = table_col_id(desc, c), hid = id_index(cid, 0x7601u), rid = id_index(cid, 0x7600u);
+    for (uint32_t vis = 0u; vis < t.count; ++vis) {
+        const uint32_t orig = vis_order[vis];
+        const auto& col = t.columns[vis]; const uint32_t cid = table_col_id(desc_in, orig), hid = id_index(cid, 0x7601u), rid = id_index(cid, 0x7600u);
         auto* cw = state_map_find(&ctx->active_ui->states, cid);
-        if (WidgetCold* cwc = ensure_widget_cold(cw)) cwc->column_width = t.col_widths[c];
+        if (WidgetCold* cwc = ensure_widget_cold(cw)) cwc->column_width = t.col_widths[vis];
         const bool header_kbd = focused(hid) && ctx->active_ui->ime_comp_len == 0u &&
             (consume_key_pressed(SDLK_RETURN) || consume_key_pressed(SDLK_KP_ENTER) || consume_key_pressed(SDLK_SPACE));
         if (col.sortable && (clicked(hid) || header_kbd) && !resizing) {
-            result.sort_descending = result.sort_column == c ? !result.sort_descending : true;
-            result.sort_column = c; result.sort_changed = true;
+            result.sort_descending = result.sort_column == orig ? !result.sort_descending : true;
+            result.sort_column = orig; result.sort_changed = true;
         }
+        const bool pin_frozen = (vis < frozen_count && hscroll_x > 0.0f);
+        if (pin_frozen) push_layer({ .translate = { hscroll_x, 0.0f } });
         begin_box({ .id = hid, .width = Sizing::grow(), .height = Sizing::grow(),
-            .padding = {desc.cell_padding_x, desc.cell_padding_x + (col.sortable && result.sort_column == c ? 18.0f : 0.0f), 0, 0}, .align_x = col.align_x, .align_y = AlignY::Center, .clip_children = true, .focusable = true });
+            .padding = {desc.cell_padding_x, desc.cell_padding_x + (col.sortable && result.sort_column == orig ? 18.0f : 0.0f), 0, 0},
+            .align_x = col.align_x, .align_y = AlignY::Center,
+            .background = pin_frozen ? desc.header_background : Color{},
+            .clip_children = true, .focusable = true });
         text(col.title, { .font_size_px = desc.header_font_size_px, .wrap = false, .ellipsis = true });
         auto* paint=ctx->frame_arena.alloc<TableHeaderPaint>();
         if (paint) {
-            *paint={desc.id,c,desc.show_column_lines,col.sortable && result.sort_column==c,result.sort_descending,desc.border_color,thm.accent};
+            *paint={desc.id,orig,desc.show_column_lines || (vis + 1u == frozen_count && frozen_count < t.count),col.sortable && result.sort_column==orig,result.sort_descending,desc.border_color,thm.accent};
             draw_after_layout(paint_table_header,paint);
         }
         if (col.resizable) box({ .id = rid, .width = Sizing::fixed(6), .height = Sizing::fixed(desc.header_height_px),
             .attach_to = AttachTo::Parent, .anchor_element = Anchor::TopRight, .anchor_parent = Anchor::TopRight, .floating_offset = {0,0} });
         end_box();
+        if (pin_frozen) pop_layer();
     }
     end_box();
     ws = state_map_find(&ctx->active_ui->states, desc.id);
@@ -2192,7 +3211,13 @@ TableResult begin_table(const TableDesc& desc_in) noexcept {
         tcold->table_sort_column = result.sort_column; tcold->table_sort_descending = result.sort_descending;
     }
     metadata->count = t.count;
-    for (uint32_t c = 0; c < t.count; ++c) { metadata->widths[c] = t.col_widths[c]; metadata->column_ids[c] = table_col_id(desc,c); metadata->min_widths[c] = t.columns[c].min_width; metadata->max_widths[c] = t.columns[c].max_width; }
+    for (uint32_t vis = 0u; vis < t.count; ++vis) {
+        const uint32_t orig = vis_order[vis];
+        metadata->widths[orig] = t.col_widths[vis];
+        metadata->column_ids[orig] = table_col_id(desc_in, orig);
+        metadata->min_widths[orig] = t.columns[vis].min_width;
+        metadata->max_widths[orig] = t.columns[vis].max_width;
+    }
     begin_box({ .axis = Axis::Col, .width = Sizing::grow(content_min), .height = Sizing::grow(), .shrink_width = true, .shrink_height=true });
     result.slice = begin_virtual_list({ .id = desc.id, .item_count = desc.item_count, .item_height_px = desc.row_height_px,
         .row_gap_px = desc.row_gap_px, .overscan_rows = desc.overscan_rows, .width = Sizing::grow(), .height = Sizing::grow(),
@@ -2223,7 +3248,7 @@ TableResult begin_table(const TableDesc& desc_in) noexcept {
 }
 bool table_next_row(uint32_t* out, Color bg, Color border) noexcept {
     Context* ctx = current_context(); if (!ctx || !ctx->in_frame || !ctx->active_ui->table_depth) return false;
-    auto& t = ctx->active_ui->table_stack[ctx->active_ui->table_depth - 1]; table_close_row(t);
+    auto& t = ctx->active_ui->table_stack[ctx->active_ui->table_depth - 1]; table_close_row(ctx, t);
     if (t.cursor_row >= t.end_row) return false;
     const auto& d = t.desc; const uint32_t row = t.cursor_row++, rid = id_index(d.id, 0x100000u + row);
     if (out) *out = row;
@@ -2253,16 +3278,41 @@ TableRowResult table_row_result(uint32_t table_id, uint32_t row_index) noexcept 
 bool table_next_column() noexcept {
     Context* ctx = current_context(); if (!ctx || !ctx->in_frame || !ctx->active_ui->table_depth) return false;
     auto& t = ctx->active_ui->table_stack[ctx->active_ui->table_depth - 1]; if (!t.row_open) return false;
-    if (t.cell_open) { end_box(); t.cell_open = false; }
+    table_close_cell(ctx, t);
     if (t.col_cursor == t.count) return false;
-    const uint32_t c = t.col_cursor++;
-    begin_box({ .id = id_index(id_index(t.desc.id, 0x100000u + t.cursor_row - 1),c), .width = Sizing::grow(), .height = Sizing::grow(),
-        .padding = Padding::xy(t.desc.cell_padding_x,0), .align_x = t.columns[c].align_x, .align_y = AlignY::Center, .clip_children = true, .pointer_passthrough = true });
+    const uint32_t vis = t.col_cursor++;
+    const TableMetadata* meta = table_metadata(ctx, t.desc.id);
+    uint32_t vis_order[kMaxTableColumns] = {};
+    table_build_visual_order(meta, t.count, vis_order);
+    const uint32_t orig = vis_order[vis];
+    const uint32_t row = t.cursor_row - 1u;
+    const uint32_t rid = id_index(t.desc.id, 0x100000u + row);
+    const uint32_t frozen_count = table_effective_frozen(ctx, t);
+    const float hscroll_x = table_hscroll_x(ctx, t.desc);
+    const bool pin_frozen = (vis < frozen_count && hscroll_x > 0.0f);
+    Color cell_bg = {};
+    if (pin_frozen) {
+        const auto& d = t.desc;
+        Color row_color = (row & 1u) ? d.zebra_color : Color{};
+        const bool selected = (d.selection.selected_words || d.selection.focused_row)
+            ? table_row_selected(d.selection, row)
+            : (d.selected_row && *d.selected_row == row);
+        if (selected) row_color = d.selected_row_color;
+        if (hovered(rid)) {
+            const Color under = row_color.a ? row_color : d.background;
+            row_color = Color::blend_over(under, d.hover_row_color);
+        }
+        cell_bg = row_color.a == 255u ? row_color : Color::blend_over(d.background, row_color);
+        push_layer({ .translate = { hscroll_x, 0.0f } });
+    }
+    begin_box({ .id = id_index(rid, orig), .width = Sizing::grow(), .height = Sizing::grow(),
+        .padding = Padding::xy(t.desc.cell_padding_x, 0), .align_x = t.columns[vis].align_x, .align_y = AlignY::Center,
+        .background = cell_bg, .clip_children = true, .pointer_passthrough = true });
     t.cell_open = true; return true;
 }
 void end_table() noexcept {
     Context* ctx = current_context(); if (!ctx || !ctx->in_frame || !ctx->active_ui->table_depth) return;
-    auto& t = ctx->active_ui->table_stack[--ctx->active_ui->table_depth]; table_close_row(t); end_virtual_list(); end_box(); end_box(); end_box();
+    auto& t = ctx->active_ui->table_stack[--ctx->active_ui->table_depth]; table_close_row(ctx, t); end_virtual_list(); end_box(); end_box(); end_box();
 }
 float table_column_width(uint32_t id, uint32_t col) noexcept {
     Context* ctx = current_context(); if (!ctx || !id || col >= kMaxTableColumns) return 0;
@@ -2288,6 +3338,72 @@ void set_table_sort(uint32_t id, uint32_t col, bool descending) noexcept {
     request_redraw(ctx);
 }
 void table_scroll_to_row(uint32_t id, uint32_t row, float height, AlignY align) noexcept { virtual_list_scroll_to_row(id,row,height,align); }
+void table_set_frozen_columns(uint32_t table_id, uint32_t frozen_count) noexcept {
+    Context* ctx = current_context();
+    if (!ctx || !ctx->active_ui || table_id == 0u) return;
+    for (uint32_t i = 0u; i < ctx->active_ui->table_depth; ++i) {
+        if (ctx->active_ui->table_stack[i].desc.id == table_id) return;
+    }
+    TableMetadata* meta = table_metadata_get_or_create(ctx, table_id);
+    if (!meta) return;
+    const uint32_t clamped = frozen_count > kMaxTableColumns ? kMaxTableColumns : frozen_count;
+    if (meta->frozen_columns != clamped) {
+        meta->frozen_columns = clamped;
+        request_redraw(ctx);
+    }
+}
+uint32_t table_frozen_columns(uint32_t table_id) noexcept {
+    Context* ctx = current_context();
+    if (!ctx || !ctx->active_ui || table_id == 0u) return 0u;
+    const TableMetadata* meta = table_metadata(ctx, table_id);
+    return meta ? meta->frozen_columns : 0u;
+}
+bool table_set_column_order(uint32_t table_id, std::span<const uint32_t> order) noexcept {
+    Context* ctx = current_context();
+    if (!ctx || !ctx->active_ui || table_id == 0u) return false;
+    if (order.empty()) {
+        if (TableMetadata* meta = table_metadata(ctx, table_id)) {
+            meta->has_custom_order = false;
+            request_redraw(ctx);
+        }
+        return true;
+    }
+    if (order.size() > kMaxTableColumns) return false;
+    const uint32_t n = static_cast<uint32_t>(order.size());
+    uint32_t seen = 0u;
+    for (uint32_t i = 0u; i < n; ++i) {
+        if (order[i] >= n) return false;
+        const uint32_t bit = 1u << order[i];
+        if ((seen & bit) != 0u) return false;
+        seen |= bit;
+    }
+    TableMetadata* existing = table_metadata(ctx, table_id);
+    if (existing && existing->count > 0u && existing->column_ids[0] != 0u && existing->count != n) {
+        return false;
+    }
+    TableMetadata* meta = existing ? existing : table_metadata_get_or_create(ctx, table_id);
+    if (!meta) return false;
+    for (uint32_t i = 0u; i < n; ++i) meta->column_order[i] = order[i];
+    for (uint32_t i = n; i < kMaxTableColumns; ++i) meta->column_order[i] = i;
+    meta->has_custom_order = true;
+    if (meta->count == 0u || meta->column_ids[0] == 0u) meta->count = n;
+    request_redraw(ctx);
+    return true;
+}
+uint32_t table_get_column_order(uint32_t table_id, uint32_t* out_order, uint32_t cap) noexcept {
+    Context* ctx = current_context();
+    if (!ctx || !ctx->active_ui || table_id == 0u) return 0u;
+    const TableMetadata* meta = table_metadata(ctx, table_id);
+    if (!meta || meta->count == 0u) return 0u;
+    const uint32_t n = meta->count <= kMaxTableColumns ? meta->count : kMaxTableColumns;
+    if (out_order && cap > 0u) {
+        uint32_t vis[kMaxTableColumns] = {};
+        table_build_visual_order(meta, n, vis);
+        const uint32_t copy_n = n < cap ? n : cap;
+        for (uint32_t i = 0u; i < copy_n; ++i) out_order[i] = vis[i];
+    }
+    return n;
+}
 bool is_tree_open(uint32_t id) noexcept {
     Context* ctx = current_context(); if (!ctx || !id) return false;
     const auto* ws = state_map_find(&ctx->active_ui->states,id); return ws && ws->tree_open;

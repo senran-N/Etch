@@ -911,6 +911,9 @@ struct TableMetadata {
     float widths[kMaxTableColumns] = {};
     float min_widths[kMaxTableColumns] = {};
     float max_widths[kMaxTableColumns] = {};
+    uint32_t frozen_columns = 0u;
+    uint32_t column_order[kMaxTableColumns] = {};
+    bool has_custom_order = false;
 };
 struct TableStackEntry {
     TableDesc desc = {}; TableColumnDesc columns[kMaxTableColumns] = {};
@@ -1206,9 +1209,11 @@ struct WindowUiState {
     uint64_t             a11y_announce_seq = 0u;
     bool                 a11y_announce_dirty = false;
 
-    // Extended pointer, pen & multi-touch state (#35)
+    // Extended pointer, pen & multi-touch state (#35, E06)
     PointerState         pointer_state = {};
+    PointerGesturePhase  gesture_phase = PointerGesturePhase::None;
     uint64_t             active_touch_ids[16] = {};
+    TouchPoint           active_touch_points[16] = {};
     uint32_t             active_touch_count = 0u;
 
     // Dock tear-off pending event (#56)
@@ -1478,17 +1483,28 @@ struct Context {
     bool in_refresh_callback = false;
     bool enable_os_a11y = true;
 
-    // System appearance & i18n preferences override (#34)
+    // System appearance & i18n preferences override (#34, E03)
     bool has_sys_prefs_override = false;
     SystemPreferences sys_prefs_override = {};
+    bool auto_sys_theme = false;
+    bool auto_sys_text_scale = false;
+    bool auto_sys_rtl = false;
+    float effective_text_scale = 1.0f;
+    LayoutDirection effective_layout_direction = LayoutDirection::Ltr;
 
-    // GPU device recovery contract (#07)
+    // GPU device recovery contract (#07, E13) & async readback (E15)
     bool gpu_device_lost = false;
     uint64_t gpu_device_generation = 0u;
     GpuDeviceResetFn gpu_reset_fn = nullptr;
     void* gpu_reset_user_data = nullptr;
     EtchCGpuResetFn c_gpu_reset_fn = nullptr;
     void* c_gpu_reset_user_data = nullptr;
+    SDL_GPUFence* async_readback_fence = nullptr;
+    SDL_GPUTransferBuffer* async_readback_buf = nullptr;
+    uint32_t async_readback_w = 0u;
+    uint32_t async_readback_h = 0u;
+    uint32_t async_readback_pitch = 0u;
+    uint32_t async_readback_size = 0u;
 
     // Structured frame timing & memory trace (#04, #48)
     bool trace_enabled = false;

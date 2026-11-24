@@ -704,8 +704,9 @@ inline bool verify_v028_driver(const char* driver) noexcept {
     }
 
     // ------------------------------------------------------------------
-    // (g) GPU device recreation contract (#07): generation bump, reset callback,
-    //     Ready status, preserved widget/font/sprite state, and valid post-reset render
+    // (g) GPU device loss & recreation contract (#07 / E13): mark_gpu_device_lost,
+    //     failed driver switch retry, generation bump, custom LoadedTexture recreated
+    //     inside GpuDeviceResetFn, ShaderSurface survival, and valid post-reset render
     // ------------------------------------------------------------------
     {
         check(gpu_status(c) == GpuStatus::Ready, __LINE__);
@@ -718,26 +719,59 @@ inline bool verify_v028_driver(const char* driver) noexcept {
         check(std::fabs(split_ratio(split_id) - 0.73f) < 1e-4f, __LINE__);
 
         uint8_t sp_px[4u * 4u * 4u] = {};
+        uint8_t user_px[4u * 4u * 4u] = {};
         for (uint32_t i = 0u; i < 16u; ++i) {
             sp_px[i * 4u + 0u] = 24u;
             sp_px[i * 4u + 1u] = 210u;
             sp_px[i * 4u + 2u] = 240u;
             sp_px[i * 4u + 3u] = 255u;
+            user_px[i * 4u + 0u] = 40u;
+            user_px[i * 4u + 1u] = 230u;
+            user_px[i * 4u + 2u] = 60u;
+            user_px[i * 4u + 3u] = 255u;
         }
         const uint32_t sp_id = create_sprite_rgba(c, {.rgba_pixels = sp_px, .width = 4u, .height = 4u});
         check(sp_id != kInvalidSprite, __LINE__);
 
+        LoadedTexture user_tex = create_texture_rgba(c, {.rgba_pixels = user_px, .width = 4u, .height = 4u});
+        check(bool(user_tex), __LINE__);
+
+        const ShaderSurfaceCreateDesc surf_code = {
+            .spirv = {g_etch_surface_demo_spv, sizeof(g_etch_surface_demo_spv)},
+            .dxil = {g_etch_surface_demo_dxil, sizeof(g_etch_surface_demo_dxil)},
+            .msl = {g_etch_surface_demo_msl, sizeof(g_etch_surface_demo_msl)},
+        };
+        const ShaderSurfaceId surf_id = create_shader_surface(c, surf_code);
+        check(surf_id != 0u, __LINE__);
+
+        ShaderSurfaceEvalDesc surf_eval = {.width = 32u, .height = 32u};
+        surf_eval.params[0] = {0.75f, 0.0f, 0.0f, 1.0f};
+        begin_frame(c, {.viewport_w = 64u, .viewport_h = 64u});
+        SDL_GPUTexture* pre_surf_tex = eval_shader_surface(c, surf_id, surf_eval);
+        check(pre_surf_tex != nullptr, __LINE__);
+        image({.texture = pre_surf_tex, .width = Sizing::fixed(32.0f), .height = Sizing::fixed(32.0f)});
+        end_frame(c);
+        check(render_headless_pixels(c, {
+            .frame_width = 64u, .frame_height = 64u,
+            .receive = [](const uint8_t*, uint32_t, uint32_t, uint32_t, void*) { return true; },
+        }), __LINE__);
+
         struct ResetTracker {
             Context* expected_ctx = nullptr;
+            LoadedTexture* user_tex = nullptr;
+            const uint8_t* user_px = nullptr;
             uint32_t calls = 0u;
             uint64_t last_gen = 0u;
             bool ctx_match = true;
-        } tracker = {.expected_ctx = c};
+        } tracker = {.expected_ctx = c, .user_tex = &user_tex, .user_px = user_px};
         set_gpu_device_reset_callback(c, [](Context* rc, uint64_t gen, void* ud) noexcept {
             auto* t = static_cast<ResetTracker*>(ud);
             ++t->calls;
             t->last_gen = gen;
             t->ctx_match &= (rc == t->expected_ctx);
+            if (t->user_tex && t->user_px) {
+                *t->user_tex = create_texture_rgba(rc, {.rgba_pixels = t->user_px, .width = 4u, .height = 4u});
+            }
         }, &tracker);
 
         // Mid-frame recreate must be rejected cleanly without firing callback.
@@ -746,23 +780,51 @@ inline bool verify_v028_driver(const char* driver) noexcept {
         end_frame(c);
         check(tracker.calls == 0u && gpu_device_generation(c) == gen_before, __LINE__);
 
-        // Recreate between frames.
-        check(recreate_gpu_device(c, driver), __LINE__);
+        // Simulate device loss: status becomes Lost and GPU submission is blocked.
+        mark_gpu_device_lost(nullptr);
+        mark_gpu_device_lost(c);
+        check(gpu_status(c) == GpuStatus::Lost, __LINE__);
+        check(!render_headless_pixels(c, {
+            .frame_width = 64u, .frame_height = 64u,
+            .receive = [](const uint8_t*, uint32_t, uint32_t, uint32_t, void*) { return true; },
+        }), __LINE__);
+        check(!begin_async_readback(c, 64u, 64u), __LINE__);
+
+        // Release caller-owned texture before tearing down the old GPU device;
+        // ShaderSurface is owned by Etch and survives reset automatically.
+        destroy_texture(c, &user_tex);
+        check(!bool(user_tex), __LINE__);
+
+        // Failed driver switch leaves device Failed without firing callback; recovery succeeds after.
+        const char* forced_driver = SDL_GetHint(SDL_HINT_GPU_DRIVER);
+        if (!forced_driver || !forced_driver[0]) {
+            check(!recreate_gpu_device(c, "nonexistent_driver_xyz"), __LINE__);
+            check(gpu_status(c) == GpuStatus::Failed, __LINE__);
+            check(tracker.calls == 0u && !bool(user_tex), __LINE__);
+        }
+
+        const char* recover_drv = (driver && driver[0]) ? driver : "";
+        check(recreate_gpu_device(c, recover_drv), __LINE__);
         const uint64_t gen_after = gpu_device_generation(c);
         check(gen_after == gen_before + 1u, __LINE__);
         check(tracker.calls == 1u && tracker.last_gen == gen_after && tracker.ctx_match, __LINE__);
         check(gpu_status(c) == GpuStatus::Ready, __LINE__);
         check(gpu_device(c) != nullptr, __LINE__);
+        check(bool(user_tex) && user_tex.width == 4u && user_tex.height == 4u, __LINE__);
         check(std::fabs(split_ratio(split_id) - 0.73f) < 1e-4f, __LINE__);
         check(is_font_loaded(c, kFontSans), __LINE__);
 
         const Color reset_bg = Color::rgb_hex(0x0E1118);
-        begin_frame(c, {.viewport_w = 240u, .viewport_h = 96u});
-        begin_box({.axis = Axis::Row, .width = Sizing::fixed(240.0f), .height = Sizing::fixed(96.0f),
-                   .padding = Padding::all(12.0f), .gap = 12.0f, .background = reset_bg});
-        box({.width = Sizing::fixed(48.0f), .height = Sizing::fixed(48.0f),
+        begin_frame(c, {.viewport_w = 320u, .viewport_h = 96u});
+        SDL_GPUTexture* post_surf_tex = eval_shader_surface(c, surf_id, surf_eval);
+        check(post_surf_tex != nullptr, __LINE__);
+        begin_box({.axis = Axis::Row, .width = Sizing::fixed(320.0f), .height = Sizing::fixed(96.0f),
+                   .padding = Padding::all(12.0f), .gap = 8.0f, .background = reset_bg});
+        box({.width = Sizing::fixed(40.0f), .height = Sizing::fixed(40.0f),
              .background = Color::rgba8(230, 80, 50, 255)});
-        image({.sprite_id = sp_id, .width = Sizing::fixed(48.0f), .height = Sizing::fixed(48.0f)});
+        image({.sprite_id = sp_id, .width = Sizing::fixed(40.0f), .height = Sizing::fixed(40.0f)});
+        image({.texture = user_tex.texture, .width = Sizing::fixed(40.0f), .height = Sizing::fixed(40.0f)});
+        image({.texture = post_surf_tex, .width = Sizing::fixed(40.0f), .height = Sizing::fixed(40.0f)});
         begin_box({.axis = Axis::Col, .width = Sizing::grow(), .height = Sizing::grow(), .gap = 4.0f});
         text(str_lit("Post-reset"), {.color = Color::white(), .font_size_px = 14.0f, .wrap = false});
         text(str_lit("OK"), {.color = Color::white(), .font_size_px = 32.0f, .wrap = false});
@@ -773,21 +835,27 @@ inline bool verify_v028_driver(const char* driver) noexcept {
         struct ResetRead {
             bool rect_ok = false;
             bool sprite_ok = false;
+            bool user_tex_ok = false;
+            bool surface_ok = false;
             uint32_t text_lit = 0u;
         } rr = {};
         check(render_headless_pixels(c, {
-            .frame_width = 240u, .frame_height = 96u,
+            .frame_width = 320u, .frame_height = 96u,
             .clear_color = reset_bg,
             .receive = [](const uint8_t* rgba, uint32_t w, uint32_t h, uint32_t pitch, void* ud) {
                 auto* out = static_cast<ResetRead*>(ud);
-                if (w != 240u || h != 96u || pitch < w * 4u) return false;
-                const uint8_t* p0 = rgba + 36u * pitch + 36u * 4u;
+                if (w != 320u || h != 96u || pitch < w * 4u) return false;
+                const uint8_t* p0 = rgba + 32u * pitch + 32u * 4u;
                 out->rect_ok = (p0[0] > 190u && p0[1] > 50u && p0[1] < 120u && p0[2] < 80u);
-                const uint8_t* p1 = rgba + 36u * pitch + 96u * 4u;
+                const uint8_t* p1 = rgba + 32u * pitch + 80u * 4u;
                 out->sprite_ok = (p1[0] < 60u && p1[1] > 170u && p1[2] > 200u);
+                const uint8_t* p2 = rgba + 32u * pitch + 128u * 4u;
+                out->user_tex_ok = (p2[0] < 80u && p2[1] > 190u && p2[2] < 100u);
+                const uint8_t* p3 = rgba + 32u * pitch + 176u * 4u;
+                out->surface_ok = (p3[0] > 195u && p3[1] < 25u && p3[2] < 25u);
                 for (uint32_t y = 12u; y < 84u; ++y) {
                     const uint8_t* row = rgba + y * pitch;
-                    for (uint32_t x = 132u; x < 228u; ++x) {
+                    for (uint32_t x = 204u; x < 308u; ++x) {
                         if (row[x * 4u + 0u] > 140u && row[x * 4u + 1u] > 140u && row[x * 4u + 2u] > 140u) {
                             ++out->text_lit;
                         }
@@ -797,26 +865,32 @@ inline bool verify_v028_driver(const char* driver) noexcept {
             },
             .user_data = &rr,
         }), __LINE__);
-        check(rr.rect_ok && rr.sprite_ok && rr.text_lit >= 40u, __LINE__);
+        check(rr.rect_ok && rr.sprite_ok && rr.user_tex_ok && rr.surface_ok && rr.text_lit >= 40u, __LINE__);
 
+        destroy_texture(c, &user_tex);
+        destroy_shader_surface(c, surf_id);
         destroy_sprite(c, sp_id);
         set_gpu_device_reset_callback(c, nullptr, nullptr);
     }
 
     // ------------------------------------------------------------------
-    // (h) Structured frame timing & memory trace (#04, #48)
+    // (h) Structured frame timing, percentiles & memory trace (#04, #48, E18)
     // ------------------------------------------------------------------
     {
         check(!trace_enabled(c), __LINE__);
         trace_clear(c);
         check(trace_sample_count(c) == 0u, __LINE__);
+        TracePercentiles empty_pct = {};
+        check(!trace_compute_percentiles(c, &empty_pct) && empty_pct.sample_count == 0u, __LINE__);
+        check(!trace_compute_percentiles(nullptr, &empty_pct), __LINE__);
+        check(!trace_compute_percentiles(c, nullptr), __LINE__);
         char empty_json[16] = {};
         check(trace_export_json(c, empty_json, static_cast<uint32_t>(sizeof(empty_json))) == 2u &&
               std::strcmp(empty_json, "[]") == 0, __LINE__);
 
         set_trace_enabled(c, true);
         check(trace_enabled(c), __LINE__);
-        for (int f = 0; f < 2; ++f) {
+        for (int f = 0; f < 5; ++f) {
             begin_frame(c, {.viewport_w = 160u, .viewport_h = 80u});
             begin_box({.width = Sizing::fixed(160.0f), .height = Sizing::fixed(80.0f),
                        .padding = Padding::all(8.0f), .background = Color::rgb_hex(0x141820)});
@@ -830,16 +904,31 @@ inline bool verify_v028_driver(const char* driver) noexcept {
         }
 
         const uint32_t sc = trace_sample_count(c);
-        check(sc >= 2u, __LINE__);
+        check(sc >= 5u, __LINE__);
         FrameTraceSample s0 = {}, s1 = {}, bad = {};
         check(trace_get_sample(c, 0u, &s0), __LINE__);
         check(trace_get_sample(c, sc - 1u, &s1), __LINE__);
         check(!trace_get_sample(c, sc, &bad), __LINE__);
         check(s1.frame_index >= s0.frame_index, __LINE__);
+        check(s1.prim_build_us >= 0.0 && std::isfinite(s1.prim_build_us), __LINE__);
         check(s1.ui_draw_calls > 0u && s1.total_draw_calls >= s1.ui_draw_calls && s1.prim_count > 0u, __LINE__);
         check(s1.estimated_vram_bytes > 0u, __LINE__);
 #if defined(_WIN32) || defined(__APPLE__) || defined(__linux__)
         check(s1.working_set_bytes > 0u, __LINE__);
+#endif
+
+        TracePercentiles pct = {};
+        check(trace_compute_percentiles(c, &pct), __LINE__);
+        check(pct.sample_count == sc, __LINE__);
+        check(pct.layout_p50_us >= 0.0 &&
+              pct.layout_p50_us <= pct.layout_p95_us &&
+              pct.layout_p95_us <= pct.layout_p99_us, __LINE__);
+        check(pct.gpu_p50_us >= 0.0 &&
+              pct.gpu_p50_us <= pct.gpu_p95_us &&
+              pct.gpu_p95_us <= pct.gpu_p99_us, __LINE__);
+        check(pct.peak_vram_bytes >= s1.estimated_vram_bytes && pct.peak_vram_bytes > 0u, __LINE__);
+#if defined(_WIN32) || defined(__APPLE__) || defined(__linux__)
+        check(pct.peak_working_set_bytes > 0u, __LINE__);
 #endif
 
         const uint32_t req = trace_export_json(c, nullptr, 0u);
@@ -862,13 +951,215 @@ inline bool verify_v028_driver(const char* driver) noexcept {
         set_trace_enabled(c, false);
         check(!trace_enabled(c), __LINE__);
     }
+
+    // ------------------------------------------------------------------
+    // (i) Non-blocking async GPU readback (E15)
+    // ------------------------------------------------------------------
+    {
+        check(poll_async_readback(nullptr, nullptr) == -1, __LINE__);
+        check(poll_async_readback(c, nullptr) == -1, __LINE__);
+        check(!begin_async_readback(nullptr, 64u, 64u), __LINE__);
+        check(!begin_async_readback(c, 0u, 64u), __LINE__);
+
+        const Color async_bg = Color::rgb_hex(0x10141C);
+        begin_frame(c, {.viewport_w = 64u, .viewport_h = 64u});
+        check(!begin_async_readback(c, 64u, 64u, async_bg), __LINE__);
+        begin_box({.width = Sizing::fixed(64.0f), .height = Sizing::fixed(64.0f),
+                   .padding = Padding::all(8.0f), .background = async_bg});
+        box({.width = Sizing::fixed(48.0f), .height = Sizing::fixed(48.0f),
+             .background = Color::rgba8(90, 120, 245, 255)});
+        end_box();
+        end_frame(c);
+
+        check(begin_async_readback(c, 64u, 64u, async_bg), __LINE__);
+        check(!begin_async_readback(c, 64u, 64u, async_bg), __LINE__);
+
+        struct AsyncRead {
+            uint32_t calls = 0u;
+            bool center_ok = false;
+            bool corner_ok = false;
+        } ar = {};
+        int32_t status = 0;
+        for (uint32_t attempt = 0u; attempt < 2000u; ++attempt) {
+            status = poll_async_readback(
+                c,
+                [](const uint8_t* rgba, uint32_t w, uint32_t h, uint32_t pitch, void* ud) -> bool {
+                    auto* out = static_cast<AsyncRead*>(ud);
+                    ++out->calls;
+                    if (!rgba || w != 64u || h != 64u || pitch < w * 4u) return false;
+                    const uint8_t* center = rgba + 32u * pitch + 32u * 4u;
+                    const uint8_t* corner = rgba + 2u * pitch + 2u * 4u;
+                    out->center_ok = (center[0] > 60u && center[0] < 130u &&
+                                      center[1] > 90u && center[1] < 160u &&
+                                      center[2] > 210u && center[3] == 255u);
+                    out->corner_ok = (corner[0] < 40u && corner[1] < 45u &&
+                                      corner[2] < 55u && corner[3] == 255u);
+                    return true;
+                },
+                &ar);
+            if (status != 0) break;
+            SDL_Delay(1);
+        }
+        check(status == 1 && ar.calls == 1u && ar.center_ok && ar.corner_ok, __LINE__);
+        check(poll_async_readback(c, nullptr) == -1, __LINE__);
+    }
+
+    // ------------------------------------------------------------------
+    // (j) Idle transient GPU target reclamation (R07)
+    // ------------------------------------------------------------------
+    {
+        set_trace_enabled(c, true);
+        trace_clear(c);
+
+        begin_frame(c, {.viewport_w = 512u, .viewport_h = 512u});
+        box({.width = Sizing::fixed(512.0f), .height = Sizing::fixed(512.0f),
+             .background = Color::rgb_hex(0x18202C), .radius = Corners::all(4.0f)});
+        end_frame(c);
+        check(render_headless_pixels(c, {
+            .frame_width = 512u, .frame_height = 512u,
+            .receive = [](const uint8_t*, uint32_t, uint32_t, uint32_t, void*) { return true; },
+        }), __LINE__);
+
+        FrameTraceSample before_idle = {};
+        check(trace_sample_count(c) > 0u &&
+              trace_get_sample(c, trace_sample_count(c) - 1u, &before_idle), __LINE__);
+
+        SDL_GPUDevice* cur_dev = gpu_device(c);
+        check(cur_dev != nullptr, __LINE__);
+        SDL_GPUTextureCreateInfo tiny_info = {};
+        tiny_info.type = SDL_GPU_TEXTURETYPE_2D;
+        tiny_info.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB;
+        tiny_info.usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET;
+        tiny_info.width = 16u;
+        tiny_info.height = 16u;
+        tiny_info.layer_count_or_depth = 1u;
+        tiny_info.num_levels = 1u;
+        tiny_info.sample_count = SDL_GPU_SAMPLECOUNT_1;
+        SDL_GPUTexture* tiny_rt = cur_dev ? SDL_CreateGPUTexture(cur_dev, &tiny_info) : nullptr;
+        check(tiny_rt != nullptr, __LINE__);
+        if (tiny_rt) {
+            const uint64_t t_idle = SDL_GetTicks();
+            while (SDL_GetTicks() - t_idle < 2050u) {
+                SDL_Delay(25);
+            }
+            SDL_Event ev = {};
+            (void)wait_events(c, &ev, 0);
+
+            begin_frame(c, {.viewport_w = 16u, .viewport_h = 16u});
+            box({.width = Sizing::fixed(16.0f), .height = Sizing::fixed(16.0f),
+                 .background = Color::rgb_hex(0x203040), .radius = Corners::all(4.0f)});
+            end_frame(c);
+            const RenderTargetDesc tiny_desc = {
+                .texture = tiny_rt,
+                .width = 16u,
+                .height = 16u,
+                .sdl_texture_format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB,
+                .clear_color = Color::rgb_hex(0x101010),
+            };
+            check(render_to_texture(c, tiny_desc), __LINE__);
+
+            FrameTraceSample after_idle = {};
+            check(trace_sample_count(c) >= 2u &&
+                  trace_get_sample(c, trace_sample_count(c) - 1u, &after_idle), __LINE__);
+            check(before_idle.estimated_vram_bytes >= after_idle.estimated_vram_bytes + (512u * 512u * 4u), __LINE__);
+            SDL_ReleaseGPUTexture(cur_dev, tiny_rt);
+        }
+
+        // Verify headless target cleanly recreates on demand after idle reclamation.
+        begin_frame(c, {.viewport_w = 64u, .viewport_h = 64u});
+        box({.width = Sizing::fixed(64.0f), .height = Sizing::fixed(64.0f),
+             .background = Color::rgba8(50, 190, 120, 255)});
+        end_frame(c);
+        bool after_reclaim_px = false;
+        check(render_headless_pixels(c, {
+            .frame_width = 64u, .frame_height = 64u,
+            .receive = [](const uint8_t* rgba, uint32_t w, uint32_t h, uint32_t pitch, void* ud) {
+                if (!rgba || w != 64u || h != 64u || pitch < w * 4u) return false;
+                const uint8_t* p = rgba + 32u * pitch + 32u * 4u;
+                *static_cast<bool*>(ud) = (p[0] < 80u && p[1] > 160u && p[2] > 90u && p[2] < 150u);
+                return true;
+            },
+            .user_data = &after_reclaim_px,
+        }) && after_reclaim_px, __LINE__);
+
+        trace_clear(c);
+        set_trace_enabled(c, false);
+    }
     std::remove(png_path);
     destroy_context(c);
     set_current_context(nullptr);
     return ok;
 }
 
+inline bool verify_v028_cpu_decode() noexcept {
+    using namespace etch;
+    bool ok = true;
+    auto check = [&](bool cond, int line) noexcept {
+        if (!cond) {
+            std::fprintf(stderr, "v028 cpu_decode check failed at line %d\n", line);
+            ok = false;
+        }
+    };
+
+    // Pure-CPU decode must work with zero Context* and zero GPU device.
+    set_current_context(nullptr);
+    check(current_context() == nullptr, __LINE__);
+
+    // 1x1 24-bit uncompressed BMP with BGR = (0x20, 0x40, 0xE0) -> RGBA = (0xE0, 0x40, 0x20, 0xFF).
+    static constexpr uint8_t kBmp1x1[58] = {
+        0x42u, 0x4Du, 0x3Au, 0x00u, 0x00u, 0x00u, 0x00u, 0x00u, 0x00u, 0x00u, 0x36u, 0x00u, 0x00u, 0x00u,
+        0x28u, 0x00u, 0x00u, 0x00u, 0x01u, 0x00u, 0x00u, 0x00u, 0x01u, 0x00u, 0x00u, 0x00u, 0x01u, 0x00u,
+        0x18u, 0x00u, 0x00u, 0x00u, 0x00u, 0x00u, 0x04u, 0x00u, 0x00u, 0x00u, 0x13u, 0x0Bu, 0x00u, 0x00u,
+        0x13u, 0x0Bu, 0x00u, 0x00u, 0x00u, 0x00u, 0x00u, 0x00u, 0x00u, 0x00u, 0x00u, 0x00u,
+        0x20u, 0x40u, 0xE0u, 0x00u,
+    };
+
+    DecodedImage bmp = {};
+    check(decode_image_memory(kBmp1x1, sizeof(kBmp1x1), &bmp), __LINE__);
+    check(bmp.rgba != nullptr && bmp.width == 1u && bmp.height == 1u, __LINE__);
+    if (bmp.rgba && bmp.width == 1u && bmp.height == 1u) {
+        check(bmp.rgba[0] == 0xE0u && bmp.rgba[1] == 0x40u && bmp.rgba[2] == 0x20u && bmp.rgba[3] == 0xFFu, __LINE__);
+    }
+    free_decoded_image(&bmp);
+    check(bmp.rgba == nullptr && bmp.width == 0u && bmp.height == 0u, __LINE__);
+    free_decoded_image(&bmp);
+    free_decoded_image(nullptr);
+
+    static constexpr const char kSvg16[] =
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"16\" height=\"16\">"
+        "<rect width=\"16\" height=\"16\" fill=\"#20C060\"/>"
+        "</svg>";
+    DecodedImage svg = {};
+    check(rasterize_svg_memory(kSvg16, sizeof(kSvg16) - 1u, {.width_px = 16u, .height_px = 16u}, &svg), __LINE__);
+    check(svg.rgba != nullptr && svg.width == 16u && svg.height == 16u, __LINE__);
+    if (svg.rgba && svg.width == 16u && svg.height == 16u) {
+        const uint8_t* p = svg.rgba + (8u * 16u + 8u) * 4u;
+        check(std::abs(int(p[0]) - 0x20) <= 2 &&
+              std::abs(int(p[1]) - 0xC0) <= 2 &&
+              std::abs(int(p[2]) - 0x60) <= 2 &&
+              p[3] == 0xFFu, __LINE__);
+    }
+    free_decoded_image(&svg);
+    check(svg.rgba == nullptr && svg.width == 0u && svg.height == 0u, __LINE__);
+
+    // Auto-detect SVG through decode_image_memory and reject invalid inputs cleanly.
+    DecodedImage svg_auto = {};
+    check(decode_image_memory(kSvg16, sizeof(kSvg16) - 1u, &svg_auto) &&
+          svg_auto.rgba != nullptr && svg_auto.width >= 16u && svg_auto.height >= 16u, __LINE__);
+    free_decoded_image(&svg_auto);
+    check(!decode_image_memory(nullptr, 0u, &svg_auto), __LINE__);
+    check(!decode_image_memory(kBmp1x1, sizeof(kBmp1x1), nullptr), __LINE__);
+    static constexpr uint8_t kGarbage[8] = {0x01u, 0x02u, 0x03u, 0x04u, 0x05u, 0x06u, 0x07u, 0x08u};
+    check(!decode_image_memory(kGarbage, sizeof(kGarbage), &svg_auto) && svg_auto.rgba == nullptr, __LINE__);
+    check(!rasterize_svg_memory(kSvg16, sizeof(kSvg16) - 1u, {.width_px = 16u, .height_px = 16u}, nullptr), __LINE__);
+    check(!rasterize_svg_memory(nullptr, 0u, {}, &svg_auto), __LINE__);
+    return ok;
+}
+
 inline bool verify_v028() noexcept {
+    if (!verify_v028_cpu_decode()) {
+        return false;
+    }
     const char* env_drv = SDL_getenv("ETCH_GPU_DRIVER");
     if (!env_drv || !env_drv[0]) env_drv = SDL_getenv("SDL_GPU_DRIVER");
     if (env_drv && env_drv[0]) {

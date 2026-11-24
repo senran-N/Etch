@@ -349,4 +349,62 @@ uint32_t trace_export_json(const Context* ctx, char* out_buf, uint32_t cap) noex
     return total;
 }
 
+bool trace_compute_percentiles(const Context* ctx, TracePercentiles* out_summary) noexcept {
+    if (!out_summary) return false;
+    *out_summary = {};
+    if (!ctx || !ctx->trace_ring || ctx->trace_ring->count == 0u) return false;
+
+    const FrameTraceRing* ring = ctx->trace_ring;
+    const uint32_t n = ring->count <= FrameTraceRing::kCap ? ring->count : FrameTraceRing::kCap;
+    double layout_vals[FrameTraceRing::kCap];
+    double gpu_vals[FrameTraceRing::kCap];
+    uint64_t peak_ws = 0u;
+    uint64_t peak_vram = 0u;
+
+    for (uint32_t i = 0u; i < n; ++i) {
+        const uint32_t slot = (ring->head + FrameTraceRing::kCap - ring->count + i) % FrameTraceRing::kCap;
+        const FrameTraceSample& s = ring->samples[slot];
+        layout_vals[i] = std::isfinite(s.layout_us) ? s.layout_us : 0.0;
+        gpu_vals[i] = std::isfinite(s.gpu_submit_us) ? s.gpu_submit_us : 0.0;
+        if (s.working_set_bytes > peak_ws) peak_ws = s.working_set_bytes;
+        if (s.estimated_vram_bytes > peak_vram) peak_vram = s.estimated_vram_bytes;
+    }
+
+    const auto sort_doubles = [](double* a, uint32_t count) noexcept {
+        static constexpr uint32_t kGaps[] = {132u, 57u, 23u, 10u, 4u, 1u};
+        for (uint32_t gap : kGaps) {
+            for (uint32_t i = gap; i < count; ++i) {
+                const double key = a[i];
+                uint32_t j = i;
+                while (j >= gap && a[j - gap] > key) {
+                    a[j] = a[j - gap];
+                    j -= gap;
+                }
+                a[j] = key;
+            }
+        }
+    };
+    const auto pick_pct = [](const double* sorted, uint32_t count, double pct) noexcept -> double {
+        const double pos = static_cast<double>(count - 1u) * (pct * 0.01);
+        const uint32_t lo = static_cast<uint32_t>(pos);
+        const uint32_t hi = (lo + 1u < count) ? (lo + 1u) : lo;
+        const double frac = pos - static_cast<double>(lo);
+        return sorted[lo] + (sorted[hi] - sorted[lo]) * frac;
+    };
+
+    sort_doubles(layout_vals, n);
+    sort_doubles(gpu_vals, n);
+
+    out_summary->sample_count = n;
+    out_summary->layout_p50_us = pick_pct(layout_vals, n, 50.0);
+    out_summary->layout_p95_us = pick_pct(layout_vals, n, 95.0);
+    out_summary->layout_p99_us = pick_pct(layout_vals, n, 99.0);
+    out_summary->gpu_p50_us = pick_pct(gpu_vals, n, 50.0);
+    out_summary->gpu_p95_us = pick_pct(gpu_vals, n, 95.0);
+    out_summary->gpu_p99_us = pick_pct(gpu_vals, n, 99.0);
+    out_summary->peak_working_set_bytes = peak_ws;
+    out_summary->peak_vram_bytes = peak_vram;
+    return true;
+}
+
 } // namespace etch

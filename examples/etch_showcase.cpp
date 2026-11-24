@@ -701,10 +701,11 @@ int main(int argc, char** argv) {
               element_bounds(id("aurora-canvas")).w > 500.0f;
         const uint32_t ui_dc = has_trace ? tr.ui_draw_calls : st.draw_call_count;
         const double ws_mb = has_trace ? (static_cast<double>(tr.working_set_bytes) / (1024.0 * 1024.0)) : 0.0;
+        const double commit_mb = has_trace ? (static_cast<double>(tr.private_commit_bytes) / (1024.0 * 1024.0)) : 0.0;
         const double vram_mb = has_trace ? (static_cast<double>(tr.estimated_vram_bytes) / (1024.0 * 1024.0)) : 0.0;
         std::printf(
-            "Showcase material/layout/batch checks: %s (ui_dc=%u, blur=%u, prims=%u, arena=%zu B, ws_mb=%.1f, vram_mb=%.1f)\n",
-            ok ? "PASS" : "FAIL", ui_dc, st.blur_pass_count, st.prim_count, st.arena_used_bytes, ws_mb, vram_mb);
+            "Showcase material/layout/batch checks: %s (ui_dc=%u, blur=%u, prims=%u, arena=%zu B, ws_mb=%.1f, commit_mb=%.1f, vram_mb=%.1f)\n",
+            ok ? "PASS" : "FAIL", ui_dc, st.blur_pass_count, st.prim_count, st.arena_used_bytes, ws_mb, commit_mb, vram_mb);
     } else {
         uint64_t previous = SDL_GetTicksNS();
         while (running) {

@@ -97,6 +97,7 @@ struct LayoutNodeConfig {
     float flex_shrink = 1.0f;
     float aspect_ratio = 0.0f;
     bool wrap = false;
+    bool rtl = false;
     bool shrink_width = false;
     bool shrink_height = false;
     bool percent_after_fixed = false;
@@ -1359,6 +1360,7 @@ inline Vec2 layout_row_metrics(LayoutEngine* le, LayoutNode& p, bool stretch_y) 
         } else {
             x = c.align_x == AlignX::Left ? 0.0f : (c.align_x == AlignX::Center ? extra * 0.5f : extra);
         }
+        const float row_span = layout_maxf(avail_w, row_w);
         for (uint32_t i = start; i < end; ++i) {
             LayoutNode& ch = le->nodes.data[le->scratch_children.data[i]];
             if (stretch_y && !ch.is_text && (ch.cfg.height.kind == SizingKind::Grow || ch.cfg.align_self == AlignSelf::Stretch)) {
@@ -1366,7 +1368,7 @@ inline Vec2 layout_row_metrics(LayoutEngine* le, LayoutNode& p, bool stretch_y) 
                 ch.height = layout_clampf(layout_maxf(0.0f, row_h - my), layout_sizing_min(ch.cfg.height), layout_sizing_max(ch.cfg.height));
             }
             const float outer_w = ch.width + ch.cfg.margin.left + ch.cfg.margin.right;
-            ch.cell_x = x;
+            ch.cell_x = c.rtl ? (row_span - x - outer_w) : x;
             ch.cell_w = outer_w;
             ch.cell_y = y;
             ch.cell_h = row_h;
@@ -2003,6 +2005,7 @@ inline void layout_position_subtree(LayoutEngine* le, uint32_t root_idx, Vec2 ro
                     }
                 }
 
+                const float row_span = layout_maxf(inner_w, content_w);
                 float cursor = main_offset;
                 for (uint32_t ci = n.first_child; ci != kLayoutInvalidNode; ci = le->nodes.data[ci].next_sibling) {
                     LayoutNode& ch = le->nodes.data[ci];
@@ -2016,8 +2019,9 @@ inline void layout_position_subtree(LayoutEngine* le, uint32_t root_idx, Vec2 ro
                             else if (ch.cfg.align_self == AlignSelf::Center) cy = cross_extra * 0.5f;
                             else if (ch.cfg.align_self == AlignSelf::End) cy = cross_extra;
                         }
+                        const float cx = c.rtl ? (row_span - cursor - ow + ch.cfg.margin.right) : (cursor + ch.cfg.margin.left);
                         ch.bounds = {
-                            n.bounds.x + c.padding.left + cursor + c.child_offset.x + ch.cfg.margin.left,
+                            n.bounds.x + c.padding.left + cx + c.child_offset.x,
                             n.bounds.y + c.padding.top + cy + c.child_offset.y + ch.cfg.margin.top,
                             ch.width,
                             ch.height,

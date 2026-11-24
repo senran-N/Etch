@@ -28,7 +28,15 @@ void a11y_patch(A11yNode& n,const A11yOverrideDesc& d) noexcept {
     if(d.has_actions_mask)n.actions_mask=d.actions_mask;
     n.state_flags=(n.state_flags|d.add_states)&~(d.clear_states&~A11yState_Password);
 }
+constexpr uint32_t kA11yScrollActionBits =
+    a11y_action_bit(A11yAction::ScrollUp) | a11y_action_bit(A11yAction::ScrollDown);
+
 A11yBuild* a11y_emit(Context* ctx,uint32_t id,A11yRole role,Str label,Str value,uint32_t states,uint32_t actions) noexcept {
+    if ((role == A11yRole::ScrollArea || role == A11yRole::List || role == A11yRole::Table) &&
+        (actions & 12u) == 12u)
+    {
+        actions |= kA11yScrollActionBits;
+    }
     auto* b=ctx->frame_arena.alloc<A11yBuild>();if(!b)return nullptr;
     *b={};b->node.id=id;b->node.role=role;b->node.state_flags=states;b->node.actions_mask=actions;
     b->node.label=ctx->frame_arena.push_str(label.chars,label.length);b->node.value_text=ctx->frame_arena.push_str(value.chars,value.length);
@@ -50,11 +58,32 @@ void a11y_begin(Context* ctx) noexcept {
     }
     ui.a11y_action_count=0;
     for(uint32_t i=0;i<ui.frame_a11y_action_count;++i) {
-        auto& act=ui.frame_a11y_actions[i];if(act.consumed || !act.id || act.action!=A11yAction::Focus)continue;
-        const auto* ws=state_map_find(&ui.states,act.id);
-        const uint32_t target=(ws && ws->collapsible_initialized)?id_index(act.id,0xC011u):act.id;
-        const auto* tws=(target==act.id)?ws:state_map_find(&ui.states,target);
-        if(!ui.modal_scope || target==ui.modal_scope || (tws && tws->focus_scope==ui.modal_scope)){request_focus(target);act.consumed=true;}
+        auto& act=ui.frame_a11y_actions[i];if(act.consumed || !act.id)continue;
+        if(act.action==A11yAction::Focus) {
+            const auto* ws=state_map_find(&ui.states,act.id);
+            const uint32_t target=(ws && ws->collapsible_initialized)?id_index(act.id,0xC011u):act.id;
+            const auto* tws=(target==act.id)?ws:state_map_find(&ui.states,target);
+            if(!ui.modal_scope || target==ui.modal_scope || (tws && tws->focus_scope==ui.modal_scope)){request_focus(target);act.consumed=true;}
+        } else if(act.action==A11yAction::ScrollUp || act.action==A11yAction::ScrollDown) {
+            WidgetState* ws=state_map_find(&ui.states,act.id);
+            if(ws && ws->is_virtual_list && ws->cold &&
+               (!ui.modal_scope || act.id==ui.modal_scope || ws->focus_scope==ui.modal_scope))
+            {
+                const double step=(act.number>0.0f && std::isfinite(act.number))
+                    ? static_cast<double>(act.number)
+                    : std::fmax(40.0, static_cast<double>(ws->viewport_dim.y) * 0.85);
+                const double delta=(act.action==A11yAction::ScrollDown) ? step : -step;
+                ws->cold->vscroll_pos_y=clamp_double(ws->cold->vscroll_pos_y + delta, 0.0, ws->cold->vscroll_max_y);
+                ws->cold->vscroll_vel_y=0.0;
+                if(delta<0.0) {
+                    ws->cold->vlist_stuck_bottom=false;
+                } else if(ws->cold->vscroll_max_y<=0.5 || ws->cold->vscroll_pos_y>=ws->cold->vscroll_max_y-2.0) {
+                    ws->cold->vlist_stuck_bottom=true;
+                }
+                act.consumed=true;
+                request_redraw(ctx);
+            }
+        }
     }
     ctx->a11y_index=nullptr;ctx->a11y_index_cap=ctx->a11y_index_count=0;
     ctx->a11y_first=ctx->a11y_last=ctx->a11y_parent=nullptr;ctx->a11y_patches=nullptr;ctx->a11y_count=0;
@@ -160,7 +189,7 @@ void a11y_semantic(uint32_t id,A11yRole role,Str label,uint32_t states,uint32_t 
     auto* ctx=current_context();
     auto* entry=a11y_index(ctx,id);
     if(auto* b=entry ? entry->build : nullptr) {
-        if (role == A11yRole::Table) actions |= (b->node.actions_mask & 12u);
+        if (role == A11yRole::Table) actions |= (b->node.actions_mask & (12u | kA11yScrollActionBits));
         b->node.role=role;b->node.label=ctx->frame_arena.push_str(label.chars,label.length);
         b->node.state_flags|=states;b->node.actions_mask=actions;b->node.value_num=value;b->node.min_value=lo;b->node.max_value=hi;
         for(auto* p=entry->patches;p;p=p->next)a11y_patch(b->node,p->desc);
@@ -184,7 +213,7 @@ const A11yNode* find_a11y_node(uint32_t id,const Context* ctx,SDL_Window* window
     for(const auto& n:frame_a11y_nodes(ctx,window)) { if(n.id==id) return &n; } return nullptr;
 }
 bool perform_a11y_action(uint32_t id,A11yAction action,float number,Str text,Context* ctx,SDL_Window* window) noexcept {
-    if(!ctx) { ctx=current_context(); } if(!ctx || !id || static_cast<uint8_t>(action)>7 || !std::isfinite(number) || (text.length && !text.chars)) { return false; }
+    if(!ctx) { ctx=current_context(); } if(!ctx || !id || static_cast<uint8_t>(action)>static_cast<uint8_t>(A11yAction::ScrollDown) || !std::isfinite(number) || (text.length && !text.chars)) { return false; }
     auto* ui=(!window && ctx->headless)?ctx->headless_ui:window_ui(ctx,window);const auto* n=find_a11y_node(id,ctx,window);
     if(!ui || !n || (n->state_flags&A11yState_Disabled) || !(n->actions_mask&a11y_action_bit(action)) || ui->a11y_action_count==WindowUiState::kMaxPendingA11yActions || !ensure_a11y_actions(ui))return false;
     auto& c=ui->a11y_actions[ui->a11y_action_count++];c={};c.id=id;c.action=action;c.number=number;

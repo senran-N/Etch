@@ -774,7 +774,10 @@ bool uia_supports_text(WinUiaNode* n, const A11yNode* an) noexcept {
 }
 
 bool uia_supports_scroll(const A11yNode* an) noexcept {
-    return an && (an->role == A11yRole::ScrollArea || an->role == A11yRole::List || an->role == A11yRole::Table);
+    constexpr uint32_t kScrollBits =
+        a11y_action_bit(A11yAction::ScrollUp) | a11y_action_bit(A11yAction::ScrollDown);
+    return an && (an->role == A11yRole::ScrollArea || an->role == A11yRole::List ||
+                  an->role == A11yRole::Table || (an->actions_mask & kScrollBits) != 0u);
 }
 
 bool uia_supports_grid(const A11yNode* an) noexcept {
@@ -2809,11 +2812,22 @@ HRESULT STDMETHODCALLTYPE uia_scroll_do(IScrollProvider* This, enum ScrollAmount
     return uia_run_on_owner(n, [&]() noexcept -> HRESULT {
         const A11yNode* an = uia_live_node(n);
         if (!an) return kUiaElemNotAvail;
-        UiaScrollGeom g = {};
-        if (!uia_read_scroll_geom(n, an, &g)) return kUiaInvalidOp;
         const bool req_h = (horizontalAmount != ScrollAmount_NoAmount);
         const bool req_v = (verticalAmount != ScrollAmount_NoAmount);
         if (!req_h && !req_v) return S_OK;
+        UiaScrollGeom g = {};
+        if (!uia_read_scroll_geom(n, an, &g)) {
+            if (req_v) {
+                const bool up = (verticalAmount == ScrollAmount_SmallDecrement || verticalAmount == ScrollAmount_LargeDecrement);
+                const bool dn = (verticalAmount == ScrollAmount_SmallIncrement || verticalAmount == ScrollAmount_LargeIncrement);
+                if ((up && perform_a11y_action(an->id, A11yAction::ScrollUp, 0.0f, {}, n->slot->ctx, n->slot->window)) ||
+                    (dn && perform_a11y_action(an->id, A11yAction::ScrollDown, 0.0f, {}, n->slot->ctx, n->slot->window)))
+                {
+                    return S_OK;
+                }
+            }
+            return kUiaInvalidOp;
+        }
         if ((req_h && !g.h_scrollable) && (!req_v || !g.v_scrollable)) return kUiaInvalidOp;
         if ((req_v && !g.v_scrollable) && (!req_h || !g.h_scrollable)) return kUiaInvalidOp;
         bool changed = false;
@@ -2830,7 +2844,11 @@ HRESULT STDMETHODCALLTYPE uia_scroll_do(IScrollProvider* This, enum ScrollAmount
                 if (WidgetCold* c = ensure_widget_cold(g.v_ws)) {
                     c->vscroll_pos_y = next_y;
                     c->vscroll_vel_y = 0.0;
-                    if (delta < 0.0) c->vlist_stuck_bottom = false;
+                    if (delta < 0.0) {
+                        c->vlist_stuck_bottom = false;
+                    } else if (delta > 0.0 && (g.v_max <= 0.5 || next_y >= g.v_max - 2.0)) {
+                        c->vlist_stuck_bottom = true;
+                    }
                 }
             } else {
                 g.v_ws->scroll_pos.y = static_cast<float>(next_y);
@@ -3692,6 +3710,12 @@ accesskit_tree_update* etch_accesskit_build_update(AccessKitSlot* ak) noexcept {
         if ((an.actions_mask & (1u << static_cast<uint32_t>(A11yAction::Collapse))) != 0u) {
             accesskit_node_builder_add_action(b, ACCESSKIT_ACTION_COLLAPSE);
         }
+        if ((an.actions_mask & a11y_action_bit(A11yAction::ScrollUp)) != 0u) {
+            accesskit_node_builder_add_action(b, ACCESSKIT_ACTION_SCROLL_UP);
+        }
+        if ((an.actions_mask & a11y_action_bit(A11yAction::ScrollDown)) != 0u) {
+            accesskit_node_builder_add_action(b, ACCESSKIT_ACTION_SCROLL_DOWN);
+        }
 
         uint32_t child_count = 0u;
         for (uint32_t c = an.first_child_idx; c != 0xFFFFFFFFu && c < count; c = span[c].next_sibling_idx) {
@@ -3735,14 +3759,22 @@ void etch_accesskit_action_cb(accesskit_action_request* req, void* userdata) noe
                 perform_a11y_action(elem_id, A11yAction::Focus, 0.0f, {}, ak->ctx, ak->window);
                 break;
             case ACCESSKIT_ACTION_INCREMENT:
-            case ACCESSKIT_ACTION_SCROLL_UP:
             case ACCESSKIT_ACTION_SCROLL_LEFT:
                 perform_a11y_action(elem_id, A11yAction::Increment, 0.0f, {}, ak->ctx, ak->window);
                 break;
             case ACCESSKIT_ACTION_DECREMENT:
-            case ACCESSKIT_ACTION_SCROLL_DOWN:
             case ACCESSKIT_ACTION_SCROLL_RIGHT:
                 perform_a11y_action(elem_id, A11yAction::Decrement, 0.0f, {}, ak->ctx, ak->window);
+                break;
+            case ACCESSKIT_ACTION_SCROLL_UP:
+                if (!perform_a11y_action(elem_id, A11yAction::ScrollUp, 0.0f, {}, ak->ctx, ak->window)) {
+                    perform_a11y_action(elem_id, A11yAction::Decrement, 0.0f, {}, ak->ctx, ak->window);
+                }
+                break;
+            case ACCESSKIT_ACTION_SCROLL_DOWN:
+                if (!perform_a11y_action(elem_id, A11yAction::ScrollDown, 0.0f, {}, ak->ctx, ak->window)) {
+                    perform_a11y_action(elem_id, A11yAction::Increment, 0.0f, {}, ak->ctx, ak->window);
+                }
                 break;
             case ACCESSKIT_ACTION_EXPAND:
                 perform_a11y_action(elem_id, A11yAction::Expand, 0.0f, {}, ak->ctx, ak->window);
@@ -4870,7 +4902,11 @@ DBusHandlerResult linux_atspi_filter(DBusConnection* conn, DBusMessage* msg, voi
                 const char* i_cmp = "org.a11y.atspi.Component";
                 g_linux_dbus.msg_iter_append_basic(&arr, 's', &i_acc);
                 g_linux_dbus.msg_iter_append_basic(&arr, 's', &i_cmp);
-                if (an && (an->actions_mask & a11y_action_bit(A11yAction::Press)) != 0u) {
+                constexpr uint32_t kAtspiActionBits =
+                    a11y_action_bit(A11yAction::Press) |
+                    a11y_action_bit(A11yAction::ScrollUp) |
+                    a11y_action_bit(A11yAction::ScrollDown);
+                if (an && (an->actions_mask & kAtspiActionBits) != 0u) {
                     const char* i_act = "org.a11y.atspi.Action";
                     g_linux_dbus.msg_iter_append_basic(&arr, 's', &i_act);
                 }
@@ -4946,8 +4982,34 @@ DBusHandlerResult linux_atspi_filter(DBusConnection* conn, DBusMessage* msg, voi
         }
         return DBUS_HANDLER_RESULT_HANDLED;
     }
+    const auto collect_atspi_actions = [](const A11yNode* node, A11yAction (&acts)[3], const char* (&names)[3]) noexcept -> int32_t {
+        int32_t n = 0;
+        if (!node) return 0;
+        if ((node->actions_mask & a11y_action_bit(A11yAction::Press)) != 0u) {
+            acts[n] = A11yAction::Press;
+            names[n++] = "press";
+        }
+        if ((node->actions_mask & a11y_action_bit(A11yAction::ScrollUp)) != 0u) {
+            acts[n] = A11yAction::ScrollUp;
+            names[n++] = "scroll_up";
+        }
+        if ((node->actions_mask & a11y_action_bit(A11yAction::ScrollDown)) != 0u) {
+            acts[n] = A11yAction::ScrollDown;
+            names[n++] = "scroll_down";
+        }
+        return n;
+    };
     if (g_linux_dbus.msg_is_call(msg, "org.a11y.atspi.Action", "DoAction")) {
-        const uint32_t ok = perform_a11y_action(elem_id, A11yAction::Press, 0.0f, {}, ats->ctx, ats->window) ? 1u : 0u;
+        int32_t action_idx = 0;
+        DBusMessageIter arg = {};
+        if (g_linux_dbus.msg_iter_init(msg, &arg) && g_linux_dbus.msg_iter_get_arg_type(&arg) == 'i') {
+            g_linux_dbus.msg_iter_get_basic(&arg, &action_idx);
+        }
+        A11yAction acts[3] = {};
+        const char* names[3] = {};
+        const int32_t nact = collect_atspi_actions(an, acts, names);
+        const uint32_t ok = (action_idx >= 0 && action_idx < nact &&
+            perform_a11y_action(elem_id, acts[action_idx], 0.0f, {}, ats->ctx, ats->window)) ? 1u : 0u;
         if (DBusMessage* rep = g_linux_dbus.msg_new_return(msg)) {
             DBusMessageIter it = {};
             g_linux_dbus.msg_iter_init_append(rep, &it);
@@ -4957,7 +5019,9 @@ DBusHandlerResult linux_atspi_filter(DBusConnection* conn, DBusMessage* msg, voi
         return DBUS_HANDLER_RESULT_HANDLED;
     }
     if (g_linux_dbus.msg_is_call(msg, "org.a11y.atspi.Action", "GetNActions")) {
-        const int32_t nact = (an && (an->actions_mask & a11y_action_bit(A11yAction::Press)) != 0u) ? 1 : 0;
+        A11yAction acts[3] = {};
+        const char* names[3] = {};
+        const int32_t nact = collect_atspi_actions(an, acts, names);
         if (DBusMessage* rep = g_linux_dbus.msg_new_return(msg)) {
             DBusMessageIter it = {};
             g_linux_dbus.msg_iter_init_append(rep, &it);
@@ -4967,7 +5031,15 @@ DBusHandlerResult linux_atspi_filter(DBusConnection* conn, DBusMessage* msg, voi
         return DBUS_HANDLER_RESULT_HANDLED;
     }
     if (g_linux_dbus.msg_is_call(msg, "org.a11y.atspi.Action", "GetName")) {
-        const char* act_name = "press";
+        int32_t action_idx = 0;
+        DBusMessageIter arg = {};
+        if (g_linux_dbus.msg_iter_init(msg, &arg) && g_linux_dbus.msg_iter_get_arg_type(&arg) == 'i') {
+            g_linux_dbus.msg_iter_get_basic(&arg, &action_idx);
+        }
+        A11yAction acts[3] = {};
+        const char* names[3] = {};
+        const int32_t nact = collect_atspi_actions(an, acts, names);
+        const char* act_name = (action_idx >= 0 && action_idx < nact) ? names[action_idx] : "";
         if (DBusMessage* rep = g_linux_dbus.msg_new_return(msg)) {
             DBusMessageIter it = {};
             g_linux_dbus.msg_iter_init_append(rep, &it);

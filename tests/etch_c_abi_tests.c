@@ -2,6 +2,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #if defined(ETCH_CMAKE_VERSION_MAJOR)
 #define ETCH_EXPECTED_VERSION_STRING \
@@ -1380,7 +1381,12 @@ static bool test_v027_c_abi(EtchContext* ctx) {
     return true;
 }
 
-typedef char c_chk_v28_minor[(ETCH_VERSION_MINOR == 28) ? 1 : -1];
+typedef char c_chk_v28_minor[(ETCH_VERSION_MINOR >= 28) ? 1 : -1];
+typedef char c_chk_v29_minor[(ETCH_VERSION_MINOR == 29) ? 1 : -1];
+typedef char c_chk_v29_a11y_scroll[(ETCH_A11Y_ACT_SCROLL_UP == 8 && ETCH_A11Y_ACT_SCROLL_DOWN == 9) ? 1 : -1];
+typedef char c_chk_v29_gesture[(ETCH_GESTURE_NONE == 0 && ETCH_GESTURE_BEGIN == 1 &&
+                                ETCH_GESTURE_UPDATE == 2 && ETCH_GESTURE_END == 3 &&
+                                ETCH_GESTURE_CANCEL == 4) ? 1 : -1];
 typedef char c_chk_v28_blend[(ETCH_BLEND_NORMAL == 0 && ETCH_BLEND_ADDITIVE == 1 &&
                               ETCH_BLEND_MULTIPLY == 2 && ETCH_BLEND_SCREEN == 3) ? 1 : -1];
 typedef char c_chk_v28_mask[(ETCH_ALPHA_MASK_NONE == 0 && ETCH_ALPHA_MASK_ROUNDED == 1 &&
@@ -1481,6 +1487,315 @@ static bool test_v028_c_abi(EtchContext* ctx) {
         etch_end_frame(ctx);
 
         if (etch_frame_prim_count(ctx) < 2u) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+static bool test_v029_c_abi(EtchContext* ctx) {
+    /* System preferences application, active text scale & layout direction */
+    {
+        EtchSystemPreferences ov;
+        memset(&ov, 0, sizeof(ov));
+        ov.theme = ETCH_SYSTEM_THEME_DARK;
+        ov.text_scale = 1.25f;
+        ov.layout_direction = ETCH_LAYOUT_RTL;
+        etch_set_system_preferences_override(ctx, &ov);
+        etch_apply_system_preferences(ctx, false, true, true);
+        const float ts = etch_active_text_scale(ctx);
+        const EtchLayoutDirection dir = etch_active_layout_direction(ctx);
+        if (ts < 1.2f || ts > 1.3f || dir != ETCH_LAYOUT_RTL) {
+            return false;
+        }
+        /* Restore neutral LTR / 1.0 text scale before clearing override */
+        ov.text_scale = 1.0f;
+        ov.layout_direction = ETCH_LAYOUT_LTR;
+        etch_set_system_preferences_override(ctx, &ov);
+        etch_apply_system_preferences(ctx, false, true, true);
+        if (etch_active_text_scale(ctx) < 0.99f || etch_active_text_scale(ctx) > 1.01f ||
+            etch_active_layout_direction(ctx) != ETCH_LAYOUT_LTR) {
+            return false;
+        }
+        etch_set_system_preferences_override(ctx, NULL);
+        etch_apply_system_preferences(ctx, false, false, false);
+    }
+
+    /* Pointer gesture phase & active touch points */
+    {
+        EtchTouchPoint touches[4];
+        memset(touches, 0, sizeof(touches));
+        if (etch_pointer_gesture_phase(ctx) != ETCH_GESTURE_NONE ||
+            etch_active_touch_points(touches, 4u, ctx) != 0u) {
+            return false;
+        }
+    }
+
+    /* Multi-MIME clipboard API */
+    {
+        EtchArena clip_arena = etch_arena_create(512u);
+        if (!clip_arena.base) return false;
+        if (etch_set_clipboard_mime(NULL, 1u) ||
+            etch_has_clipboard_mime(etch_str_n(NULL, 0u, false))) {
+            etch_arena_destroy(&clip_arena);
+            return false;
+        }
+        static const uint8_t kClipPayload[4] = { 'o', 'k', '4', '2' };
+        EtchMimeDragEntry entry;
+        entry.mime_type = ETCH_STR_LIT("application/x-etch-c99-test");
+        entry.bytes = kClipPayload;
+        entry.size = 4u;
+        if (etch_set_clipboard_mime(&entry, 1u)) {
+            const bool has_it = etch_has_clipboard_mime(ETCH_STR_LIT("application/x-etch-c99-test"));
+            const EtchClipboardMimeData got = etch_get_clipboard_mime(
+                ETCH_STR_LIT("application/x-etch-c99-test"), &clip_arena);
+            if (!has_it || got.size_bytes != 4u || !got.bytes ||
+                memcmp(got.bytes, kClipPayload, 4u) != 0) {
+                etch_arena_destroy(&clip_arena);
+                return false;
+            }
+        }
+        etch_arena_destroy(&clip_arena);
+    }
+
+    /* CPU-side image decode, SVG rasterization & free */
+    {
+        EtchDecodedImage img;
+        memset(&img, 0, sizeof(img));
+        static const uint8_t kBadBytes[4] = { 0xDEu, 0xADu, 0xBEu, 0xEFu };
+        if (etch_decode_image_memory(kBadBytes, sizeof(kBadBytes), &img) ||
+            etch_decode_image_memory(NULL, 0u, &img)) {
+            return false;
+        }
+        static const uint8_t kTga1x1[22] = {
+            0u, 0u, 2u,
+            0u, 0u, 0u, 0u, 0u,
+            0u, 0u, 0u, 0u,
+            1u, 0u,
+            1u, 0u,
+            32u, 0x28u,
+            0x10u, 0x80u, 0xF0u, 0xFFu
+        };
+        if (!etch_decode_image_memory(kTga1x1, sizeof(kTga1x1), &img) ||
+            img.rgba == NULL || img.width != 1u || img.height != 1u) {
+            etch_free_decoded_image(&img);
+            return false;
+        }
+        etch_free_decoded_image(&img);
+        if (img.rgba != NULL || img.width != 0u || img.height != 0u) {
+            return false;
+        }
+
+        static const char kSvg16[] =
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"16\" height=\"16\">"
+            "<rect width=\"16\" height=\"16\" fill=\"#38BDF8\"/></svg>";
+        EtchSvgRasterDesc rdesc = etch_svg_raster_desc_default();
+        EtchDecodedImage svg_img;
+        memset(&svg_img, 0, sizeof(svg_img));
+        if (!etch_rasterize_svg_memory(kSvg16, sizeof(kSvg16) - 1u, &rdesc, &svg_img) ||
+            svg_img.rgba == NULL || svg_img.width == 0u || svg_img.height == 0u) {
+            etch_free_decoded_image(&svg_img);
+            return false;
+        }
+        etch_free_decoded_image(&svg_img);
+        if (svg_img.rgba != NULL) {
+            return false;
+        }
+    }
+
+    /* GPU device-lost state transition on isolated headless context + async readback contract */
+    {
+        if (etch_begin_async_readback(ctx, 0u, 0u, etch_rgba8(0u, 0u, 0u, 255u)) ||
+            etch_poll_async_readback(ctx, NULL, NULL) > 0) {
+            return false;
+        }
+        EtchContextDesc lcd = etch_context_desc_default();
+        lcd.headless = true;
+        EtchContext* lost_ctx = etch_create_context(&lcd);
+        if (!lost_ctx) return false;
+        const bool has_gpu = (etch_gpu_device(lost_ctx) != NULL);
+        bool lost_ok = true;
+        if (has_gpu) {
+            etch_mark_gpu_device_lost(lost_ctx);
+            lost_ok = (etch_gpu_status(lost_ctx) == ETCH_GPU_LOST);
+            lost_ok = lost_ok && etch_recreate_gpu_device(lost_ctx, NULL) &&
+                      (etch_gpu_status(lost_ctx) == ETCH_GPU_READY);
+            EtchFrameDesc afd = etch_frame_desc_default();
+            afd.viewport_w = 32u; afd.viewport_h = 32u;
+            etch_begin_frame(lost_ctx, &afd);
+            etch_end_frame(lost_ctx);
+            lost_ok = lost_ok && etch_begin_async_readback(lost_ctx, 32u, 32u, etch_rgba8(12u, 24u, 36u, 255u));
+            int32_t pr = 0;
+            const clock_t start_clk = clock();
+            while (pr == 0 && (clock() - start_clk) < (clock_t)(2 * CLOCKS_PER_SEC)) {
+                pr = etch_poll_async_readback(lost_ctx, NULL, NULL);
+            }
+            lost_ok = lost_ok && (pr == 1);
+        }
+        etch_destroy_context(lost_ctx);
+        etch_set_current_context(ctx);
+        if (!lost_ok) return false;
+    }
+
+    /* Trace percentile summary */
+    {
+        EtchTracePercentiles pct;
+        memset(&pct, 0, sizeof(pct));
+        if (etch_trace_compute_percentiles(ctx, NULL)) {
+            return false;
+        }
+        etch_trace_clear(ctx);
+        etch_set_trace_enabled(ctx, true);
+        for (int pass = 0; pass < 2; ++pass) {
+            EtchFrameDesc fd = etch_frame_desc_default();
+            fd.viewport_w = 240u;
+            fd.viewport_h = 120u;
+            etch_begin_frame(ctx, &fd);
+            EtchBoxDesc b = etch_box_desc_default();
+            b.width = etch_sizing_fixed(60.0f);
+            b.height = etch_sizing_fixed(24.0f);
+            etch_box(&b);
+            etch_end_frame(ctx);
+        }
+        const uint32_t sc = etch_trace_sample_count(ctx);
+        const bool got_pct = etch_trace_compute_percentiles(ctx, &pct);
+        etch_trace_clear(ctx);
+        etch_set_trace_enabled(ctx, false);
+        if (sc > 0u) {
+            if (!got_pct || pct.sample_count != sc) return false;
+        } else if (got_pct) {
+            return false;
+        }
+    }
+
+    /* Dock JSON save/load & window pane re-dock */
+    {
+        const uint32_t dk1 = etch_id("c_v029_dk1");
+        const uint32_t dk2 = etch_id("c_v029_dk2");
+        const uint32_t dk3 = etch_id("c_v029_dk3");
+        const uint32_t p1 = etch_id("c_v029_p1");
+        const uint32_t p2 = etch_id("c_v029_p2");
+        const uint32_t p3 = etch_id("c_v029_p3");
+        const uint32_t r1 = etch_dock_reset_root(dk1);
+        uint32_t la = 0u, lb = 0u;
+        if (!r1 || !etch_dock_split_node(dk1, r1, ETCH_AXIS_ROW, 0.4f, &la, &lb, 0u, 80.0f, 80.0f)) {
+            return false;
+        }
+        EtchDockPaneDesc dp1 = etch_dock_pane_desc_default();
+        dp1.id = p1; dp1.title = ETCH_STR_LIT("Pane1");
+        EtchDockPaneDesc dp2 = etch_dock_pane_desc_default();
+        dp2.id = p2; dp2.title = ETCH_STR_LIT("Pane2");
+        if (!etch_dock_add_pane(dk1, la, &dp1) || !etch_dock_add_pane(dk1, lb, &dp2)) {
+            return false;
+        }
+        char json_buf[2048];
+        const uint32_t req = etch_dock_save_layout_json(dk1, json_buf, (uint32_t)sizeof(json_buf));
+        if (req == 0u || req >= (uint32_t)sizeof(json_buf) ||
+            !etch_dock_load_layout_json(dk2, etch_str_n(json_buf, req, false)) ||
+            etch_dock_find_pane_leaf(dk2, p1) == 0u ||
+            etch_dock_find_pane_leaf(dk2, p2) == 0u) {
+            return false;
+        }
+        if (etch_dock_load_layout_json(dk2, ETCH_STR_LIT("{invalid")) ||
+            etch_dock_find_pane_leaf(dk2, p1) == 0u) {
+            return false;
+        }
+        const uint32_t r3 = etch_dock_reset_root(dk3);
+        EtchDockPaneDesc dp3 = etch_dock_pane_desc_default();
+        dp3.id = p3; dp3.title = ETCH_STR_LIT("Host");
+        if (!r3 || !etch_dock_add_pane(dk3, r3, &dp3) ||
+            etch_dock_redock_window_panes(NULL, dk2, dk3, p3, ETCH_DOCK_RIGHT, NULL) != 2u ||
+            etch_dock_find_pane_leaf(dk3, p1) == 0u ||
+            etch_dock_find_pane_leaf(dk3, p2) == 0u) {
+            return false;
+        }
+    }
+
+    /* Table frozen columns & column order */
+    {
+        const uint32_t tid = etch_id("c_v029_tbl");
+        etch_table_set_frozen_columns(tid, 1u);
+        if (etch_table_frozen_columns(tid) != 1u) return false;
+        const uint32_t bad_ord[3] = { 0u, 0u, 1u };
+        const uint32_t good_ord[3] = { 2u, 0u, 1u };
+        uint32_t out_ord[3] = { 0u, 0u, 0u };
+        if (etch_table_set_column_order(tid, bad_ord, 3u) ||
+            !etch_table_set_column_order(tid, good_ord, 3u) ||
+            etch_table_get_column_order(tid, out_ord, 3u) != 3u ||
+            out_ord[0] != 2u || out_ord[1] != 0u || out_ord[2] != 1u) {
+            return false;
+        }
+    }
+
+    /* Command shortcut rebinding & chord/scope descriptor fields */
+    {
+        EtchCommandDesc cd = etch_command_desc_default();
+        cd.id = 9101u;
+        cd.name = ETCH_STR_LIT("c.v029.cmd");
+        cd.title = ETCH_STR_LIT("V29 Cmd");
+        cd.shortcut_mods = (uint16_t)ETCH_MOD_CTRL;
+        cd.shortcut_keycode = (uint32_t)'k';
+        cd.scope_id = etch_id("c_v029_scope");
+        cd.chord_mods = (uint16_t)ETCH_MOD_CTRL;
+        cd.chord_keycode = (uint32_t)'c';
+        if (!etch_register_command(ctx, &cd) ||
+            !etch_rebind_command_shortcut(ctx, 9101u, (uint16_t)(ETCH_MOD_CTRL | ETCH_MOD_SHIFT), (uint32_t)'m', (uint16_t)ETCH_MOD_ALT, (uint32_t)'n')) {
+            return false;
+        }
+        EtchCommandDesc got;
+        memset(&got, 0, sizeof(got));
+        if (!etch_get_command(ctx, etch_command_count(ctx) - 1u, &got) ||
+            got.id != 9101u || got.scope_id != cd.scope_id ||
+            got.shortcut_keycode != (uint32_t)'m' ||
+            got.chord_mods != ETCH_MOD_ALT || got.chord_keycode != (uint32_t)'n') {
+            (void)etch_unregister_command(ctx, 9101u);
+            return false;
+        }
+        if (!etch_unregister_command(ctx, 9101u)) return false;
+    }
+
+    /* Automation replay, failure JSON report & A11y scroll actions */
+    {
+        const uint32_t scroll_id = etch_id("c_v029_a11y_scroll");
+        etch_automation_clear_recording(ctx);
+        etch_automation_set_recording(ctx, true);
+        EtchFrameDesc fd = etch_frame_desc_default();
+        fd.viewport_w = 240u;
+        fd.viewport_h = 120u;
+        fd.dt_seconds = 1.0f / 60.0f;
+        fd.pointer_pos = etch_vec2(16.0f, 16.0f);
+        etch_begin_frame(ctx, &fd);
+        etch_emit_a11y_node(scroll_id, ETCH_A11Y_SCROLL_AREA, ETCH_STR_LIT("V29Scroll"),
+            etch_str_n(NULL, 0u, false), 0u,
+            (1u << ETCH_A11Y_ACT_SCROLL_UP) | (1u << ETCH_A11Y_ACT_SCROLL_DOWN),
+            0.0f, etch_rect(0.0f, 0.0f, 120.0f, 80.0f));
+        etch_end_frame(ctx);
+        etch_automation_set_recording(ctx, false);
+
+        if (!etch_perform_a11y_action(scroll_id, ETCH_A11Y_ACT_SCROLL_DOWN, 0.0f, etch_str_n(NULL, 0u, false), ctx, NULL) ||
+            !etch_perform_a11y_action(scroll_id, ETCH_A11Y_ACT_SCROLL_UP, 0.0f, etch_str_n(NULL, 0u, false), ctx, NULL)) {
+            return false;
+        }
+
+        if (etch_automation_recorded_count(ctx) != 1u ||
+            !etch_automation_replay_frame(ctx, 0u, 240u, 120u, 1.0f)) {
+            return false;
+        }
+        etch_emit_a11y_node(scroll_id, ETCH_A11Y_SCROLL_AREA, ETCH_STR_LIT("V29Scroll"),
+            etch_str_n(NULL, 0u, false), 0u,
+            (1u << ETCH_A11Y_ACT_SCROLL_UP) | (1u << ETCH_A11Y_ACT_SCROLL_DOWN),
+            0.0f, etch_rect(0.0f, 0.0f, 120.0f, 80.0f));
+        etch_end_frame(ctx);
+
+        char rep_buf[4096];
+        const uint32_t rlen = etch_automation_export_failure_report_json(
+            ctx, rep_buf, (uint32_t)sizeof(rep_buf), NULL);
+        etch_automation_clear_recording(ctx);
+        if (rlen == 0u || rlen >= (uint32_t)sizeof(rep_buf) ||
+            strstr(rep_buf, "\"recorded_frames\"") == NULL ||
+            strstr(rep_buf, "\"a11y_nodes\"") == NULL ||
+            strstr(rep_buf, "V29Scroll") == NULL) {
             return false;
         }
     }
@@ -1688,7 +2003,9 @@ int main(void) {
     if (!ok_v027) fprintf(stderr, "c99_abi_smoke: test_v027_c_abi failed\n");
     const bool ok_v028 = ok_v027 && test_v028_c_abi(ctx);
     if (!ok_v028) fprintf(stderr, "c99_abi_smoke: test_v028_c_abi failed\n");
-    const bool ok_release = ok_v028 && test_release_api(ctx);
+    const bool ok_v029 = ok_v028 && test_v029_c_abi(ctx);
+    if (!ok_v029) fprintf(stderr, "c99_abi_smoke: test_v029_c_abi failed\n");
+    const bool ok_release = ok_v029 && test_release_api(ctx);
     if (!ok_release) fprintf(stderr, "c99_abi_smoke: Etch %s public API failed\n", ETCH_VERSION_STRING);
     const bool ok_layout = ok_release && ok_material_defaults && ok_closure && ok_numerals && test_layout_widgets_and_a11y(ctx);
     const bool ok_editor = test_text_buffer_and_code_editor(ctx);

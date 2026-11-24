@@ -265,5 +265,194 @@ static bool verify_a11y_checks(etch::Context* restore) noexcept {
         check(mouse_ps.kind==PointerKind::Mouse && mouse_ps.pressure==1.0f && !mouse_ps.pen_eraser && mouse_ps.tilt_x==0.0f,__LINE__);
     }
 
+    // E03: apply_system_preferences (RTL Row flip, text_scale height growth, high_contrast theme)
+    {
+        const uint32_t rtl_row = id("a11y_e03_row");
+        const uint32_t rtl_a = id("a11y_e03_child_a");
+        const uint32_t rtl_b = id("a11y_e03_child_b");
+        const uint32_t txt_box = id("a11y_e03_text_box");
+
+        SystemPreferences pref = {};
+        pref.theme = SystemTheme::Light;
+        pref.high_contrast = false;
+        pref.text_scale = 1.0f;
+        std::snprintf(pref.locale, sizeof(pref.locale), "en-US");
+        set_system_preferences_override(ctx, &pref);
+        apply_system_preferences(ctx, true, true, true);
+        check(theme(ctx).id == ThemeId::Light &&
+              active_text_scale(ctx) == 1.0f &&
+              active_layout_direction(ctx) == LayoutDirection::Ltr, __LINE__);
+
+        const auto run_e03_frame = [&]() noexcept {
+            begin_frame(ctx, {.viewport_w = 640, .viewport_h = 480});
+            begin_box({.id = id("a11y_e03_root"), .axis = Axis::Col, .width = Sizing::fixed(640), .height = Sizing::fixed(480)});
+            begin_box({.id = rtl_row, .axis = Axis::Row, .width = Sizing::fixed(300), .height = Sizing::fixed(40), .gap = 10});
+            box({.id = rtl_a, .width = Sizing::fixed(60), .height = Sizing::fixed(24)});
+            box({.id = rtl_b, .width = Sizing::fixed(80), .height = Sizing::fixed(24)});
+            end_box();
+            begin_box({.id = txt_box, .axis = Axis::Col, .width = Sizing::fit(), .height = Sizing::fit()});
+            text(str_lit("Accessible Scaled Text"), {.font_size_px = 16.0f});
+            end_box();
+            end_box();
+            end_frame(ctx);
+        };
+
+        run_e03_frame();
+        const A11yNode* ltr_a = find_a11y_node(rtl_a, ctx);
+        const A11yNode* ltr_b = find_a11y_node(rtl_b, ctx);
+        const A11yNode* tb1 = find_a11y_node(txt_box, ctx);
+        check(ltr_a && ltr_b && tb1 && ltr_a->bounds.x < ltr_b->bounds.x && tb1->bounds.h > 0.0f, __LINE__);
+        const float base_text_h = tb1 ? tb1->bounds.h : 0.0f;
+
+        SystemPreferences pref_rtl = {};
+        pref_rtl.theme = SystemTheme::Dark;
+        pref_rtl.high_contrast = true;
+        pref_rtl.text_scale = 1.5f;
+        std::snprintf(pref_rtl.locale, sizeof(pref_rtl.locale), "ar-SA");
+        set_system_preferences_override(ctx, &pref_rtl);
+        check(theme(ctx).id == ThemeId::HighContrast &&
+              active_text_scale(ctx) > 1.49f && active_text_scale(ctx) < 1.51f &&
+              active_layout_direction(ctx) == LayoutDirection::Rtl, __LINE__);
+
+        run_e03_frame();
+        const A11yNode* ra = find_a11y_node(rtl_a, ctx);
+        const A11yNode* rb = find_a11y_node(rtl_b, ctx);
+        const A11yNode* tb2 = find_a11y_node(txt_box, ctx);
+        check(ra && rb && tb2 && ra->bounds.x > rb->bounds.x && tb2->bounds.h > base_text_h * 1.25f, __LINE__);
+
+        apply_system_preferences(ctx, false, false, false);
+        set_system_preferences_override(ctx, nullptr);
+        set_theme(Theme::dark(), ctx);
+        check(active_text_scale(ctx) == 1.0f && active_layout_direction(ctx) == LayoutDirection::Ltr, __LINE__);
+    }
+
+    // C03: A11yAction::ScrollUp / ScrollDown on scroll container and virtual list
+    {
+        const uint32_t sc_id = id("a11y_c03_scroll");
+        const uint32_t vl_id = id("a11y_c03_vlist");
+        VirtualListSlice vl_slice = {};
+        const auto run_c03_frame = [&]() noexcept {
+            begin_frame(ctx, {.viewport_w = 640, .viewport_h = 480});
+            begin_box({.id = id("a11y_c03_root"), .axis = Axis::Row, .width = Sizing::fixed(640), .height = Sizing::fixed(480), .gap = 12});
+            begin_box({.id = sc_id, .axis = Axis::Col, .width = Sizing::fixed(160), .height = Sizing::fixed(80), .clip_children = true, .scroll_y = true});
+            for (uint32_t i = 0; i < 10u; ++i) {
+                box({.width = Sizing::fixed(120), .height = Sizing::fixed(40)});
+            }
+            end_box();
+            vl_slice = begin_virtual_list({.id = vl_id, .item_count = 40u, .item_height_px = 24.0f, .width = Sizing::fixed(160), .height = Sizing::fixed(80)});
+            for (uint32_t i = vl_slice.first_index; i < vl_slice.end_index; ++i) {
+                box({.width = Sizing::fixed(120), .height = Sizing::fixed(24)});
+            }
+            end_virtual_list();
+            end_box();
+            end_frame(ctx);
+        };
+
+        constexpr uint32_t kScrollBits =
+            a11y_action_bit(A11yAction::ScrollUp) | a11y_action_bit(A11yAction::ScrollDown);
+        run_c03_frame();
+        const A11yNode* scn = find_a11y_node(sc_id, ctx);
+        const A11yNode* vln = find_a11y_node(vl_id, ctx);
+        check(scn && (scn->actions_mask & kScrollBits) == kScrollBits, __LINE__);
+        check(vln && (vln->actions_mask & kScrollBits) == kScrollBits, __LINE__);
+
+        check(perform_a11y_action(sc_id, A11yAction::ScrollDown, 0.0f, {}, ctx), __LINE__);
+        check(perform_a11y_action(vl_id, A11yAction::ScrollDown, 0.0f, {}, ctx), __LINE__);
+        run_c03_frame();
+        const float sc_down_y = scroll_offset(sc_id).y;
+        const double vl_down_y = virtual_list_scroll_offset(vl_id);
+        check(sc_down_y >= 40.0f && vl_down_y >= 40.0 && vl_slice.scroll_y >= 40.0, __LINE__);
+
+        check(perform_a11y_action(sc_id, A11yAction::ScrollUp, 0.0f, {}, ctx), __LINE__);
+        check(perform_a11y_action(vl_id, A11yAction::ScrollUp, 0.0f, {}, ctx), __LINE__);
+        run_c03_frame();
+        check(scroll_offset(sc_id).y == 0.0f && virtual_list_scroll_offset(vl_id) == 0.0 && vl_slice.scroll_y == 0.0, __LINE__);
+    }
+
+    // E06: pointer_gesture_phase lifecycle + multi-touch active_touch_points
+    {
+        begin_frame(ctx, {.viewport_w = 640, .viewport_h = 480, .dpi_scale = 1.0f});
+        end_frame(ctx);
+
+        SDL_Event pb = {}; pb.type = SDL_EVENT_PINCH_BEGIN; process_event(ctx, pb);
+        check(pointer_gesture_phase(ctx) == PointerGesturePhase::Begin, __LINE__);
+        SDL_Event pu = {}; pu.type = SDL_EVENT_PINCH_UPDATE; pu.pinch.scale = 1.15f; process_event(ctx, pu);
+        check(pointer_gesture_phase(ctx) == PointerGesturePhase::Update, __LINE__);
+        SDL_Event pe = {}; pe.type = SDL_EVENT_PINCH_END; process_event(ctx, pe);
+        check(pointer_gesture_phase(ctx) == PointerGesturePhase::End, __LINE__);
+        begin_frame(ctx, {.viewport_w = 640, .viewport_h = 480}); end_frame(ctx);
+        check(pointer_gesture_phase(ctx) == PointerGesturePhase::None, __LINE__);
+
+        SDL_Event tf1 = {}; tf1.type = SDL_EVENT_FINGER_DOWN; tf1.tfinger.fingerID = 201u; tf1.tfinger.x = 0.25f; tf1.tfinger.y = 0.5f; tf1.tfinger.pressure = 0.75f;
+        SDL_Event tf2 = {}; tf2.type = SDL_EVENT_FINGER_DOWN; tf2.tfinger.fingerID = 202u; tf2.tfinger.x = 0.75f; tf2.tfinger.y = 0.25f; tf2.tfinger.pressure = 0.4f;
+        process_event(ctx, tf1);
+        process_event(ctx, tf2);
+        TouchPoint pts[4] = {};
+        const uint32_t tp_cnt = active_touch_points(pts, 4u, ctx);
+        check(tp_cnt == 2u && active_touch_points(nullptr, 0u, ctx) == 2u, __LINE__);
+        check(pts[0].finger_id == 201u && pts[0].pos.x > 159.5f && pts[0].pos.x < 160.5f &&
+              pts[0].pos.y > 239.5f && pts[0].pos.y < 240.5f && pts[0].pressure > 0.74f && pts[0].pressure < 0.76f, __LINE__);
+        check(pts[1].finger_id == 202u && pts[1].pos.x > 479.5f && pts[1].pos.x < 480.5f &&
+              pts[1].pos.y > 119.5f && pts[1].pos.y < 120.5f && pts[1].pressure > 0.39f && pts[1].pressure < 0.41f, __LINE__);
+
+        SDL_Event tf2m = {}; tf2m.type = SDL_EVENT_FINGER_MOTION; tf2m.tfinger.fingerID = 202u; tf2m.tfinger.x = 0.5f; tf2m.tfinger.y = 0.75f; tf2m.tfinger.pressure = 0.6f;
+        process_event(ctx, tf2m);
+        check(active_touch_points(pts, 4u, ctx) == 2u && pts[1].pos.x > 319.5f && pts[1].pos.x < 320.5f &&
+              pts[1].pos.y > 359.5f && pts[1].pos.y < 360.5f && pts[1].pressure > 0.59f && pts[1].pressure < 0.61f, __LINE__);
+
+        SDL_Event tf1c = {}; tf1c.type = SDL_EVENT_FINGER_CANCELED; tf1c.tfinger.fingerID = 201u;
+        process_event(ctx, tf1c);
+        check(pointer_gesture_phase(ctx) == PointerGesturePhase::Cancel && active_touch_points(pts, 4u, ctx) == 1u && pts[0].finger_id == 202u, __LINE__);
+        begin_frame(ctx, {.viewport_w = 640, .viewport_h = 480}); end_frame(ctx);
+        check(pointer_gesture_phase(ctx) == PointerGesturePhase::None, __LINE__);
+
+        SDL_Event flost = {}; flost.type = SDL_EVENT_WINDOW_FOCUS_LOST;
+        process_event(ctx, flost);
+        check(pointer_gesture_phase(ctx) == PointerGesturePhase::Cancel && active_touch_points(nullptr, 0u, ctx) == 0u, __LINE__);
+        begin_frame(ctx, {.viewport_w = 640, .viewport_h = 480}); end_frame(ctx);
+        check(pointer_gesture_phase(ctx) == PointerGesturePhase::None, __LINE__);
+    }
+
+    // E08: Multi-MIME clipboard roundtrip (text/html, text/plain, custom binary payload)
+    {
+        static constexpr const char kHtml[] = "<b>Etch</b>";
+        static constexpr const char kPlain[] = "Etch";
+        static constexpr uint8_t kCustom[] = {0x45u, 0x00u, 0x74u, 0xFFu, 0x10u};
+        const MimeDragEntry entries[] = {
+            {.mime_type = str_lit("text/html"), .bytes = reinterpret_cast<const uint8_t*>(kHtml), .size = static_cast<uint32_t>(sizeof(kHtml) - 1u)},
+            {.mime_type = str_lit("text/plain"), .bytes = reinterpret_cast<const uint8_t*>(kPlain), .size = static_cast<uint32_t>(sizeof(kPlain) - 1u)},
+            {.mime_type = str_lit("application/x-etch-node"), .bytes = kCustom, .size = static_cast<uint32_t>(sizeof(kCustom))},
+        };
+        check(set_clipboard_mime(entries), __LINE__);
+        check(has_clipboard_mime(str_lit("text/html")) &&
+              has_clipboard_mime(str_lit("text/plain")) &&
+              has_clipboard_mime(str_lit("application/x-etch-node")) &&
+              !has_clipboard_mime(str_lit("image/png")), __LINE__);
+
+        begin_frame(ctx, {.viewport_w = 640, .viewport_h = 480});
+        const ClipboardMimeData got_html = get_clipboard_mime(str_lit("text/html"));
+        const ClipboardMimeData got_plain = get_clipboard_mime(str_lit("text/plain"));
+        const ClipboardMimeData got_custom = get_clipboard_mime(str_lit("application/x-etch-node"));
+        const ClipboardMimeData got_missing = get_clipboard_mime(str_lit("image/png"));
+        check(got_html.bytes && got_html.size_bytes == sizeof(kHtml) - 1u &&
+              std::memcmp(got_html.bytes, kHtml, sizeof(kHtml) - 1u) == 0, __LINE__);
+        check(got_plain.bytes && got_plain.size_bytes == sizeof(kPlain) - 1u &&
+              std::memcmp(got_plain.bytes, kPlain, sizeof(kPlain) - 1u) == 0, __LINE__);
+        check(got_custom.bytes && got_custom.size_bytes == sizeof(kCustom) &&
+              std::memcmp(got_custom.bytes, kCustom, sizeof(kCustom)) == 0, __LINE__);
+        check(!got_missing.bytes && got_missing.size_bytes == 0u, __LINE__);
+        end_frame(ctx);
+
+        Arena custom_arena = arena_create(256u);
+        const ClipboardMimeData arena_copy = get_clipboard_mime(str_lit("application/x-etch-node"), &custom_arena);
+        check(arena_copy.bytes && arena_copy.size_bytes == sizeof(kCustom) &&
+              std::memcmp(arena_copy.bytes, kCustom, sizeof(kCustom)) == 0, __LINE__);
+        arena_destroy(&custom_arena);
+
+        check(set_clipboard_mime({}), __LINE__);
+        check(!has_clipboard_mime(str_lit("text/html")) && !has_clipboard_mime(str_lit("text/plain")) &&
+              !has_clipboard_mime(str_lit("application/x-etch-node")), __LINE__);
+    }
+
     free_text_buffer(&document);destroy_context(ctx);set_current_context(restore);return ok;
 }

@@ -1,18 +1,6 @@
 // Shared static decoding and Slot 0 sprite staging; compiled by the unity TU.
 namespace etch {
 namespace {
-struct DecodedImage {
-    uint8_t* rgba = nullptr;
-    uint32_t width = 0, height = 0;
-    bool from_stbi = false;
-};
-void free_decoded_image(DecodedImage* p) noexcept {
-    if (p->from_stbi)
-        stbi_image_free(p->rgba);
-    else
-        std::free(p->rgba);
-    *p = {};
-}
 bool looks_like_svg_bytes(const uint8_t* bytes, size_t size) noexcept {
     if (!bytes || size < 5u) return false;
     size_t i = 0u;
@@ -85,7 +73,7 @@ bool decode_webp_memory(const uint8_t* bytes, size_t size, DecodedImage* out) no
         std::free(rgba);
         return false;
     }
-    *out = {rgba, static_cast<uint32_t>(w), static_cast<uint32_t>(h), false};
+    *out = {rgba, static_cast<uint32_t>(w), static_cast<uint32_t>(h)};
     return true;
 }
 
@@ -97,65 +85,10 @@ bool decode_svg_memory(const void* data, size_t size, uint32_t target_w, uint32_
     if (!etch_svg_rasterize_memory(data, size, target_w, target_h, scale, &rgba, &w, &h, nullptr, nullptr)) {
         return false;
     }
-    *out = {rgba, w, h, false};
+    *out = {rgba, w, h};
     return true;
 }
 
-bool decode_image_memory(const void* data, size_t size, DecodedImage* out) noexcept {
-    *out = {};
-    if (!data || !size || size > 0x7FFFFFFFu)
-        return false;
-    const auto* bytes = static_cast<const uint8_t*>(data);
-    if (decode_webp_memory(bytes, size, out)) {
-        return true;
-    }
-    if (looks_like_svg_bytes(bytes, size)) {
-        return decode_svg_memory(data, size, 0u, 0u, 2.0f, out);
-    }
-    auto* io = SDL_IOFromConstMem(data, size);
-    auto* surf = io ? SDL_LoadPNG_IO(io, false) : nullptr;
-    if (!surf && io && size >= 2 && bytes[0] == 'B' && bytes[1] == 'M') {
-        SDL_SeekIO(io, 0, SDL_IO_SEEK_SET);
-        surf = SDL_LoadBMP_IO(io, false);
-    }
-    if (io)
-        SDL_CloseIO(io);
-    if (surf) {
-        if (surf->w <= 0 || surf->h <= 0 || surf->w > 8192 || surf->h > 8192) {
-            SDL_DestroySurface(surf);
-            return false;
-        }
-        if (surf->format != SDL_PIXELFORMAT_RGBA32) {
-            auto* converted = SDL_ConvertSurface(surf, SDL_PIXELFORMAT_RGBA32);
-            SDL_DestroySurface(surf);
-            surf = converted;
-            if (!surf)
-                return false;
-        }
-        const uint32_t w = uint32_t(surf->w), h = uint32_t(surf->h);
-        auto* rgba = static_cast<uint8_t*>(std::malloc(size_t(w) * h * 4u));
-        if (rgba)
-            for (uint32_t y = 0; y < h; ++y)
-                std::memcpy(rgba + size_t(y) * w * 4u,
-                            static_cast<const uint8_t*>(surf->pixels) + size_t(y) * size_t(surf->pitch),
-                            size_t(w) * 4u);
-        SDL_DestroySurface(surf);
-        if (!rgba)
-            return false;
-        *out = {rgba, w, h, false};
-        return true;
-    }
-    int w = 0, h = 0, comp = 0;
-    auto* rgba = stbi_load_from_memory(bytes, int(size), &w, &h, &comp, 4);
-    if (!rgba)
-        return false;
-    if (w <= 0 || h <= 0 || w > 8192 || h > 8192) {
-        stbi_image_free(rgba);
-        return false;
-    }
-    *out = {rgba, uint32_t(w), uint32_t(h), true};
-    return true;
-}
 bool decode_image_file(const char* path, DecodedImage* out) noexcept {
     if (!path || !path[0])
         return false;
@@ -275,6 +208,7 @@ bool compact_sprite_atlas(Context* ctx) noexcept {
     for(uint32_t row=0;row<8;++row)std::memset(pixels+size_t(row)*a.width*4,255,32);
     std::memcpy(a.sprites,plan,size_t(a.sprite_used)*sizeof(SpriteSlot));std::free(plan);std::free(a.pixels);a.pixels=pixels;
     a.shelf_x=x;a.shelf_y=y;a.shelf_h=shelf;a.dirty=true;a.dirty_y0=0;a.dirty_y1=a.height;++a.uv_epoch;
+    if (ctx->trace_enabled) ++ctx->trace_atlas_evictions;
     return true;
 }
 bool allocate_sprite_rect(Context* ctx, uint32_t w, uint32_t h, SpriteSlot* s) noexcept {
@@ -368,6 +302,88 @@ bool resolve_sprite_uv_rect(const Context* ctx, uint32_t id, Vec2 lo, Vec2 hi, V
     return true;
 }
 } // namespace
+
+void free_decoded_image(DecodedImage* image) noexcept {
+    if (!image) return;
+    std::free(image->rgba);
+    *image = {};
+}
+
+bool decode_image_memory(const void* data, size_t size_bytes, DecodedImage* out_image) noexcept {
+    if (!out_image) return false;
+    *out_image = {};
+    if (!data || size_bytes == 0u || size_bytes > 0x7FFFFFFFu) {
+        return false;
+    }
+    const auto* bytes = static_cast<const uint8_t*>(data);
+    if (decode_webp_memory(bytes, size_bytes, out_image)) {
+        return true;
+    }
+    if (looks_like_svg_bytes(bytes, size_bytes)) {
+        return decode_svg_memory(data, size_bytes, 0u, 0u, 2.0f, out_image);
+    }
+    auto* io = SDL_IOFromConstMem(data, size_bytes);
+    auto* surf = io ? SDL_LoadPNG_IO(io, false) : nullptr;
+    if (!surf && io && size_bytes >= 2u && bytes[0] == 'B' && bytes[1] == 'M') {
+        SDL_SeekIO(io, 0, SDL_IO_SEEK_SET);
+        surf = SDL_LoadBMP_IO(io, false);
+    }
+    if (io) {
+        SDL_CloseIO(io);
+    }
+    if (surf) {
+        if (surf->w <= 0 || surf->h <= 0 || surf->w > 8192 || surf->h > 8192) {
+            SDL_DestroySurface(surf);
+            return false;
+        }
+        if (surf->format != SDL_PIXELFORMAT_RGBA32) {
+            auto* converted = SDL_ConvertSurface(surf, SDL_PIXELFORMAT_RGBA32);
+            SDL_DestroySurface(surf);
+            surf = converted;
+            if (!surf) return false;
+        }
+        const uint32_t w = static_cast<uint32_t>(surf->w);
+        const uint32_t h = static_cast<uint32_t>(surf->h);
+        auto* rgba = static_cast<uint8_t*>(std::malloc(static_cast<size_t>(w) * h * 4u));
+        if (rgba) {
+            for (uint32_t y = 0u; y < h; ++y) {
+                std::memcpy(rgba + static_cast<size_t>(y) * w * 4u,
+                            static_cast<const uint8_t*>(surf->pixels) + static_cast<size_t>(y) * static_cast<size_t>(surf->pitch),
+                            static_cast<size_t>(w) * 4u);
+            }
+        }
+        SDL_DestroySurface(surf);
+        if (!rgba) return false;
+        *out_image = {rgba, w, h};
+        return true;
+    }
+    int w = 0, h = 0, comp = 0;
+    auto* rgba = stbi_load_from_memory(bytes, static_cast<int>(size_bytes), &w, &h, &comp, 4);
+    if (!rgba) {
+        return false;
+    }
+    if (w <= 0 || h <= 0 || w > 8192 || h > 8192) {
+        stbi_image_free(rgba);
+        return false;
+    }
+    *out_image = {rgba, static_cast<uint32_t>(w), static_cast<uint32_t>(h)};
+    return true;
+}
+
+bool rasterize_svg_memory(
+    const void* data,
+    size_t size_bytes,
+    const SvgRasterDesc& desc,
+    DecodedImage* out_image) noexcept
+{
+    if (!out_image) return false;
+    *out_image = {};
+    if (!data || size_bytes == 0u || size_bytes > 0x7FFFFFFFu) {
+        return false;
+    }
+    return decode_svg_memory(data, size_bytes, desc.width_px, desc.height_px, desc.scale, out_image);
+}
+
 uint32_t create_sprite_rgba(Context* ctx, const TextureDesc& d) noexcept {
     if (!ctx || !d.rgba_pixels || !d.width || !d.height || d.width > 2046 || d.height > 2046 ||
         (d.row_pitch_bytes && d.row_pitch_bytes < d.width * 4))

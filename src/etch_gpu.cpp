@@ -1896,11 +1896,13 @@ bool record_frame_commands(
         0.0f, 2u);
 }
 
-bool ensure_headless_resources(Context* ctx, uint32_t width, uint32_t height, uint32_t needed_dl) noexcept {
+bool ensure_headless_texture(Context* ctx, uint32_t width, uint32_t height) noexcept {
     if (!ctx->headless_tex || ctx->headless_w != width || ctx->headless_h != height) {
         if (ctx->headless_tex) {
             SDL_ReleaseGPUTexture(ctx->device, ctx->headless_tex);
             ctx->headless_tex = nullptr;
+            ctx->headless_w = 0u;
+            ctx->headless_h = 0u;
         }
         const SDL_GPUTextureCreateInfo tex_info = {
             .type = SDL_GPU_TEXTURETYPE_2D,
@@ -1921,11 +1923,19 @@ bool ensure_headless_resources(Context* ctx, uint32_t width, uint32_t height, ui
         ctx->headless_w = width;
         ctx->headless_h = height;
     }
+    return true;
+}
+
+bool ensure_headless_resources(Context* ctx, uint32_t width, uint32_t height, uint32_t needed_dl) noexcept {
+    if (!ensure_headless_texture(ctx, width, height)) {
+        return false;
+    }
 
     if (!ctx->headless_dl_buf || ctx->headless_dl_size < needed_dl) {
         if (ctx->headless_dl_buf) {
             SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->headless_dl_buf);
             ctx->headless_dl_buf = nullptr;
+            ctx->headless_dl_size = 0u;
         }
         const SDL_GPUTransferBufferCreateInfo dl_info = {
             .usage = SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD,
@@ -2007,6 +2017,8 @@ void release_gpu_device_resources(Context* ctx, bool unclaim_windows = true) noe
         if (ctx->atlas.subpixel_gpu_tex) SDL_ReleaseGPUTexture(ctx->device, ctx->atlas.subpixel_gpu_tex);
         if (ctx->headless_tex) SDL_ReleaseGPUTexture(ctx->device, ctx->headless_tex);
         if (ctx->headless_dl_buf) SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->headless_dl_buf);
+        if (ctx->async_readback_fence) SDL_ReleaseGPUFence(ctx->device, ctx->async_readback_fence);
+        if (ctx->async_readback_buf) SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->async_readback_buf);
         SDL_DestroyGPUDevice(ctx->device);
     } else {
         release_shader_surface_gpu_resources(ctx);
@@ -2067,6 +2079,10 @@ void release_gpu_device_resources(Context* ctx, bool unclaim_windows = true) noe
     ctx->headless_w = ctx->headless_h = 0u;
     ctx->headless_dl_buf = nullptr;
     ctx->headless_dl_size = 0u;
+    ctx->async_readback_fence = nullptr;
+    ctx->async_readback_buf = nullptr;
+    ctx->async_readback_w = ctx->async_readback_h = 0u;
+    ctx->async_readback_pitch = ctx->async_readback_size = 0u;
 }
 
 bool ensure_gpu_device(Context* ctx) noexcept {
@@ -3024,7 +3040,7 @@ int32_t idle_gpu_timeout(Context* ctx, uint64_t now, int32_t timeout) noexcept {
     for (uint32_t i = 0; i < ctx->claimed_window_cap; ++i) {
         if (ClaimedWindowSlot* slot = ctx->claimed_windows[i]) check(slot->ui);
     }
-    if (ctx->headless_tex || ctx->headless_dl_buf) {
+    if (!ctx->async_readback_fence && (ctx->headless_tex || ctx->headless_dl_buf || ctx->async_readback_buf)) {
         uint64_t deadline = ctx->headless_ui ? ctx->headless_ui->transient_gpu_deadline : 0u;
         for (uint32_t i = 0; i < ctx->claimed_window_cap; ++i) {
             if (ClaimedWindowSlot* slot = ctx->claimed_windows[i]) {
@@ -3045,6 +3061,12 @@ int32_t idle_gpu_timeout(Context* ctx, uint64_t now, int32_t timeout) noexcept {
                 ctx->headless_dl_buf = nullptr;
                 ctx->headless_dl_size = 0u;
             }
+            if (ctx->async_readback_buf) {
+                SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->async_readback_buf);
+                ctx->async_readback_buf = nullptr;
+                ctx->async_readback_w = ctx->async_readback_h = 0u;
+                ctx->async_readback_pitch = ctx->async_readback_size = 0u;
+            }
         } else {
             const auto remaining = static_cast<int32_t>(deadline - now);
             if (timeout < 0 || remaining < timeout) timeout = remaining;
@@ -3057,12 +3079,23 @@ int32_t idle_gpu_timeout(Context* ctx, uint64_t now, int32_t timeout) noexcept {
 
 void optimize_render_batches(Context* ctx) noexcept {
     if (!ctx) return;
+    const uint64_t opt_t0 = ctx->trace_enabled ? SDL_GetPerformanceCounter() : 0u;
+    const auto record_opt_us = [&]() noexcept {
+        if (opt_t0 != 0u) {
+            const uint64_t freq = SDL_GetPerformanceFrequency();
+            if (freq > 0u) {
+                ctx->trace_prim_build_us +=
+                    static_cast<double>(SDL_GetPerformanceCounter() - opt_t0) * 1000000.0 / static_cast<double>(freq);
+            }
+        }
+    };
     ctx->gpu_batch_count = 0u;
     ctx->gpu_blur_split_count = 0u;
     ctx->gpu_use_early_z = false;
     if (ctx->prim_count == 0u) return;
 
     if (!ensure_gpu_opt_buffers(ctx, ctx->prim_count, ctx->blur_split_count)) {
+        record_opt_us();
         return;
     }
 
@@ -3112,6 +3145,7 @@ void optimize_render_batches(Context* ctx) noexcept {
             ctx->gpu_blur_split_count = 0u;
             ctx->gpu_use_early_z = false;
         }
+        record_opt_us();
     };
     OptPrimItem* items = (scratch->remaining() >= size_t(ctx->prim_count) * sizeof(OptPrimItem) + 64u)
         ? scratch->alloc_uninit<OptPrimItem>(ctx->prim_count) : nullptr;
@@ -3429,6 +3463,12 @@ void set_gpu_device_reset_callback(Context* ctx, GpuDeviceResetFn fn, void* user
     if (!ctx) return;
     ctx->gpu_reset_fn = fn;
     ctx->gpu_reset_user_data = user_data;
+}
+
+void mark_gpu_device_lost(Context* ctx) noexcept {
+    if (ctx && ctx->device) {
+        ctx->gpu_device_lost = true;
+    }
 }
 
 bool recreate_gpu_device(Context* ctx, const char* driver) noexcept {
@@ -3827,6 +3867,151 @@ bool render_headless_png(Context* ctx, uint32_t width, uint32_t height, const ch
         },
         .user_data = &path,
     });
+}
+
+bool begin_async_readback(Context* ctx, uint32_t width, uint32_t height, Color clear_color) noexcept {
+    if (!ctx || ctx->in_frame || ctx->gpu_device_lost ||
+        width == 0u || height == 0u || width > 16384u || height > 16384u ||
+        ctx->async_readback_fence != nullptr || !ensure_gpu_device(ctx))
+    {
+        return false;
+    }
+    if (!ctx->active_ui) {
+        ctx->active_ui = ensure_headless_ui(ctx);
+        if (!ctx->active_ui) return false;
+    }
+
+    // Align row pitch to 64 pixels (256 bytes) to satisfy D3D12 copy pitch alignment without extra copies.
+    const uint32_t aligned_pixels_per_row = (width + 63u) & ~63u;
+    const uint32_t stride_bytes = aligned_pixels_per_row * 4u;
+    const uint32_t needed_bytes = stride_bytes * height;
+    if (!ensure_headless_texture(ctx, width, height)) {
+        return false;
+    }
+
+    if (!ctx->async_readback_buf || ctx->async_readback_size < needed_bytes) {
+        if (ctx->async_readback_buf) {
+            SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->async_readback_buf);
+            ctx->async_readback_buf = nullptr;
+            ctx->async_readback_size = 0u;
+        }
+        const SDL_GPUTransferBufferCreateInfo dl_info = {
+            .usage = SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD,
+            .size = needed_bytes,
+            .props = 0u,
+        };
+        ctx->async_readback_buf = SDL_CreateGPUTransferBuffer(ctx->device, &dl_info);
+        if (!ctx->async_readback_buf) {
+            SDL_LogError(
+                SDL_LOG_CATEGORY_APPLICATION,
+                "SDL_CreateGPUTransferBuffer (async readback) failed: %s",
+                SDL_GetError());
+            return false;
+        }
+        ctx->async_readback_size = needed_bytes;
+    }
+
+    const uint64_t t0 = SDL_GetPerformanceCounter();
+    SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(ctx->device);
+    if (!cmd) {
+        ctx->gpu_device_lost = true;
+        return false;
+    }
+
+    if (!record_frame_commands(
+            ctx,
+            cmd,
+            ctx->headless_tex,
+            SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB,
+            width,
+            height,
+            clear_color))
+    {
+        SDL_CancelGPUCommandBuffer(cmd);
+        complete_shader_surfaces(ctx, ctx->active_window, false);
+        return false;
+    }
+
+    SDL_GPUCopyPass* dl_pass = SDL_BeginGPUCopyPass(cmd);
+    if (!dl_pass) {
+        SDL_CancelGPUCommandBuffer(cmd);
+        complete_shader_surfaces(ctx, ctx->active_window, false);
+        return false;
+    }
+
+    const SDL_GPUTextureRegion src_reg = {
+        .texture = ctx->headless_tex,
+        .mip_level = 0u,
+        .layer = 0u,
+        .x = 0u,
+        .y = 0u,
+        .z = 0u,
+        .w = width,
+        .h = height,
+        .d = 1u,
+    };
+    const SDL_GPUTextureTransferInfo dst_info = {
+        .transfer_buffer = ctx->async_readback_buf,
+        .offset = 0u,
+        .pixels_per_row = aligned_pixels_per_row,
+        .rows_per_layer = height,
+    };
+    SDL_DownloadFromGPUTexture(dl_pass, &src_reg, &dst_info);
+    SDL_EndGPUCopyPass(dl_pass);
+
+    SDL_GPUFence* fence = SDL_SubmitGPUCommandBufferAndAcquireFence(cmd);
+    complete_shader_surfaces(ctx, ctx->active_window, fence != nullptr);
+    if (!fence) {
+        ctx->gpu_device_lost = true;
+        return false;
+    }
+
+    ctx->async_readback_fence = fence;
+    ctx->async_readback_w = width;
+    ctx->async_readback_h = height;
+    ctx->async_readback_pitch = stride_bytes;
+
+    const uint64_t t1 = SDL_GetPerformanceCounter();
+    const uint64_t freq = SDL_GetPerformanceFrequency();
+    ctx->stats.draw_call_count = ctx->gpu_batch_count;
+    ctx->stats.gpu_submit_ms = (freq > 0u)
+        ? (static_cast<double>(t1 - t0) * 1000.0 / static_cast<double>(freq))
+        : 0.0;
+    trace_record_frame(ctx);
+    return true;
+}
+
+int32_t poll_async_readback(
+    Context* ctx,
+    bool (*receive)(const uint8_t*, uint32_t, uint32_t, uint32_t, void*),
+    void* user_data) noexcept
+{
+    if (!ctx || !ctx->device || !ctx->async_readback_fence) {
+        return -1;
+    }
+    if (!SDL_QueryGPUFence(ctx->device, ctx->async_readback_fence)) {
+        return 0;
+    }
+    SDL_ReleaseGPUFence(ctx->device, ctx->async_readback_fence);
+    ctx->async_readback_fence = nullptr;
+
+    if (!ctx->async_readback_buf) {
+        return -1;
+    }
+    void* pixels = SDL_MapGPUTransferBuffer(ctx->device, ctx->async_readback_buf, false);
+    if (!pixels) {
+        return -1;
+    }
+    const bool ok = receive
+        ? receive(
+              static_cast<const uint8_t*>(pixels),
+              ctx->async_readback_w,
+              ctx->async_readback_h,
+              ctx->async_readback_pitch,
+              user_data)
+        : true;
+    SDL_UnmapGPUTransferBuffer(ctx->device, ctx->async_readback_buf);
+    return ok ? 1 : -1;
 }
 
 namespace {

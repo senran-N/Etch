@@ -12,7 +12,7 @@
 #include <type_traits>
 
 #define ETCH_VERSION_MAJOR 0
-#define ETCH_VERSION_MINOR 28
+#define ETCH_VERSION_MINOR 29
 #define ETCH_VERSION_PATCH 0
 #define ETCH_VERSION_STR_DETAIL(x) #x
 #define ETCH_VERSION_STR(x) ETCH_VERSION_STR_DETAIL(x)
@@ -1034,7 +1034,7 @@ static_assert(std::is_trivially_copyable_v<GlobalsUniform>);
 enum class A11yRole : uint8_t { None, Window, Group, Region, Toolbar, MenuBar, Menu, MenuItem, TabList, Tab, Dialog, ScrollArea, List, ListItem, Table, Tree, TreeItem, StaticText, Button, Checkbox, Switch, Slider, SpinButton, ProgressBar, ComboBox, TextInput, CodeEditor, Canvas, Tooltip, Heading, Link, Document, Math, Figure, Alert, Status };
 enum A11yStateFlags : uint32_t { A11yState_None = 0u, A11yState_Focused = 1u << 0, A11yState_Hovered = 1u << 1, A11yState_Pressed = 1u << 2, A11yState_Checked = 1u << 3, A11yState_Selected = 1u << 4, A11yState_Expanded = 1u << 5, A11yState_Disabled = 1u << 6, A11yState_ReadOnly = 1u << 7, A11yState_Modal = 1u << 8, A11yState_Multiline = 1u << 9, A11yState_Password = 1u << 10, A11yState_LivePolite = 1u << 11, A11yState_LiveAssertive = 1u << 12, A11yState_Busy = 1u << 13, A11yState_Invalid = 1u << 14 };
 enum class A11yLiveMode : uint8_t { Off = 0, Polite = 1, Assertive = 2 };
-enum class A11yAction : uint8_t { Focus, Press, Increment, Decrement, Expand, Collapse, Dismiss, SetValue };
+enum class A11yAction : uint8_t { Focus, Press, Increment, Decrement, Expand, Collapse, Dismiss, SetValue, ScrollUp, ScrollDown };
 constexpr uint32_t a11y_action_bit(A11yAction a) noexcept { return 1u << static_cast<uint8_t>(a); }
 struct A11yNode {
  uint32_t id = 0, parent_id = 0, first_child_idx = 0xFFFFFFFFu, next_sibling_idx = 0xFFFFFFFFu;
@@ -1108,7 +1108,16 @@ SystemTheme system_theme() noexcept;
 bool system_dark_mode(bool default_when_unknown = true) noexcept;
 SystemPreferences system_preferences(const Context* ctx = nullptr) noexcept;
 void set_system_preferences_override(Context* ctx, const SystemPreferences* override_prefs) noexcept;
+void apply_system_preferences(Context* ctx, bool auto_theme = true, bool auto_text_scale = true, bool auto_rtl = true) noexcept;
+float active_text_scale(const Context* ctx = nullptr) noexcept;
+LayoutDirection active_layout_direction(const Context* ctx = nullptr) noexcept;
 enum class PointerKind : uint8_t { Mouse = 0, Pen = 1, Touch = 2 };
+enum class PointerGesturePhase : uint8_t { None = 0, Begin = 1, Update = 2, End = 3, Cancel = 4 };
+struct TouchPoint {
+    uint64_t finger_id = 0u;
+    Vec2 pos = {};
+    float pressure = 0.0f;
+};
 struct PointerState {
     PointerKind kind = PointerKind::Mouse;
     uint32_t pointer_id = 0u;
@@ -1121,6 +1130,8 @@ struct PointerState {
     bool pen_eraser = false;
 };
 PointerState pointer_state(const Context* ctx = nullptr) noexcept;
+PointerGesturePhase pointer_gesture_phase(const Context* ctx = nullptr) noexcept;
+uint32_t active_touch_points(TouchPoint* out_points, uint32_t max_points, const Context* ctx = nullptr) noexcept;
 bool frame_in_progress(const Context* ctx) noexcept;
 
 enum class ThemeId : uint8_t {
@@ -2381,6 +2392,10 @@ bool dock_poll_tear_off(DockTearOffEvent* out_event) noexcept;
 bool dock_transfer_pane(uint32_t src_dock_id, uint32_t dst_dock_id, uint32_t pane_id,
     uint32_t target_pane_id, DockZone zone, float split_ratio = 0.5f,
     SDL_Window* src_window = nullptr, SDL_Window* dst_window = nullptr) noexcept;
+uint32_t dock_save_layout_json(uint32_t dock_id, char* out_buf, uint32_t cap) noexcept;
+bool dock_load_layout_json(uint32_t dock_id, Str json) noexcept;
+uint32_t dock_redock_window_panes(SDL_Window* closing_window, uint32_t src_dock_id, uint32_t dst_dock_id,
+    uint32_t target_pane_id, DockZone zone, SDL_Window* dst_window = nullptr) noexcept;
 
 inline constexpr uint32_t kMaxTableColumns = 16u;
 enum class TableColumnSizing : uint8_t { Fixed = 0, Stretch = 1 };
@@ -2433,6 +2448,10 @@ float table_column_width(uint32_t table_id, uint32_t col_index) noexcept;
 void set_table_column_width(uint32_t table_id, uint32_t col_index, float width_px) noexcept;
 void set_table_sort(uint32_t table_id, uint32_t col_index, bool descending) noexcept;
 void table_scroll_to_row(uint32_t table_id, uint32_t row_index, float row_height_px, AlignY align = AlignY::Top) noexcept;
+void table_set_frozen_columns(uint32_t table_id, uint32_t frozen_count) noexcept;
+uint32_t table_frozen_columns(uint32_t table_id) noexcept;
+bool table_set_column_order(uint32_t table_id, std::span<const uint32_t> order) noexcept;
+uint32_t table_get_column_order(uint32_t table_id, uint32_t* out_order, uint32_t cap) noexcept;
 
 struct TreeNodeDesc {
     uint32_t id = 0; Str label = {}; uint16_t icon_id = kInvalidIcon;
@@ -2553,8 +2572,12 @@ using GpuDeviceResetFn = void (*)(Context* ctx, uint64_t device_generation, void
 // Tear down and rebuild the GPU device, pipelines, atlases, and transient targets
 // in place while keeping layout, widget state, fonts, and text buffers intact.
 bool recreate_gpu_device(Context* ctx, const char* driver = nullptr) noexcept;
+void mark_gpu_device_lost(Context* ctx) noexcept;
 uint64_t gpu_device_generation(const Context* ctx) noexcept;
 void set_gpu_device_reset_callback(Context* ctx, GpuDeviceResetFn fn, void* user_data = nullptr) noexcept;
+bool begin_async_readback(Context* ctx, uint32_t width, uint32_t height, Color clear_color = Color::theme_auto()) noexcept;
+// Returns 1 when completed & delivered, 0 when still pending, -1 on error or no active request.
+int32_t poll_async_readback(Context* ctx, bool (*receive)(const uint8_t*, uint32_t, uint32_t, uint32_t, void*), void* user_data = nullptr) noexcept;
 
 // Structured frame timing, draw-call, cache, and OS/VRAM memory trace.
 struct FrameTraceSample {
@@ -2582,6 +2605,13 @@ uint32_t trace_sample_count(const Context* ctx) noexcept;
 bool trace_get_sample(const Context* ctx, uint32_t index, FrameTraceSample* out_sample) noexcept;
 void trace_clear(Context* ctx) noexcept;
 uint32_t trace_export_json(const Context* ctx, char* out_buf, uint32_t cap) noexcept;
+struct TracePercentiles {
+    uint32_t sample_count = 0u;
+    double layout_p50_us = 0.0, layout_p95_us = 0.0, layout_p99_us = 0.0;
+    double gpu_p50_us = 0.0, gpu_p95_us = 0.0, gpu_p99_us = 0.0;
+    uint64_t peak_working_set_bytes = 0u, peak_vram_bytes = 0u;
+};
+bool trace_compute_percentiles(const Context* ctx, TracePercentiles* out_summary) noexcept;
 
 // Multi-font registry & automatic cluster-safe fallback chain
 enum class FontWeight : uint8_t {
@@ -2933,6 +2963,15 @@ bool register_svg_font_file(const char* family, bool bold, bool italic, const ch
 bool register_svg_font_memory(const char* family, bool bold, bool italic, const void* data, size_t size_bytes) noexcept;
 void destroy_texture(Context* ctx, LoadedTexture* tex) noexcept;
 void destroy_texture(Context* ctx, SDL_GPUTexture* tex) noexcept;
+// Thread-safe pure-CPU image/SVG decoding for off-UI-thread asset pipelines (no GPU device calls).
+struct DecodedImage {
+    uint8_t* rgba = nullptr;
+    uint32_t width = 0u;
+    uint32_t height = 0u;
+};
+bool decode_image_memory(const void* data, size_t size_bytes, DecodedImage* out_image) noexcept;
+bool rasterize_svg_memory(const void* data, size_t size_bytes, const SvgRasterDesc& desc, DecodedImage* out_image) noexcept;
+void free_decoded_image(DecodedImage* image) noexcept;
 
 TextInputResult text_input(const TextInputDesc& desc) noexcept;
 void set_text_selection(uint32_t element_id, uint32_t anchor_byte, uint32_t cursor_byte) noexcept;
@@ -2950,6 +2989,14 @@ struct ClipboardImageData {
 bool set_clipboard_text(const char* utf8_text) noexcept;
 Str get_clipboard_text(Arena* arena = nullptr) noexcept;
 ClipboardImageData get_clipboard_image(Arena* arena = nullptr) noexcept;
+struct ClipboardMimeData {
+    const uint8_t* bytes = nullptr;
+    uint32_t size_bytes = 0u;
+};
+struct MimeDragEntry;
+bool set_clipboard_mime(std::span<const MimeDragEntry> entries) noexcept;
+ClipboardMimeData get_clipboard_mime(Str mime_type, Arena* arena = nullptr) noexcept;
+bool has_clipboard_mime(Str mime_type) noexcept;
 
 // Asynchronous native OS folder & file dialogs (non-blocking; completion wakes wait_events()).
 struct FileDialogFilter {
@@ -3058,11 +3105,16 @@ struct CommandDesc {
     uint32_t shortcut_keycode = 0u;
     bool enabled = true;
     bool allow_when_typing = false;
+    uint32_t scope_id = 0u;
+    uint16_t chord_mods = 0u;
+    uint32_t chord_keycode = 0u;
 };
 bool register_command(Context* ctx, const CommandDesc& desc) noexcept;
 bool unregister_command(Context* ctx, uint32_t command_id) noexcept;
 bool set_command_enabled(Context* ctx, uint32_t command_id, bool enabled) noexcept;
 bool is_command_enabled(const Context* ctx, uint32_t command_id) noexcept;
+bool rebind_command_shortcut(Context* ctx, uint32_t command_id, uint16_t mods, uint32_t keycode,
+    uint16_t chord_mods = 0u, uint32_t chord_keycode = 0u) noexcept;
 uint32_t find_command_shortcut_conflict(const Context* ctx, uint16_t mods, uint32_t keycode, uint32_t ignore_id = 0u) noexcept;
 uint32_t poll_triggered_command(Context* ctx = nullptr) noexcept;
 bool dispatch_command(Context* ctx, uint32_t command_id) noexcept;
@@ -3086,6 +3138,8 @@ struct RecordedFrameInput {
     Vec2 scroll_delta = {};
     uint16_t key_mods = 0u;
     uint32_t key_pressed_code = 0u;
+    char typed_utf8[64] = {};
+    uint32_t typed_utf8_len = 0u;
 };
 uint32_t automation_find_nodes(const Context* ctx, const AutomationQuery& query, uint32_t* out_ids, uint32_t max_ids, SDL_Window* window = nullptr) noexcept;
 bool automation_assert_node(const Context* ctx, const AutomationQuery& query, A11yNode* out_node = nullptr, SDL_Window* window = nullptr) noexcept;
@@ -3094,6 +3148,8 @@ void automation_set_recording(Context* ctx, bool enabled) noexcept;
 uint32_t automation_recorded_count(const Context* ctx) noexcept;
 bool automation_get_recorded(const Context* ctx, uint32_t index, RecordedFrameInput* out_input) noexcept;
 void automation_clear_recording(Context* ctx) noexcept;
+bool automation_replay_frame(Context* ctx, uint32_t index, uint32_t viewport_w, uint32_t viewport_h, float dpi_scale = 1.0f) noexcept;
+uint32_t automation_export_failure_report_json(const Context* ctx, char* out_buf, uint32_t cap, SDL_Window* window = nullptr) noexcept;
 
 // Analytic damped spring animator, DPI/hairline metrics & inertial scroll container control
 float dpi_scale(const Context* ctx = nullptr) noexcept;

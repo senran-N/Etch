@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(etch VERSION 0.28.0 LANGUAGES C CXX)
+project(etch VERSION 0.29.0 LANGUAGES C CXX)
 
 option(ETCH_BUILD_EXAMPLES "Build Etch sandbox and etch_studio examples" ${PROJECT_IS_TOP_LEVEL})
 option(ETCH_BUILD_TESTS "Build Etch CTest suite" ${PROJECT_IS_TOP_LEVEL})
@@ -621,4 +621,7 @@ if (ETCH_INSTALL)
         "${CMAKE_CURRENT_BINARY_DIR}/EtchConfigVersion.cmake"
         "cmake/EtchShaderTools.cmake" "cmake/embed_msl.cmake"
         DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/Etch")
+    install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE"
+        "${CMAKE_CURRENT_SOURCE_DIR}/THIRD_PARTY_NOTICES.md"
+        DESTINATION "${CMAKE_INSTALL_DOCDIR}")
 endif ()

@@ -8,7 +8,7 @@
 
 #ifndef ETCH_VERSION_MAJOR
 #define ETCH_VERSION_MAJOR 0
-#define ETCH_VERSION_MINOR 28
+#define ETCH_VERSION_MINOR 29
 #define ETCH_VERSION_PATCH 0
 #define ETCH_VERSION_STR_DETAIL(x) #x
 #define ETCH_VERSION_STR(x) ETCH_VERSION_STR_DETAIL(x)
@@ -201,7 +201,9 @@ typedef enum EtchA11yAction {
     ETCH_A11Y_ACT_EXPAND,
     ETCH_A11Y_ACT_COLLAPSE,
     ETCH_A11Y_ACT_DISMISS,
-    ETCH_A11Y_ACT_SET_VALUE
+    ETCH_A11Y_ACT_SET_VALUE,
+    ETCH_A11Y_ACT_SCROLL_UP,
+    ETCH_A11Y_ACT_SCROLL_DOWN
 } EtchA11yAction;
 
 typedef enum EtchSystemTheme {
@@ -229,6 +231,14 @@ typedef enum EtchPointerKind {
     ETCH_POINTER_PEN   = 1,
     ETCH_POINTER_TOUCH = 2
 } EtchPointerKind;
+
+typedef enum EtchPointerGesturePhase {
+    ETCH_GESTURE_NONE   = 0,
+    ETCH_GESTURE_BEGIN  = 1,
+    ETCH_GESTURE_UPDATE = 2,
+    ETCH_GESTURE_END    = 3,
+    ETCH_GESTURE_CANCEL = 4
+} EtchPointerGesturePhase;
 
 typedef struct EtchPointerState {
     EtchPointerKind kind;
@@ -2295,8 +2305,11 @@ ETCH_API const char* etch_gpu_driver_name(const EtchContext* ctx);
 ETCH_API bool etch_retry_gpu_initialization(EtchContext* ctx, const char* driver);
 typedef void (*EtchGpuDeviceResetFn)(EtchContext* ctx, uint64_t device_generation, void* user_data);
 ETCH_API bool etch_recreate_gpu_device(EtchContext* ctx, const char* driver);
+ETCH_API void etch_mark_gpu_device_lost(EtchContext* ctx);
 ETCH_API uint64_t etch_gpu_device_generation(const EtchContext* ctx);
 ETCH_API void etch_set_gpu_device_reset_callback(EtchContext* ctx, EtchGpuDeviceResetFn fn, void* user_data);
+ETCH_API bool etch_begin_async_readback(EtchContext* ctx, uint32_t width, uint32_t height, EtchColor clear_color);
+ETCH_API int32_t etch_poll_async_readback(EtchContext* ctx, bool (*receive)(const uint8_t*, uint32_t, uint32_t, uint32_t, void*), void* user_data);
 
 typedef struct EtchFrameTraceSample {
     uint64_t frame_index;
@@ -2323,10 +2336,27 @@ ETCH_API uint32_t etch_trace_sample_count(const EtchContext* ctx);
 ETCH_API bool etch_trace_get_sample(const EtchContext* ctx, uint32_t index, EtchFrameTraceSample* out_sample);
 ETCH_API void etch_trace_clear(EtchContext* ctx);
 ETCH_API uint32_t etch_trace_export_json(const EtchContext* ctx, char* out_buf, uint32_t cap);
+typedef struct EtchTracePercentiles {
+    uint32_t sample_count;
+    double layout_p50_us, layout_p95_us, layout_p99_us;
+    double gpu_p50_us, gpu_p95_us, gpu_p99_us;
+    uint64_t peak_working_set_bytes, peak_vram_bytes;
+} EtchTracePercentiles;
+ETCH_API bool etch_trace_compute_percentiles(const EtchContext* ctx, EtchTracePercentiles* out_summary);
 
 ETCH_API EtchSystemPreferences etch_system_preferences(const EtchContext* ctx);
 ETCH_API void etch_set_system_preferences_override(EtchContext* ctx, const EtchSystemPreferences* override_prefs);
+ETCH_API void etch_apply_system_preferences(EtchContext* ctx, bool auto_theme, bool auto_text_scale, bool auto_rtl);
+ETCH_API float etch_active_text_scale(const EtchContext* ctx);
+ETCH_API EtchLayoutDirection etch_active_layout_direction(const EtchContext* ctx);
 ETCH_API EtchPointerState etch_pointer_state(const EtchContext* ctx);
+ETCH_API EtchPointerGesturePhase etch_pointer_gesture_phase(const EtchContext* ctx);
+typedef struct EtchTouchPoint {
+    uint64_t finger_id;
+    EtchVec2 pos;
+    float pressure;
+} EtchTouchPoint;
+ETCH_API uint32_t etch_active_touch_points(EtchTouchPoint* out_points, uint32_t max_points, const EtchContext* ctx);
 
 typedef enum EtchFontWeight {
     ETCH_FONT_WEIGHT_REGULAR = 0,
@@ -2526,6 +2556,14 @@ ETCH_API bool etch_register_svg_font_file(const char* family, bool bold, bool it
 ETCH_API bool etch_register_svg_font_memory(const char* family, bool bold, bool italic, const void* data, size_t size_bytes);
 ETCH_API void etch_destroy_loaded_texture(EtchContext* ctx, EtchLoadedTexture* tex);
 ETCH_API void etch_destroy_gpu_texture(EtchContext* ctx, struct SDL_GPUTexture* tex);
+typedef struct EtchDecodedImage {
+    uint8_t* rgba;
+    uint32_t width;
+    uint32_t height;
+} EtchDecodedImage;
+ETCH_API bool etch_decode_image_memory(const void* data, size_t size_bytes, EtchDecodedImage* out_image);
+ETCH_API bool etch_rasterize_svg_memory(const void* data, size_t size_bytes, const EtchSvgRasterDesc* desc, EtchDecodedImage* out_image);
+ETCH_API void etch_free_decoded_image(EtchDecodedImage* image);
 
 /* ============================================================================
  * Text Editing, Selection, Clipboard, IME & Code Editor
@@ -2791,6 +2829,10 @@ ETCH_API bool etch_dock_poll_tear_off(EtchDockTearOffEvent* out_event);
 ETCH_API bool etch_dock_transfer_pane(uint32_t src_dock_id, uint32_t dst_dock_id, uint32_t pane_id,
     uint32_t target_pane_id, EtchDockZone zone, float split_ratio,
     struct SDL_Window* src_window, struct SDL_Window* dst_window);
+ETCH_API uint32_t etch_dock_save_layout_json(uint32_t dock_id, char* out_buf, uint32_t cap);
+ETCH_API bool etch_dock_load_layout_json(uint32_t dock_id, EtchStr json);
+ETCH_API uint32_t etch_dock_redock_window_panes(struct SDL_Window* closing_window, uint32_t src_dock_id,
+    uint32_t dst_dock_id, uint32_t target_pane_id, EtchDockZone zone, struct SDL_Window* dst_window);
 
 typedef struct EtchMimeDragEntry {
     EtchStr mime_type;
@@ -2801,6 +2843,13 @@ ETCH_API bool etch_begin_mime_drag_payload(uint32_t source_id, EtchStr label, co
 ETCH_API uint32_t etch_mime_drag_format_count(void);
 ETCH_API bool etch_peek_mime_drag_entry(EtchStr mime_type, EtchMimeDragEntry* out_entry);
 ETCH_API bool etch_accept_mime_drag_payload(uint32_t target_id, EtchStr mime_type, EtchMimeDragEntry* out_entry);
+typedef struct EtchClipboardMimeData {
+    const uint8_t* bytes;
+    uint32_t size_bytes;
+} EtchClipboardMimeData;
+ETCH_API bool etch_set_clipboard_mime(const EtchMimeDragEntry* entries, uint32_t count);
+ETCH_API EtchClipboardMimeData etch_get_clipboard_mime(EtchStr mime_type, EtchArena* arena);
+ETCH_API bool etch_has_clipboard_mime(EtchStr mime_type);
 
 typedef struct EtchCommandDesc {
     uint32_t struct_size;
@@ -2812,12 +2861,17 @@ typedef struct EtchCommandDesc {
     uint32_t shortcut_keycode;
     bool enabled;
     bool allow_when_typing;
+    uint32_t scope_id;
+    uint16_t chord_mods;
+    uint32_t chord_keycode;
 } EtchCommandDesc;
 ETCH_API EtchCommandDesc etch_command_desc_default(void);
 ETCH_API bool etch_register_command(EtchContext* ctx, const EtchCommandDesc* desc);
 ETCH_API bool etch_unregister_command(EtchContext* ctx, uint32_t command_id);
 ETCH_API bool etch_set_command_enabled(EtchContext* ctx, uint32_t command_id, bool enabled);
 ETCH_API bool etch_is_command_enabled(const EtchContext* ctx, uint32_t command_id);
+ETCH_API bool etch_rebind_command_shortcut(EtchContext* ctx, uint32_t command_id, uint16_t mods, uint32_t keycode,
+    uint16_t chord_mods, uint32_t chord_keycode);
 ETCH_API uint32_t etch_find_command_shortcut_conflict(const EtchContext* ctx, uint16_t mods, uint32_t keycode, uint32_t ignore_id);
 ETCH_API uint32_t etch_poll_triggered_command(EtchContext* ctx);
 ETCH_API bool etch_dispatch_command(EtchContext* ctx, uint32_t command_id);
@@ -2840,6 +2894,8 @@ typedef struct EtchRecordedFrameInput {
     EtchVec2 scroll_delta;
     uint16_t key_mods;
     uint32_t key_pressed_code;
+    char typed_utf8[64];
+    uint32_t typed_utf8_len;
 } EtchRecordedFrameInput;
 ETCH_API uint32_t etch_automation_find_nodes(const EtchContext* ctx, const EtchAutomationQuery* query,
     uint32_t* out_ids, uint32_t max_ids, struct SDL_Window* window);
@@ -2850,6 +2906,8 @@ ETCH_API void etch_automation_set_recording(EtchContext* ctx, bool enabled);
 ETCH_API uint32_t etch_automation_recorded_count(const EtchContext* ctx);
 ETCH_API bool etch_automation_get_recorded(const EtchContext* ctx, uint32_t index, EtchRecordedFrameInput* out_input);
 ETCH_API void etch_automation_clear_recording(EtchContext* ctx);
+ETCH_API bool etch_automation_replay_frame(EtchContext* ctx, uint32_t index, uint32_t viewport_w, uint32_t viewport_h, float dpi_scale);
+ETCH_API uint32_t etch_automation_export_failure_report_json(const EtchContext* ctx, char* out_buf, uint32_t cap, struct SDL_Window* window);
 
 ETCH_API EtchTableResult etch_begin_table(const EtchTableDesc* desc);
 ETCH_API bool etch_table_next_row(uint32_t* out_row_index, EtchColor row_bg_override, EtchColor row_border_override);
@@ -2864,6 +2922,10 @@ ETCH_API float etch_table_column_width(uint32_t table_id, uint32_t col_index);
 ETCH_API void etch_set_table_column_width(uint32_t table_id, uint32_t col_index, float width_px);
 ETCH_API void etch_set_table_sort(uint32_t table_id, uint32_t col_index, bool descending);
 ETCH_API void etch_table_scroll_to_row(uint32_t table_id, uint32_t row_index, float row_height_px, EtchAlignY align);
+ETCH_API void etch_table_set_frozen_columns(uint32_t table_id, uint32_t frozen_count);
+ETCH_API uint32_t etch_table_frozen_columns(uint32_t table_id);
+ETCH_API bool etch_table_set_column_order(uint32_t table_id, const uint32_t* order, uint32_t count);
+ETCH_API uint32_t etch_table_get_column_order(uint32_t table_id, uint32_t* out_order, uint32_t cap);
 
 ETCH_API EtchTreeNodeResult etch_begin_tree_node(const EtchTreeNodeDesc* desc);
 ETCH_API void etch_end_tree_node(void);

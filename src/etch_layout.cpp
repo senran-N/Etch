@@ -916,12 +916,18 @@ bool verify_caret_deadline() noexcept {
     return hidden && shown;
 }
 
-static void touch_track_add(WindowUiState* ui, uint64_t finger_id) noexcept {
+static void touch_track_upsert(WindowUiState* ui, uint64_t finger_id, Vec2 pos, float pressure) noexcept {
+    const TouchPoint tp = { .finger_id = finger_id, .pos = pos, .pressure = pressure };
     for (uint32_t i = 0u; i < ui->active_touch_count; ++i) {
-        if (ui->active_touch_ids[i] == finger_id) return;
+        if (ui->active_touch_ids[i] == finger_id) {
+            ui->active_touch_points[i] = tp;
+            return;
+        }
     }
     if (ui->active_touch_count < ETCH_COUNTOF(ui->active_touch_ids)) {
-        ui->active_touch_ids[ui->active_touch_count++] = finger_id;
+        const uint32_t idx = ui->active_touch_count++;
+        ui->active_touch_ids[idx] = finger_id;
+        ui->active_touch_points[idx] = tp;
     }
 }
 
@@ -930,8 +936,11 @@ static void touch_track_remove(WindowUiState* ui, uint64_t finger_id) noexcept {
         if (ui->active_touch_ids[i] == finger_id) {
             for (uint32_t j = i + 1u; j < ui->active_touch_count; ++j) {
                 ui->active_touch_ids[j - 1u] = ui->active_touch_ids[j];
+                ui->active_touch_points[j - 1u] = ui->active_touch_points[j];
             }
             --ui->active_touch_count;
+            ui->active_touch_ids[ui->active_touch_count] = 0u;
+            ui->active_touch_points[ui->active_touch_count] = {};
             return;
         }
     }
@@ -1116,29 +1125,36 @@ static void process_window_event(Context* ctx, const SDL_Event& event) noexcept 
         case SDL_EVENT_FINGER_CANCELED: {
             const uint64_t fid = static_cast<uint64_t>(event.tfinger.fingerID);
             const bool is_down = (event.type == SDL_EVENT_FINGER_DOWN);
-            const bool is_up = (event.type == SDL_EVENT_FINGER_UP || event.type == SDL_EVENT_FINGER_CANCELED);
+            const bool is_canceled = (event.type == SDL_EVENT_FINGER_CANCELED);
+            const bool is_up = (event.type == SDL_EVENT_FINGER_UP || is_canceled);
             const bool was_primary = (ctx->active_ui->active_touch_count == 0u) ||
                                      (ctx->active_ui->active_touch_ids[0] == fid);
+            const float dpi = (ctx->active_ui->dpi_scale > 0.0f) ? ctx->active_ui->dpi_scale : 1.0f;
+            const float lw = static_cast<float>(ctx->active_ui->viewport_w) / dpi;
+            const float lh = static_cast<float>(ctx->active_ui->viewport_h) / dpi;
+            const bool valid_xy = std::isfinite(event.tfinger.x) && std::isfinite(event.tfinger.y);
+            const Vec2 logical_pos = valid_xy ? Vec2{ event.tfinger.x * lw, event.tfinger.y * lh } : Vec2{};
+            const float touch_pressure = (!is_up && std::isfinite(event.tfinger.pressure))
+                ? clamp_range(event.tfinger.pressure, 0.0f, 1.0f)
+                : 0.0f;
             if (is_up) {
                 touch_track_remove(ctx->active_ui, fid);
             } else {
-                touch_track_add(ctx->active_ui, fid);
+                touch_track_upsert(ctx->active_ui, fid, logical_pos, touch_pressure);
+            }
+            if (is_canceled) {
+                ctx->active_ui->gesture_phase = PointerGesturePhase::Cancel;
             }
             PointerState& ps = ctx->active_ui->pointer_state;
             ps.kind = PointerKind::Touch;
             ps.pointer_id = static_cast<uint32_t>(fid);
             ps.active_touches = ctx->active_ui->active_touch_count;
-            ps.pressure = (!is_up && std::isfinite(event.tfinger.pressure))
-                ? clamp_range(event.tfinger.pressure, 0.0f, 1.0f)
-                : 0.0f;
+            ps.pressure = touch_pressure;
             ps.tilt_x = 0.0f;
             ps.tilt_y = 0.0f;
             ps.pen_eraser = false;
-            if (was_primary && std::isfinite(event.tfinger.x) && std::isfinite(event.tfinger.y)) {
-                const float dpi = (ctx->active_ui->dpi_scale > 0.0f) ? ctx->active_ui->dpi_scale : 1.0f;
-                const float lw = static_cast<float>(ctx->active_ui->viewport_w) / dpi;
-                const float lh = static_cast<float>(ctx->active_ui->viewport_h) / dpi;
-                ctx->active_ui->event_pointer_pos = Vec2{ event.tfinger.x * lw, event.tfinger.y * lh };
+            if (was_primary && valid_xy) {
+                ctx->active_ui->event_pointer_pos = logical_pos;
                 ctx->active_ui->has_event_pointer = true;
                 if (is_down) {
                     ctx->active_ui->event_pointer_down = true;
@@ -1155,11 +1171,20 @@ static void process_window_event(Context* ctx, const SDL_Event& event) noexcept 
             request_redraw(ctx);
             break;
         }
+        case SDL_EVENT_PINCH_BEGIN:
+            ctx->active_ui->gesture_phase = PointerGesturePhase::Begin;
+            request_redraw(ctx);
+            break;
         case SDL_EVENT_PINCH_UPDATE:
+            ctx->active_ui->gesture_phase = PointerGesturePhase::Update;
             if (std::isfinite(event.pinch.scale)) {
                 ctx->active_ui->pointer_state.pinch_delta += (event.pinch.scale - 1.0f);
-                request_redraw(ctx);
             }
+            request_redraw(ctx);
+            break;
+        case SDL_EVENT_PINCH_END:
+            ctx->active_ui->gesture_phase = PointerGesturePhase::End;
+            request_redraw(ctx);
             break;
         case SDL_EVENT_TEXT_EDITING: {
             const char* src = event.edit.text ? event.edit.text : "";
@@ -1329,6 +1354,12 @@ static void process_window_event(Context* ctx, const SDL_Event& event) noexcept 
             ctx->active_ui->drag_accepted_this_frame = false;
             ctx->active_ui->space_down = false;
             ctx->active_ui->active_id = 0u;
+            if (ctx->active_ui->active_touch_count > 0u ||
+                ctx->active_ui->gesture_phase == PointerGesturePhase::Begin ||
+                ctx->active_ui->gesture_phase == PointerGesturePhase::Update)
+            {
+                ctx->active_ui->gesture_phase = PointerGesturePhase::Cancel;
+            }
             ctx->active_ui->active_touch_count = 0u;
             ctx->active_ui->pointer_state.active_touches = 0u;
             ctx->active_ui->pointer_state.pressure = 0.0f;
@@ -2319,21 +2350,36 @@ void begin_box(const BoxDesc& desc_in) noexcept {
         return;
     }
 
-    if(box_ws && (desc.scroll_x || desc.scroll_y)) {
+    if (box_ws && (desc.scroll_x || desc.scroll_y)) {
+        constexpr uint32_t kScrollActionMask =
+            12u | a11y_action_bit(A11yAction::ScrollUp) | a11y_action_bit(A11yAction::ScrollDown);
         PendingA11yAction sc_cmd = {};
-        float direction = 0.0f;
-        while(a11y_take_any(desc.id,12u,&sc_cmd)) direction += (sc_cmd.action==A11yAction::Increment)?1.0f:-1.0f;
-        if(direction != 0.0f) {
-            if(desc.scroll_y) {
-                box_ws->scroll_pos.y=clamp_range(box_ws->scroll_pos.y+direction*40,0,box_ws->scroll_max.y);
-                if (direction < 0.0f) {
-                    box_ws->scroll_stuck_bottom = false;
-                } else if (box_ws->scroll_max.y <= 0.5f || box_ws->scroll_pos.y >= box_ws->scroll_max.y - 2.0f) {
-                    box_ws->scroll_stuck_bottom = true;
-                }
+        float delta_x = 0.0f;
+        float delta_y = 0.0f;
+        const float page_y = std::fmax(40.0f, box_ws->viewport_dim.y * 0.85f);
+        while (a11y_take_any(desc.id, kScrollActionMask, &sc_cmd)) {
+            if (sc_cmd.action == A11yAction::ScrollUp || sc_cmd.action == A11yAction::ScrollDown) {
+                const float step = (sc_cmd.number > 0.0f && std::isfinite(sc_cmd.number)) ? sc_cmd.number : page_y;
+                delta_y += (sc_cmd.action == A11yAction::ScrollDown) ? step : -step;
             } else {
-                box_ws->scroll_pos.x=clamp_range(box_ws->scroll_pos.x+direction*40,0,box_ws->scroll_max.x);
+                const float d = (sc_cmd.action == A11yAction::Increment) ? 40.0f : -40.0f;
+                if (desc.scroll_y) delta_y += d;
+                else delta_x += d;
             }
+        }
+        if (delta_y != 0.0f && desc.scroll_y) {
+            box_ws->scroll_pos.y = clamp_range(box_ws->scroll_pos.y + delta_y, 0.0f, box_ws->scroll_max.y);
+            box_ws->scroll_vel.y = 0.0f;
+            if (delta_y < 0.0f) {
+                box_ws->scroll_stuck_bottom = false;
+            } else if (box_ws->scroll_max.y <= 0.5f || box_ws->scroll_pos.y >= box_ws->scroll_max.y - 2.0f) {
+                box_ws->scroll_stuck_bottom = true;
+            }
+            request_redraw(ctx);
+        }
+        if (delta_x != 0.0f && desc.scroll_x) {
+            box_ws->scroll_pos.x = clamp_range(box_ws->scroll_pos.x + delta_x, 0.0f, box_ws->scroll_max.x);
+            box_ws->scroll_vel.x = 0.0f;
             request_redraw(ctx);
         }
     }
@@ -2456,6 +2502,7 @@ void begin_box(const BoxDesc& desc_in) noexcept {
     decl.flex_shrink = std::isfinite(desc.flex_shrink) && desc.flex_shrink >= 0.0f ? desc.flex_shrink : 1.0f;
     decl.aspect_ratio = std::isfinite(desc.aspect_ratio) && desc.aspect_ratio > 0.0f ? desc.aspect_ratio : 0.0f;
     decl.wrap = desc.wrap;
+    decl.rtl = (ctx->effective_layout_direction == LayoutDirection::Rtl);
     decl.shrink_width = desc.shrink_width;
     decl.shrink_height = desc.shrink_height;
     decl.grid_columns = desc.grid_columns > 128u ? 128u : desc.grid_columns;
@@ -2501,7 +2548,9 @@ void begin_box(const BoxDesc& desc_in) noexcept {
 
     layout_configure_open(ctx->active_ui->layout, decl);
     const uint32_t aid = ctx->active_ui->layout->nodes.data[node_idx].id;
-    auto* semantic = a11y_emit(ctx, desc.id ? desc.id : aid, is_scroll ? A11yRole::ScrollArea : A11yRole::Group, {}, {}, 0, (is_scroll?12u:0u)|(desc.id?2u:0u)|(desc.focusable?1u:0u));
+    constexpr uint32_t kScrollBits =
+        12u | a11y_action_bit(A11yAction::ScrollUp) | a11y_action_bit(A11yAction::ScrollDown);
+    auto* semantic = a11y_emit(ctx, desc.id ? desc.id : aid, is_scroll ? A11yRole::ScrollArea : A11yRole::Group, {}, {}, 0, (is_scroll ? kScrollBits : 0u) | (desc.id ? 2u : 0u) | (desc.focusable ? 1u : 0u));
     if (semantic) { semantic->clay_id = aid; ctx->a11y_parent = semantic; }
 }
 
@@ -2571,8 +2620,9 @@ void text(Str content, const TextDesc& desc) noexcept {
     }
 
     const float wscale = current_world_scale(ctx);
+    const float tscale = ctx->auto_sys_text_scale ? ctx->effective_text_scale : 1.0f;
     const float raw_px = (desc.font_size_px > 0.0f) ? desc.font_size_px : 16.0f;
-    const float clamped_px = clamp_range(raw_px * wscale, 0.25f, 65535.0f);
+    const float clamped_px = clamp_range(raw_px * wscale * tscale, 0.25f, 65535.0f);
 
     const Theme& thm = active_theme(ctx);
     const Color eff_color = resolve_theme_color(desc.color, thm.text_primary);
@@ -2583,7 +2633,7 @@ void text(Str content, const TextDesc& desc) noexcept {
     cfg.font_id = (desc.font_id < kMaxFontSlots) ? desc.font_id : kFontSans;
     cfg.font_size_px = clamped_px;
     cfg.letter_spacing = std::isfinite(desc.letter_spacing) ? desc.letter_spacing * wscale : 0.0f;
-    cfg.line_height = desc.line_height_px > 0.0f ? (desc.line_height_px * wscale) : 0.0f;
+    cfg.line_height = desc.line_height_px > 0.0f ? (desc.line_height_px * wscale * tscale) : 0.0f;
     cfg.ellipsis = desc.ellipsis;
     cfg.max_lines = desc.max_lines;
     cfg.wrap = desc.wrap;
@@ -2662,8 +2712,9 @@ void text_spans(std::span<const TextSpan> spans, const RichTextDesc& desc) noexc
     const Color eff_sel_color = resolve_theme_color(desc.selection_color, thm.selection);
 
     const float wscale = current_world_scale(ctx);
+    const float tscale = ctx->auto_sys_text_scale ? ctx->effective_text_scale : 1.0f;
     const float base_px = clamp_range(
-        ((desc.font_size_px > 0.0f) ? desc.font_size_px : 14.0f) * wscale,
+        ((desc.font_size_px > 0.0f) ? desc.font_size_px : 14.0f) * wscale * tscale,
         0.25f,
         4096.0f);
 
@@ -2692,7 +2743,7 @@ void text_spans(std::span<const TextSpan> spans, const RichTextDesc& desc) noexc
         }
         const uint32_t b1 = cursor;
 
-        const float raw_sz = (sp.font_size_px > 0.0f) ? (sp.font_size_px * wscale) : base_px;
+        const float raw_sz = (sp.font_size_px > 0.0f) ? (sp.font_size_px * wscale * tscale) : base_px;
         const float sp_px = clamp_range(raw_sz, 0.25f, 4096.0f);
         const uint16_t req_font = (sp.font_id != kInvalidFont) ? sp.font_id : desc.font_id;
         const uint16_t resolved_slot = ctx->atlas.font_valid
@@ -2780,7 +2831,7 @@ void text_spans(std::span<const TextSpan> spans, const RichTextDesc& desc) noexc
     full_utf8[total_bytes] = '\0';
     plain_utf8[text_bytes] = '\0';
 
-    const float final_lh = (desc.line_height_px > 0.0f) ? (desc.line_height_px * wscale) : max_lh;
+    const float final_lh = (desc.line_height_px > 0.0f) ? (desc.line_height_px * wscale * tscale) : max_lh;
     cfg_hash = fnv1a_32_step(cfg_hash, &final_lh, sizeof(final_lh));
 
     rich->spans = int_spans;
@@ -4930,6 +4981,39 @@ PointerState pointer_state(const Context* ctx_arg) noexcept {
         ? ctx->active_ui
         : (ctx->headless ? ctx->headless_ui : window_ui(ctx, nullptr));
     return ui ? ui->pointer_state : PointerState{};
+}
+
+PointerGesturePhase pointer_gesture_phase(const Context* ctx_arg) noexcept {
+    const Context* ctx = ctx_arg ? ctx_arg : current_context();
+    if (!ctx) {
+        return PointerGesturePhase::None;
+    }
+    const WindowUiState* ui = ctx->active_ui
+        ? ctx->active_ui
+        : (ctx->headless ? ctx->headless_ui : window_ui(ctx, nullptr));
+    return ui ? ui->gesture_phase : PointerGesturePhase::None;
+}
+
+uint32_t active_touch_points(TouchPoint* out_points, uint32_t max_points, const Context* ctx_arg) noexcept {
+    const Context* ctx = ctx_arg ? ctx_arg : current_context();
+    if (!ctx) {
+        return 0u;
+    }
+    const WindowUiState* ui = ctx->active_ui
+        ? ctx->active_ui
+        : (ctx->headless ? ctx->headless_ui : window_ui(ctx, nullptr));
+    if (!ui) {
+        return 0u;
+    }
+    const uint32_t total = ui->active_touch_count;
+    if (!out_points || max_points == 0u) {
+        return total;
+    }
+    const uint32_t copy_n = (total < max_points) ? total : max_points;
+    if (copy_n > 0u) {
+        std::memcpy(out_points, ui->active_touch_points, static_cast<size_t>(copy_n) * sizeof(TouchPoint));
+    }
+    return copy_n;
 }
 
 bool right_clicked(uint32_t element_id) noexcept {
