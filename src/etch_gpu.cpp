@@ -8,6 +8,7 @@ namespace etch {
 namespace {
 
 bool ensure_gpu_device(Context* ctx) noexcept;
+void release_shader_surface_gpu_resources(Context* ctx) noexcept;
 
 constexpr bool is_srgb_gpu_format(SDL_GPUTextureFormat fmt) noexcept {
     return fmt == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB ||
@@ -783,7 +784,8 @@ void emit_gpu_batches(
     uint32_t end_batch,
     uint32_t prim_base_offset = 0u,
     bool use_depth = false,
-    const SDL_Rect* scissor_override = nullptr) noexcept
+    const SDL_Rect* scissor_override = nullptr,
+    uint32_t* out_draws = nullptr) noexcept
 {
     if (begin_batch >= end_batch) {
         return;
@@ -936,6 +938,7 @@ void emit_gpu_batches(
 
         // Portable across D3D12/Vulkan/Metal: always pass 0 for first_vertex & first_instance.
         SDL_DrawGPUPrimitives(render_pass, 6u, batch.prim_count, 0u, 0u);
+        if (out_draws) ++(*out_draws);
     }
 }
 
@@ -977,7 +980,7 @@ bool run_gpu_render_pass(
         return false;
     }
     emit_gpu_batches(ctx, cmd, render_pass, dst_fmt, dst_w, dst_h,
-                     ctx->gpu_batches, begin_batch, end_batch, 0u, use_depth);
+                     ctx->gpu_batches, begin_batch, end_batch, 0u, use_depth, nullptr, &ctx->trace_ui_draw_calls);
     SDL_EndGPURenderPass(render_pass);
     return true;
 }
@@ -1151,8 +1154,23 @@ bool record_frame_commands(
     if (!ctx || !cmd || !target_tex || target_w == 0u || target_h == 0u) {
         return false;
     }
+    ctx->trace_gpu_upload_us = 0.0;
+    ctx->trace_ui_draw_calls = 0u;
+    ctx->trace_filter_passes = 0u;
+    const uint64_t trace_freq = ctx->trace_enabled ? SDL_GetPerformanceFrequency() : 0u;
+    const auto trace_add_upload_us = [&](uint64_t t_start) noexcept {
+        if (trace_freq > 0u) {
+            ctx->trace_gpu_upload_us +=
+                static_cast<double>(SDL_GetPerformanceCounter() - t_start) * 1000000.0 / static_cast<double>(trace_freq);
+        }
+    };
     ctx->active_ui->transient_gpu_deadline = SDL_GetTicks() + 2000u;
-    if (!flush_texture_uploads(ctx)) return false;
+    {
+        const bool had_tex_upload = (ctx->texture_upload_cmd != nullptr);
+        const uint64_t t_up = (trace_freq && had_tex_upload) ? SDL_GetPerformanceCounter() : 0u;
+        if (!flush_texture_uploads(ctx)) return false;
+        if (had_tex_upload) trace_add_upload_us(t_up);
+    }
     if (!ensure_white_fallback_tex(ctx)) return false;
     if (!record_shader_surfaces(ctx, cmd)) return false;
     clear_color = resolve_theme_color(clear_color, active_theme(ctx).bg_canvas);
@@ -1328,6 +1346,7 @@ bool record_frame_commands(
     const bool subpixel_upload = atlas.subpixel_gpu_tex && atlas.subpixel_dirty && atlas.subpixel_dirty_y1 > atlas.subpixel_dirty_y0;
     if (clip_shapes_dirty || grad_stops_dirty || atlas_upload || subpixel_upload || total_prims > 0u || slug_curves_pending || slug_bands_pending ||
         ctx->dyn_slug_curve_count > 0u || ctx->dyn_slug_band_count > 0u) {
+        const uint64_t t_copy = trace_freq ? SDL_GetPerformanceCounter() : 0u;
         SDL_GPUCopyPass* copy_pass = SDL_BeginGPUCopyPass(cmd);
         if (!copy_pass) {
             return false;
@@ -1488,6 +1507,7 @@ bool record_frame_commands(
         }
 
         SDL_EndGPUCopyPass(copy_pass);
+        trace_add_upload_us(t_copy);
     }
 
     if (!atlas_upload && ctx->atlas_transfer_buf && ++ctx->atlas_clean_frames >= 60u) {
@@ -1645,6 +1665,7 @@ bool record_frame_commands(
                     split_batches, group_first[gi], group_end[gi], ctx->prim_count, false, &slice_scissor);
             }
             SDL_EndGPURenderPass(fpass);
+            ++ctx->trace_filter_passes;
 
             float pad_dst[kMaxFilterLevels] = {};
             if (slice_max_level[s] > 0u) {
@@ -1674,6 +1695,7 @@ bool record_frame_commands(
                     return false;
                 }
                 ++ctx->stats.blur_pass_count;
+                ++ctx->trace_filter_passes;
             }
         }
         cleanup_filter_split();
@@ -1924,6 +1946,129 @@ bool ensure_headless_resources(Context* ctx, uint32_t width, uint32_t height, ui
     return true;
 }
 
+void release_gpu_device_resources(Context* ctx, bool unclaim_windows = true) noexcept {
+    if (!ctx) return;
+    if (ctx->device) {
+        (void)SDL_WaitForGPUIdle(ctx->device);
+        if (ctx->headless_ui) {
+            release_blur_targets(ctx->device, *ctx->headless_ui);
+            release_filter_targets(ctx->device, *ctx->headless_ui);
+            release_depth_target(ctx->device, *ctx->headless_ui);
+        }
+        for (uint32_t i = 0u; i < ctx->claimed_window_cap; ++i) {
+            ClaimedWindowSlot* slot = ctx->claimed_windows[i];
+            if (!slot) continue;
+            release_blur_targets(ctx->device, slot->ui);
+            release_filter_targets(ctx->device, slot->ui);
+            release_depth_target(ctx->device, slot->ui);
+            if (unclaim_windows && slot->window) {
+                SDL_ReleaseWindowFromGPUDevice(ctx->device, slot->window);
+            }
+        }
+        release_shader_surface_gpu_resources(ctx);
+        release_pso_table(ctx);
+        if (ctx->quad_vs_shader) SDL_ReleaseGPUShader(ctx->device, ctx->quad_vs_shader);
+        if (ctx->quad_ps_shader) SDL_ReleaseGPUShader(ctx->device, ctx->quad_ps_shader);
+        if (ctx->subpixel_vs_shader) SDL_ReleaseGPUShader(ctx->device, ctx->subpixel_vs_shader);
+        if (ctx->subpixel_ps_shader) SDL_ReleaseGPUShader(ctx->device, ctx->subpixel_ps_shader);
+        if (ctx->slug_vs_shader) SDL_ReleaseGPUShader(ctx->device, ctx->slug_vs_shader);
+        if (ctx->slug_ps_shader) SDL_ReleaseGPUShader(ctx->device, ctx->slug_ps_shader);
+        if (ctx->image_vs_shader) SDL_ReleaseGPUShader(ctx->device, ctx->image_vs_shader);
+        if (ctx->image_ps_shader) SDL_ReleaseGPUShader(ctx->device, ctx->image_ps_shader);
+        if (ctx->fx_vs_shader) SDL_ReleaseGPUShader(ctx->device, ctx->fx_vs_shader);
+        if (ctx->fx_ps_shader) SDL_ReleaseGPUShader(ctx->device, ctx->fx_ps_shader);
+        if (ctx->kawase_vs_shader) SDL_ReleaseGPUShader(ctx->device, ctx->kawase_vs_shader);
+        if (ctx->kawase_ps_shader) SDL_ReleaseGPUShader(ctx->device, ctx->kawase_ps_shader);
+        if (ctx->linear_sampler) SDL_ReleaseGPUSampler(ctx->device, ctx->linear_sampler);
+        if (ctx->nearest_sampler) SDL_ReleaseGPUSampler(ctx->device, ctx->nearest_sampler);
+        if (ctx->mirror_linear_sampler) SDL_ReleaseGPUSampler(ctx->device, ctx->mirror_linear_sampler);
+        if (ctx->surface_fallback_tex) SDL_ReleaseGPUTexture(ctx->device, ctx->surface_fallback_tex);
+        if (ctx->prim_gpu_buf) SDL_ReleaseGPUBuffer(ctx->device, ctx->prim_gpu_buf);
+        if (ctx->prim_transfer_buf) SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->prim_transfer_buf);
+        if (ctx->prim_depth_gpu_buf) SDL_ReleaseGPUBuffer(ctx->device, ctx->prim_depth_gpu_buf);
+        if (ctx->prim_depth_transfer_buf) SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->prim_depth_transfer_buf);
+        if (ctx->dyn_slug_curve_gpu_buf) SDL_ReleaseGPUBuffer(ctx->device, ctx->dyn_slug_curve_gpu_buf);
+        if (ctx->dyn_slug_curve_tbuf) SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->dyn_slug_curve_tbuf);
+        if (ctx->dyn_slug_band_gpu_buf) SDL_ReleaseGPUBuffer(ctx->device, ctx->dyn_slug_band_gpu_buf);
+        if (ctx->dyn_slug_band_tbuf) SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->dyn_slug_band_tbuf);
+        if (ctx->slug_curve_gpu_buf) SDL_ReleaseGPUBuffer(ctx->device, ctx->slug_curve_gpu_buf);
+        if (ctx->slug_band_gpu_buf) SDL_ReleaseGPUBuffer(ctx->device, ctx->slug_band_gpu_buf);
+        if (ctx->slug_curve_tbuf) SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->slug_curve_tbuf);
+        if (ctx->slug_band_tbuf) SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->slug_band_tbuf);
+        if (ctx->atlas_transfer_buf) SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->atlas_transfer_buf);
+        if (ctx->subpixel_transfer_buf) SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->subpixel_transfer_buf);
+        if (ctx->texture_upload_cmd) SDL_CancelGPUCommandBuffer(ctx->texture_upload_cmd);
+        if (ctx->clip_shape_gpu) SDL_ReleaseGPUBuffer(ctx->device, ctx->clip_shape_gpu);
+        if (ctx->clip_shape_transfer) SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->clip_shape_transfer);
+        if (ctx->grad_stop_gpu) SDL_ReleaseGPUBuffer(ctx->device, ctx->grad_stop_gpu);
+        if (ctx->grad_stop_transfer) SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->grad_stop_transfer);
+        if (ctx->texture_upload_buf) SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->texture_upload_buf);
+        if (ctx->atlas.gpu_tex) SDL_ReleaseGPUTexture(ctx->device, ctx->atlas.gpu_tex);
+        if (ctx->atlas.subpixel_gpu_tex) SDL_ReleaseGPUTexture(ctx->device, ctx->atlas.subpixel_gpu_tex);
+        if (ctx->headless_tex) SDL_ReleaseGPUTexture(ctx->device, ctx->headless_tex);
+        if (ctx->headless_dl_buf) SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->headless_dl_buf);
+        SDL_DestroyGPUDevice(ctx->device);
+    } else {
+        release_shader_surface_gpu_resources(ctx);
+        release_pso_table(ctx);
+    }
+
+    ctx->device = nullptr;
+    ctx->gpu_shader_fmt = SDL_GPU_SHADERFORMAT_INVALID;
+    ctx->quad_vs_shader = ctx->quad_ps_shader = nullptr;
+    ctx->subpixel_vs_shader = ctx->subpixel_ps_shader = nullptr;
+    ctx->slug_vs_shader = ctx->slug_ps_shader = nullptr;
+    ctx->image_vs_shader = ctx->image_ps_shader = nullptr;
+    ctx->fx_vs_shader = ctx->fx_ps_shader = nullptr;
+    ctx->kawase_vs_shader = ctx->kawase_ps_shader = nullptr;
+    ctx->linear_sampler = ctx->nearest_sampler = ctx->mirror_linear_sampler = nullptr;
+    ctx->surface_fallback_tex = nullptr;
+    ctx->prim_gpu_buf = nullptr;
+    ctx->prim_transfer_buf = nullptr;
+    ctx->prim_gpu_cap = ctx->prim_tbuf_cap = ctx->prim_tbuf_cursor = 0u;
+    ctx->prim_depth_gpu_buf = nullptr;
+    ctx->prim_depth_transfer_buf = nullptr;
+    ctx->prim_depth_gpu_cap = ctx->prim_depth_tbuf_cap = ctx->prim_depth_tbuf_cursor = 0u;
+    ctx->dyn_slug_curve_gpu_buf = nullptr;
+    ctx->dyn_slug_curve_tbuf = nullptr;
+    ctx->dyn_slug_curve_gpu_cap = ctx->dyn_slug_curve_tbuf_cap = 0u;
+    ctx->dyn_slug_band_gpu_buf = nullptr;
+    ctx->dyn_slug_band_tbuf = nullptr;
+    ctx->dyn_slug_band_gpu_cap = ctx->dyn_slug_band_tbuf_cap = 0u;
+    ctx->slug_curve_gpu_buf = ctx->slug_band_gpu_buf = nullptr;
+    ctx->slug_curve_tbuf = ctx->slug_band_tbuf = nullptr;
+    ctx->slug_curve_gpu_cap = ctx->slug_band_gpu_cap = 0u;
+    ctx->slug_curve_tbuf_cap = ctx->slug_band_tbuf_cap = 0u;
+    ctx->atlas.uploaded_slug_curves = 0u;
+    ctx->atlas.uploaded_slug_bands = 0u;
+    ctx->atlas.gpu_tex = nullptr;
+    ctx->atlas.gpu_w = ctx->atlas.gpu_h = 0u;
+    ctx->atlas.subpixel_gpu_tex = nullptr;
+    ctx->atlas.subpixel_gpu_w = ctx->atlas.subpixel_gpu_h = 0u;
+    ctx->atlas_transfer_buf = nullptr;
+    ctx->atlas_tbuf_size = 0u;
+    ctx->atlas_clean_frames = 0u;
+    ctx->subpixel_transfer_buf = nullptr;
+    ctx->subpixel_tbuf_size = 0u;
+    ctx->atlas.subpixel_clean_frames = 0u;
+    ctx->texture_upload_cmd = nullptr;
+    ctx->texture_upload_buf = nullptr;
+    ctx->texture_upload_cap = 0u;
+    ctx->mipmapped_texture_count = 0u;
+    ctx->clip_shape_gpu = nullptr;
+    ctx->clip_shape_transfer = nullptr;
+    ctx->clip_shape_gpu_capacity = ctx->clip_shape_transfer_capacity = 0u;
+    ctx->clip_shape_sentinel_uploaded = false;
+    ctx->grad_stop_gpu = nullptr;
+    ctx->grad_stop_transfer = nullptr;
+    ctx->grad_stop_gpu_capacity = ctx->grad_stop_transfer_capacity = 0u;
+    ctx->grad_stop_sentinel_uploaded = false;
+    ctx->headless_tex = nullptr;
+    ctx->headless_w = ctx->headless_h = 0u;
+    ctx->headless_dl_buf = nullptr;
+    ctx->headless_dl_size = 0u;
+}
+
 bool ensure_gpu_device(Context* ctx) noexcept {
     if (!ctx || ctx->gpu_init_failed) return false;
     if (ctx->device) return true;
@@ -1934,70 +2079,7 @@ bool ensure_gpu_device(Context* ctx) noexcept {
     if (driver && !driver[0]) driver = nullptr;
 
     const auto fail = [&]() noexcept -> bool {
-        if (ctx->device) {
-            release_pso_table(ctx);
-            if (ctx->quad_vs_shader) SDL_ReleaseGPUShader(ctx->device, ctx->quad_vs_shader);
-            if (ctx->quad_ps_shader) SDL_ReleaseGPUShader(ctx->device, ctx->quad_ps_shader);
-            if (ctx->subpixel_vs_shader) SDL_ReleaseGPUShader(ctx->device, ctx->subpixel_vs_shader);
-            if (ctx->subpixel_ps_shader) SDL_ReleaseGPUShader(ctx->device, ctx->subpixel_ps_shader);
-            if (ctx->slug_vs_shader) SDL_ReleaseGPUShader(ctx->device, ctx->slug_vs_shader);
-            if (ctx->slug_ps_shader) SDL_ReleaseGPUShader(ctx->device, ctx->slug_ps_shader);
-            if (ctx->image_vs_shader) SDL_ReleaseGPUShader(ctx->device, ctx->image_vs_shader);
-            if (ctx->image_ps_shader) SDL_ReleaseGPUShader(ctx->device, ctx->image_ps_shader);
-            if (ctx->fx_vs_shader) SDL_ReleaseGPUShader(ctx->device, ctx->fx_vs_shader);
-            if (ctx->fx_ps_shader) SDL_ReleaseGPUShader(ctx->device, ctx->fx_ps_shader);
-            if (ctx->kawase_vs_shader) SDL_ReleaseGPUShader(ctx->device, ctx->kawase_vs_shader);
-            if (ctx->kawase_ps_shader) SDL_ReleaseGPUShader(ctx->device, ctx->kawase_ps_shader);
-            if (ctx->linear_sampler) SDL_ReleaseGPUSampler(ctx->device, ctx->linear_sampler);
-            if (ctx->nearest_sampler) SDL_ReleaseGPUSampler(ctx->device, ctx->nearest_sampler);
-            if (ctx->mirror_linear_sampler) SDL_ReleaseGPUSampler(ctx->device, ctx->mirror_linear_sampler);
-            if (ctx->surface_fallback_tex) SDL_ReleaseGPUTexture(ctx->device, ctx->surface_fallback_tex);
-            if (ctx->prim_gpu_buf) SDL_ReleaseGPUBuffer(ctx->device, ctx->prim_gpu_buf);
-            if (ctx->prim_transfer_buf) SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->prim_transfer_buf);
-            if (ctx->prim_depth_gpu_buf) SDL_ReleaseGPUBuffer(ctx->device, ctx->prim_depth_gpu_buf);
-            if (ctx->prim_depth_transfer_buf) SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->prim_depth_transfer_buf);
-            if (ctx->atlas.gpu_tex) SDL_ReleaseGPUTexture(ctx->device, ctx->atlas.gpu_tex);
-            if (ctx->atlas.subpixel_gpu_tex) SDL_ReleaseGPUTexture(ctx->device, ctx->atlas.subpixel_gpu_tex);
-            if (ctx->atlas_transfer_buf) SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->atlas_transfer_buf);
-            if (ctx->subpixel_transfer_buf) SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->subpixel_transfer_buf);
-            if (ctx->texture_upload_cmd) SDL_CancelGPUCommandBuffer(ctx->texture_upload_cmd);
-            if (ctx->clip_shape_gpu) SDL_ReleaseGPUBuffer(ctx->device, ctx->clip_shape_gpu);
-            if (ctx->clip_shape_transfer) SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->clip_shape_transfer);
-            if (ctx->grad_stop_gpu) SDL_ReleaseGPUBuffer(ctx->device, ctx->grad_stop_gpu);
-            if (ctx->grad_stop_transfer) SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->grad_stop_transfer);
-            if (ctx->texture_upload_buf) SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->texture_upload_buf);
-            if (ctx->slug_curve_gpu_buf) SDL_ReleaseGPUBuffer(ctx->device, ctx->slug_curve_gpu_buf);
-            if (ctx->slug_band_gpu_buf) SDL_ReleaseGPUBuffer(ctx->device, ctx->slug_band_gpu_buf);
-            if (ctx->dyn_slug_curve_gpu_buf) SDL_ReleaseGPUBuffer(ctx->device, ctx->dyn_slug_curve_gpu_buf);
-            if (ctx->dyn_slug_band_gpu_buf) SDL_ReleaseGPUBuffer(ctx->device, ctx->dyn_slug_band_gpu_buf);
-            SDL_DestroyGPUDevice(ctx->device);
-        }
-        ctx->quad_vs_shader = ctx->quad_ps_shader = nullptr;
-        ctx->subpixel_vs_shader = ctx->subpixel_ps_shader = nullptr;
-        ctx->slug_vs_shader = ctx->slug_ps_shader = nullptr;
-        ctx->image_vs_shader = ctx->image_ps_shader = nullptr;
-        ctx->fx_vs_shader = ctx->fx_ps_shader = nullptr;
-        ctx->kawase_vs_shader = ctx->kawase_ps_shader = nullptr;
-        ctx->linear_sampler = ctx->nearest_sampler = ctx->mirror_linear_sampler = nullptr;
-        ctx->surface_fallback_tex = nullptr;
-        ctx->prim_gpu_buf = nullptr; ctx->prim_transfer_buf = nullptr;
-        ctx->prim_depth_gpu_buf = nullptr; ctx->prim_depth_transfer_buf = nullptr;
-        ctx->atlas.gpu_tex = nullptr; ctx->atlas.subpixel_gpu_tex = nullptr;
-        ctx->atlas_transfer_buf = nullptr; ctx->subpixel_transfer_buf = nullptr; ctx->subpixel_tbuf_size = 0u;
-        ctx->texture_upload_cmd = nullptr;
-        ctx->clip_shape_gpu = nullptr; ctx->clip_shape_transfer = nullptr;
-        ctx->clip_shape_gpu_capacity = ctx->clip_shape_transfer_capacity = 0u;
-        ctx->grad_stop_gpu = nullptr; ctx->grad_stop_transfer = nullptr;
-        ctx->grad_stop_gpu_capacity = ctx->grad_stop_transfer_capacity = 0u;
-        ctx->grad_stop_sentinel_uploaded = false;
-        ctx->texture_upload_buf = nullptr; ctx->texture_upload_cap = 0u;
-        ctx->slug_curve_gpu_buf = ctx->slug_band_gpu_buf = nullptr;
-        ctx->dyn_slug_curve_gpu_buf = ctx->dyn_slug_band_gpu_buf = nullptr;
-        ctx->device = nullptr;
-        ctx->prim_gpu_cap = ctx->prim_tbuf_cap = 0u;
-        ctx->prim_depth_gpu_cap = ctx->prim_depth_tbuf_cap = 0u;
-        ctx->slug_curve_gpu_cap = ctx->slug_band_gpu_cap = 0u;
-        ctx->dyn_slug_curve_gpu_cap = ctx->dyn_slug_band_gpu_cap = 0u;
+        release_gpu_device_resources(ctx, false);
         ctx->gpu_init_failed = true;
         return false;
     };
@@ -2163,6 +2245,9 @@ bool ensure_gpu_device(Context* ctx) noexcept {
         return fail();
     }
 
+    if (ctx->gpu_device_generation == 0u) {
+        ctx->gpu_device_generation = 1u;
+    }
     return true;
 }
 
@@ -2939,6 +3024,32 @@ int32_t idle_gpu_timeout(Context* ctx, uint64_t now, int32_t timeout) noexcept {
     for (uint32_t i = 0; i < ctx->claimed_window_cap; ++i) {
         if (ClaimedWindowSlot* slot = ctx->claimed_windows[i]) check(slot->ui);
     }
+    if (ctx->headless_tex || ctx->headless_dl_buf) {
+        uint64_t deadline = ctx->headless_ui ? ctx->headless_ui->transient_gpu_deadline : 0u;
+        for (uint32_t i = 0; i < ctx->claimed_window_cap; ++i) {
+            if (ClaimedWindowSlot* slot = ctx->claimed_windows[i]) {
+                if (slot->ui.transient_gpu_deadline > deadline) {
+                    deadline = slot->ui.transient_gpu_deadline;
+                }
+            }
+        }
+        if (now >= deadline) {
+            if (ctx->headless_tex) {
+                SDL_ReleaseGPUTexture(ctx->device, ctx->headless_tex);
+                ctx->headless_tex = nullptr;
+                ctx->headless_w = 0u;
+                ctx->headless_h = 0u;
+            }
+            if (ctx->headless_dl_buf) {
+                SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->headless_dl_buf);
+                ctx->headless_dl_buf = nullptr;
+                ctx->headless_dl_size = 0u;
+            }
+        } else {
+            const auto remaining = static_cast<int32_t>(deadline - now);
+            if (timeout < 0 || remaining < timeout) timeout = remaining;
+        }
+    }
     return timeout;
 }
 
@@ -3299,6 +3410,7 @@ SDL_GPUDevice* gpu_device(Context* ctx) noexcept {
 
 GpuStatus gpu_status(const Context* ctx) noexcept {
     if (!ctx) return GpuStatus::Failed;
+    if (ctx->gpu_device_lost) return GpuStatus::Lost;
     if (ctx->device) return GpuStatus::Ready;
     return ctx->gpu_init_failed ? GpuStatus::Failed : GpuStatus::Uninitialized;
 }
@@ -3307,6 +3419,89 @@ const char* gpu_driver_name(const Context* ctx) noexcept {
     if (!ctx || !ctx->device) return "";
     const char* name = SDL_GetGPUDeviceDriver(ctx->device);
     return name ? name : "";
+}
+
+uint64_t gpu_device_generation(const Context* ctx) noexcept {
+    return ctx ? ctx->gpu_device_generation : 0u;
+}
+
+void set_gpu_device_reset_callback(Context* ctx, GpuDeviceResetFn fn, void* user_data) noexcept {
+    if (!ctx) return;
+    ctx->gpu_reset_fn = fn;
+    ctx->gpu_reset_user_data = user_data;
+}
+
+bool recreate_gpu_device(Context* ctx, const char* driver) noexcept {
+    if (!ctx || ctx->in_frame) return false;
+    const size_t driver_len = driver ? std::strlen(driver) : 0u;
+    if (driver && driver_len >= sizeof(ctx->gpu_driver)) return false;
+
+    const uint64_t prev_gen = ctx->gpu_device_generation;
+    release_gpu_device_resources(ctx, true);
+    ctx->gpu_device_lost = false;
+    ctx->gpu_init_failed = false;
+
+    if (driver) {
+        std::memcpy(ctx->gpu_driver, driver, driver_len + 1u);
+    }
+
+    if (!ensure_gpu_device(ctx)) {
+        return false;
+    }
+
+    for (uint32_t i = 0u; i < ctx->claimed_window_cap; ++i) {
+        ClaimedWindowSlot* slot = ctx->claimed_windows[i];
+        if (!slot || !slot->window) continue;
+        if (!SDL_ClaimWindowForGPUDevice(ctx->device, slot->window)) {
+            for (uint32_t j = 0u; j < i; ++j) {
+                ClaimedWindowSlot* prev = ctx->claimed_windows[j];
+                if (prev && prev->window) {
+                    SDL_ReleaseWindowFromGPUDevice(ctx->device, prev->window);
+                }
+            }
+            release_gpu_device_resources(ctx, false);
+            ctx->gpu_init_failed = true;
+            return false;
+        }
+        if (SDL_WindowSupportsGPUSwapchainComposition(
+                ctx->device,
+                slot->window,
+                SDL_GPU_SWAPCHAINCOMPOSITION_SDR_LINEAR))
+        {
+            SDL_SetGPUSwapchainParameters(
+                ctx->device,
+                slot->window,
+                SDL_GPU_SWAPCHAINCOMPOSITION_SDR_LINEAR,
+                SDL_GPU_PRESENTMODE_VSYNC);
+        }
+        if (slot->ui.redraw_budget < 2u) {
+            slot->ui.redraw_budget = 2u;
+        }
+    }
+
+    // Mark CPU-backed sprite/fallback & hinted/subpixel atlases and Slug glyph buffers dirty for re-upload.
+    ctx->atlas.dirty = true;
+    ctx->atlas.dirty_y0 = 0u;
+    ctx->atlas.dirty_y1 = ctx->atlas.height;
+    if (ctx->atlas.subpixel_pixels && ctx->atlas.subpixel_w > 0u && ctx->atlas.subpixel_h > 0u) {
+        ctx->atlas.subpixel_dirty = true;
+        ctx->atlas.subpixel_dirty_y0 = 0u;
+        ctx->atlas.subpixel_dirty_y1 = ctx->atlas.subpixel_h;
+    }
+    ctx->atlas.uploaded_slug_curves = 0u;
+    ctx->atlas.uploaded_slug_bands = 0u;
+    ++ctx->atlas.uv_epoch;
+    ctx->gpu_batch_count = 0u;
+    ctx->gpu_blur_split_count = 0u;
+    if (ctx->headless_ui && ctx->headless_ui->redraw_budget < 2u) {
+        ctx->headless_ui->redraw_budget = 2u;
+    }
+
+    ctx->gpu_device_generation = prev_gen + 1u;
+    if (ctx->gpu_reset_fn) {
+        ctx->gpu_reset_fn(ctx, ctx->gpu_device_generation, ctx->gpu_reset_user_data);
+    }
+    return true;
 }
 
 bool retry_gpu_initialization(Context* ctx, const char* driver) noexcept {
@@ -3336,62 +3531,8 @@ void destroy_context(Context* ctx) noexcept {
     for (uint32_t i = 0; i < ctx->claimed_window_cap; ++i)
         if (ctx->claimed_windows[i]) release_window_impl(ctx, ctx->claimed_windows[i]->window, true);
     ctx->active_ui = ctx->headless_ui;
-    if (ctx->device) {
-        release_shader_surfaces(ctx);
-        release_pso_table(ctx);
-        if (ctx->quad_vs_shader) SDL_ReleaseGPUShader(ctx->device, ctx->quad_vs_shader);
-        if (ctx->quad_ps_shader) SDL_ReleaseGPUShader(ctx->device, ctx->quad_ps_shader);
-        if (ctx->subpixel_vs_shader) SDL_ReleaseGPUShader(ctx->device, ctx->subpixel_vs_shader);
-        if (ctx->subpixel_ps_shader) SDL_ReleaseGPUShader(ctx->device, ctx->subpixel_ps_shader);
-        if (ctx->slug_vs_shader) SDL_ReleaseGPUShader(ctx->device, ctx->slug_vs_shader);
-        if (ctx->slug_ps_shader) SDL_ReleaseGPUShader(ctx->device, ctx->slug_ps_shader);
-        if (ctx->image_vs_shader) SDL_ReleaseGPUShader(ctx->device, ctx->image_vs_shader);
-        if (ctx->image_ps_shader) SDL_ReleaseGPUShader(ctx->device, ctx->image_ps_shader);
-        if (ctx->fx_vs_shader) SDL_ReleaseGPUShader(ctx->device, ctx->fx_vs_shader);
-        if (ctx->fx_ps_shader) SDL_ReleaseGPUShader(ctx->device, ctx->fx_ps_shader);
-        if (ctx->kawase_vs_shader) SDL_ReleaseGPUShader(ctx->device, ctx->kawase_vs_shader);
-        if (ctx->kawase_ps_shader) SDL_ReleaseGPUShader(ctx->device, ctx->kawase_ps_shader);
-        if (ctx->linear_sampler) SDL_ReleaseGPUSampler(ctx->device, ctx->linear_sampler);
-        if (ctx->nearest_sampler) SDL_ReleaseGPUSampler(ctx->device, ctx->nearest_sampler);
-        if (ctx->mirror_linear_sampler) SDL_ReleaseGPUSampler(ctx->device, ctx->mirror_linear_sampler);
-        if (ctx->surface_fallback_tex) SDL_ReleaseGPUTexture(ctx->device, ctx->surface_fallback_tex);
-        if (ctx->prim_gpu_buf) SDL_ReleaseGPUBuffer(ctx->device, ctx->prim_gpu_buf);
-        if (ctx->prim_transfer_buf) SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->prim_transfer_buf);
-        if (ctx->prim_depth_gpu_buf) SDL_ReleaseGPUBuffer(ctx->device, ctx->prim_depth_gpu_buf);
-        if (ctx->prim_depth_transfer_buf) SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->prim_depth_transfer_buf);
-        if (ctx->dyn_slug_curve_gpu_buf) SDL_ReleaseGPUBuffer(ctx->device, ctx->dyn_slug_curve_gpu_buf);
-        if (ctx->dyn_slug_curve_tbuf) SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->dyn_slug_curve_tbuf);
-        if (ctx->dyn_slug_band_gpu_buf) SDL_ReleaseGPUBuffer(ctx->device, ctx->dyn_slug_band_gpu_buf);
-        if (ctx->dyn_slug_band_tbuf) SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->dyn_slug_band_tbuf);
-        if (ctx->slug_curve_gpu_buf) SDL_ReleaseGPUBuffer(ctx->device, ctx->slug_curve_gpu_buf);
-        if (ctx->slug_band_gpu_buf) SDL_ReleaseGPUBuffer(ctx->device, ctx->slug_band_gpu_buf);
-        if (ctx->slug_curve_tbuf) SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->slug_curve_tbuf);
-        if (ctx->slug_band_tbuf) SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->slug_band_tbuf);
-        if (ctx->atlas_transfer_buf) SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->atlas_transfer_buf);
-        if (ctx->subpixel_transfer_buf) SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->subpixel_transfer_buf);
-        if(ctx->texture_upload_cmd) {SDL_CancelGPUCommandBuffer(ctx->texture_upload_cmd);ctx->texture_upload_cmd=nullptr;}
-        if(ctx->clip_shape_gpu) SDL_ReleaseGPUBuffer(ctx->device,ctx->clip_shape_gpu);
-        if(ctx->clip_shape_transfer) SDL_ReleaseGPUTransferBuffer(ctx->device,ctx->clip_shape_transfer);
-        ctx->clip_shape_gpu=nullptr;ctx->clip_shape_transfer=nullptr;ctx->clip_shape_gpu_capacity=ctx->clip_shape_transfer_capacity=0;
-        if (ctx->grad_stop_gpu) SDL_ReleaseGPUBuffer(ctx->device, ctx->grad_stop_gpu);
-        if (ctx->grad_stop_transfer) SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->grad_stop_transfer);
-        ctx->grad_stop_gpu = nullptr; ctx->grad_stop_transfer = nullptr;
-        ctx->grad_stop_gpu_capacity = ctx->grad_stop_transfer_capacity = 0u;
-        if (ctx->texture_upload_buf) SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->texture_upload_buf);
-        if (ctx->atlas.gpu_tex) SDL_ReleaseGPUTexture(ctx->device, ctx->atlas.gpu_tex);
-        if (ctx->atlas.subpixel_gpu_tex) SDL_ReleaseGPUTexture(ctx->device, ctx->atlas.subpixel_gpu_tex);
-        if (ctx->active_ui) {
-            release_blur_targets(ctx->device, *ctx->active_ui);
-            release_filter_targets(ctx->device, *ctx->active_ui);
-            release_depth_target(ctx->device, *ctx->active_ui);
-        }
-        if (ctx->headless_tex) SDL_ReleaseGPUTexture(ctx->device, ctx->headless_tex);
-        if (ctx->headless_dl_buf) SDL_ReleaseGPUTransferBuffer(ctx->device, ctx->headless_dl_buf);
-        SDL_DestroyGPUDevice(ctx->device);
-        ctx->device = nullptr;
-    } else {
-        release_pso_table(ctx);
-    }
+    release_shader_surfaces(ctx);
+    release_gpu_device_resources(ctx, false);
 
     if (ctx->active_ui && ctx->active_ui->mouse_captured) {
         SDL_CaptureMouse(false);
@@ -3404,6 +3545,9 @@ void destroy_context(Context* ctx) noexcept {
         }
     }
 
+    free_trace_ring(ctx);
+    free_command_registry(ctx);
+    free_automation_recording(ctx);
     font_atlas_destroy(&ctx->atlas);
     for (uint32_t bi = 0u; bi < 2u; ++bi) {
         std::free(ctx->shape_cache.banks[bi].entries);
@@ -3446,7 +3590,7 @@ void destroy_context(Context* ctx) noexcept {
 }
 
 bool render_window(Context* ctx, Color clear_color, SDL_Window* window_override) noexcept {
-    if (!ensure_gpu_device(ctx)) {
+    if (!ctx || ctx->gpu_device_lost || !ensure_gpu_device(ctx)) {
         return false;
     }
     SDL_Window* target_win = window_override ? window_override : (ctx->draw_list_window ? ctx->draw_list_window : ctx->window);
@@ -3458,6 +3602,7 @@ bool render_window(Context* ctx, Color clear_color, SDL_Window* window_override)
     const uint64_t t0 = SDL_GetPerformanceCounter();
     SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(ctx->device);
     if (!cmd) {
+        ctx->gpu_device_lost = true;
         return false;
     }
 
@@ -3471,7 +3616,10 @@ bool render_window(Context* ctx, Color clear_color, SDL_Window* window_override)
 
     if (!swap_tex || swap_w == 0u || swap_h == 0u) {
         // Window is minimized or hidden; submit empty command buffer cleanly.
-        SDL_SubmitGPUCommandBuffer(cmd);
+        if (!SDL_SubmitGPUCommandBuffer(cmd)) {
+            ctx->gpu_device_lost = true;
+            return false;
+        }
         return true;
     }
 
@@ -3493,11 +3641,17 @@ bool render_window(Context* ctx, Color clear_color, SDL_Window* window_override)
     ctx->active_window = saved_win;
     if (!recorded) {
         const bool submitted = SDL_SubmitGPUCommandBuffer(cmd);
+        if (!submitted) {
+            ctx->gpu_device_lost = true;
+        }
         complete_shader_surfaces(ctx, target_win, submitted);
         return false;
     }
 
     const bool submitted = SDL_SubmitGPUCommandBuffer(cmd);
+    if (!submitted) {
+        ctx->gpu_device_lost = true;
+    }
     complete_shader_surfaces(ctx, target_win, submitted);
     const uint64_t t1 = SDL_GetPerformanceCounter();
     const uint64_t freq = SDL_GetPerformanceFrequency();
@@ -3505,11 +3659,14 @@ bool render_window(Context* ctx, Color clear_color, SDL_Window* window_override)
     ctx->stats.gpu_submit_ms = (freq > 0u)
         ? (static_cast<double>(t1 - t0) * 1000.0 / static_cast<double>(freq))
         : 0.0;
+    if (submitted) {
+        trace_record_frame(ctx);
+    }
     return submitted;
 }
 
 bool render_to_texture(Context* ctx, const RenderTargetDesc& desc) noexcept {
-    if (!ctx || ctx->in_frame || !desc.texture || !desc.width || !desc.height) return false;
+    if (!ctx || ctx->in_frame || ctx->gpu_device_lost || !desc.texture || !desc.width || !desc.height) return false;
     switch (desc.sdl_texture_format) {
         case SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM:
         case SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB:
@@ -3526,7 +3683,10 @@ bool render_to_texture(Context* ctx, const RenderTargetDesc& desc) noexcept {
     if (!draw_ui) return false;
     const uint64_t start = SDL_GetPerformanceCounter();
     SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(ctx->device);
-    if (!cmd) return false;
+    if (!cmd) {
+        ctx->gpu_device_lost = true;
+        return false;
+    }
 
     WindowUiState* saved_ui = ctx->active_ui;
     SDL_Window* saved_window = ctx->active_window;
@@ -3542,15 +3702,23 @@ bool render_to_texture(Context* ctx, const RenderTargetDesc& desc) noexcept {
         return false;
     }
     const bool submitted = SDL_SubmitGPUCommandBuffer(cmd);
+    if (!submitted) {
+        ctx->gpu_device_lost = true;
+    }
     complete_shader_surfaces(ctx, draw_window, submitted);
     ctx->stats.draw_call_count = ctx->gpu_batch_count;
-    ctx->stats.gpu_submit_ms = double(SDL_GetPerformanceCounter() - start) * 1000.0 /
-        double(SDL_GetPerformanceFrequency());
+    const uint64_t freq = SDL_GetPerformanceFrequency();
+    ctx->stats.gpu_submit_ms = (freq > 0u)
+        ? (double(SDL_GetPerformanceCounter() - start) * 1000.0 / double(freq))
+        : 0.0;
+    if (submitted) {
+        trace_record_frame(ctx);
+    }
     return submitted;
 }
 
 bool render_headless_pixels(Context* ctx, const ReadPixelsDesc& desc) noexcept {
-    if (!ctx || ctx->in_frame || !desc.receive || desc.frame_width > 16384u || desc.frame_height > 16384u ||
+    if (!ctx || ctx->in_frame || ctx->gpu_device_lost || !desc.receive || desc.frame_width > 16384u || desc.frame_height > 16384u ||
         desc.x >= desc.frame_width || desc.y >= desc.frame_height) return false;
     const uint32_t remaining_w = desc.frame_width - desc.x, remaining_h = desc.frame_height - desc.y;
     const uint32_t width = desc.width ? desc.width : remaining_w;
@@ -3573,6 +3741,7 @@ bool render_headless_pixels(Context* ctx, const ReadPixelsDesc& desc) noexcept {
     const uint64_t t0 = SDL_GetPerformanceCounter();
     SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(ctx->device);
     if (!cmd) {
+        ctx->gpu_device_lost = true;
         return false;
     }
 
@@ -3620,11 +3789,13 @@ bool render_headless_pixels(Context* ctx, const ReadPixelsDesc& desc) noexcept {
     SDL_GPUFence* fence = SDL_SubmitGPUCommandBufferAndAcquireFence(cmd);
     complete_shader_surfaces(ctx, ctx->active_window, fence != nullptr);
     if (!fence) {
+        ctx->gpu_device_lost = true;
         return false;
     }
     const bool waited = SDL_WaitForGPUFences(ctx->device, true, &fence, 1u);
     SDL_ReleaseGPUFence(ctx->device, fence);
     if (!waited) {
+        ctx->gpu_device_lost = true;
         return false;
     }
 
@@ -3641,6 +3812,7 @@ bool render_headless_pixels(Context* ctx, const ReadPixelsDesc& desc) noexcept {
     ctx->stats.gpu_submit_ms = (freq > 0u)
         ? (static_cast<double>(t1 - t0) * 1000.0 / static_cast<double>(freq))
         : 0.0;
+    trace_record_frame(ctx);
 
     return received;
 }
@@ -3783,11 +3955,15 @@ void release_window_impl(Context* ctx, SDL_Window* window, bool destroying) noex
         WindowUiState* saved = ctx->active_ui;
         const bool was_active_ui = (saved == &slot.ui);
         ctx->active_ui = &slot.ui;
-        release_blur_targets(ctx->device, *ctx->active_ui);
-        release_filter_targets(ctx->device, *ctx->active_ui);
-        release_depth_target(ctx->device, *ctx->active_ui);
+        if (ctx->device) {
+            release_blur_targets(ctx->device, *ctx->active_ui);
+            release_filter_targets(ctx->device, *ctx->active_ui);
+            release_depth_target(ctx->device, *ctx->active_ui);
+        }
         destroy_window_ui_state(ctx, &slot.ui);
-        SDL_ReleaseWindowFromGPUDevice(ctx->device, window);
+        if (ctx->device) {
+            SDL_ReleaseWindowFromGPUDevice(ctx->device, window);
+        }
         slot.window = nullptr;
         slot.hit_test_attached = false;
         std::free(ctx->claimed_windows[i]); ctx->claimed_windows[i] = nullptr;
@@ -3820,10 +3996,15 @@ void release_window_impl(Context* ctx, SDL_Window* window, bool destroying) noex
 } // namespace
 
 bool flush_texture_uploads(Context* ctx) noexcept {
-    if(!ctx || !ctx->device) return false;
-    if(!ctx->texture_upload_cmd) return true;
-    SDL_GPUCommandBuffer* cmd=ctx->texture_upload_cmd;ctx->texture_upload_cmd=nullptr;
-    return SDL_SubmitGPUCommandBuffer(cmd);
+    if (!ctx || !ctx->device || ctx->gpu_device_lost) return false;
+    if (!ctx->texture_upload_cmd) return true;
+    SDL_GPUCommandBuffer* cmd = ctx->texture_upload_cmd;
+    ctx->texture_upload_cmd = nullptr;
+    const bool submitted = SDL_SubmitGPUCommandBuffer(cmd);
+    if (!submitted) {
+        ctx->gpu_device_lost = true;
+    }
+    return submitted;
 }
 
 void release_window(Context* ctx, SDL_Window* window) noexcept {

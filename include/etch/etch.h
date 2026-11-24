@@ -1031,8 +1031,9 @@ static_assert(std::is_trivially_copyable_v<GlobalsUniform>);
 // Declarative UI & Context Lifecycle API
 // ============================================================================
 
-enum class A11yRole : uint8_t { None, Window, Group, Region, Toolbar, MenuBar, Menu, MenuItem, TabList, Tab, Dialog, ScrollArea, List, ListItem, Table, Tree, TreeItem, StaticText, Button, Checkbox, Switch, Slider, SpinButton, ProgressBar, ComboBox, TextInput, CodeEditor, Canvas, Tooltip };
-enum A11yStateFlags : uint32_t { A11yState_None = 0u, A11yState_Focused = 1u << 0, A11yState_Hovered = 1u << 1, A11yState_Pressed = 1u << 2, A11yState_Checked = 1u << 3, A11yState_Selected = 1u << 4, A11yState_Expanded = 1u << 5, A11yState_Disabled = 1u << 6, A11yState_ReadOnly = 1u << 7, A11yState_Modal = 1u << 8, A11yState_Multiline = 1u << 9, A11yState_Password = 1u << 10 };
+enum class A11yRole : uint8_t { None, Window, Group, Region, Toolbar, MenuBar, Menu, MenuItem, TabList, Tab, Dialog, ScrollArea, List, ListItem, Table, Tree, TreeItem, StaticText, Button, Checkbox, Switch, Slider, SpinButton, ProgressBar, ComboBox, TextInput, CodeEditor, Canvas, Tooltip, Heading, Link, Document, Math, Figure, Alert, Status };
+enum A11yStateFlags : uint32_t { A11yState_None = 0u, A11yState_Focused = 1u << 0, A11yState_Hovered = 1u << 1, A11yState_Pressed = 1u << 2, A11yState_Checked = 1u << 3, A11yState_Selected = 1u << 4, A11yState_Expanded = 1u << 5, A11yState_Disabled = 1u << 6, A11yState_ReadOnly = 1u << 7, A11yState_Modal = 1u << 8, A11yState_Multiline = 1u << 9, A11yState_Password = 1u << 10, A11yState_LivePolite = 1u << 11, A11yState_LiveAssertive = 1u << 12, A11yState_Busy = 1u << 13, A11yState_Invalid = 1u << 14 };
+enum class A11yLiveMode : uint8_t { Off = 0, Polite = 1, Assertive = 2 };
 enum class A11yAction : uint8_t { Focus, Press, Increment, Decrement, Expand, Collapse, Dismiss, SetValue };
 constexpr uint32_t a11y_action_bit(A11yAction a) noexcept { return 1u << static_cast<uint8_t>(a); }
 struct A11yNode {
@@ -1094,8 +1095,32 @@ struct WindowFrameDesc {
 };
 
 enum class SystemTheme : uint8_t { Unknown = 0, Light = 1, Dark = 2 };
+enum class LayoutDirection : uint8_t { Ltr = 0, Rtl = 1 };
+struct SystemPreferences {
+    SystemTheme theme = SystemTheme::Unknown;
+    bool high_contrast = false;
+    bool reduced_motion = false;
+    float text_scale = 1.0f;
+    LayoutDirection layout_direction = LayoutDirection::Ltr;
+    char locale[32] = {};
+};
 SystemTheme system_theme() noexcept;
 bool system_dark_mode(bool default_when_unknown = true) noexcept;
+SystemPreferences system_preferences(const Context* ctx = nullptr) noexcept;
+void set_system_preferences_override(Context* ctx, const SystemPreferences* override_prefs) noexcept;
+enum class PointerKind : uint8_t { Mouse = 0, Pen = 1, Touch = 2 };
+struct PointerState {
+    PointerKind kind = PointerKind::Mouse;
+    uint32_t pointer_id = 0u;
+    uint32_t active_touches = 0u;
+    float pressure = 0.0f;
+    float tilt_x = 0.0f;
+    float tilt_y = 0.0f;
+    float pinch_delta = 0.0f;
+    bool precise_scroll = false;
+    bool pen_eraser = false;
+};
+PointerState pointer_state(const Context* ctx = nullptr) noexcept;
 bool frame_in_progress(const Context* ctx) noexcept;
 
 enum class ThemeId : uint8_t {
@@ -1970,6 +1995,7 @@ struct DragPayloadView {
 struct TextLineCol { uint32_t line = 0; uint32_t col_byte = 0; };
 struct TextUtf16Position { uint32_t line = 0; uint32_t character = 0; };
 struct TextBufferEdit;
+struct TextDiagnostic;
 // Caller owns this POD. Initialize once, free explicitly; do not shallow-copy ownership.
 struct TextBuffer {
     char* data = nullptr; uint32_t cap = 0, gap_start = 0, gap_end = 0;
@@ -1978,6 +2004,8 @@ struct TextBuffer {
     uint32_t* line_data = nullptr; uint32_t line_cap = 0, line_gap_start = 0, line_gap_end = 0;
     TextBufferEdit* undo_ops = nullptr; uint32_t undo_cap = 0, undo_count = 0, undo_cursor = 0;
     char* undo_blob = nullptr; uint32_t undo_blob_cap = 0, undo_blob_used = 0;
+    TextDiagnostic* diagnostics = nullptr; uint32_t diagnostic_count = 0, diagnostic_capacity = 0;
+    uint64_t diagnostics_revision = 0;
     uint64_t version = 1;
 };
 bool init_text_buffer(TextBuffer*, Str initial_utf8 = {}, uint32_t initial_cap = 4096) noexcept;
@@ -1999,6 +2027,25 @@ uint32_t text_buffer_byte_offset(const TextBuffer*, uint32_t, uint32_t) noexcept
 TextUtf16Position text_buffer_utf16_position(const TextBuffer*, uint32_t byte_offset) noexcept;
 uint32_t text_buffer_byte_from_utf16(const TextBuffer*, TextUtf16Position) noexcept;
 uint64_t text_buffer_revision(const TextBuffer*) noexcept;
+struct TextEdit { uint32_t byte_start, byte_end; Str text; };
+// Apply sorted, non-overlapping UTF-8 ranges from the expected revision as one undo step.
+// Insertions at the same byte keep input order. A stale revision, invalid range or patch
+// exceeding the undo budget fails without changing text, revision or undo history.
+bool text_buffer_apply_edits(TextBuffer*, uint64_t expected_revision, std::span<const TextEdit> edits) noexcept;
+enum class TextDiagnosticSeverity : uint8_t { Error, Warning, Information, Hint };
+struct TextDiagnostic {
+    uint32_t byte_start = 0, byte_end = 0;
+    TextDiagnosticSeverity severity = TextDiagnosticSeverity::Error;
+    Str message = {};
+};
+// Diagnostics are borrowed only for this call and are hidden automatically
+// after the buffer revision changes.
+bool text_buffer_set_diagnostics(TextBuffer*, uint64_t expected_revision,
+                                 std::span<const TextDiagnostic> diagnostics) noexcept;
+void text_buffer_clear_diagnostics(TextBuffer*) noexcept;
+struct TextSearchMatch { uint32_t byte_start = 0u, byte_end = 0u; };
+bool text_buffer_find(const TextBuffer* buf, Str needle, uint32_t start_byte, bool case_sensitive, bool whole_word, TextSearchMatch* out_match) noexcept;
+uint32_t text_buffer_find_all(const TextBuffer* buf, Str needle, bool case_sensitive, bool whole_word, TextSearchMatch* out_matches, uint32_t max_matches) noexcept;
 bool text_buffer_undo(TextBuffer*, uint32_t* out_cursor = nullptr, uint32_t* out_anchor = nullptr) noexcept;
 bool text_buffer_redo(TextBuffer*, uint32_t* out_cursor = nullptr, uint32_t* out_anchor = nullptr) noexcept;
 void text_buffer_clear_undo(TextBuffer*) noexcept;
@@ -2044,6 +2091,15 @@ struct CodeEditorResult {
 CodeEditorResult code_editor(const CodeEditorDesc&) noexcept;
 void code_editor_set_cursor(uint32_t, uint32_t anchor_byte, uint32_t cursor_byte, bool scroll_into_view = true) noexcept;
 void code_editor_scroll_to_line(uint32_t, uint32_t, AlignY align = AlignY::Center) noexcept;
+void code_editor_set_inline_completion(uint32_t editor_id, Str ghost_text) noexcept;
+bool code_editor_completion_accepted(uint32_t editor_id) noexcept;
+bool code_editor_completion_dismissed(uint32_t editor_id) noexcept;
+void code_editor_set_search_highlights(uint32_t editor_id, Str query, bool case_sensitive = false) noexcept;
+bool code_editor_set_fold(uint32_t editor_id, uint32_t start_line, uint32_t end_line, bool collapsed) noexcept;
+bool code_editor_is_line_folded(uint32_t editor_id, uint32_t line) noexcept;
+bool code_editor_add_cursor(uint32_t editor_id, uint32_t byte_offset) noexcept;
+void code_editor_clear_extra_cursors(uint32_t editor_id) noexcept;
+uint32_t code_editor_cursor_count(uint32_t editor_id) noexcept;
 
 struct TextInputHighlight {
     uint32_t byte_offset = 0;
@@ -2314,6 +2370,17 @@ void dock_set_pane_open(uint32_t dock_id, uint32_t pane_id, bool open) noexcept;
 void begin_dock_space(const DockSpaceDesc& desc) noexcept;
 uint32_t next_dock_pane() noexcept;
 void end_dock_space() noexcept;
+struct DockTearOffEvent {
+    uint32_t dock_id = 0u;
+    uint32_t pane_id = 0u;
+    Vec2 screen_pos = {};
+    Str title = {};
+};
+bool dock_detach_pane(uint32_t dock_id, uint32_t pane_id) noexcept;
+bool dock_poll_tear_off(DockTearOffEvent* out_event) noexcept;
+bool dock_transfer_pane(uint32_t src_dock_id, uint32_t dst_dock_id, uint32_t pane_id,
+    uint32_t target_pane_id, DockZone zone, float split_ratio = 0.5f,
+    SDL_Window* src_window = nullptr, SDL_Window* dst_window = nullptr) noexcept;
 
 inline constexpr uint32_t kMaxTableColumns = 16u;
 enum class TableColumnSizing : uint8_t { Fixed = 0, Stretch = 1 };
@@ -2476,12 +2543,45 @@ void set_current_context(Context* ctx) noexcept;
 
 Arena* frame_arena(Context* ctx) noexcept;
 SDL_GPUDevice* gpu_device(Context* ctx) noexcept;
-enum class GpuStatus : uint8_t { Uninitialized = 0, Ready = 1, Failed = 2 };
+enum class GpuStatus : uint8_t { Uninitialized = 0, Ready = 1, Failed = 2, Lost = 3 };
 GpuStatus gpu_status(const Context* ctx) noexcept;
 const char* gpu_driver_name(const Context* ctx) noexcept;
 // Retry a failed lazy initialization between frames. nullptr keeps the original
 // driver selection and "" uses the default. A ready device cannot be replaced.
 bool retry_gpu_initialization(Context* ctx, const char* driver = nullptr) noexcept;
+using GpuDeviceResetFn = void (*)(Context* ctx, uint64_t device_generation, void* user_data) noexcept;
+// Tear down and rebuild the GPU device, pipelines, atlases, and transient targets
+// in place while keeping layout, widget state, fonts, and text buffers intact.
+bool recreate_gpu_device(Context* ctx, const char* driver = nullptr) noexcept;
+uint64_t gpu_device_generation(const Context* ctx) noexcept;
+void set_gpu_device_reset_callback(Context* ctx, GpuDeviceResetFn fn, void* user_data = nullptr) noexcept;
+
+// Structured frame timing, draw-call, cache, and OS/VRAM memory trace.
+struct FrameTraceSample {
+    uint64_t frame_index = 0u;
+    double layout_us = 0.0;
+    double text_shape_us = 0.0;
+    double prim_build_us = 0.0;
+    double gpu_upload_us = 0.0;
+    double gpu_submit_us = 0.0;
+    uint32_t ui_draw_calls = 0u;
+    uint32_t total_draw_calls = 0u;
+    uint32_t blur_passes = 0u;
+    uint32_t filter_passes = 0u;
+    uint32_t prim_count = 0u;
+    uint32_t atlas_evictions = 0u;
+    uint32_t shape_cache_hits = 0u;
+    uint32_t shape_cache_misses = 0u;
+    uint64_t working_set_bytes = 0u;
+    uint64_t private_commit_bytes = 0u;
+    uint64_t estimated_vram_bytes = 0u;
+};
+void set_trace_enabled(Context* ctx, bool enabled) noexcept;
+bool trace_enabled(const Context* ctx) noexcept;
+uint32_t trace_sample_count(const Context* ctx) noexcept;
+bool trace_get_sample(const Context* ctx, uint32_t index, FrameTraceSample* out_sample) noexcept;
+void trace_clear(Context* ctx) noexcept;
+uint32_t trace_export_json(const Context* ctx, char* out_buf, uint32_t cap) noexcept;
 
 // Multi-font registry & automatic cluster-safe fallback chain
 enum class FontWeight : uint8_t {
@@ -2594,6 +2694,13 @@ bool wait_events(Context* ctx, SDL_Event* first_event_out, int32_t timeout_ms = 
 // begin_frame binds ctx as the active thread context; end_frame finalizes ctx (or current_context()).
 void begin_frame(Context* ctx, const FrameDesc& desc) noexcept;
 void set_a11y_override(const A11yOverrideDesc& desc) noexcept;
+void emit_a11y_node(uint32_t element_id, A11yRole role, Str label, Str value_text = {},
+    uint32_t state_flags = A11yState_None, uint32_t actions_mask = 0u,
+    float value_num = 0.0f, Rect bounds = {}) noexcept;
+void announce_a11y(Str message, A11yLiveMode priority = A11yLiveMode::Polite,
+    Context* ctx = nullptr, SDL_Window* window = nullptr) noexcept;
+Str last_a11y_announcement(A11yLiveMode* out_priority = nullptr, uint64_t* out_seq = nullptr,
+    const Context* ctx = nullptr, SDL_Window* window = nullptr) noexcept;
 std::span<const A11yNode> frame_a11y_nodes(const Context* ctx = nullptr, SDL_Window* window = nullptr) noexcept;
 const A11yNode* find_a11y_node(uint32_t element_id, const Context* ctx = nullptr, SDL_Window* window = nullptr) noexcept;
 bool perform_a11y_action(uint32_t element_id, A11yAction action, float numeric_value = 0, Str text_value = {}, Context* ctx = nullptr, SDL_Window* window = nullptr) noexcept;
@@ -2931,6 +3038,62 @@ bool begin_drag_payload(
 bool is_dragging_payload(uint32_t kind_hash = 0) noexcept;
 bool peek_drag_payload(DragPayloadView* out_view, uint32_t kind_hash = 0) noexcept;
 bool accept_drag_payload(uint32_t target_id, uint32_t kind_hash, DragPayloadView* out_view) noexcept;
+struct MimeDragEntry {
+    Str mime_type = {};
+    const uint8_t* bytes = nullptr;
+    uint32_t size = 0u;
+};
+bool begin_mime_drag_payload(uint32_t source_id, Str label, std::span<const MimeDragEntry> entries) noexcept;
+uint32_t mime_drag_format_count() noexcept;
+bool peek_mime_drag_entry(Str mime_type, MimeDragEntry* out_entry) noexcept;
+bool accept_mime_drag_payload(uint32_t target_id, Str mime_type, MimeDragEntry* out_entry) noexcept;
+
+// Application-level command registry, shortcut conflict detection, and recent history
+struct CommandDesc {
+    uint32_t id = 0u;
+    Str name = {};
+    Str title = {};
+    Str category = {};
+    uint16_t shortcut_mods = 0u;
+    uint32_t shortcut_keycode = 0u;
+    bool enabled = true;
+    bool allow_when_typing = false;
+};
+bool register_command(Context* ctx, const CommandDesc& desc) noexcept;
+bool unregister_command(Context* ctx, uint32_t command_id) noexcept;
+bool set_command_enabled(Context* ctx, uint32_t command_id, bool enabled) noexcept;
+bool is_command_enabled(const Context* ctx, uint32_t command_id) noexcept;
+uint32_t find_command_shortcut_conflict(const Context* ctx, uint16_t mods, uint32_t keycode, uint32_t ignore_id = 0u) noexcept;
+uint32_t poll_triggered_command(Context* ctx = nullptr) noexcept;
+bool dispatch_command(Context* ctx, uint32_t command_id) noexcept;
+uint32_t recent_command_count(const Context* ctx) noexcept;
+uint32_t recent_command_at(const Context* ctx, uint32_t index) noexcept;
+uint32_t command_count(const Context* ctx) noexcept;
+bool get_command(const Context* ctx, uint32_t index, CommandDesc* out_desc) noexcept;
+
+// Pixel-free semantic UI automation, deterministic clock scaling, and input recording
+struct AutomationQuery {
+    A11yRole role = A11yRole::None;
+    Str label_contains = {};
+    uint32_t required_states = 0u;
+    uint32_t forbidden_states = 0u;
+};
+struct RecordedFrameInput {
+    float dt_seconds = 0.0f;
+    Vec2 pointer_pos = {NAN, NAN};
+    bool pointer_down = false;
+    bool right_pointer_down = false;
+    Vec2 scroll_delta = {};
+    uint16_t key_mods = 0u;
+    uint32_t key_pressed_code = 0u;
+};
+uint32_t automation_find_nodes(const Context* ctx, const AutomationQuery& query, uint32_t* out_ids, uint32_t max_ids, SDL_Window* window = nullptr) noexcept;
+bool automation_assert_node(const Context* ctx, const AutomationQuery& query, A11yNode* out_node = nullptr, SDL_Window* window = nullptr) noexcept;
+float time_scale(const Context* ctx) noexcept;
+void automation_set_recording(Context* ctx, bool enabled) noexcept;
+uint32_t automation_recorded_count(const Context* ctx) noexcept;
+bool automation_get_recorded(const Context* ctx, uint32_t index, RecordedFrameInput* out_input) noexcept;
+void automation_clear_recording(Context* ctx) noexcept;
 
 // Analytic damped spring animator, DPI/hairline metrics & inertial scroll container control
 float dpi_scale(const Context* ctx = nullptr) noexcept;

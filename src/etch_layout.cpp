@@ -916,6 +916,27 @@ bool verify_caret_deadline() noexcept {
     return hidden && shown;
 }
 
+static void touch_track_add(WindowUiState* ui, uint64_t finger_id) noexcept {
+    for (uint32_t i = 0u; i < ui->active_touch_count; ++i) {
+        if (ui->active_touch_ids[i] == finger_id) return;
+    }
+    if (ui->active_touch_count < ETCH_COUNTOF(ui->active_touch_ids)) {
+        ui->active_touch_ids[ui->active_touch_count++] = finger_id;
+    }
+}
+
+static void touch_track_remove(WindowUiState* ui, uint64_t finger_id) noexcept {
+    for (uint32_t i = 0u; i < ui->active_touch_count; ++i) {
+        if (ui->active_touch_ids[i] == finger_id) {
+            for (uint32_t j = i + 1u; j < ui->active_touch_count; ++j) {
+                ui->active_touch_ids[j - 1u] = ui->active_touch_ids[j];
+            }
+            --ui->active_touch_count;
+            return;
+        }
+    }
+}
+
 static void process_window_event(Context* ctx, const SDL_Event& event) noexcept {
     if (event.type == SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED) {
         if (SDL_Window* window = SDL_GetWindowFromID(event.window.windowID)) sync_desktop_window(window, ctx);
@@ -930,10 +951,28 @@ static void process_window_event(Context* ctx, const SDL_Event& event) noexcept 
             ctx->active_ui->event_pointer_pos = window_to_logical_pos_for(
                 ctx, SDL_GetWindowFromID(event.motion.windowID), event.motion.x, event.motion.y);
             ctx->active_ui->has_event_pointer = true;
+            if (event.motion.which != SDL_PEN_MOUSEID && event.motion.which != SDL_TOUCH_MOUSEID) {
+                PointerState& ps = ctx->active_ui->pointer_state;
+                ps.kind = PointerKind::Mouse;
+                ps.pointer_id = static_cast<uint32_t>(event.motion.which);
+                ps.pressure = (event.motion.state != 0u) ? 1.0f : 0.0f;
+                ps.tilt_x = 0.0f;
+                ps.tilt_y = 0.0f;
+                ps.pen_eraser = false;
+            }
             request_redraw(ctx);
             break;
         case SDL_EVENT_MOUSE_BUTTON_DOWN:
         case SDL_EVENT_MOUSE_BUTTON_UP:
+            if (event.button.which != SDL_PEN_MOUSEID && event.button.which != SDL_TOUCH_MOUSEID) {
+                PointerState& ps = ctx->active_ui->pointer_state;
+                ps.kind = PointerKind::Mouse;
+                ps.pointer_id = static_cast<uint32_t>(event.button.which);
+                ps.pressure = (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN) ? 1.0f : 0.0f;
+                ps.tilt_x = 0.0f;
+                ps.tilt_y = 0.0f;
+                ps.pen_eraser = false;
+            }
             if (event.button.button == SDL_BUTTON_LEFT) {
                 ctx->active_ui->event_pointer_pos = window_to_logical_pos_for(
                     ctx, SDL_GetWindowFromID(event.button.windowID), event.button.x, event.button.y);
@@ -975,6 +1014,9 @@ static void process_window_event(Context* ctx, const SDL_Event& event) noexcept 
             }
             ctx->active_ui->event_scroll_delta.x += wx;
             ctx->active_ui->event_scroll_delta.y += wy;
+            if (std::fabs(wx - std::round(wx)) > 0.01f || std::fabs(wy - std::round(wy)) > 0.01f) {
+                ctx->active_ui->pointer_state.precise_scroll = true;
+            }
             if (event.wheel.mouse_x >= 0.0f && event.wheel.mouse_y >= 0.0f) {
                 ctx->active_ui->event_pointer_pos = window_to_logical_pos_for(
                     ctx, SDL_GetWindowFromID(event.wheel.windowID), event.wheel.mouse_x, event.wheel.mouse_y);
@@ -983,6 +1025,142 @@ static void process_window_event(Context* ctx, const SDL_Event& event) noexcept 
             request_redraw(ctx);
             break;
         }
+        case SDL_EVENT_PEN_PROXIMITY_IN:
+        case SDL_EVENT_PEN_PROXIMITY_OUT: {
+            PointerState& ps = ctx->active_ui->pointer_state;
+            ps.kind = PointerKind::Pen;
+            ps.pointer_id = static_cast<uint32_t>(event.pproximity.which);
+            if (event.type == SDL_EVENT_PEN_PROXIMITY_OUT) {
+                ps.pressure = 0.0f;
+                ps.tilt_x = 0.0f;
+                ps.tilt_y = 0.0f;
+                ps.pen_eraser = false;
+            } else {
+                ps.pen_eraser = (event.pproximity.pen_state & SDL_PEN_INPUT_ERASER_TIP) != 0u;
+            }
+            request_redraw(ctx);
+            break;
+        }
+        case SDL_EVENT_PEN_DOWN:
+        case SDL_EVENT_PEN_UP: {
+            const bool down = (event.type == SDL_EVENT_PEN_DOWN);
+            PointerState& ps = ctx->active_ui->pointer_state;
+            ps.kind = PointerKind::Pen;
+            ps.pointer_id = static_cast<uint32_t>(event.ptouch.which);
+            ps.pen_eraser = event.ptouch.eraser || ((event.ptouch.pen_state & SDL_PEN_INPUT_ERASER_TIP) != 0u);
+            if (!down) {
+                ps.pressure = 0.0f;
+            } else if (ps.pressure <= 0.0f) {
+                ps.pressure = 1.0f;
+            }
+            ctx->active_ui->event_pointer_pos = window_to_logical_pos_for(
+                ctx, SDL_GetWindowFromID(event.ptouch.windowID), event.ptouch.x, event.ptouch.y);
+            ctx->active_ui->has_event_pointer = true;
+            ctx->active_ui->event_pointer_down = down;
+            if (down) {
+                ctx->active_ui->event_left_pressed_edge = true;
+                ctx->active_ui->last_mouse_clicks = 1u;
+                ctx->active_ui->caret_blink_on = true;
+                ctx->active_ui->caret_blink_cycles = 0u;
+                ctx->active_ui->caret_blink_tick = SDL_GetTicks();
+            } else {
+                ctx->active_ui->event_left_released_edge = true;
+            }
+            request_redraw(ctx);
+            break;
+        }
+        case SDL_EVENT_PEN_MOTION: {
+            PointerState& ps = ctx->active_ui->pointer_state;
+            ps.kind = PointerKind::Pen;
+            ps.pointer_id = static_cast<uint32_t>(event.pmotion.which);
+            ps.pen_eraser = (event.pmotion.pen_state & SDL_PEN_INPUT_ERASER_TIP) != 0u;
+            ctx->active_ui->event_pointer_pos = window_to_logical_pos_for(
+                ctx, SDL_GetWindowFromID(event.pmotion.windowID), event.pmotion.x, event.pmotion.y);
+            ctx->active_ui->has_event_pointer = true;
+            request_redraw(ctx);
+            break;
+        }
+        case SDL_EVENT_PEN_AXIS: {
+            PointerState& ps = ctx->active_ui->pointer_state;
+            ps.kind = PointerKind::Pen;
+            ps.pointer_id = static_cast<uint32_t>(event.paxis.which);
+            ps.pen_eraser = (event.paxis.pen_state & SDL_PEN_INPUT_ERASER_TIP) != 0u;
+            if (std::isfinite(event.paxis.value)) {
+                switch (event.paxis.axis) {
+                    case SDL_PEN_AXIS_PRESSURE:
+                        ps.pressure = clamp_range(event.paxis.value, 0.0f, 1.0f);
+                        break;
+                    case SDL_PEN_AXIS_XTILT:
+                        ps.tilt_x = clamp_range(event.paxis.value, -90.0f, 90.0f);
+                        break;
+                    case SDL_PEN_AXIS_YTILT:
+                        ps.tilt_y = clamp_range(event.paxis.value, -90.0f, 90.0f);
+                        break;
+                    default:
+                        break;
+                }
+            }
+            if (std::isfinite(event.paxis.x) && std::isfinite(event.paxis.y) &&
+                (event.paxis.x != 0.0f || event.paxis.y != 0.0f))
+            {
+                ctx->active_ui->event_pointer_pos = window_to_logical_pos_for(
+                    ctx, SDL_GetWindowFromID(event.paxis.windowID), event.paxis.x, event.paxis.y);
+                ctx->active_ui->has_event_pointer = true;
+            }
+            request_redraw(ctx);
+            break;
+        }
+        case SDL_EVENT_FINGER_DOWN:
+        case SDL_EVENT_FINGER_MOTION:
+        case SDL_EVENT_FINGER_UP:
+        case SDL_EVENT_FINGER_CANCELED: {
+            const uint64_t fid = static_cast<uint64_t>(event.tfinger.fingerID);
+            const bool is_down = (event.type == SDL_EVENT_FINGER_DOWN);
+            const bool is_up = (event.type == SDL_EVENT_FINGER_UP || event.type == SDL_EVENT_FINGER_CANCELED);
+            const bool was_primary = (ctx->active_ui->active_touch_count == 0u) ||
+                                     (ctx->active_ui->active_touch_ids[0] == fid);
+            if (is_up) {
+                touch_track_remove(ctx->active_ui, fid);
+            } else {
+                touch_track_add(ctx->active_ui, fid);
+            }
+            PointerState& ps = ctx->active_ui->pointer_state;
+            ps.kind = PointerKind::Touch;
+            ps.pointer_id = static_cast<uint32_t>(fid);
+            ps.active_touches = ctx->active_ui->active_touch_count;
+            ps.pressure = (!is_up && std::isfinite(event.tfinger.pressure))
+                ? clamp_range(event.tfinger.pressure, 0.0f, 1.0f)
+                : 0.0f;
+            ps.tilt_x = 0.0f;
+            ps.tilt_y = 0.0f;
+            ps.pen_eraser = false;
+            if (was_primary && std::isfinite(event.tfinger.x) && std::isfinite(event.tfinger.y)) {
+                const float dpi = (ctx->active_ui->dpi_scale > 0.0f) ? ctx->active_ui->dpi_scale : 1.0f;
+                const float lw = static_cast<float>(ctx->active_ui->viewport_w) / dpi;
+                const float lh = static_cast<float>(ctx->active_ui->viewport_h) / dpi;
+                ctx->active_ui->event_pointer_pos = Vec2{ event.tfinger.x * lw, event.tfinger.y * lh };
+                ctx->active_ui->has_event_pointer = true;
+                if (is_down) {
+                    ctx->active_ui->event_pointer_down = true;
+                    ctx->active_ui->event_left_pressed_edge = true;
+                    ctx->active_ui->last_mouse_clicks = 1u;
+                    ctx->active_ui->caret_blink_on = true;
+                    ctx->active_ui->caret_blink_cycles = 0u;
+                    ctx->active_ui->caret_blink_tick = SDL_GetTicks();
+                } else if (is_up) {
+                    ctx->active_ui->event_pointer_down = false;
+                    ctx->active_ui->event_left_released_edge = true;
+                }
+            }
+            request_redraw(ctx);
+            break;
+        }
+        case SDL_EVENT_PINCH_UPDATE:
+            if (std::isfinite(event.pinch.scale)) {
+                ctx->active_ui->pointer_state.pinch_delta += (event.pinch.scale - 1.0f);
+                request_redraw(ctx);
+            }
+            break;
         case SDL_EVENT_TEXT_EDITING: {
             const char* src = event.edit.text ? event.edit.text : "";
             const uint32_t raw_len = static_cast<uint32_t>(std::strlen(src));
@@ -1151,6 +1329,9 @@ static void process_window_event(Context* ctx, const SDL_Event& event) noexcept 
             ctx->active_ui->drag_accepted_this_frame = false;
             ctx->active_ui->space_down = false;
             ctx->active_ui->active_id = 0u;
+            ctx->active_ui->active_touch_count = 0u;
+            ctx->active_ui->pointer_state.active_touches = 0u;
+            ctx->active_ui->pointer_state.pressure = 0.0f;
             clear_ime_composition(ctx);
             if (ctx->active_ui->mouse_captured) {
                 if (ctx->mouse_capture_window == ctx->active_window) { SDL_CaptureMouse(false); ctx->mouse_capture_window = nullptr; }
@@ -1238,15 +1419,19 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
     ctx->active_ui->focus_scope = 0;
     ctx->layout_start_ticks = SDL_GetPerformanceCounter();
     ++ctx->active_ui->frame_index;
-    ctx->active_ui->elapsed_seconds += desc.dt_seconds*ctx->time_scale;
+    const float ts = std::isfinite(ctx->time_scale)
+        ? ((ctx->time_scale > 0.0f) ? ctx->time_scale : 0.0f)
+        : 1.0f;
+    const float raw_dt = (std::isfinite(desc.dt_seconds) && desc.dt_seconds > 0.0f)
+        ? desc.dt_seconds
+        : 0.0f;
+    ctx->active_ui->elapsed_seconds += raw_dt * ts;
 
     if (ctx->active_ui->redraw_budget > 0u) {
         --ctx->active_ui->redraw_budget;
     }
-    ctx->active_ui->sim_dt = (desc.dt_seconds <= 0.0f)
-        ? 0.0f
-        : ((desc.dt_seconds > 0.1f) ? (1.0f / 60.0f) : desc.dt_seconds);
-    ctx->active_ui->sim_dt *= ctx->time_scale;
+    ctx->active_ui->sim_dt = (raw_dt > 0.1f) ? (1.0f / 60.0f) : raw_dt;
+    ctx->active_ui->sim_dt *= ts;
     ctx->active_ui->active_anim_count = 0u;
     ctx->active_ui->desired_cursor = Cursor::Arrow;
 
@@ -4734,6 +4919,17 @@ Vec2 pointer_pos() noexcept {
 Vec2 pointer_delta() noexcept {
     const Context* ctx = current_context();
     return ctx ? ctx->active_ui->pointer_delta : Vec2{0.0f, 0.0f};
+}
+
+PointerState pointer_state(const Context* ctx_arg) noexcept {
+    const Context* ctx = ctx_arg ? ctx_arg : current_context();
+    if (!ctx) {
+        return {};
+    }
+    const WindowUiState* ui = ctx->active_ui
+        ? ctx->active_ui
+        : (ctx->headless ? ctx->headless_ui : window_ui(ctx, nullptr));
+    return ui ? ui->pointer_state : PointerState{};
 }
 
 bool right_clicked(uint32_t element_id) noexcept {

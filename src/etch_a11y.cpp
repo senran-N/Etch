@@ -192,8 +192,94 @@ bool perform_a11y_action(uint32_t id,A11yAction action,float number,Str text,Con
     ui->redraw_budget=2;request_redraw(ctx);wake_up(ctx);
     return true;
 }
+void emit_a11y_node(
+    uint32_t element_id,
+    A11yRole role,
+    Str label,
+    Str value_text,
+    uint32_t state_flags,
+    uint32_t actions_mask,
+    float value_num,
+    Rect bounds) noexcept
+{
+    Context* ctx = current_context();
+    if (!ctx || !ctx->in_frame || element_id == 0u ||
+        (label.length && !label.chars) || (value_text.length && !value_text.chars))
+    {
+        return;
+    }
+    A11yIndexEntry* existing = a11y_index(ctx, element_id, false);
+    A11yBuild* b = (existing && existing->build) ? existing->build : nullptr;
+    if (!b) {
+        b = a11y_emit(ctx, element_id, role, label, value_text, state_flags, actions_mask);
+        if (!b) return;
+    } else {
+        b->node.role = role;
+        b->node.label = ctx->frame_arena.push_str(label.chars, label.length);
+        b->node.value_text = ctx->frame_arena.push_str(value_text.chars, value_text.length);
+        b->node.state_flags = state_flags;
+        b->node.actions_mask = actions_mask;
+        for (auto* p = existing->patches; p; p = p->next) {
+            a11y_patch(b->node, p->desc);
+        }
+    }
+    b->node.value_num = std::isfinite(value_num) ? value_num : 0.0f;
+    if (std::isfinite(bounds.x) && std::isfinite(bounds.y) &&
+        std::isfinite(bounds.w) && std::isfinite(bounds.h) &&
+        bounds.w > 0.0f && bounds.h > 0.0f)
+    {
+        b->node.bounds = bounds;
+        b->has_explicit_bounds = true;
+    }
+}
+void announce_a11y(Str message, A11yLiveMode priority, Context* ctx, SDL_Window* window) noexcept {
+    if (!ctx) { ctx = current_context(); }
+    if (!ctx || !message.chars || message.length == 0u || priority == A11yLiveMode::Off) {
+        return;
+    }
+    if (static_cast<uint8_t>(priority) > static_cast<uint8_t>(A11yLiveMode::Assertive)) {
+        priority = A11yLiveMode::Polite;
+    }
+    WindowUiState* ui = (!window && ctx->headless) ? ensure_headless_ui(ctx) : window_ui(ctx, window);
+    if (!ui) {
+        return;
+    }
+    if (ui->a11y_announce_dirty &&
+        ui->a11y_announce_priority == A11yLiveMode::Assertive &&
+        priority == A11yLiveMode::Polite)
+    {
+        return;
+    }
+    const uint32_t max_len = static_cast<uint32_t>(sizeof(ui->a11y_announce_buf) - 1u);
+    const uint32_t raw_len = (message.length < max_len) ? message.length : max_len;
+    const uint32_t clamped = utf8_clamp_boundary(message.chars, message.length, raw_len);
+    if (clamped == 0u) {
+        return;
+    }
+    std::memcpy(ui->a11y_announce_buf, message.chars, clamped);
+    ui->a11y_announce_buf[clamped] = '\0';
+    ui->a11y_announce_len = clamped;
+    ui->a11y_announce_priority = priority;
+    ++ui->a11y_announce_seq;
+    ui->a11y_announce_dirty = true;
+    if (ui->redraw_budget < 2u) {
+        ui->redraw_budget = 2u;
+    }
+    request_redraw(ctx);
+}
+Str last_a11y_announcement(A11yLiveMode* out_priority, uint64_t* out_seq, const Context* ctx, SDL_Window* window) noexcept {
+    if (out_priority) *out_priority = A11yLiveMode::Off;
+    if (out_seq) *out_seq = 0u;
+    if (!ctx) { ctx = current_context(); }
+    if (!ctx) { return {}; }
+    const WindowUiState* ui = (!window && ctx->headless) ? ctx->headless_ui : window_ui(ctx, window);
+    if (!ui) { return {}; }
+    if (out_priority) *out_priority = ui->a11y_announce_priority;
+    if (out_seq) *out_seq = ui->a11y_announce_seq;
+    return (ui->a11y_announce_len > 0u) ? Str{ui->a11y_announce_buf, ui->a11y_announce_len, false} : Str{};
+}
 const char* a11y_role_name(A11yRole role) noexcept {
-    static constexpr const char* names[]={"None","Window","Group","Region","Toolbar","MenuBar","Menu","MenuItem","TabList","Tab","Dialog","ScrollArea","List","ListItem","Table","Tree","TreeItem","StaticText","Button","Checkbox","Switch","Slider","SpinButton","ProgressBar","ComboBox","TextInput","CodeEditor","Canvas","Tooltip"};
+    static constexpr const char* names[]={"None","Window","Group","Region","Toolbar","MenuBar","Menu","MenuItem","TabList","Tab","Dialog","ScrollArea","List","ListItem","Table","Tree","TreeItem","StaticText","Button","Checkbox","Switch","Slider","SpinButton","ProgressBar","ComboBox","TextInput","CodeEditor","Canvas","Tooltip","heading","link","document","math","figure","alert","status"};
     const uint32_t i=static_cast<uint32_t>(role);return i<ETCH_COUNTOF(names)?names[i]:"None";
 }
 } // namespace etch

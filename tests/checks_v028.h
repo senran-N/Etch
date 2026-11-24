@@ -702,6 +702,166 @@ inline bool verify_v028_driver(const char* driver) noexcept {
             check(false, __LINE__);
         }
     }
+
+    // ------------------------------------------------------------------
+    // (g) GPU device recreation contract (#07): generation bump, reset callback,
+    //     Ready status, preserved widget/font/sprite state, and valid post-reset render
+    // ------------------------------------------------------------------
+    {
+        check(gpu_status(c) == GpuStatus::Ready, __LINE__);
+        const uint64_t gen_before = gpu_device_generation(c);
+        check(gen_before >= 1u, __LINE__);
+        check(is_font_loaded(c, kFontSans), __LINE__);
+
+        const uint32_t split_id = id("v028_gpu_reset_split");
+        set_split_ratio(split_id, 0.73f);
+        check(std::fabs(split_ratio(split_id) - 0.73f) < 1e-4f, __LINE__);
+
+        uint8_t sp_px[4u * 4u * 4u] = {};
+        for (uint32_t i = 0u; i < 16u; ++i) {
+            sp_px[i * 4u + 0u] = 24u;
+            sp_px[i * 4u + 1u] = 210u;
+            sp_px[i * 4u + 2u] = 240u;
+            sp_px[i * 4u + 3u] = 255u;
+        }
+        const uint32_t sp_id = create_sprite_rgba(c, {.rgba_pixels = sp_px, .width = 4u, .height = 4u});
+        check(sp_id != kInvalidSprite, __LINE__);
+
+        struct ResetTracker {
+            Context* expected_ctx = nullptr;
+            uint32_t calls = 0u;
+            uint64_t last_gen = 0u;
+            bool ctx_match = true;
+        } tracker = {.expected_ctx = c};
+        set_gpu_device_reset_callback(c, [](Context* rc, uint64_t gen, void* ud) noexcept {
+            auto* t = static_cast<ResetTracker*>(ud);
+            ++t->calls;
+            t->last_gen = gen;
+            t->ctx_match &= (rc == t->expected_ctx);
+        }, &tracker);
+
+        // Mid-frame recreate must be rejected cleanly without firing callback.
+        begin_frame(c, {.viewport_w = 160u, .viewport_h = 80u});
+        check(!recreate_gpu_device(c, driver), __LINE__);
+        end_frame(c);
+        check(tracker.calls == 0u && gpu_device_generation(c) == gen_before, __LINE__);
+
+        // Recreate between frames.
+        check(recreate_gpu_device(c, driver), __LINE__);
+        const uint64_t gen_after = gpu_device_generation(c);
+        check(gen_after == gen_before + 1u, __LINE__);
+        check(tracker.calls == 1u && tracker.last_gen == gen_after && tracker.ctx_match, __LINE__);
+        check(gpu_status(c) == GpuStatus::Ready, __LINE__);
+        check(gpu_device(c) != nullptr, __LINE__);
+        check(std::fabs(split_ratio(split_id) - 0.73f) < 1e-4f, __LINE__);
+        check(is_font_loaded(c, kFontSans), __LINE__);
+
+        const Color reset_bg = Color::rgb_hex(0x0E1118);
+        begin_frame(c, {.viewport_w = 240u, .viewport_h = 96u});
+        begin_box({.axis = Axis::Row, .width = Sizing::fixed(240.0f), .height = Sizing::fixed(96.0f),
+                   .padding = Padding::all(12.0f), .gap = 12.0f, .background = reset_bg});
+        box({.width = Sizing::fixed(48.0f), .height = Sizing::fixed(48.0f),
+             .background = Color::rgba8(230, 80, 50, 255)});
+        image({.sprite_id = sp_id, .width = Sizing::fixed(48.0f), .height = Sizing::fixed(48.0f)});
+        begin_box({.axis = Axis::Col, .width = Sizing::grow(), .height = Sizing::grow(), .gap = 4.0f});
+        text(str_lit("Post-reset"), {.color = Color::white(), .font_size_px = 14.0f, .wrap = false});
+        text(str_lit("OK"), {.color = Color::white(), .font_size_px = 32.0f, .wrap = false});
+        end_box();
+        end_box();
+        end_frame(c);
+
+        struct ResetRead {
+            bool rect_ok = false;
+            bool sprite_ok = false;
+            uint32_t text_lit = 0u;
+        } rr = {};
+        check(render_headless_pixels(c, {
+            .frame_width = 240u, .frame_height = 96u,
+            .clear_color = reset_bg,
+            .receive = [](const uint8_t* rgba, uint32_t w, uint32_t h, uint32_t pitch, void* ud) {
+                auto* out = static_cast<ResetRead*>(ud);
+                if (w != 240u || h != 96u || pitch < w * 4u) return false;
+                const uint8_t* p0 = rgba + 36u * pitch + 36u * 4u;
+                out->rect_ok = (p0[0] > 190u && p0[1] > 50u && p0[1] < 120u && p0[2] < 80u);
+                const uint8_t* p1 = rgba + 36u * pitch + 96u * 4u;
+                out->sprite_ok = (p1[0] < 60u && p1[1] > 170u && p1[2] > 200u);
+                for (uint32_t y = 12u; y < 84u; ++y) {
+                    const uint8_t* row = rgba + y * pitch;
+                    for (uint32_t x = 132u; x < 228u; ++x) {
+                        if (row[x * 4u + 0u] > 140u && row[x * 4u + 1u] > 140u && row[x * 4u + 2u] > 140u) {
+                            ++out->text_lit;
+                        }
+                    }
+                }
+                return true;
+            },
+            .user_data = &rr,
+        }), __LINE__);
+        check(rr.rect_ok && rr.sprite_ok && rr.text_lit >= 40u, __LINE__);
+
+        destroy_sprite(c, sp_id);
+        set_gpu_device_reset_callback(c, nullptr, nullptr);
+    }
+
+    // ------------------------------------------------------------------
+    // (h) Structured frame timing & memory trace (#04, #48)
+    // ------------------------------------------------------------------
+    {
+        check(!trace_enabled(c), __LINE__);
+        trace_clear(c);
+        check(trace_sample_count(c) == 0u, __LINE__);
+        char empty_json[16] = {};
+        check(trace_export_json(c, empty_json, static_cast<uint32_t>(sizeof(empty_json))) == 2u &&
+              std::strcmp(empty_json, "[]") == 0, __LINE__);
+
+        set_trace_enabled(c, true);
+        check(trace_enabled(c), __LINE__);
+        for (int f = 0; f < 2; ++f) {
+            begin_frame(c, {.viewport_w = 160u, .viewport_h = 80u});
+            begin_box({.width = Sizing::fixed(160.0f), .height = Sizing::fixed(80.0f),
+                       .padding = Padding::all(8.0f), .background = Color::rgb_hex(0x141820)});
+            text(str_lit("Trace check"), {.color = Color::white(), .font_size_px = 14.0f, .wrap = false});
+            end_box();
+            end_frame(c);
+            check(render_headless_pixels(c, {
+                .frame_width = 160u, .frame_height = 80u,
+                .receive = [](const uint8_t*, uint32_t, uint32_t, uint32_t, void*) { return true; },
+            }), __LINE__);
+        }
+
+        const uint32_t sc = trace_sample_count(c);
+        check(sc >= 2u, __LINE__);
+        FrameTraceSample s0 = {}, s1 = {}, bad = {};
+        check(trace_get_sample(c, 0u, &s0), __LINE__);
+        check(trace_get_sample(c, sc - 1u, &s1), __LINE__);
+        check(!trace_get_sample(c, sc, &bad), __LINE__);
+        check(s1.frame_index >= s0.frame_index, __LINE__);
+        check(s1.ui_draw_calls > 0u && s1.total_draw_calls >= s1.ui_draw_calls && s1.prim_count > 0u, __LINE__);
+        check(s1.estimated_vram_bytes > 0u, __LINE__);
+#if defined(_WIN32) || defined(__APPLE__) || defined(__linux__)
+        check(s1.working_set_bytes > 0u, __LINE__);
+#endif
+
+        const uint32_t req = trace_export_json(c, nullptr, 0u);
+        check(req > 32u && req < 4096u, __LINE__);
+        char trunc_buf[8] = {};
+        check(trace_export_json(c, trunc_buf, static_cast<uint32_t>(sizeof(trunc_buf))) == req &&
+              trunc_buf[0] == '[' && trunc_buf[7] == '\0', __LINE__);
+        char json_buf[4096] = {};
+        const uint32_t written = trace_export_json(c, json_buf, static_cast<uint32_t>(sizeof(json_buf)));
+        check(written == req && std::strlen(json_buf) == req, __LINE__);
+        check(json_buf[0] == '[' && json_buf[req - 1u] == ']', __LINE__);
+        check(std::strstr(json_buf, "\"working_set\":") != nullptr, __LINE__);
+        check(std::strstr(json_buf, "\"private_commit\":") != nullptr, __LINE__);
+        check(std::strstr(json_buf, "\"est_vram\":") != nullptr, __LINE__);
+        check(std::strstr(json_buf, "\"ui_dc\":") != nullptr, __LINE__);
+        check(std::strstr(json_buf, "\"total_dc\":") != nullptr, __LINE__);
+
+        trace_clear(c);
+        check(trace_sample_count(c) == 0u, __LINE__);
+        set_trace_enabled(c, false);
+        check(!trace_enabled(c), __LINE__);
+    }
     std::remove(png_path);
     destroy_context(c);
     set_current_context(nullptr);

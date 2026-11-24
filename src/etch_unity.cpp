@@ -102,14 +102,16 @@
 #include "etch_frame.cpp"
 #include "etch_widgets.cpp"
 #include "etch_workbench.cpp"
+#include "etch_c_internal.h"
 #include "etch_editor.cpp"
 #include "etch_a11y.cpp"
 #include "etch_window_chrome.cpp"
 #include "etch_a11y_os.cpp"
+#include "etch_trace.cpp"
 #include "etch_gpu.cpp"
 #include "etch_surface.cpp"
-
-#include "etch_c_internal.h"
+#include "etch_commands.cpp"
+#include "etch_automation.cpp"
 
 namespace etch {
 namespace {
@@ -117,6 +119,12 @@ void c_bridge_window_refresh_trampoline(Context* ctx, SDL_Window* win, float dt_
     (void)user_data;
     if (ctx && ctx->c_refresh_fn) {
         ctx->c_refresh_fn(reinterpret_cast<EtchContext*>(ctx), win, dt_seconds, ctx->c_refresh_user_data);
+    }
+}
+void c_bridge_gpu_reset_trampoline(Context* ctx, uint64_t gen, void* user_data) noexcept {
+    (void)user_data;
+    if (ctx && ctx->c_gpu_reset_fn) {
+        ctx->c_gpu_reset_fn(reinterpret_cast<EtchContext*>(ctx), gen, ctx->c_gpu_reset_user_data);
     }
 }
 } // namespace
@@ -133,6 +141,19 @@ void c_bridge_set_window_refresh(Context* ctx, EtchWindowRefreshFn fn, void* use
         ctx->c_refresh_user_data = user_data;
     } else {
         set_window_refresh_callback(ctx, nullptr, nullptr);
+    }
+}
+
+void c_bridge_set_gpu_device_reset(Context* ctx, EtchGpuDeviceResetFn fn, void* user_data) noexcept {
+    if (!ctx) return;
+    if (fn) {
+        ctx->c_gpu_reset_fn = fn;
+        ctx->c_gpu_reset_user_data = user_data;
+        set_gpu_device_reset_callback(ctx, c_bridge_gpu_reset_trampoline, ctx);
+    } else {
+        ctx->c_gpu_reset_fn = nullptr;
+        ctx->c_gpu_reset_user_data = nullptr;
+        set_gpu_device_reset_callback(ctx, nullptr, nullptr);
     }
 }
 

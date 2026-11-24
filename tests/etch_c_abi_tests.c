@@ -321,6 +321,17 @@ static bool test_text_buffer_and_code_editor(EtchContext* ctx) {
     }
     bool ok = (etch_text_buffer_line_count(tb) == 2u);
     const uint64_t revision = etch_text_buffer_revision(tb);
+    {
+        const EtchTextEdit patch[] = {{0u, 0u, ETCH_STR_LIT("头")}, {1u, 1u, ETCH_STR_LIT("尾")}};
+        ok = ok && etch_text_buffer_apply_edits(tb, revision, patch, 2u) &&
+             !etch_text_buffer_apply_edits(tb, revision, patch, 2u) &&
+             etch_text_buffer_undo(tb, NULL, NULL);
+    }
+    {
+        const EtchTextDiagnostic diagnostic = {0u, 2u, ETCH_TEXT_DIAGNOSTIC_WARNING, ETCH_STR_LIT("warning")};
+        ok = ok && etch_text_buffer_set_diagnostics(tb, etch_text_buffer_revision(tb), &diagnostic, 1u);
+        etch_text_buffer_clear_diagnostics(tb);
+    }
     const EtchTextUtf16Position start = etch_text_buffer_utf16_position(tb, 11u);
     ok = ok && start.line == 1u && start.character == 0u && etch_text_buffer_byte_from_utf16(tb, start) == 11u;
     const uint32_t len0 = etch_text_buffer_byte_length(tb);
@@ -531,6 +542,202 @@ static bool test_containers_and_canvas(EtchContext* ctx) {
     etch_end_frame(ctx);
     return (c_off - expected_c_y) > -0.5 && (c_off - expected_c_y) < 0.5 &&
            islice.first_index <= 400u && islice.end_index > 400u;
+}
+
+static void c_gpu_reset_cb(EtchContext* ctx, uint64_t device_generation, void* user_data) {
+    (void)ctx;
+    (void)device_generation;
+    if (user_data) {
+        ++(*(uint32_t*)user_data);
+    }
+}
+
+static bool test_kernel_audit_c_abi(EtchContext* ctx) {
+    bool ok = true;
+
+    /* System preferences override & pointer state */
+    {
+        EtchSystemPreferences ov;
+        memset(&ov, 0, sizeof(ov));
+        ov.theme = ETCH_SYSTEM_THEME_DARK;
+        ov.high_contrast = true;
+        ov.reduced_motion = true;
+        ov.text_scale = 1.25f;
+        ov.layout_direction = ETCH_LAYOUT_RTL;
+        memcpy(ov.locale, "fr-FR", 6u);
+        etch_set_system_preferences_override(ctx, &ov);
+        const EtchSystemPreferences got = etch_system_preferences(ctx);
+        ok = ok && got.theme == ETCH_SYSTEM_THEME_DARK && got.high_contrast && got.reduced_motion &&
+             got.layout_direction == ETCH_LAYOUT_RTL && got.text_scale > 1.2f &&
+             strcmp(got.locale, "fr-FR") == 0;
+        etch_set_system_preferences_override(ctx, NULL);
+
+        const EtchPointerState ps = etch_pointer_state(ctx);
+        ok = ok && (ps.kind == ETCH_POINTER_MOUSE || ps.kind == ETCH_POINTER_PEN || ps.kind == ETCH_POINTER_TOUCH);
+    }
+
+    /* GPU device generation, reset callback & frame trace */
+    {
+        uint32_t reset_calls = 0u;
+        (void)etch_gpu_device_generation(ctx);
+        etch_set_gpu_device_reset_callback(ctx, c_gpu_reset_cb, &reset_calls);
+        etch_set_gpu_device_reset_callback(ctx, NULL, NULL);
+
+        etch_set_trace_enabled(ctx, true);
+        ok = ok && etch_trace_enabled(ctx);
+        EtchFrameDesc tfd = etch_frame_desc_default();
+        tfd.viewport_w = 320u;
+        tfd.viewport_h = 180u;
+        etch_begin_frame(ctx, &tfd);
+        etch_emit_a11y_node(etch_id("c_custom_a11y"), ETCH_A11Y_STATUS, ETCH_STR_LIT("Ready"),
+            ETCH_STR_LIT("OK"), ETCH_A11Y_STATE_LIVE_POLITE, 0u, 1.0f, etch_rect(0.0f, 0.0f, 80.0f, 20.0f));
+        etch_a11y_announce(ETCH_STR_LIT("Build complete"), ETCH_A11Y_LIVE_ASSERTIVE, ctx, NULL);
+        etch_end_frame(ctx);
+
+        EtchA11yLiveMode live_mode = ETCH_A11Y_LIVE_OFF;
+        uint64_t live_seq = 0u;
+        const EtchStr ann = etch_last_a11y_announcement(&live_mode, &live_seq, ctx, NULL);
+        ok = ok && live_mode == ETCH_A11Y_LIVE_ASSERTIVE && live_seq > 0u &&
+             ann.length == 14u && memcmp(ann.chars, "Build complete", 14u) == 0;
+
+        const uint32_t sc = etch_trace_sample_count(ctx);
+        if (sc > 0u) {
+            EtchFrameTraceSample smp;
+            memset(&smp, 0, sizeof(smp));
+            ok = ok && etch_trace_get_sample(ctx, 0u, &smp);
+        }
+        char json_buf[2048];
+        const uint32_t jlen = etch_trace_export_json(ctx, json_buf, (uint32_t)sizeof(json_buf));
+        ok = ok && jlen < (uint32_t)sizeof(json_buf);
+        etch_trace_clear(ctx);
+        ok = ok && etch_trace_sample_count(ctx) == 0u;
+        etch_set_trace_enabled(ctx, false);
+        ok = ok && !etch_trace_enabled(ctx);
+    }
+
+    /* Editor find/find_all, ghost completion, search highlights, folding & multi-cursor */
+    {
+        EtchTextBuffer* tb = etch_create_text_buffer(ETCH_STR_LIT("alpha beta ALPHA\nline1\nline2\nline3"), 0u);
+        if (!tb) return false;
+        EtchTextSearchMatch m;
+        memset(&m, 0, sizeof(m));
+        ok = ok && etch_text_buffer_find(tb, ETCH_STR_LIT("alpha"), 0u, true, true, &m) &&
+             m.byte_start == 0u && m.byte_end == 5u;
+        EtchTextSearchMatch all[4];
+        ok = ok && etch_text_buffer_find_all(tb, ETCH_STR_LIT("alpha"), false, true, all, 4u) == 2u;
+
+        const uint32_t ced = etch_id("c_audit_ed");
+        etch_code_editor_set_inline_completion(ced, ETCH_STR_LIT("_suffix"));
+        ok = ok && !etch_code_editor_completion_accepted(ced) && !etch_code_editor_completion_dismissed(ced);
+        etch_code_editor_set_search_highlights(ced, ETCH_STR_LIT("line"), false);
+        ok = ok && etch_code_editor_set_fold(ced, 1u, 2u, true) && etch_code_editor_is_line_folded(ced, 2u) &&
+             !etch_code_editor_is_line_folded(ced, 1u);
+        ok = ok && etch_code_editor_set_fold(ced, 1u, 2u, false) && !etch_code_editor_is_line_folded(ced, 2u);
+        ok = ok && etch_code_editor_add_cursor(ced, 6u) && etch_code_editor_cursor_count(ced) == 2u;
+        etch_code_editor_clear_extra_cursors(ced);
+        ok = ok && etch_code_editor_cursor_count(ced) == 1u;
+        etch_code_editor_set_inline_completion(ced, etch_str_n(NULL, 0u, false));
+        etch_code_editor_set_search_highlights(ced, etch_str_n(NULL, 0u, false), false);
+        etch_destroy_text_buffer(tb);
+    }
+
+    /* Commands */
+    {
+        EtchCommandDesc cd = etch_command_desc_default();
+        cd.id = 901u;
+        cd.name = ETCH_STR_LIT("c.cmd");
+        cd.title = ETCH_STR_LIT("C Command");
+        cd.category = ETCH_STR_LIT("Test");
+        cd.shortcut_mods = ETCH_MOD_CTRL;
+        cd.shortcut_keycode = (uint32_t)'k';
+        cd.allow_when_typing = true;
+        ok = ok && etch_register_command(ctx, &cd) && etch_command_count(ctx) == 1u;
+        EtchCommandDesc out_cd;
+        memset(&out_cd, 0, sizeof(out_cd));
+        ok = ok && etch_get_command(ctx, 0u, &out_cd) && out_cd.id == 901u;
+        ok = ok && etch_find_command_shortcut_conflict(ctx, ETCH_MOD_CTRL, (uint32_t)'k', 0u) == 901u;
+        ok = ok && etch_set_command_enabled(ctx, 901u, false) && !etch_is_command_enabled(ctx, 901u) &&
+             !etch_dispatch_command(ctx, 901u);
+        ok = ok && etch_set_command_enabled(ctx, 901u, true) && etch_dispatch_command(ctx, 901u) &&
+             etch_recent_command_count(ctx) >= 1u && etch_recent_command_at(ctx, 0u) == 901u;
+        (void)etch_poll_triggered_command(ctx);
+        ok = ok && etch_unregister_command(ctx, 901u) && etch_command_count(ctx) == 0u;
+    }
+
+    /* Automation & deterministic clock */
+    {
+        EtchAutomationQuery q;
+        memset(&q, 0, sizeof(q));
+        q.role = ETCH_A11Y_STATUS;
+        q.label_contains = ETCH_STR_LIT("ready");
+        uint32_t ids[4] = {0u};
+        EtchA11yNode node;
+        memset(&node, 0, sizeof(node));
+        ok = ok && etch_automation_find_nodes(ctx, &q, ids, 4u, NULL) >= 1u &&
+             etch_automation_assert_node(ctx, &q, &node, NULL) && node.role == ETCH_A11Y_STATUS;
+
+        etch_set_time_scale(ctx, 2.0f);
+        ok = ok && etch_time_scale(ctx) == 2.0f;
+        etch_set_time_scale(ctx, 1.0f);
+
+        etch_automation_set_recording(ctx, true);
+        etch_automation_set_recording(ctx, false);
+        EtchRecordedFrameInput rec;
+        memset(&rec, 0, sizeof(rec));
+        if (etch_automation_recorded_count(ctx) > 0u) {
+            ok = ok && etch_automation_get_recorded(ctx, 0u, &rec);
+        }
+        etch_automation_clear_recording(ctx);
+        ok = ok && etch_automation_recorded_count(ctx) == 0u;
+    }
+
+    /* Dock detach/transfer/tear-off & Multi-MIME drag */
+    {
+        const uint32_t da = etch_id("c_dock_tr_a");
+        const uint32_t db = etch_id("c_dock_tr_b");
+        const uint32_t pa = etch_id("c_dock_pa");
+        const uint32_t pb = etch_id("c_dock_pb");
+        const uint32_t ra = etch_dock_reset_root(da);
+        const uint32_t rb = etch_dock_reset_root(db);
+        EtchDockPaneDesc dpa = etch_dock_pane_desc_default();
+        dpa.id = pa;
+        dpa.title = ETCH_STR_LIT("PA");
+        EtchDockPaneDesc dpb = etch_dock_pane_desc_default();
+        dpb.id = pb;
+        dpb.title = ETCH_STR_LIT("PB");
+        ok = ok && etch_dock_add_pane(da, ra, &dpa) && etch_dock_add_pane(db, rb, &dpb);
+        ok = ok && etch_dock_transfer_pane(da, db, pa, pb, ETCH_DOCK_RIGHT, 0.5f, NULL, NULL);
+        ok = ok && etch_dock_detach_pane(db, pa);
+        EtchDockTearOffEvent tear;
+        memset(&tear, 0, sizeof(tear));
+        ok = ok && !etch_dock_poll_tear_off(&tear);
+
+        static const uint8_t kPayload[3] = { 'a', 'b', 'c' };
+        EtchMimeDragEntry entries[1];
+        entries[0].mime_type = ETCH_STR_LIT("text/plain");
+        entries[0].bytes = kPayload;
+        entries[0].size = 3u;
+        EtchFrameDesc mfd = etch_frame_desc_default();
+        mfd.viewport_w = 200u;
+        mfd.viewport_h = 100u;
+        mfd.pointer_pos = etch_vec2(10.0f, 10.0f);
+        mfd.pointer_down = true;
+        etch_begin_frame(ctx, &mfd);
+        ok = ok && etch_begin_mime_drag_payload(etch_id("c_msrc"), ETCH_STR_LIT("Mime"), entries, 1u);
+        EtchMimeDragEntry peeked;
+        memset(&peeked, 0, sizeof(peeked));
+        ok = ok && etch_mime_drag_format_count() == 1u &&
+             etch_peek_mime_drag_entry(ETCH_STR_LIT("text/plain"), &peeked) && peeked.size == 3u;
+        etch_end_frame(ctx);
+        mfd.pointer_down = false;
+        etch_begin_frame(ctx, &mfd);
+        EtchMimeDragEntry accepted;
+        memset(&accepted, 0, sizeof(accepted));
+        ok = ok && etch_accept_mime_drag_payload(0u, ETCH_STR_LIT("text/plain"), &accepted) && accepted.size == 3u;
+        etch_end_frame(ctx);
+    }
+
+    return ok;
 }
 
 static bool test_release_api(EtchContext* ctx) {
@@ -1486,6 +1693,7 @@ int main(void) {
     const bool ok_layout = ok_release && ok_material_defaults && ok_closure && ok_numerals && test_layout_widgets_and_a11y(ctx);
     const bool ok_editor = test_text_buffer_and_code_editor(ctx);
     const bool ok_containers = test_containers_and_canvas(ctx);
+    const bool ok_audit = test_kernel_audit_c_abi(ctx);
     bool ok_svg_webp = false;
     {
         static const char kCSvg[] = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"24\" height=\"24\"><rect width=\"24\" height=\"24\" fill=\"#E59A38\"/></svg>";
@@ -1504,9 +1712,9 @@ int main(void) {
     etch_destroy_context(ctx);
     etch_set_current_context(NULL);
 
-    if (!ok_layout || !ok_editor || !ok_containers || !ok_svg_webp) {
-        fprintf(stderr, "c99_abi_smoke: failed (layout=%d editor=%d containers=%d svg_webp=%d)\n",
-            (int)ok_layout, (int)ok_editor, (int)ok_containers, (int)ok_svg_webp);
+    if (!ok_layout || !ok_editor || !ok_containers || !ok_audit || !ok_svg_webp) {
+        fprintf(stderr, "c99_abi_smoke: failed (layout=%d editor=%d containers=%d audit=%d svg_webp=%d)\n",
+            (int)ok_layout, (int)ok_editor, (int)ok_containers, (int)ok_audit, (int)ok_svg_webp);
         return 1;
     }
     printf("c99_abi_smoke: PASS\n");

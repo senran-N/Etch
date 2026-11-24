@@ -349,6 +349,25 @@ scroll zero and the bottom/right mask disappears at the end; backgrounds and
 scrollbars retain their opacity. The fade uses a smoothstep ramp in logical
 pixels and adds no draw calls.
 
+Text buffers expose revision-bound diagnostics, UTF-8 search (`text_buffer_find`,
+`text_buffer_find_all`), and atomic multi-range edits (`text_buffer_apply_edits`).
+Diagnostics copy messages cleanly, remain visible only for the revision that
+produced them, and render highest-severity row and gutter markers in the code
+editor. `code_editor` also supports inline ghost-text completion (`Tab` accept /
+`Escape` dismiss), search highlights, line folding, and multi-cursor atomic edits.
+
+For desktop resilience, tooling, and accessibility, Etch provides in-place GPU
+device recovery (`recreate_gpu_device`, `gpu_device_generation`,
+`set_gpu_device_reset_callback`), structured frame/memory tracing with JSON
+export (`set_trace_enabled`, `trace_export_json`), semantic A11y roles and live
+announcements (`emit_a11y_node`, `announce_a11y`), OS appearance/i18n queries
+(`system_preferences`), extended pen/touch/pinch `pointer_state`, an application
+command registry (`register_command`, `find_command_shortcut_conflict`),
+pixel-free semantic automation (`automation_find_nodes`, `automation_assert_node`,
+input recording), cross-window dock tear-off/transfer (`dock_detach_pane`,
+`dock_poll_tear_off`, `dock_transfer_pane`), and multi-MIME drag negotiation —
+all mirrored in `<etch/etch_c.h>`.
+
 `punch_hole` erases previously drawn color and alpha inside a rounded shape.
 Draw overlays afterward to keep them above the transparent opening. Hole runs
 use a lazily created destination-erase pipeline; normal/hole/normal ordering

@@ -3,6 +3,65 @@
 
 namespace etch {
 
+void automation_record_frame_input(Context* ctx, const RecordedFrameInput& input) noexcept;
+
+namespace {
+bool locale_is_rtl(const char* locale) noexcept {
+    if (!locale || locale[0] == '\0') return false;
+    char lang[8] = {};
+    uint32_t len = 0u;
+    while (locale[len] != '\0' && locale[len] != '-' && locale[len] != '_' &&
+           locale[len] != '.' && locale[len] != '@' && len < 7u)
+    {
+        char c = locale[len];
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c + ('a' - 'A'));
+        lang[len++] = c;
+    }
+    lang[len] = '\0';
+    if (len != 2u) return false;
+    return (lang[0] == 'a' && lang[1] == 'r') ||
+           (lang[0] == 'h' && lang[1] == 'e') ||
+           (lang[0] == 'i' && lang[1] == 'w') ||
+           (lang[0] == 'f' && lang[1] == 'a') ||
+           (lang[0] == 'u' && lang[1] == 'r') ||
+           (lang[0] == 'y' && lang[1] == 'i') ||
+           (lang[0] == 'p' && lang[1] == 's') ||
+           (lang[0] == 's' && lang[1] == 'd');
+}
+
+#if defined(_WIN32)
+float query_win32_text_scale() noexcept {
+    using RegGetValueWFn = LONG(WINAPI*)(HKEY, LPCWSTR, LPCWSTR, DWORD, LPDWORD, PVOID, LPDWORD);
+    static RegGetValueWFn fn = nullptr;
+    static bool resolved = false;
+    if (!resolved) {
+        resolved = true;
+        HMODULE mod = GetModuleHandleW(L"advapi32.dll");
+        if (!mod) mod = LoadLibraryW(L"advapi32.dll");
+        if (mod) {
+            fn = reinterpret_cast<RegGetValueWFn>(reinterpret_cast<void*>(GetProcAddress(mod, "RegGetValueW")));
+        }
+    }
+    if (!fn) return 1.0f;
+    static constexpr DWORD kRrfRtRegDword = 0x00000010u;
+    DWORD val = 100u;
+    DWORD size = static_cast<DWORD>(sizeof(val));
+    const LONG st = fn(
+        HKEY_CURRENT_USER,
+        L"Software\\Microsoft\\Accessibility",
+        L"TextScaleFactor",
+        kRrfRtRegDword,
+        nullptr,
+        &val,
+        &size);
+    if (st == ERROR_SUCCESS && val >= 100u && val <= 225u) {
+        return static_cast<float>(val) / 100.0f;
+    }
+    return 1.0f;
+}
+#endif
+} // namespace
+
 void end_frame(Context* ctx_arg) noexcept {
     Context* ctx = ctx_arg ? ctx_arg : current_context();
     if (!ctx || !ctx->in_frame || !ctx->active_ui->layout) {
@@ -1239,6 +1298,8 @@ void end_frame(Context* ctx_arg) noexcept {
     ctx->active_ui->frame_drop_count = 0;
     ctx->active_ui->frame_text_drop_count = 0;
     ctx->active_ui->has_delivered_drop_pos = false;
+    ctx->active_ui->pointer_state.pinch_delta = 0.0f;
+    ctx->active_ui->pointer_state.precise_scroll = false;
     if (ctx->active_ui->states.count > 128u &&
         (ctx->active_ui->states.count * 4u >= ctx->active_ui->states.capacity * 3u ||
          (ctx->active_ui->frame_index & 127u) == 0u))
@@ -1292,6 +1353,76 @@ bool system_dark_mode(bool fallback) noexcept {
     const SystemTheme theme = system_theme();
     return theme == SystemTheme::Unknown ? fallback : theme == SystemTheme::Dark;
 }
+SystemPreferences system_preferences(const Context* ctx) noexcept {
+    const Context* c = ctx ? ctx : current_context();
+    if (c && c->has_sys_prefs_override) {
+        return c->sys_prefs_override;
+    }
+    SystemPreferences prefs = {};
+    prefs.theme = system_theme();
+    prefs.text_scale = 1.0f;
+#if defined(_WIN32)
+    HIGHCONTRASTW hc = {};
+    hc.cbSize = static_cast<UINT>(sizeof(hc));
+    if (SystemParametersInfoW(SPI_GETHIGHCONTRAST, static_cast<UINT>(sizeof(hc)), &hc, 0u)) {
+        prefs.high_contrast = (hc.dwFlags & HCF_HIGHCONTRASTON) != 0u;
+    }
+    BOOL anim = TRUE;
+    if (SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0u, &anim, 0u)) {
+        prefs.reduced_motion = (anim == FALSE);
+    }
+    prefs.text_scale = query_win32_text_scale();
+    wchar_t wloc[LOCALE_NAME_MAX_LENGTH] = {};
+    if (GetUserDefaultLocaleName(wloc, LOCALE_NAME_MAX_LENGTH) > 0) {
+        const int written = WideCharToMultiByte(
+            CP_UTF8, 0u, wloc, -1, prefs.locale, static_cast<int>(sizeof(prefs.locale)), nullptr, nullptr);
+        if (written <= 0) {
+            prefs.locale[0] = '\0';
+        } else {
+            prefs.locale[sizeof(prefs.locale) - 1u] = '\0';
+        }
+    }
+#else
+    prefs.reduced_motion = (c != nullptr) ? c->reduced_motion : false;
+    const char* env_loc = SDL_getenv("LC_ALL");
+    if (!env_loc || env_loc[0] == '\0') env_loc = SDL_getenv("LANG");
+    if (env_loc && env_loc[0] != '\0' && std::strcmp(env_loc, "C") != 0 && std::strcmp(env_loc, "POSIX") != 0) {
+        uint32_t j = 0u;
+        while (env_loc[j] != '\0' && env_loc[j] != '.' && env_loc[j] != '@' &&
+               j < static_cast<uint32_t>(sizeof(prefs.locale) - 1u))
+        {
+            prefs.locale[j] = (env_loc[j] == '_') ? '-' : env_loc[j];
+            ++j;
+        }
+        prefs.locale[j] = '\0';
+    }
+#endif
+    if (prefs.locale[0] == '\0') {
+        std::memcpy(prefs.locale, "en-US", 6u);
+    }
+    prefs.layout_direction = locale_is_rtl(prefs.locale) ? LayoutDirection::Rtl : LayoutDirection::Ltr;
+    return prefs;
+}
+void set_system_preferences_override(Context* ctx, const SystemPreferences* override_prefs) noexcept {
+    Context* c = ctx ? ctx : current_context();
+    if (!c) return;
+    if (!override_prefs) {
+        c->has_sys_prefs_override = false;
+        c->sys_prefs_override = {};
+    } else {
+        SystemPreferences p = *override_prefs;
+        p.locale[sizeof(p.locale) - 1u] = '\0';
+        if (!std::isfinite(p.text_scale) || p.text_scale <= 0.0f) {
+            p.text_scale = 1.0f;
+        }
+        if (p.layout_direction == LayoutDirection::Ltr && locale_is_rtl(p.locale)) {
+            p.layout_direction = LayoutDirection::Rtl;
+        }
+        c->sys_prefs_override = p;
+        c->has_sys_prefs_override = true;
+    }
+    request_redraw(c);
+}
 bool needs_window_redraw(const Context* ctx, SDL_Window* window) noexcept {
     const WindowUiState* ui = ctx ? window_ui(ctx, window) : nullptr;
     return ui && (ui->redraw_budget || ui->active_anim_count || shader_surface_timeout(ctx, window, false, -1) == 0);
@@ -1315,6 +1446,14 @@ void process_event(Context* ctx, const SDL_Event& event) noexcept {
         case SDL_EVENT_MOUSE_MOTION: id = event.motion.windowID; break;
         case SDL_EVENT_MOUSE_BUTTON_DOWN: case SDL_EVENT_MOUSE_BUTTON_UP: id = event.button.windowID; break;
         case SDL_EVENT_MOUSE_WHEEL: id = event.wheel.windowID; break;
+        case SDL_EVENT_PEN_PROXIMITY_IN: case SDL_EVENT_PEN_PROXIMITY_OUT: id = event.pproximity.windowID; break;
+        case SDL_EVENT_PEN_DOWN: case SDL_EVENT_PEN_UP: id = event.ptouch.windowID; break;
+        case SDL_EVENT_PEN_MOTION: id = event.pmotion.windowID; break;
+        case SDL_EVENT_PEN_BUTTON_DOWN: case SDL_EVENT_PEN_BUTTON_UP: id = event.pbutton.windowID; break;
+        case SDL_EVENT_PEN_AXIS: id = event.paxis.windowID; break;
+        case SDL_EVENT_FINGER_DOWN: case SDL_EVENT_FINGER_UP: case SDL_EVENT_FINGER_MOTION:
+        case SDL_EVENT_FINGER_CANCELED: id = event.tfinger.windowID; break;
+        case SDL_EVENT_PINCH_BEGIN: case SDL_EVENT_PINCH_UPDATE: case SDL_EVENT_PINCH_END: id = event.pinch.windowID; break;
         case SDL_EVENT_KEY_DOWN: case SDL_EVENT_KEY_UP: id = event.key.windowID; break;
         case SDL_EVENT_TEXT_EDITING: id = event.edit.windowID; break;
         case SDL_EVENT_TEXT_INPUT: id = event.text.windowID; break;
@@ -1335,7 +1474,11 @@ void process_event(Context* ctx, const SDL_Event& event) noexcept {
     WindowUiState* saved = ctx->active_ui;
     SDL_Window* saved_window = ctx->active_window;
     ctx->active_ui = ui; ctx->active_window = window;
-    if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN) ui->keyboard_focus_active = false;
+    if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN || event.type == SDL_EVENT_PEN_DOWN ||
+        event.type == SDL_EVENT_FINGER_DOWN)
+    {
+        ui->keyboard_focus_active = false;
+    }
     if (event.type == SDL_EVENT_KEY_DOWN && (event.key.key == SDLK_TAB || event.key.key == SDLK_LEFT ||
         event.key.key == SDLK_RIGHT || event.key.key == SDLK_UP || event.key.key == SDLK_DOWN)) ui->keyboard_focus_active = true;
     process_window_event(ctx, event);
@@ -1347,6 +1490,22 @@ void begin_frame(Context* ctx, const FrameDesc& desc) noexcept {
     ctx->active_ui = ctx->headless ? ensure_headless_ui(ctx) : window_ui(ctx, nullptr);
     if (!ctx->active_ui) return;
     begin_bound_frame(ctx, desc);
+    if (ctx->in_frame && ctx->automation_recording) {
+        const WindowUiState* ui = ctx->active_ui;
+        const uint32_t key_code = (desc.key_pressed_code != 0u)
+            ? desc.key_pressed_code
+            : ((ui->frame_key_count > 0u) ? ui->frame_keys[0].key : 0u);
+        const RecordedFrameInput rec = {
+            .dt_seconds = desc.dt_seconds,
+            .pointer_pos = ui->pointer_pos,
+            .pointer_down = ui->prev_pointer_down,
+            .right_pointer_down = ui->prev_right_down,
+            .scroll_delta = ui->frame_scroll_delta,
+            .key_mods = ui->frame_key_mods,
+            .key_pressed_code = key_code,
+        };
+        automation_record_frame_input(ctx, rec);
+    }
 }
 void begin_window_frame(Context* ctx, SDL_Window* window, float dt) noexcept {
     begin_window_frame(ctx, window, WindowFrameDesc{.dt = dt});
@@ -1363,6 +1522,19 @@ void begin_window_frame(Context* ctx, SDL_Window* window, const WindowFrameDesc&
     if (scale < ctx->active_ui->min_dpi_scale) scale = ctx->active_ui->min_dpi_scale;
     begin_bound_frame(ctx, FrameDesc{.viewport_w = static_cast<uint32_t>(w > 0 ? w : 1),
         .viewport_h = static_cast<uint32_t>(h > 0 ? h : 1), .dpi_scale = scale, .dt_seconds = desc.dt, .pixel_snap = desc.pixel_snap,.bloom_intensity=desc.bloom_intensity,.bloom_threshold=desc.bloom_threshold});
+    if (ctx->in_frame && ctx->automation_recording) {
+        const WindowUiState* ui = ctx->active_ui;
+        const RecordedFrameInput rec = {
+            .dt_seconds = desc.dt,
+            .pointer_pos = ui->pointer_pos,
+            .pointer_down = ui->prev_pointer_down,
+            .right_pointer_down = ui->prev_right_down,
+            .scroll_delta = ui->frame_scroll_delta,
+            .key_mods = ui->frame_key_mods,
+            .key_pressed_code = (ui->frame_key_count > 0u) ? ui->frame_keys[0].key : 0u,
+        };
+        automation_record_frame_input(ctx, rec);
+    }
 }
 void end_window_frame(Context* ctx) noexcept { end_frame(ctx); }
 void begin_focus_scope(uint32_t scope_id, bool trap_tab) noexcept {

@@ -677,6 +677,7 @@ int main(int argc, char** argv) {
         .max_fps = 30.0f,
     });
     app.spectrum_tex = create_spectrum_texture(ctx);
+    (void)flush_texture_uploads(ctx);
 
     bool ok = (app.aurora != 0u) && bool(app.spectrum_tex);
     bool running = ok;
@@ -686,13 +687,24 @@ int main(int argc, char** argv) {
             build_ui(ctx, &app);
             end_frame(ctx);
         }
+        set_trace_enabled(ctx, true);
         ok &= render_headless_png(ctx, 1200u, 800u, out_png, theme(ctx).bg_canvas);
+        FrameTraceSample tr = {};
+        const bool has_trace = trace_sample_count(ctx) > 0u &&
+                               trace_get_sample(ctx, trace_sample_count(ctx) - 1u, &tr);
+        set_trace_enabled(ctx, false);
+        trace_clear(ctx);
         const FrameStats st = frame_stats(ctx);
-        ok &= st.draw_call_count > 0u &&
+        ok &= has_trace &&
+              st.draw_call_count > 0u &&
               st.draw_call_count <= 32u &&
               element_bounds(id("aurora-canvas")).w > 500.0f;
-        std::printf("Showcase material/layout/batch checks: %s (dc=%u, blur=%u, prims=%u, arena=%zu B)\n",
-            ok ? "PASS" : "FAIL", st.draw_call_count, st.blur_pass_count, st.prim_count, st.arena_used_bytes);
+        const uint32_t ui_dc = has_trace ? tr.ui_draw_calls : st.draw_call_count;
+        const double ws_mb = has_trace ? (static_cast<double>(tr.working_set_bytes) / (1024.0 * 1024.0)) : 0.0;
+        const double vram_mb = has_trace ? (static_cast<double>(tr.estimated_vram_bytes) / (1024.0 * 1024.0)) : 0.0;
+        std::printf(
+            "Showcase material/layout/batch checks: %s (ui_dc=%u, blur=%u, prims=%u, arena=%zu B, ws_mb=%.1f, vram_mb=%.1f)\n",
+            ok ? "PASS" : "FAIL", ui_dc, st.blur_pass_count, st.prim_count, st.arena_used_bytes, ws_mb, vram_mb);
     } else {
         uint64_t previous = SDL_GetTicksNS();
         while (running) {

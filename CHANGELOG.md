@@ -6,6 +6,30 @@ All notable changes to Etch are documented here. This file follows
 
 ## [Unreleased]
 
+- Apply revision-checked editor patches atomically, expose revision-bound
+  diagnostics (with owned message copies, severity precedence, and non-bleeding
+  half-open line matching), buffer search (`text_buffer_find`/`find_all`),
+  inline ghost completion (`Tab`/`Escape`), search highlights, line folding, and
+  multi-cursor atomic editing.
+- Add in-place GPU device recovery (`GpuStatus::Lost`, `recreate_gpu_device`,
+  `gpu_device_generation`, `set_gpu_device_reset_callback`) preserving layout,
+  widgets, fonts, and editor buffers across resets, plus idle release of
+  headless capture targets.
+- Add structured frame timing, draw-call, cache, and OS/VRAM memory tracing
+  (`FrameTraceSample`, `set_trace_enabled`, `trace_export_json`).
+- Expand Accessibility & desktop input: 7 semantic roles (`Heading`, `Link`,
+  `Document`, `Math`, `Figure`, `Alert`, `Status`), `emit_a11y_node`,
+  live-region announcements (`announce_a11y`), OS `system_preferences`
+  (high-contrast, reduced motion, text scale, BCP-47 locale, RTL layout
+  direction + override), and extended pen/multi-touch/pinch `pointer_state`.
+- Add application command registry (`register_command`, shortcut conflict
+  detection, `poll_triggered_command`, MRU history), pixel-free semantic UI
+  automation & input recording (`automation_find_nodes`/`assert_node`,
+  `time_scale`, `automation_set_recording`), cross-window dock pane tear-off &
+  transfer (`dock_detach_pane`, `dock_poll_tear_off`, `dock_transfer_pane`), and
+  multi-format MIME drag negotiation (`begin_mime_drag_payload`,
+  `peek_mime_drag_entry`, `accept_mime_drag_payload`), all with full C99 ABI
+  parity.
 - Load static SVG and WebP images, rasterize SVGs directly into the upload
   bitmap and transfer ownership of memory-backed SVG fonts to the renderer.
 - Render completed frames into caller-owned, same-device SDL GPU textures.

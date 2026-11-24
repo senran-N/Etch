@@ -1502,9 +1502,17 @@ bool grow_dock_nodes(DockSpaceSlot* s) noexcept {
     for (uint32_t i = s->node_cap; i < cap; ++i) s->nodes[i] = {};
     s->node_cap = cap; return true;
 }
-DockSpaceSlot* dock_slot(Context* ctx, uint32_t id) noexcept {
-    for (auto& s : std::span(ctx->active_ui->dock_spaces, ctx->active_ui->dock_space_count)) if (s.id == id) return &s;
+DockSpaceSlot* dock_slot_in(WindowUiState* ui, uint32_t id) noexcept {
+    if (!ui) return nullptr;
+    for (auto& s : std::span(ui->dock_spaces, ui->dock_space_count)) if (s.id == id) return &s;
     return nullptr;
+}
+DockSpaceSlot* dock_slot(Context* ctx, uint32_t id) noexcept {
+    return dock_slot_in(ctx->active_ui, id);
+}
+WindowUiState* resolve_dock_ui(Context* ctx, SDL_Window* win) noexcept {
+    if (!ctx) return nullptr;
+    return win ? window_ui(ctx, win) : (ctx->active_ui ? ctx->active_ui : window_ui(ctx, nullptr));
 }
 DockTabSlot* dock_tab(DockSpaceSlot* s, uint32_t id) noexcept {
     for (auto& t : std::span(s->tabs, s->tab_cap)) if (t.id == id) return &t;
@@ -1535,6 +1543,18 @@ void dock_collapse(DockSpaceSlot* s, uint32_t leaf) noexcept {
     p = s->nodes[sibling - 1u]; p.parent = grand;
     dock_reparent(s, sibling, parent);
     s->nodes[sibling - 1u] = {}; n = {};
+}
+bool dock_detach_from_slot(DockSpaceSlot* s, uint32_t pane_id) noexcept {
+    auto* t = s ? dock_tab(s, pane_id) : nullptr;
+    if (!t) return false;
+    const uint32_t leaf = t->leaf;
+    std::free(t->title_heap);
+    *t = {};
+    if (leaf > 0u && leaf <= s->node_cap && s->nodes[leaf - 1u].used) {
+        s->nodes[leaf - 1u].active = dock_visible(s, leaf);
+        dock_collapse(s, leaf);
+    }
+    return true;
 }
 }
 bool dock_space_initialized(uint32_t id) noexcept {
@@ -1662,6 +1682,140 @@ bool dock_reorder_pane(uint32_t id, uint32_t pane, uint32_t target, bool after) 
     else if (from > to) std::memmove(s->tabs+to+1,s->tabs+to,size_t(from-to)*sizeof(DockTabSlot));
     s->tabs[to] = moving; s->nodes[new_leaf-1].active = pane;
     dock_collapse(s,old_leaf); request_redraw(ctx); return true;
+}
+bool dock_detach_pane(uint32_t dock_id, uint32_t pane_id) noexcept {
+    Context* ctx = current_context();
+    if (!ctx || !ctx->active_ui || !dock_id || !pane_id || ctx->active_ui->dock_cursor.space) return false;
+    auto* s = dock_slot_in(ctx->active_ui, dock_id);
+    if (!dock_detach_from_slot(s, pane_id)) return false;
+    request_redraw(ctx);
+    return true;
+}
+bool dock_poll_tear_off(DockTearOffEvent* out_event) noexcept {
+    Context* ctx = current_context();
+    if (!ctx || !ctx->active_ui || !ctx->active_ui->has_dock_tear_off) return false;
+    auto& ui = *ctx->active_ui;
+    if (out_event) {
+        *out_event = ui.pending_dock_tear_off;
+        const uint32_t len = static_cast<uint32_t>(std::strlen(ui.dock_tear_off_title));
+        out_event->title = len > 0u ? Str{ui.dock_tear_off_title, len, false} : Str{};
+    }
+    ui.has_dock_tear_off = false;
+    return true;
+}
+bool dock_transfer_pane(
+    uint32_t src_dock_id,
+    uint32_t dst_dock_id,
+    uint32_t pane_id,
+    uint32_t target_pane_id,
+    DockZone zone,
+    float split_ratio,
+    SDL_Window* src_window,
+    SDL_Window* dst_window) noexcept
+{
+    Context* ctx = current_context();
+    if (!ctx || !src_dock_id || !dst_dock_id || !pane_id || !std::isfinite(split_ratio)) return false;
+    if (zone < DockZone::None || zone > DockZone::Bottom) return false;
+    WindowUiState* src_ui = resolve_dock_ui(ctx, src_window);
+    WindowUiState* dst_ui = resolve_dock_ui(ctx, dst_window);
+    if (!src_ui || !dst_ui || src_ui->dock_cursor.space || dst_ui->dock_cursor.space) return false;
+
+    if (src_ui == dst_ui && src_dock_id == dst_dock_id) {
+        if (!target_pane_id || target_pane_id == pane_id) return false;
+        WindowUiState* saved_ui = ctx->active_ui;
+        ctx->active_ui = src_ui;
+        const bool moved = dock_dock_pane(src_dock_id, pane_id, target_pane_id,
+            zone == DockZone::None ? DockZone::Center : zone, split_ratio);
+        ctx->active_ui = saved_ui;
+        return moved;
+    }
+
+    DockSpaceSlot* src_slot = dock_slot_in(src_ui, src_dock_id);
+    DockTabSlot* src_tab = src_slot ? dock_tab(src_slot, pane_id) : nullptr;
+    if (!src_tab) return false;
+
+    const Str src_title = dock_tab_title(*src_tab);
+    char title_stack[128] = {};
+    char* title_heap_copy = nullptr;
+    const char* title_ptr = title_stack;
+    if (src_title.length > 0u) {
+        if (src_title.length < sizeof(title_stack)) {
+            std::memcpy(title_stack, src_title.chars, src_title.length);
+            title_stack[src_title.length] = '\0';
+        } else {
+            title_heap_copy = static_cast<char*>(std::malloc(size_t(src_title.length) + 1u));
+            if (!title_heap_copy) return false;
+            std::memcpy(title_heap_copy, src_title.chars, src_title.length);
+            title_heap_copy[src_title.length] = '\0';
+            title_ptr = title_heap_copy;
+        }
+    }
+    const DockPaneDesc pane_desc = {
+        .id = src_tab->id,
+        .title = Str{title_ptr, src_title.length, false},
+        .icon_id = src_tab->icon_id,
+        .closable = src_tab->closable,
+        .default_open = true,
+    };
+
+    WindowUiState* saved_ui = ctx->active_ui;
+    ctx->active_ui = dst_ui;
+    bool added = false;
+    if (!dock_slot_in(dst_ui, dst_dock_id)) {
+        (void)dock_reset_root(dst_dock_id);
+    }
+    if (DockSpaceSlot* dst_slot = dock_slot_in(dst_ui, dst_dock_id)) {
+        if (!dock_tab(dst_slot, pane_id)) {
+            DockTabSlot* dst_target = target_pane_id ? dock_tab(dst_slot, target_pane_id) : nullptr;
+            if (target_pane_id == 0u) {
+                uint32_t leaf = dst_slot->root;
+                while (leaf > 0u && leaf <= dst_slot->node_cap && dst_slot->nodes[leaf - 1u].first) {
+                    leaf = dst_slot->nodes[leaf - 1u].first;
+                }
+                if (leaf > 0u && dock_add_pane(dst_dock_id, leaf, pane_desc)) {
+                    dst_slot->nodes[leaf - 1u].active = pane_id;
+                    added = true;
+                }
+            } else if (dst_target && dst_target->open) {
+                if (zone == DockZone::Center || zone == DockZone::None) {
+                    if (dock_add_pane(dst_dock_id, dst_target->leaf, pane_desc)) {
+                        dst_slot->nodes[dst_target->leaf - 1u].active = pane_id;
+                        added = true;
+                    }
+                } else {
+                    uint32_t a = 0u, b = 0u;
+                    const bool before = (zone == DockZone::Left || zone == DockZone::Top);
+                    const Axis split_axis = (zone == DockZone::Left || zone == DockZone::Right) ? Axis::Row : Axis::Col;
+                    if (dock_split_node(dst_dock_id, dst_target->leaf, split_axis, split_ratio, &a, &b)) {
+                        if (before) {
+                            for (auto& tab : std::span(dst_slot->tabs, dst_slot->tab_cap)) {
+                                if (tab.leaf == a) tab.leaf = b;
+                            }
+                            dst_slot->nodes[b - 1u].active = target_pane_id;
+                        }
+                        const uint32_t new_leaf = before ? a : b;
+                        if (dock_add_pane(dst_dock_id, new_leaf, pane_desc)) {
+                            dst_slot->nodes[new_leaf - 1u].active = pane_id;
+                            added = true;
+                        } else {
+                            dock_collapse(dst_slot, new_leaf);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    ctx->active_ui = saved_ui;
+    std::free(title_heap_copy);
+    if (!added) return false;
+
+    // Re-lookup src_slot in case dst_ui == src_ui reallocated dock_spaces.
+    src_slot = dock_slot_in(src_ui, src_dock_id);
+    (void)dock_detach_from_slot(src_slot, pane_id);
+    src_ui->redraw_budget = 2u;
+    dst_ui->redraw_budget = 2u;
+    request_redraw(ctx);
+    return true;
 }
 void begin_dock_space(const DockSpaceDesc& desc_in) noexcept {
     Context* ctx = current_context(); if (!ctx || !ctx->in_frame || !desc_in.id || ctx->active_ui->dock_cursor.space) return;
@@ -1801,7 +1955,8 @@ uint32_t next_dock_pane() noexcept {
 }
 void end_dock_space() noexcept {
     Context* ctx = current_context(); if (!ctx || !ctx->in_frame || !ctx->active_ui->dock_cursor.space) return;
-    auto& c = ctx->active_ui->dock_cursor;
+    auto& ui = *ctx->active_ui;
+    auto& c = ui.dock_cursor;
     if (c.pane_open) { end_box(); end_box(); }
     while (c.depth) { auto& e = c.stack[--c.depth]; if (e.phase) end_split(); }
     end_box();
@@ -1810,7 +1965,34 @@ void end_dock_space() noexcept {
     const bool reorder=c.reorder, after=c.insert_after; c.reorder=false; c.insert_after=false;
     if (pane && target && reorder) dock_reorder_pane(id,pane,target,after);
     else if (pane && target) dock_dock_pane(id, pane, target, zone);
-    else if (pane) { auto* t = dock_tab(s, pane); dock_collapse(s, t->leaf); request_redraw(ctx); }
+    else if (pane) { auto* t = dock_tab(s, pane); if (t) dock_collapse(s, t->leaf); request_redraw(ctx); }
+    else if (ui.drag_drop_pending && !ui.drag_accepted_this_frame &&
+             ui.drag_kind_hash == kInternalDockDragKind && ui.drag_u32 != 0u) {
+        const Rect dock_bounds = element_bounds(id);
+        const bool inside_dock = hovered(id) ||
+            (dock_bounds.w > 0.0f && dock_bounds.h > 0.0f && dock_bounds.contains(ui.pointer_pos));
+        if (!inside_dock) {
+            if (DockTabSlot* t = dock_tab(s, ui.drag_u32)) {
+                const Str title = dock_tab_title(*t);
+                const uint32_t raw_cap = (title.length < static_cast<uint32_t>(sizeof(ui.dock_tear_off_title) - 1u))
+                    ? title.length
+                    : static_cast<uint32_t>(sizeof(ui.dock_tear_off_title) - 1u);
+                const uint32_t copy_len = raw_cap > 0u ? utf8_clamp_boundary(title.chars, title.length, raw_cap) : 0u;
+                if (copy_len > 0u) std::memcpy(ui.dock_tear_off_title, title.chars, copy_len);
+                ui.dock_tear_off_title[copy_len] = '\0';
+                ui.pending_dock_tear_off = DockTearOffEvent{
+                    .dock_id = id,
+                    .pane_id = ui.drag_u32,
+                    .screen_pos = ui.pointer_pos,
+                    .title = copy_len > 0u ? Str{ui.dock_tear_off_title, copy_len, false} : Str{},
+                };
+                ui.has_dock_tear_off = true;
+                ui.drag_accepted_this_frame = true;
+                dock_detach_from_slot(s, ui.drag_u32);
+                request_redraw(ctx);
+            }
+        }
+    }
 }
 namespace {
 TableMetadata* table_metadata(Context* ctx, uint32_t id) noexcept {
@@ -2356,6 +2538,167 @@ static void update_selectable_text_pointer(Context* ctx, WidgetState* ws, std::s
         else { if (!(ctx->active_ui->frame_key_mods & Mod_Shift)) c->edit_sel_anchor = hit; c->edit_cursor = hit; }
     } else c->edit_cursor = hit;
     request_redraw(ctx);
+}
+
+struct MimeDragEntryOwned {
+    char* mime = nullptr;
+    uint32_t mime_len = 0u;
+    uint8_t* bytes = nullptr;
+    uint32_t size = 0u;
+};
+
+struct MimeDragStorage {
+    static constexpr uint32_t kMaxEntries = 16u;
+    MimeDragEntryOwned entries[kMaxEntries] = {};
+    uint32_t count = 0u;
+};
+
+namespace {
+
+constexpr uint32_t kInternalMimeDragKind = 0x4D494D45u;
+
+void clear_mime_drag_entries(MimeDragStorage* st) noexcept {
+    for (uint32_t i = 0u; i < st->count; ++i) {
+        std::free(st->entries[i].mime);
+        std::free(st->entries[i].bytes);
+        st->entries[i] = {};
+    }
+    st->count = 0u;
+}
+
+bool mime_types_equal(Str a, const char* b, uint32_t b_len) noexcept {
+    if (!a.chars || !b || a.length != b_len) return false;
+    for (uint32_t i = 0u; i < b_len; ++i) {
+        char ca = a.chars[i];
+        char cb = b[i];
+        if (ca >= 'A' && ca <= 'Z') ca = static_cast<char>(ca + ('a' - 'A'));
+        if (cb >= 'A' && cb <= 'Z') cb = static_cast<char>(cb + ('a' - 'A'));
+        if (ca != cb) return false;
+    }
+    return true;
+}
+
+} // namespace
+
+void free_mime_drag_storage(WindowUiState* ui) noexcept {
+    if (!ui || !ui->mime_drag) return;
+    clear_mime_drag_entries(ui->mime_drag);
+    std::free(ui->mime_drag);
+    ui->mime_drag = nullptr;
+}
+
+bool begin_mime_drag_payload(uint32_t source_id, Str label, std::span<const MimeDragEntry> entries) noexcept {
+    Context* ctx = current_context();
+    if (!ctx || !ctx->in_frame || !ctx->active_ui || entries.empty()) return false;
+    uint32_t valid_count = 0u;
+    for (const MimeDragEntry& e : entries) {
+        if (e.size > (1u << 20) || (e.size > 0u && !e.bytes)) return false;
+        if (e.mime_type.chars && e.mime_type.length > 0u) {
+            if (valid_count < MimeDragStorage::kMaxEntries) ++valid_count;
+        }
+    }
+    if (valid_count == 0u) return false;
+    if (!begin_drag_payload(source_id, kInternalMimeDragKind, label, nullptr, 0u, 0u, 0u)) return false;
+
+    auto& ui = *ctx->active_ui;
+    if (!ui.mime_drag) {
+        ui.mime_drag = static_cast<MimeDragStorage*>(std::calloc(1u, sizeof(MimeDragStorage)));
+        if (!ui.mime_drag) {
+            ui.drag_active = false;
+            return false;
+        }
+    }
+    MimeDragStorage* st = ui.mime_drag;
+    clear_mime_drag_entries(st);
+
+    for (const MimeDragEntry& e : entries) {
+        if (!e.mime_type.chars || e.mime_type.length == 0u) continue;
+        if (st->count >= MimeDragStorage::kMaxEntries) break;
+        char* mime_copy = static_cast<char*>(std::malloc(size_t(e.mime_type.length) + 1u));
+        if (!mime_copy) {
+            clear_mime_drag_entries(st);
+            ui.drag_active = false;
+            return false;
+        }
+        std::memcpy(mime_copy, e.mime_type.chars, e.mime_type.length);
+        mime_copy[e.mime_type.length] = '\0';
+
+        uint8_t* bytes_copy = nullptr;
+        if (e.size > 0u) {
+            bytes_copy = static_cast<uint8_t*>(std::malloc(e.size));
+            if (!bytes_copy) {
+                std::free(mime_copy);
+                clear_mime_drag_entries(st);
+                ui.drag_active = false;
+                return false;
+            }
+            std::memcpy(bytes_copy, e.bytes, e.size);
+        }
+        st->entries[st->count++] = MimeDragEntryOwned{
+            .mime = mime_copy,
+            .mime_len = e.mime_type.length,
+            .bytes = bytes_copy,
+            .size = e.size,
+        };
+    }
+    return true;
+}
+
+uint32_t mime_drag_format_count() noexcept {
+    const Context* ctx = current_context();
+    if (!ctx || !ctx->active_ui || !ctx->active_ui->mime_drag) return 0u;
+    const auto& ui = *ctx->active_ui;
+    const bool live = ui.drag_active || (ui.drag_drop_pending && !ui.drag_accepted_this_frame);
+    if (!live || ui.drag_kind_hash != kInternalMimeDragKind) return 0u;
+    return ui.mime_drag->count;
+}
+
+bool peek_mime_drag_entry(Str mime_type, MimeDragEntry* out_entry) noexcept {
+    const Context* ctx = current_context();
+    if (!ctx || !ctx->active_ui || !ctx->active_ui->mime_drag || !mime_type.chars || mime_type.length == 0u) {
+        return false;
+    }
+    if (!peek_drag_payload(nullptr, kInternalMimeDragKind)) return false;
+    const MimeDragStorage* st = ctx->active_ui->mime_drag;
+    for (uint32_t i = 0u; i < st->count; ++i) {
+        const auto& e = st->entries[i];
+        if (mime_types_equal(mime_type, e.mime, e.mime_len)) {
+            if (out_entry) {
+                *out_entry = MimeDragEntry{
+                    .mime_type = Str{e.mime, e.mime_len, false},
+                    .bytes = e.bytes,
+                    .size = e.size,
+                };
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+bool accept_mime_drag_payload(uint32_t target_id, Str mime_type, MimeDragEntry* out_entry) noexcept {
+    Context* ctx = current_context();
+    if (!ctx || !ctx->active_ui || !ctx->active_ui->mime_drag || !mime_type.chars || mime_type.length == 0u) {
+        return false;
+    }
+    const MimeDragStorage* st = ctx->active_ui->mime_drag;
+    const MimeDragEntryOwned* matched = nullptr;
+    for (uint32_t i = 0u; i < st->count; ++i) {
+        if (mime_types_equal(mime_type, st->entries[i].mime, st->entries[i].mime_len)) {
+            matched = &st->entries[i];
+            break;
+        }
+    }
+    if (!matched) return false;
+    if (!accept_drag_payload(target_id, kInternalMimeDragKind, nullptr)) return false;
+    if (out_entry) {
+        *out_entry = MimeDragEntry{
+            .mime_type = Str{matched->mime, matched->mime_len, false},
+            .bytes = matched->bytes,
+            .size = matched->size,
+        };
+    }
+    return true;
 }
 
 } // namespace etch

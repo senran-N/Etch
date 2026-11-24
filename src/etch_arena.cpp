@@ -11,7 +11,21 @@ extern "C" {
 typedef struct EtchContext EtchContext;
 typedef float (*EtchCVirtualItemHeightFn)(uint32_t index, void* user_data);
 typedef void (*EtchCWindowRefreshFn)(EtchContext* ctx, struct SDL_Window* window, float dt_seconds, void* user_data);
+typedef void (*EtchCGpuResetFn)(EtchContext* ctx, uint64_t device_generation, void* user_data);
 }
+
+namespace etch {
+struct EditorExtEntry;
+struct MimeDragStorage;
+struct FrameTraceRing;
+struct CommandRegistry;
+struct InputRecordRing;
+void free_editor_ext_entries(struct WindowUiState* ui) noexcept;
+void free_mime_drag_storage(struct WindowUiState* ui) noexcept;
+void free_trace_ring(struct Context* ctx) noexcept;
+void free_command_registry(struct Context* ctx) noexcept;
+void free_automation_recording(struct Context* ctx) noexcept;
+} // namespace etch
 
 namespace etch {
 
@@ -1184,6 +1198,29 @@ struct WindowUiState {
     SDL_GPUTexture*      depth_tex = nullptr;
     uint32_t             depth_w = 0, depth_h = 0;
     SDL_GPUTextureFormat depth_fmt = SDL_GPU_TEXTUREFORMAT_INVALID;
+
+    // A11y live region announcements (#33)
+    char                 a11y_announce_buf[512] = {};
+    uint32_t             a11y_announce_len = 0u;
+    A11yLiveMode         a11y_announce_priority = A11yLiveMode::Off;
+    uint64_t             a11y_announce_seq = 0u;
+    bool                 a11y_announce_dirty = false;
+
+    // Extended pointer, pen & multi-touch state (#35)
+    PointerState         pointer_state = {};
+    uint64_t             active_touch_ids[16] = {};
+    uint32_t             active_touch_count = 0u;
+
+    // Dock tear-off pending event (#56)
+    DockTearOffEvent     pending_dock_tear_off = {};
+    char                 dock_tear_off_title[128] = {};
+    bool                 has_dock_tear_off = false;
+
+    // Lazy side tables for editor extensions (#27) & multi-MIME drag (#57)
+    EditorExtEntry*      editor_exts = nullptr;
+    uint32_t             editor_ext_count = 0u;
+    uint32_t             editor_ext_cap = 0u;
+    MimeDragStorage*     mime_drag = nullptr;
 };
 
 struct ClaimedWindowSlot {
@@ -1440,6 +1477,35 @@ struct Context {
     bool event_watch_attached = false;
     bool in_refresh_callback = false;
     bool enable_os_a11y = true;
+
+    // System appearance & i18n preferences override (#34)
+    bool has_sys_prefs_override = false;
+    SystemPreferences sys_prefs_override = {};
+
+    // GPU device recovery contract (#07)
+    bool gpu_device_lost = false;
+    uint64_t gpu_device_generation = 0u;
+    GpuDeviceResetFn gpu_reset_fn = nullptr;
+    void* gpu_reset_user_data = nullptr;
+    EtchCGpuResetFn c_gpu_reset_fn = nullptr;
+    void* c_gpu_reset_user_data = nullptr;
+
+    // Structured frame timing & memory trace (#04, #48)
+    bool trace_enabled = false;
+    FrameTraceRing* trace_ring = nullptr;
+    double trace_text_shape_us = 0.0;
+    double trace_prim_build_us = 0.0;
+    double trace_gpu_upload_us = 0.0;
+    uint32_t trace_atlas_evictions = 0u;
+    uint32_t trace_shape_hits = 0u;
+    uint32_t trace_shape_misses = 0u;
+    uint32_t trace_filter_passes = 0u;
+    uint32_t trace_ui_draw_calls = 0u;
+
+    // Application command registry (#31) & automation/clock (#47)
+    CommandRegistry* commands = nullptr;
+    bool automation_recording = false;
+    InputRecordRing* input_record_ring = nullptr;
 };
 
 namespace {
@@ -1503,6 +1569,8 @@ void free_window_ui_cold_arrays(WindowUiState* ui) noexcept {
     std::free(ui->frame_a11y_actions); ui->frame_a11y_actions = nullptr; ui->frame_a11y_action_count = 0;
     std::free(ui->table_stack); ui->table_stack = nullptr; ui->table_depth = 0;
     std::free(ui->split_stack); ui->split_stack = nullptr; ui->split_depth = 0;
+    free_editor_ext_entries(ui);
+    free_mime_drag_storage(ui);
 }
 
 SDL_GPUTexture* resolve_clip_mask_texture(const Context* ctx, uint32_t clip_index) noexcept {

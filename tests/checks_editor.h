@@ -14,6 +14,36 @@ static bool verify_editor_checks(etch::Context* restore) noexcept {
     for(uint32_t i=0;i<lines;++i)source[size_t(i)*stride+stride-1]='\n';
     check(init_text_buffer(&b,{source,lines*stride-1}),__LINE__);std::free(source);if(!b.data)return false;
     check(!b.undo_ops && !b.undo_blob,__LINE__);
+    {
+        char stack_msg[] = "header";
+        const TextDiagnostic diagnostics[] = {
+            {0u, 5u, TextDiagnosticSeverity::Warning, {stack_msg, 6u}},
+            {stride, stride + 5u, TextDiagnosticSeverity::Error, str_lit("line")}
+        };
+        const uint64_t diagnostic_revision = text_buffer_revision(&b);
+        check(text_buffer_set_diagnostics(&b, diagnostic_revision, diagnostics) &&
+              b.diagnostic_count == 2u && b.diagnostics_revision == diagnostic_revision,__LINE__);
+        stack_msg[0] = 'X';
+        check(b.diagnostics[0].message.length == 6u &&
+              std::memcmp(b.diagnostics[0].message.chars, "header", 6u) == 0,__LINE__);
+        check(!text_buffer_set_diagnostics(&b, diagnostic_revision - 1u, diagnostics),__LINE__);
+        check(text_buffer_replace(&b, 0u, 0u, str_lit("x"), false) &&
+              b.diagnostics_revision != text_buffer_revision(&b),__LINE__);
+        check(text_buffer_replace(&b, 0u, 1u, {}, false),__LINE__);
+        text_buffer_clear_diagnostics(&b);
+    }
+    {
+        const uint32_t length = text_buffer_byte_length(&b);
+        const TextEdit patch[] = {{0, 1, str_lit("头")}, {length-1u, length, str_lit("尾")}};
+        const uint64_t rev = text_buffer_revision(&b);
+        check(text_buffer_apply_edits(&b, rev, patch) && b.undo_count == 1u &&
+              b.undo_blob_used < 128u && text_buffer_revision(&b) == rev + 1u,__LINE__);
+        check(!text_buffer_apply_edits(&b, rev, patch),__LINE__);
+        check(text_buffer_undo(&b) && text_buffer_byte_length(&b) == length &&
+              text_buffer_redo(&b) && text_buffer_byte_length(&b) == length + 4u,__LINE__);
+        check(text_buffer_undo(&b),__LINE__);
+        text_buffer_clear_undo(&b);
+    }
     TextBuffer multilingual = {};
     if (init_text_buffer(&multilingual, str_lit("a\r\n中😀z"))) {
         check(text_buffer_replace(&multilingual, 5u, 5u, str_lit("+")),__LINE__);
@@ -24,6 +54,26 @@ static bool verify_editor_checks(etch::Context* restore) noexcept {
         check(text_buffer_byte_from_utf16(&multilingual, {3u,0u}) == 11u,__LINE__);
         free_text_buffer(&multilingual);
     } else check(false,__LINE__);
+    {
+        TextBuffer batch = {};
+        check(init_text_buffer(&batch, str_lit("alpha\nbeta\n")),__LINE__);
+        const uint64_t batch_revision = text_buffer_revision(&batch);
+        const TextEdit invalid_utf8[] = {{0, 0, str_lit("\xc0\x80")}};
+        check(!text_buffer_apply_edits(&batch, batch_revision, invalid_utf8),__LINE__);
+        const TextEdit overlap[] = {{0, 2, {}}, {1, 2, {}}};
+        check(!text_buffer_apply_edits(&batch, batch_revision, overlap),__LINE__);
+        const Str alias = text_buffer_line(&batch, 0);
+        const TextEdit many[] = {{0, 0, str_lit("1")}, {0, 0, alias}, {6, 10, str_lit("z\r\n")}};
+        check(text_buffer_apply_edits(&batch, batch_revision, many),__LINE__);
+        char batch_actual[32] = {};
+        const auto want = str_lit("1alphaalpha\nz\n\n");
+        check(text_buffer_copy_range(&batch,0,UINT32_MAX,batch_actual,sizeof(batch_actual)) == want.length &&
+              std::memcmp(batch_actual,want.chars,want.length) == 0,__LINE__);
+        uint32_t cursor = 0, anchor = 0;
+        check(text_buffer_undo(&batch,&cursor,&anchor) && cursor == 0 && anchor == 0 &&
+              text_buffer_redo(&batch,&cursor,&anchor) && cursor == 14 && anchor == 14,__LINE__);
+        free_text_buffer(&batch);
+    }
     check(text_buffer_line_count(&b)==lines && text_buffer_line_start(&b,999985)==999985*stride,__LINE__);
     const uint32_t at=999985*stride+5;
     check(text_buffer_replace(&b,at,at,str_lit("x")),__LINE__);
@@ -350,6 +400,297 @@ static bool verify_editor_checks(etch::Context* restore) noexcept {
         wstep(SDLK_BACKSPACE);
         check(text_buffer_line_count(&wb) == 400u && wres.cursor_line == 5u, __LINE__);
         free_text_buffer(&wb);
+    }
+
+    // E5: Diagnostic severity precedence, half-open range non-bleed, and auto-hide on revision change.
+    {
+        TextBuffer db = {};
+        check(init_text_buffer(&db, str_lit("alpha\nbeta\n")), __LINE__);
+        const TextDiagnostic diags[] = {
+            {0u, 6u, TextDiagnosticSeverity::Warning, str_lit("warn")},
+            {1u, 3u, TextDiagnosticSeverity::Error, str_lit("err")}
+        };
+        check(text_buffer_set_diagnostics(&db, text_buffer_revision(&db), diags), __LINE__);
+        const uint32_t ded = id("e5_diag_editor");
+        const uint32_t err_bar = Color::rgba8(234, 67, 53).pack_rgba8();
+        const uint32_t warn_bar = Color::rgba8(245, 158, 11).pack_rgba8();
+        auto count_bars = [&](uint32_t packed) noexcept {
+            uint32_t n = 0u;
+            for (const Prim& p : frame_prims(test)) {
+                if ((p.style.x & 0xFu) == static_cast<uint32_t>(PrimKind::Rect) && p.style.y == packed) ++n;
+            }
+            return n;
+        };
+        begin_frame(test, {.viewport_w = 500, .viewport_h = 200});
+        code_editor({.id = ded, .buffer = &db, .width = Sizing::fixed(420), .height = Sizing::fixed(160)});
+        end_frame(test);
+        // Line 0 has Warning + Error -> Error wins (1 bar); half-open [0,6) must not bleed to line 1 (0 warn bars).
+        check(count_bars(err_bar) == 1u && count_bars(warn_bar) == 0u, __LINE__);
+        // After mutating buffer, stale diagnostics must automatically hide.
+        check(text_buffer_replace(&db, 0u, 0u, str_lit("x"), false), __LINE__);
+        begin_frame(test, {.viewport_w = 500, .viewport_h = 200});
+        code_editor({.id = ded, .buffer = &db, .width = Sizing::fixed(420), .height = Sizing::fixed(160)});
+        end_frame(test);
+        check(count_bars(err_bar) == 0u && count_bars(warn_bar) == 0u, __LINE__);
+        free_text_buffer(&db);
+    }
+
+    // E3: Kernel audit #27 (find/find_all, inline ghost completion, search highlights,
+    // folding, multi-cursor), #31 (command registry), #47 (automation), #56 (dock detach/
+    // transfer/tear-off), and #57 (multi-MIME drag negotiation).
+    {
+        // #27a: text_buffer_find & text_buffer_find_all (gap-straddling, case, whole-word)
+        TextBuffer sb = {};
+        check(init_text_buffer(&sb, str_lit("Foo foo_bar FOO (foo) foobar")), __LINE__);
+        // Force gap inside the first word to verify gap-straddling search.
+        check(text_buffer_replace(&sb, 2u, 2u, str_lit("Z"), false) &&
+              text_buffer_replace(&sb, 2u, 3u, {}, false), __LINE__);
+        TextSearchMatch m = {};
+        check(text_buffer_find(&sb, str_lit("foo"), 0u, true, false, &m) && m.byte_start == 4u && m.byte_end == 7u, __LINE__);
+        check(text_buffer_find(&sb, str_lit("foo"), 0u, false, false, &m) && m.byte_start == 0u && m.byte_end == 3u, __LINE__);
+        check(text_buffer_find(&sb, str_lit("foo"), 0u, true, true, &m) && m.byte_start == 17u && m.byte_end == 20u, __LINE__);
+        TextSearchMatch matches[8] = {};
+        const uint32_t ww_cnt = text_buffer_find_all(&sb, str_lit("foo"), false, true, matches, 8u);
+        check(ww_cnt == 3u && matches[0].byte_start == 0u && matches[1].byte_start == 12u && matches[2].byte_start == 17u, __LINE__);
+        check(text_buffer_find_all(&sb, str_lit("foo"), false, false, nullptr, 0u) == 5u, __LINE__);
+        free_text_buffer(&sb);
+
+        // #27b: inline ghost completion (Tab accept & Esc dismiss) + search highlights
+        TextBuffer gb = {};
+        check(init_text_buffer(&gb, str_lit("ret")), __LINE__);
+        const uint32_t ged = id("e3_ghost_ed");
+        const auto gstep = [&](uint32_t key = 0u) noexcept {
+            begin_frame(test, {.viewport_w = 600, .viewport_h = 220, .key_pressed_code = key});
+            code_editor({.id = ged, .buffer = &gb, .width = Sizing::fixed(500), .height = Sizing::fixed(180)});
+            end_frame(test);
+        };
+        code_editor_set_cursor(ged, 3u, 3u);
+        gstep();
+        request_focus(ged);
+        code_editor_set_inline_completion(ged, str_lit("urn 0;"));
+        gstep();
+        check(!code_editor_completion_accepted(ged) && !code_editor_completion_dismissed(ged), __LINE__);
+        gstep(SDLK_TAB);
+        char gcopy[32] = {};
+        const uint32_t glen = text_buffer_copy_range(&gb, 0u, UINT32_MAX, gcopy, sizeof(gcopy));
+        check(code_editor_completion_accepted(ged) && !code_editor_completion_dismissed(ged) &&
+              glen == 9u && std::memcmp(gcopy, "return 0;", 9u) == 0, __LINE__);
+        gstep();
+        check(!code_editor_completion_accepted(ged), __LINE__);
+        code_editor_set_inline_completion(ged, str_lit(" // note"));
+        gstep();
+        gstep(SDLK_ESCAPE);
+        check(code_editor_completion_dismissed(ged) && !code_editor_completion_accepted(ged) &&
+              text_buffer_byte_length(&gb) == 9u, __LINE__);
+
+        // Search highlights emit amber highlight rects.
+        const uint32_t hl_packed = Color::rgba8(245, 196, 66, 84).pack_rgba8();
+        auto count_rect_color = [&](uint32_t packed) noexcept {
+            uint32_t n = 0u;
+            for (const Prim& p : frame_prims(test)) {
+                if ((p.style.x & 0xFu) == static_cast<uint32_t>(PrimKind::Rect) && p.style.y == packed) ++n;
+            }
+            return n;
+        };
+        code_editor_set_search_highlights(ged, str_lit("RET"), false);
+        gstep();
+        check(count_rect_color(hl_packed) >= 1u, __LINE__);
+        code_editor_set_search_highlights(ged, str_lit("RET"), true);
+        gstep();
+        check(count_rect_color(hl_packed) == 0u, __LINE__);
+        code_editor_set_search_highlights(ged, {});
+        free_text_buffer(&gb);
+
+        // #27c: code folding hides strictly interior lines (start_line, end_line] & emits '...' badge
+        TextBuffer fb = {};
+        check(init_text_buffer(&fb, str_lit("L0\nL1\nL2\nL3\nL4\nL5")), __LINE__);
+        const uint32_t fed = id("e3_fold_ed");
+        const uint32_t fold_pill_packed = Color::rgba8(140, 150, 170, 36).pack_rgba8();
+        check(!code_editor_set_fold(fed, 2u, 2u, true), __LINE__);
+        check(code_editor_set_fold(fed, 1u, 3u, true), __LINE__);
+        check(!code_editor_is_line_folded(fed, 0u) && !code_editor_is_line_folded(fed, 1u) &&
+              code_editor_is_line_folded(fed, 2u) && code_editor_is_line_folded(fed, 3u) &&
+              !code_editor_is_line_folded(fed, 4u), __LINE__);
+        begin_frame(test, {.viewport_w = 500, .viewport_h = 220});
+        code_editor({.id = fed, .buffer = &fb, .width = Sizing::fixed(420), .height = Sizing::fixed(180)});
+        end_frame(test);
+        check(count_rect_color(fold_pill_packed) == 1u, __LINE__);
+        check(code_editor_set_fold(fed, 1u, 3u, false), __LINE__);
+        check(!code_editor_is_line_folded(fed, 2u) && !code_editor_is_line_folded(fed, 3u), __LINE__);
+        begin_frame(test, {.viewport_w = 500, .viewport_h = 220});
+        code_editor({.id = fed, .buffer = &fb, .width = Sizing::fixed(420), .height = Sizing::fixed(180)});
+        end_frame(test);
+        check(count_rect_color(fold_pill_packed) == 0u, __LINE__);
+        free_text_buffer(&fb);
+
+        // #27d: multi-cursor atomic edit in one undo step
+        TextBuffer mb = {};
+        check(init_text_buffer(&mb, str_lit("aaa\nbbb\nccc")), __LINE__);
+        const uint32_t med = id("e3_multi_ed");
+        const auto mstep = [&]() noexcept {
+            begin_frame(test, {.viewport_w = 500, .viewport_h = 220});
+            code_editor({.id = med, .buffer = &mb, .width = Sizing::fixed(420), .height = Sizing::fixed(180)});
+            end_frame(test);
+        };
+        code_editor_set_cursor(med, 0u, 0u);
+        mstep();
+        request_focus(med);
+        mstep();
+        check(code_editor_cursor_count(med) == 1u, __LINE__);
+        check(code_editor_add_cursor(med, 4u) && code_editor_add_cursor(med, 8u) &&
+              !code_editor_add_cursor(med, 4u) && !code_editor_add_cursor(med, 0u) &&
+              code_editor_cursor_count(med) == 3u, __LINE__);
+        SDL_Event tev = {};
+        tev.type = SDL_EVENT_TEXT_INPUT;
+        tev.text.text = "X";
+        process_event(test, tev);
+        mstep();
+        char mcopy[32] = {};
+        const uint32_t mlen = text_buffer_copy_range(&mb, 0u, UINT32_MAX, mcopy, sizeof(mcopy));
+        check(mlen == 14u && std::memcmp(mcopy, "Xaaa\nXbbb\nXccc", 14u) == 0, __LINE__);
+        check(text_buffer_undo(&mb) && text_buffer_byte_length(&mb) == 11u, __LINE__);
+        code_editor_clear_extra_cursors(med);
+        check(code_editor_cursor_count(med) == 1u, __LINE__);
+        free_text_buffer(&mb);
+
+        // #31: command registry, shortcut conflict, dispatch & recent history
+        char tmp_title[] = "Save Doc";
+        check(register_command(test, {
+            .id = 101u, .name = str_lit("file.save"), .title = {tmp_title, 8u},
+            .category = str_lit("File"), .shortcut_mods = Mod_Ctrl,
+            .shortcut_keycode = SDLK_S, .enabled = true, .allow_when_typing = true
+        }), __LINE__);
+        tmp_title[0] = 'X';
+        check(register_command(test, {
+            .id = 102u, .name = str_lit("file.open"), .title = str_lit("Open Doc"),
+            .category = str_lit("File"), .shortcut_mods = Mod_Ctrl,
+            .shortcut_keycode = SDLK_O, .enabled = true, .allow_when_typing = true
+        }), __LINE__);
+        CommandDesc got_cmd = {};
+        check(command_count(test) == 2u && get_command(test, 0u, &got_cmd) &&
+              got_cmd.id == 101u && got_cmd.title.length == 8u &&
+              std::memcmp(got_cmd.title.chars, "Save Doc", 8u) == 0, __LINE__);
+        check(find_command_shortcut_conflict(test, Mod_Ctrl, SDLK_S, 0u) == 101u &&
+              find_command_shortcut_conflict(test, Mod_Ctrl, SDLK_S, 101u) == 0u, __LINE__);
+        check(set_command_enabled(test, 102u, false) && !is_command_enabled(test, 102u) &&
+              !dispatch_command(test, 102u), __LINE__);
+        check(set_command_enabled(test, 102u, true) && is_command_enabled(test, 102u) &&
+              dispatch_command(test, 102u), __LINE__);
+        begin_frame(test, {.viewport_w = 400, .viewport_h = 200, .key_mods = Mod_Ctrl, .key_pressed_code = SDLK_S});
+        check(poll_triggered_command(test) == 101u && poll_triggered_command(test) == 0u, __LINE__);
+        end_frame(test);
+        check(recent_command_count(test) == 2u && recent_command_at(test, 0u) == 101u &&
+              recent_command_at(test, 1u) == 102u, __LINE__);
+        check(unregister_command(test, 101u) && unregister_command(test, 102u) && command_count(test) == 0u, __LINE__);
+
+        // #47: automation semantic queries, deterministic clock & input recording
+        const uint32_t save_btn = id("e3_auto_save");
+        const uint32_t del_btn = id("e3_auto_del");
+        begin_frame(test, {.viewport_w = 480, .viewport_h = 200});
+        begin_box({.axis = Axis::Row, .width = Sizing::fixed(480), .height = Sizing::fixed(200), .gap = 8});
+        button({.id = save_btn, .label = str_lit("Save Project")});
+        button({.id = del_btn, .label = str_lit("Delete Item"), .disabled = true});
+        end_box();
+        end_frame(test);
+        uint32_t found_ids[4] = {};
+        check(automation_find_nodes(test, {.role = A11yRole::Button, .label_contains = str_lit("save")}, found_ids, 4u) == 1u &&
+              found_ids[0] == save_btn, __LINE__);
+        A11yNode asserted = {};
+        check(automation_assert_node(test, {.role = A11yRole::Button, .label_contains = str_lit("DELETE"),
+              .required_states = A11yState_Disabled}, &asserted) && asserted.id == del_btn, __LINE__);
+        check(!automation_assert_node(test, {.role = A11yRole::Button, .label_contains = str_lit("delete"),
+              .forbidden_states = A11yState_Disabled}), __LINE__);
+        set_time_scale(test, 2.0f);
+        check(time_scale(test) == 2.0f, __LINE__);
+        set_time_scale(test, 1.0f);
+        check(time_scale(test) == 1.0f, __LINE__);
+        automation_clear_recording(test);
+        automation_set_recording(test, true);
+        begin_frame(test, {.viewport_w = 400, .viewport_h = 200, .dt_seconds = 1.0f / 60.0f,
+                           .pointer_pos = {50.0f, 60.0f}, .pointer_down = true});
+        end_frame(test);
+        automation_set_recording(test, false);
+        if (automation_recorded_count(test) > 0u) {
+            RecordedFrameInput rec = {};
+            check(automation_get_recorded(test, 0u, &rec) && rec.pointer_down && rec.pointer_pos.x == 50.0f, __LINE__);
+        }
+        automation_clear_recording(test);
+        check(automation_recorded_count(test) == 0u, __LINE__);
+
+        // #56: dock detach, transfer & tear-off
+        const uint32_t dk_a = id("e3_dock_a");
+        const uint32_t dk_b = id("e3_dock_b");
+        const uint32_t p1 = id("e3_pane_1");
+        const uint32_t p2 = id("e3_pane_2");
+        const uint32_t p3 = id("e3_pane_3");
+        const uint32_t ra = dock_reset_root(dk_a);
+        uint32_t la = 0u, lb = 0u;
+        check(ra != 0u && dock_split_node(dk_a, ra, Axis::Row, 0.5f, &la, &lb), __LINE__);
+        check(dock_add_pane(dk_a, la, {.id = p1, .title = str_lit("Left")}) &&
+              dock_add_pane(dk_a, lb, {.id = p2, .title = str_lit("Right")}), __LINE__);
+        const uint32_t rb = dock_reset_root(dk_b);
+        check(rb != 0u && dock_add_pane(dk_b, rb, {.id = p3, .title = str_lit("Target")}), __LINE__);
+        check(dock_transfer_pane(dk_a, dk_b, p2, p3, DockZone::Right, 0.5f), __LINE__);
+        check(dock_find_pane_leaf(dk_a, p2) == 0u && dock_find_pane_leaf(dk_a, p1) != 0u &&
+              dock_find_pane_leaf(dk_b, p2) != 0u && dock_find_pane_leaf(dk_b, p2) != dock_find_pane_leaf(dk_b, p3), __LINE__);
+        check(dock_detach_pane(dk_b, p2) && dock_find_pane_leaf(dk_b, p2) == 0u &&
+              dock_find_pane_leaf(dk_b, p3) != 0u, __LINE__);
+        const auto run_dock_a = [&](Vec2 ptr, bool down) noexcept {
+            begin_frame(test, {.viewport_w = 600, .viewport_h = 400, .pointer_pos = ptr, .pointer_down = down});
+            begin_dock_space({.id = dk_a, .width = Sizing::fixed(300), .height = Sizing::fixed(200)});
+            while (next_dock_pane() != 0u) {
+                box({.width = Sizing::grow(), .height = Sizing::grow()});
+            }
+            end_dock_space();
+            end_frame(test);
+        };
+        run_dock_a({-1.0f, -1.0f}, false);
+        const Rect tab_r = element_bounds(id_index(p1, 0xD300u));
+        const Vec2 tab_pt = {tab_r.x + 8.0f, tab_r.y + tab_r.h * 0.5f};
+        run_dock_a(tab_pt, true);
+        run_dock_a({450.0f, 320.0f}, true);
+        run_dock_a({450.0f, 320.0f}, false);
+        DockTearOffEvent tear = {};
+        check(dock_poll_tear_off(&tear) && tear.dock_id == dk_a && tear.pane_id == p1 &&
+              tear.title.length == 4u && std::memcmp(tear.title.chars, "Left", 4u) == 0 &&
+              dock_find_pane_leaf(dk_a, p1) == 0u && !dock_poll_tear_off(&tear), __LINE__);
+
+        // #57: multi-MIME drag negotiation
+        const uint32_t m_src = id("e3_mime_src");
+        const uint32_t m_dst = id("e3_mime_dst");
+        static constexpr uint8_t kTxtBytes[5] = {'h', 'e', 'l', 'l', 'o'};
+        static constexpr uint8_t kJsonBytes[7] = {'{', '"', 'k', '"', ':', '1', '}'};
+        const MimeDragEntry m_entries[2] = {
+            {.mime_type = str_lit("text/plain"), .bytes = kTxtBytes, .size = 5u},
+            {.mime_type = str_lit("application/json"), .bytes = kJsonBytes, .size = 7u},
+        };
+        begin_frame(test, {.viewport_w = 400, .viewport_h = 120});
+        begin_box({.axis = Axis::Row, .width = Sizing::fixed(400), .height = Sizing::fixed(80), .gap = 20});
+        box({.id = m_src, .width = Sizing::fixed(100), .height = Sizing::fixed(40)});
+        box({.id = m_dst, .width = Sizing::fixed(120), .height = Sizing::fixed(40)});
+        end_box();
+        end_frame(test);
+        const Rect dst_r = element_bounds(m_dst);
+        begin_frame(test, {.viewport_w = 400, .viewport_h = 120, .pointer_pos = {20.0f, 20.0f}, .pointer_down = true});
+        check(begin_mime_drag_payload(m_src, str_lit("Asset"), m_entries), __LINE__);
+        MimeDragEntry pe = {};
+        check(mime_drag_format_count() == 2u &&
+              peek_mime_drag_entry(str_lit("TEXT/PLAIN"), &pe) && pe.size == 5u &&
+              std::memcmp(pe.bytes, "hello", 5u) == 0 &&
+              !peek_mime_drag_entry(str_lit("image/png"), &pe), __LINE__);
+        begin_box({.axis = Axis::Row, .width = Sizing::fixed(400), .height = Sizing::fixed(80), .gap = 20});
+        box({.id = m_src, .width = Sizing::fixed(100), .height = Sizing::fixed(40)});
+        box({.id = m_dst, .width = Sizing::fixed(120), .height = Sizing::fixed(40)});
+        end_box();
+        end_frame(test);
+        begin_frame(test, {.viewport_w = 400, .viewport_h = 120,
+                           .pointer_pos = {dst_r.x + 10.0f, dst_r.y + 10.0f}, .pointer_down = false});
+        MimeDragEntry ae = {};
+        check(!accept_mime_drag_payload(m_dst, str_lit("image/png"), &ae), __LINE__);
+        check(accept_mime_drag_payload(m_dst, str_lit("application/json"), &ae) &&
+              ae.size == 7u && std::memcmp(ae.bytes, "{\"k\":1}", 7u) == 0, __LINE__);
+        check(!accept_mime_drag_payload(m_dst, str_lit("text/plain"), &ae), __LINE__);
+        end_frame(test);
     }
 
     destroy_context(test);set_current_context(restore);free_text_buffer(&b);return ok;

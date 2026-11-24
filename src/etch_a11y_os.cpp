@@ -705,7 +705,8 @@ bool uia_is_control_element(std::span<const A11yNode> span, uint32_t idx) noexce
         return true;
     }
     constexpr uint32_t kSemanticStates =
-        A11yState_Focused | A11yState_Selected | A11yState_Checked | A11yState_Expanded;
+        A11yState_Focused | A11yState_Selected | A11yState_Checked | A11yState_Expanded |
+        A11yState_LivePolite | A11yState_LiveAssertive | A11yState_Busy | A11yState_Invalid;
     if ((an.state_flags & kSemanticStates) != 0u) {
         return true;
     }
@@ -719,7 +720,13 @@ bool uia_is_control_element(std::span<const A11yNode> span, uint32_t idx) noexce
 }
 
 bool uia_is_live_role(A11yRole role) noexcept {
-    return role == A11yRole::Tooltip || role == A11yRole::ProgressBar || role == A11yRole::Dialog;
+    return role == A11yRole::Tooltip || role == A11yRole::ProgressBar || role == A11yRole::Dialog ||
+           role == A11yRole::Alert || role == A11yRole::Status;
+}
+
+bool uia_is_live_node(const A11yNode& an) noexcept {
+    return uia_is_live_role(an.role) ||
+           (an.state_flags & (A11yState_LivePolite | A11yState_LiveAssertive)) != 0u;
 }
 
 bool uia_supports_invoke(const A11yNode* n) noexcept {
@@ -1028,6 +1035,13 @@ long uia_control_type(A11yRole role) noexcept {
         case A11yRole::TextInput:   return UIA_EditControlTypeId;
         case A11yRole::CodeEditor:  return UIA_DocumentControlTypeId;
         case A11yRole::Tooltip:     return UIA_ToolTipControlTypeId;
+        case A11yRole::Heading:     return UIA_TextControlTypeId;
+        case A11yRole::Link:        return UIA_HyperlinkControlTypeId;
+        case A11yRole::Document:    return UIA_DocumentControlTypeId;
+        case A11yRole::Math:        return UIA_TextControlTypeId;
+        case A11yRole::Figure:      return UIA_ImageControlTypeId;
+        case A11yRole::Alert:       return UIA_TextControlTypeId;
+        case A11yRole::Status:      return UIA_StatusBarControlTypeId;
         default:                    return UIA_CustomControlTypeId;
     }
 }
@@ -1170,14 +1184,63 @@ HRESULT STDMETHODCALLTYPE uia_get_property_value(IRawElementProviderSimple* This
                 break;
             case UIA_LiveSettingPropertyId:
                 pRetVal->vt = VT_I4;
-                if (an->role == A11yRole::Dialog && (an->state_flags & A11yState_Modal) != 0u) {
+                if ((an->state_flags & A11yState_LiveAssertive) != 0u ||
+                    an->role == A11yRole::Alert ||
+                    (an->role == A11yRole::Dialog && (an->state_flags & A11yState_Modal) != 0u))
+                {
                     pRetVal->lVal = Assertive;
-                } else if (uia_is_live_role(an->role)) {
+                } else if ((an->state_flags & A11yState_LivePolite) != 0u ||
+                           an->role == A11yRole::Status ||
+                           uia_is_live_role(an->role))
+                {
                     pRetVal->lVal = Polite;
                 } else {
                     pRetVal->lVal = Off;
                 }
                 break;
+#ifdef UIA_HeadingLevelPropertyId
+            case UIA_HeadingLevelPropertyId:
+                if (an->role == A11yRole::Heading) {
+                    const int lvl = static_cast<int>(an->value_num + 0.5f);
+                    pRetVal->vt = VT_I4;
+                    pRetVal->lVal = (lvl >= 1 && lvl <= 9)
+                        ? (HeadingLevel1 + (lvl - 1))
+                        : HeadingLevel1;
+                }
+                break;
+#endif
+            case UIA_IsDataValidForFormPropertyId:
+                pRetVal->vt = VT_BOOL;
+                pRetVal->boolVal = (an->state_flags & A11yState_Invalid) ? VARIANT_FALSE : VARIANT_TRUE;
+                break;
+            case UIA_AriaRolePropertyId:
+                switch (an->role) {
+                    case A11yRole::Heading:
+                    case A11yRole::Link:
+                    case A11yRole::Document:
+                    case A11yRole::Math:
+                    case A11yRole::Figure:
+                    case A11yRole::Alert:
+                    case A11yRole::Status:
+                        pRetVal->vt = VT_BSTR;
+                        pRetVal->bstrVal = uia_alloc_bstr_utf8(str_cstr(a11y_role_name(an->role)));
+                        break;
+                    default:
+                        break;
+                }
+                break;
+            case UIA_AriaPropertiesPropertyId: {
+                const bool busy = (an->state_flags & A11yState_Busy) != 0u;
+                const bool invalid = (an->state_flags & A11yState_Invalid) != 0u;
+                if (busy || invalid) {
+                    const char* props = (busy && invalid)
+                        ? "busy=true;invalid=true"
+                        : (busy ? "busy=true" : "invalid=true");
+                    pRetVal->vt = VT_BSTR;
+                    pRetVal->bstrVal = uia_alloc_bstr_utf8(str_cstr(props));
+                }
+                break;
+            }
             case UIA_IsInvokePatternAvailablePropertyId:
                 pRetVal->vt = VT_BOOL;
                 pRetVal->boolVal = uia_supports_invoke(an) ? VARIANT_TRUE : VARIANT_FALSE;
@@ -3396,7 +3459,7 @@ void uia_tracked_rebuild(WinUiaSlot* uia, std::span<const A11yNode> span, uint32
         if (fi < n_nodes) insert(span[fi]);
     }
     for (uint32_t i = 0u; i < n_nodes && uia->prev_tracked_count < kUiaMaxTrackedNodes; ++i) {
-        if (uia_is_live_role(span[i].role)) insert(span[i]);
+        if (uia_is_live_node(span[i])) insert(span[i]);
     }
     for (uint32_t i = 0u; i < n_nodes && uia->prev_tracked_count < kUiaMaxTrackedNodes; ++i) {
         if (uia_is_control_element(span, i)) insert(span[i]);
@@ -3532,6 +3595,13 @@ accesskit_role etch_to_accesskit_role(A11yRole role) noexcept {
         case A11yRole::CodeEditor:  return ACCESSKIT_ROLE_MULTILINE_TEXT_INPUT;
         case A11yRole::Canvas:      return ACCESSKIT_ROLE_CANVAS;
         case A11yRole::Tooltip:     return ACCESSKIT_ROLE_TOOLTIP;
+        case A11yRole::Heading:     return ACCESSKIT_ROLE_HEADING;
+        case A11yRole::Link:        return ACCESSKIT_ROLE_LINK;
+        case A11yRole::Document:    return ACCESSKIT_ROLE_DOCUMENT;
+        case A11yRole::Math:        return ACCESSKIT_ROLE_MATH;
+        case A11yRole::Figure:      return ACCESSKIT_ROLE_FIGURE;
+        case A11yRole::Alert:       return ACCESSKIT_ROLE_ALERT;
+        case A11yRole::Status:      return ACCESSKIT_ROLE_STATUS;
         default:                    return ACCESSKIT_ROLE_UNKNOWN;
     }
 }
@@ -3752,6 +3822,7 @@ void accesskit_notify_commit(Context* ctx, ClaimedWindowSlot* slot) noexcept {
     accesskit_unix_adapter_update_if_active(
         static_cast<accesskit_unix_adapter*>(ak->adapter), etch_accesskit_initial_tree_cb, ak);
 #endif
+    slot->ui.a11y_announce_dirty = false;
 }
 
 #elif defined(__APPLE__) && defined(__MACH__) && TARGET_OS_OSX && ETCH_ENABLE_OS_A11Y
@@ -3854,6 +3925,13 @@ const char* etch_to_ns_a11y_role(A11yRole role) noexcept {
         case A11yRole::CodeEditor:  return "AXTextArea";
         case A11yRole::Canvas:      return "AXImage";
         case A11yRole::Tooltip:     return "AXHelpTag";
+        case A11yRole::Heading:     return "AXHeading";
+        case A11yRole::Link:        return "AXLink";
+        case A11yRole::Document:    return "AXGroup";
+        case A11yRole::Math:        return "AXGroup";
+        case A11yRole::Figure:      return "AXImage";
+        case A11yRole::Alert:       return "AXGroup";
+        case A11yRole::Status:      return "AXGroup";
         default:                    return "AXUnknown";
     }
 }
@@ -4217,6 +4295,14 @@ void macos_a11y_notify_commit(Context* ctx, ClaimedWindowSlot* slot) noexcept {
             }
         }
     }
+    if (slot->ui.a11y_announce_dirty) {
+        if (slot->ui.a11y_announce_len > 0u && mac->content_view &&
+            g_macos_a11y.post_notification && g_macos_a11y.notif_layout_changed)
+        {
+            g_macos_a11y.post_notification(mac->content_view, g_macos_a11y.notif_layout_changed);
+        }
+        slot->ui.a11y_announce_dirty = false;
+    }
 }
 
 #elif defined(__linux__) && ETCH_ENABLE_OS_A11Y
@@ -4390,9 +4476,16 @@ uint32_t etch_to_atspi_role(A11yRole role) noexcept {
         case A11yRole::ComboBox:    return 11u; // ATSPI_ROLE_COMBO_BOX
         case A11yRole::TextInput:   return 61u; // ATSPI_ROLE_TEXT
         case A11yRole::CodeEditor:  return 61u; // ATSPI_ROLE_TEXT
-        case A11yRole::Canvas:      return 6u;  // ATSPI_ROLE_CANVAS
-        case A11yRole::Tooltip:     return 64u; // ATSPI_ROLE_TOOL_TIP
-        default:                    return 0u;  // ATSPI_ROLE_INVALID
+        case A11yRole::Canvas:      return 6u;   // ATSPI_ROLE_CANVAS
+        case A11yRole::Tooltip:     return 64u;  // ATSPI_ROLE_TOOL_TIP
+        case A11yRole::Heading:     return 81u;  // ATSPI_ROLE_HEADING
+        case A11yRole::Link:        return 86u;  // ATSPI_ROLE_LINK
+        case A11yRole::Document:    return 80u;  // ATSPI_ROLE_DOCUMENT_FRAME
+        case A11yRole::Math:        return 115u; // ATSPI_ROLE_MATH
+        case A11yRole::Figure:      return 26u;  // ATSPI_ROLE_IMAGE
+        case A11yRole::Alert:       return 2u;   // ATSPI_ROLE_ALERT
+        case A11yRole::Status:      return 53u;  // ATSPI_ROLE_STATUS_BAR
+        default:                    return 0u;   // ATSPI_ROLE_INVALID
     }
 }
 
@@ -4459,6 +4552,13 @@ const char* etch_to_atspi_role_name(A11yRole role) noexcept {
         case A11yRole::CodeEditor:  return "text";
         case A11yRole::Canvas:      return "canvas";
         case A11yRole::Tooltip:     return "tool tip";
+        case A11yRole::Heading:     return "heading";
+        case A11yRole::Link:        return "link";
+        case A11yRole::Document:    return "document frame";
+        case A11yRole::Math:        return "math";
+        case A11yRole::Figure:      return "image";
+        case A11yRole::Alert:       return "alert";
+        case A11yRole::Status:      return "status bar";
         default:                    return "invalid";
     }
 }
@@ -4741,6 +4841,8 @@ DBusHandlerResult linux_atspi_filter(DBusConnection* conn, DBusMessage* msg, voi
             if ((an->state_flags & A11yState_Expanded) != 0u) set_bit(9u);  // EXPANDED
             if ((an->state_flags & A11yState_Pressed) != 0u) set_bit(19u);  // PRESSED
             if ((an->state_flags & A11yState_Selected) != 0u) set_bit(22u); // SELECTED
+            if ((an->state_flags & A11yState_Busy) != 0u) set_bit(2u);      // BUSY
+            if ((an->state_flags & A11yState_Invalid) != 0u) set_bit(33u);  // INVALID_ENTRY
             if ((an->role == A11yRole::TextInput || an->role == A11yRole::CodeEditor) &&
                 (an->state_flags & A11yState_ReadOnly) == 0u)
             {
@@ -5027,6 +5129,13 @@ void linux_atspi_notify_commit(Context* ctx, ClaimedWindowSlot* slot) noexcept {
             linux_atspi_emit_object_signal(ats->a11y_conn, focus_id, "StateChanged", "focused", 1, 0);
         }
     }
+    if (slot->ui.a11y_announce_dirty) {
+        if (count > 0u && slot->ui.a11y_announce_len > 0u) {
+            const int32_t politeness = (slot->ui.a11y_announce_priority == A11yLiveMode::Assertive) ? 2 : 1;
+            linux_atspi_emit_object_signal(ats->a11y_conn, span[0].id, "Announcement", slot->ui.a11y_announce_buf, politeness, 0);
+        }
+        slot->ui.a11y_announce_dirty = false;
+    }
     g_linux_dbus.conn_flush(ats->a11y_conn);
     g_linux_dbus.conn_dispatch(ats->a11y_conn, 0);
 }
@@ -5124,11 +5233,20 @@ void os_a11y_detach_window(Context* ctx, ClaimedWindowSlot* slot) noexcept {
 
 void os_a11y_notify_commit(Context* ctx) noexcept {
 #if defined(_WIN32) && ETCH_ENABLE_OS_A11Y
-    if (!ctx || !ctx->enable_os_a11y || ctx->headless || !ctx->active_window) {
+    if (!ctx) {
+        return;
+    }
+    if (!ctx->enable_os_a11y || ctx->headless || !ctx->active_window) {
+        if (ctx->active_ui) {
+            ctx->active_ui->a11y_announce_dirty = false;
+        }
         return;
     }
     ClaimedWindowSlot* slot = find_claimed_slot(ctx, ctx->active_window);
     if (!slot || !slot->os_a11y) {
+        if (ctx->active_ui) {
+            ctx->active_ui->a11y_announce_dirty = false;
+        }
         return;
     }
     auto* uia = static_cast<WinUiaSlot*>(slot->os_a11y);
@@ -5178,6 +5296,15 @@ void os_a11y_notify_commit(Context* ctx) noexcept {
         }
     }
 
+    if (slot->ui.a11y_announce_dirty) {
+        if (can_raise && uia->root && slot->ui.a11y_announce_len > 0u) {
+            g_win_uia.raise_event(
+                reinterpret_cast<IRawElementProviderSimple*>(&uia->root->simple),
+                UIA_LiveRegionChangedEventId);
+        }
+        slot->ui.a11y_announce_dirty = false;
+    }
+
     if (!can_raise) {
         uia->has_prev_snapshot = false;
         return;
@@ -5213,7 +5340,7 @@ void os_a11y_notify_commit(Context* ctx) noexcept {
             const bool toggle_changed = uia_supports_toggle(&an) && ((state_diff & A11yState_Checked) != 0u);
             const bool expand_changed = uia_supports_expand_collapse(&an) && ((state_diff & A11yState_Expanded) != 0u);
             const bool sel_changed = uia_supports_selection_item(&an) && ((state_diff & A11yState_Selected) != 0u);
-            const bool live_changed = uia_is_live_role(an.role) && (label_changed || val_changed);
+            const bool live_changed = uia_is_live_node(an) && (label_changed || val_changed);
 
             if (!label_changed && !val_changed && !toggle_changed && !expand_changed && !sel_changed && !live_changed) {
                 continue;
@@ -5301,11 +5428,20 @@ void os_a11y_notify_commit(Context* ctx) noexcept {
     uia->prev_struct_hash = struct_hash;
     uia_tracked_rebuild(uia, span, ui.focus_id);
 #elif (defined(ETCH_USE_ACCESSKIT) || (defined(__APPLE__) && defined(__MACH__) && TARGET_OS_OSX) || defined(__linux__)) && ETCH_ENABLE_OS_A11Y
-    if (!ctx || !ctx->enable_os_a11y || ctx->headless || !ctx->active_window) {
+    if (!ctx) {
+        return;
+    }
+    if (!ctx->enable_os_a11y || ctx->headless || !ctx->active_window) {
+        if (ctx->active_ui) {
+            ctx->active_ui->a11y_announce_dirty = false;
+        }
         return;
     }
     ClaimedWindowSlot* slot = find_claimed_slot(ctx, ctx->active_window);
     if (!slot || !slot->os_a11y) {
+        if (ctx->active_ui) {
+            ctx->active_ui->a11y_announce_dirty = false;
+        }
         return;
     }
 #    if defined(ETCH_USE_ACCESSKIT)
@@ -5316,7 +5452,9 @@ void os_a11y_notify_commit(Context* ctx) noexcept {
     linux_atspi_notify_commit(ctx, slot);
 #    endif
 #else
-    (void)ctx;
+    if (ctx && ctx->active_ui) {
+        ctx->active_ui->a11y_announce_dirty = false;
+    }
 #endif
 }
 
