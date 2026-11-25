@@ -71,6 +71,7 @@
 #        define NOMINMAX
 #    endif
 #    include <windows.h>
+#    include <shellapi.h>
 #    include <dwrite.h>
 #else
 #    include <dlfcn.h>
@@ -161,10 +162,19 @@ uint32_t c_bridge_tokenize_cpp_hlsl(Str line, void* out, uint32_t cap, CTokenEmi
     return tokenize_cpp_hlsl_emit(line, out, cap, active_theme(current_context()), emit);
 }
 
-void c_bridge_terminal_grid(const TerminalGridDesc& desc, const void* cells, size_t count, CTerminalCellReadFn read) noexcept {
+uint32_t c_bridge_tokenize_language(Str language, Str line, void* out, uint32_t cap, CTokenEmitFn emit) noexcept {
+    return tokenize_language_emit_stateful(language, line, 0u, nullptr, out, cap, active_theme(current_context()), emit);
+}
+
+uint32_t c_bridge_tokenize_language_stateful(Str language, Str line, uint8_t in_state, uint8_t* out_state, void* out, uint32_t cap, CTokenEmitFn emit) noexcept {
+    return tokenize_language_emit_stateful(language, line, in_state, out_state, out, cap, active_theme(current_context()), emit);
+}
+
+TerminalGridResult c_bridge_terminal_grid(const TerminalGridDesc& desc, const void* cells, size_t count, CTerminalCellReadFn read) noexcept {
     if (terminal_grid_valid(desc, count)) {
-        terminal_grid_run(desc, cells, count, read);
+        return terminal_grid_run(desc, cells, count, read);
     }
+    return {};
 }
 } // namespace etch
 

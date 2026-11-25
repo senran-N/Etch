@@ -3330,6 +3330,7 @@ Context* create_context(const ContextDesc& desc) noexcept {
     ctx->enable_gpu_debug = desc.enable_gpu_debug;
     ctx->prefer_high_performance_gpu = desc.prefer_high_performance_gpu;
     ctx->time_scale=1;
+    ctx->ui_zoom=1.0f;
 #if defined(_WIN32)
     BOOL animation_enabled=TRUE;
     if(desc.respect_reduced_motion && SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION,0,&animation_enabled,0)) ctx->reduced_motion=!animation_enabled;
@@ -3597,6 +3598,7 @@ void destroy_context(Context* ctx) noexcept {
     }
     ctx->shape_cache.initialized = false;
     shutdown_dialog_queue(ctx);
+    shutdown_native_os_integration(ctx);
     std::free(ctx->clipboard_fallback);
     ctx->clipboard_fallback = nullptr;
     ctx->clipboard_fallback_cap = 0u;
@@ -3624,7 +3626,13 @@ void destroy_context(Context* ctx) noexcept {
     arena_destroy(&ctx->frame_arena);
 
     if (ctx->owns_video_init) {
+#if !defined(_WIN32)
         SDL_QuitSubSystem(SDL_INIT_VIDEO);
+#else
+        // SDL 3.4.x WIN_VideoQuit stalls ~30s in WaitForSingleObjectEx when tearing down
+        // a lazily-initialized headless video subsystem; leave the process-wide video
+        // subsystem alive (GPU device & all Etch resources are already destroyed above).
+#endif
     }
     std::free(ctx);
 }

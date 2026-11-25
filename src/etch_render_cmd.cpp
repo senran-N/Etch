@@ -1095,7 +1095,7 @@ void push_prim(
             return pack_f16x2(unpack_f16_cpu(uint16_t(pair))*metric_scale,unpack_f16_cpu(uint16_t(pair>>16))*metric_scale);
         };
         if(kind==PrimKind::BezierWire || kind==PrimKind::RingArc || kind==PrimKind::Shadow) prim.style.w=scaled_pair(prim.style.w);
-        if(kind==PrimKind::Shadow && (prim.style.x & (uint32_t(PrimFlag_LinearGrad)<<4)) != 0u) {
+        if(kind==PrimKind::Shadow) {
             prim.payload.x = pack_f16x2(
                 unpack_f16_cpu(uint16_t(prim.payload.x)) * scale.x,
                 unpack_f16_cpu(uint16_t(prim.payload.x >> 16)) * scale.y);
@@ -1798,25 +1798,22 @@ void emit_box_background_and_shadow(
         const float oy = std::isfinite(offset_px.y) ? offset_px.y : 0.0f;
         const float br = (std::isfinite(blur_px) && blur_px > 0.0f) ? blur_px : 0.0f;
         const float sp = std::isfinite(spread_px) ? spread_px : 0.0f;
-        if (!inset && br <= 0.0f) return;
+        if (!inset && br <= 0.0f && sp == 0.0f && ox == 0.0f && oy == 0.0f) return;
         push_prim(
             ctx,
             continuous_prim(
                 Prim::make_shadow(base_box_px, clip.rect, col, base_rad_px, br, clip.radius, {ox, oy}, sp, inset),
                 d.continuous_corners),
             nullptr,
-            inset ? 2.0f : (2.0f * br + 2.0f));
+            inset ? 2.0f : (2.0f * std::fmax(br, 0.5f) + 2.0f));
     };
 
     const uint8_t sc = d.shadow_count < 4u ? d.shadow_count : 4u;
     bool has_custom_drop_shadow =
-        (!d.shadow_inset && d.shadow_color.a > 0u && std::isfinite(d.shadow_blur) && d.shadow_blur > 0.0f);
+        (!d.shadow_inset && inset_shadow_active(d.shadow_color, d.shadow_blur, d.shadow_spread, d.shadow_offset));
     for (uint8_t si = 0u; si < sc && !has_custom_drop_shadow; ++si) {
         const ShadowLayer& sl = d.shadows[si];
-        if (!sl.inset && sl.color.a > 0u &&
-            ((std::isfinite(sl.blur_px) && sl.blur_px > 0.0f) ||
-             (std::isfinite(sl.spread_px) && sl.spread_px != 0.0f)))
-        {
+        if (!sl.inset && inset_shadow_active(sl.color, sl.blur_px, sl.spread_px, sl.offset)) {
             has_custom_drop_shadow = true;
         }
     }
@@ -1874,12 +1871,12 @@ void emit_box_background_and_shadow(
             }
         }
     }
-    if (!d.shadow_inset && d.shadow_color.a > 0u && std::isfinite(d.shadow_blur) && d.shadow_blur > 0.0f) {
+    if (!d.shadow_inset && inset_shadow_active(d.shadow_color, d.shadow_blur, d.shadow_spread, d.shadow_offset)) {
         emit_shadow(d.shadow_offset * dpi, d.shadow_blur * dpi, d.shadow_spread * dpi, d.shadow_color, false);
     }
     for (uint8_t si = 0u; si < sc; ++si) {
         const ShadowLayer& sl = d.shadows[si];
-        if (!sl.inset && sl.color.a > 0u && std::isfinite(sl.blur_px) && sl.blur_px > 0.0f) {
+        if (!sl.inset && inset_shadow_active(sl.color, sl.blur_px, sl.spread_px, sl.offset)) {
             emit_shadow(sl.offset * dpi, sl.blur_px * dpi, sl.spread_px * dpi, sl.color, false);
         }
     }

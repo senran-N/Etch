@@ -281,13 +281,20 @@ uint32_t poll_triggered_command(Context* ctx) noexcept {
                                 focus_scope_contains(*ui, ui->modal_scope) ||
                                 (focused_ws != nullptr && focused_ws->focus_scope == ui->modal_scope);
 
-    const auto scope_matches = [&](uint32_t scope_id) noexcept -> bool {
-        if (scope_id == 0u) return modal_in_scope;
-        if (ui->modal_scope != 0u && scope_id != ui->modal_scope && !modal_in_scope) return false;
-        if (ui->focus_id == scope_id) return true;
-        if (focus_scope_contains(*ui, scope_id)) return true;
-        if (focused_ws != nullptr && focused_ws->focus_scope == scope_id) return true;
-        return false;
+    // Specificity rank: -1 = no match, 0 = global, 1..N = outer-to-inner command/focus scope, 1000 = direct focus_id match.
+    const auto scope_rank = [&](uint32_t scope_id) noexcept -> int32_t {
+        if (scope_id == 0u) return modal_in_scope ? 0 : -1;
+        if (ui->modal_scope != 0u && scope_id != ui->modal_scope && !modal_in_scope) return -1;
+        if (ui->focus_id == scope_id) return 1000;
+        for (int32_t d = static_cast<int32_t>(ui->command_scope_depth) - 1; d >= 0; --d) {
+            if (ui->command_scopes[d] == scope_id) return 100 + d;
+        }
+        if (ui->focus_scope == scope_id) return 50 + static_cast<int32_t>(ui->focus_scope_depth);
+        for (int32_t d = static_cast<int32_t>(ui->focus_scope_depth) - 1; d >= 0; --d) {
+            if (ui->focus_scopes[d] == scope_id) return 50 + d;
+        }
+        if (focused_ws != nullptr && focused_ws->focus_scope == scope_id) return 10;
+        return -1;
     };
 
     for (uint32_t ki = 0u; ki < ui->frame_key_count; ++ki) {
@@ -296,77 +303,65 @@ uint32_t poll_triggered_command(Context* ctx) noexcept {
         const uint16_t ev_mods = static_cast<uint16_t>(ev.mods & kCommandModMask);
 
         if (reg->pending_chord_keycode != 0u) {
-            uint32_t scoped_chord_id = 0u;
-            uint32_t global_chord_id = 0u;
+            uint32_t best_chord_id = 0u;
+            int32_t best_chord_rank = -1;
             for (uint32_t i = 0u; i < reg->count; ++i) {
                 const CommandRecord& r = reg->records[i];
                 if (!r.enabled || r.chord_keycode == 0u) continue;
                 if (typing && !r.allow_when_typing) continue;
-                if (!scope_matches(r.scope_id)) continue;
+                const int32_t rk = scope_rank(r.scope_id);
+                if (rk < 0) continue;
                 if (r.shortcut_mods == reg->pending_chord_mods &&
                     r.shortcut_keycode == reg->pending_chord_keycode &&
                     r.chord_mods == ev_mods &&
                     r.chord_keycode == ev.key) {
-                    if (r.scope_id != 0u) {
-                        scoped_chord_id = r.id;
-                        break;
+                    if (rk > best_chord_rank) {
+                        best_chord_rank = rk;
+                        best_chord_id = r.id;
                     }
-                    if (global_chord_id == 0u) global_chord_id = r.id;
                 }
             }
             cmd_clear_pending_chord(reg);
-            const uint32_t matched_chord = scoped_chord_id ? scoped_chord_id : global_chord_id;
-            if (matched_chord != 0u) {
+            if (best_chord_id != 0u) {
                 ev.consumed = true;
-                cmd_push_recent(reg, matched_chord);
-                return matched_chord;
+                cmd_push_recent(reg, best_chord_id);
+                return best_chord_id;
             }
         }
 
-        uint32_t scoped_single_id = 0u;
-        uint32_t global_single_id = 0u;
-        bool scoped_chord_prefix = false;
-        bool global_chord_prefix = false;
+        uint32_t best_single_id = 0u;
+        int32_t best_single_rank = -1;
+        int32_t best_prefix_rank = -1;
 
         for (uint32_t i = 0u; i < reg->count; ++i) {
             const CommandRecord& r = reg->records[i];
             if (!r.enabled || r.shortcut_keycode == 0u) continue;
             if (typing && !r.allow_when_typing) continue;
-            if (!scope_matches(r.scope_id)) continue;
+            const int32_t rk = scope_rank(r.scope_id);
+            if (rk < 0) continue;
             if (r.shortcut_mods != ev_mods || r.shortcut_keycode != ev.key) continue;
 
             if (r.chord_keycode != 0u) {
-                if (r.scope_id != 0u) scoped_chord_prefix = true;
-                else global_chord_prefix = true;
+                if (rk > best_prefix_rank) best_prefix_rank = rk;
             } else {
-                if (r.scope_id != 0u && scoped_single_id == 0u) scoped_single_id = r.id;
-                else if (r.scope_id == 0u && global_single_id == 0u) global_single_id = r.id;
+                if (rk > best_single_rank) {
+                    best_single_rank = rk;
+                    best_single_id = r.id;
+                }
             }
         }
 
-        if (scoped_chord_prefix) {
+        if (best_prefix_rank >= 0 && best_prefix_rank >= best_single_rank) {
             reg->pending_chord_mods = ev_mods;
             reg->pending_chord_keycode = ev.key;
             reg->pending_chord_tick = now_ms;
             ev.consumed = true;
             return 0u;
         }
-        if (scoped_single_id != 0u) {
+        if (best_single_id != 0u) {
             ev.consumed = true;
-            cmd_push_recent(reg, scoped_single_id);
-            return scoped_single_id;
-        }
-        if (global_chord_prefix) {
-            reg->pending_chord_mods = ev_mods;
-            reg->pending_chord_keycode = ev.key;
-            reg->pending_chord_tick = now_ms;
-            ev.consumed = true;
-            return 0u;
-        }
-        if (global_single_id != 0u) {
-            ev.consumed = true;
-            cmd_push_recent(reg, global_single_id);
-            return global_single_id;
+            cmd_push_recent(reg, best_single_id);
+            return best_single_id;
         }
     }
     return 0u;
@@ -415,6 +410,106 @@ bool get_command(const Context* ctx, uint32_t index, CommandDesc* out_desc) noex
         .chord_keycode = r.chord_keycode,
     };
     return true;
+}
+
+void push_command_scope(uint32_t scope_id) noexcept {
+    Context* c = current_context();
+    if (!c || !c->active_ui || scope_id == 0u || c->active_ui->command_scope_depth >= 32u) return;
+    c->active_ui->command_scopes[c->active_ui->command_scope_depth++] = scope_id;
+}
+
+void pop_command_scope() noexcept {
+    Context* c = current_context();
+    if (!c || !c->active_ui || c->active_ui->command_scope_depth == 0u) return;
+    --c->active_ui->command_scope_depth;
+}
+
+bool push_focus_restore_point(Context* ctx) noexcept {
+    Context* c = ctx ? ctx : current_context();
+    if (!c || !c->active_ui || c->active_ui->focus_restore_depth >= 16u) return false;
+    c->active_ui->focus_restore_stack[c->active_ui->focus_restore_depth++] = c->active_ui->focus_id;
+    return true;
+}
+
+uint32_t pop_focus_restore_point(Context* ctx) noexcept {
+    Context* c = ctx ? ctx : current_context();
+    if (!c || !c->active_ui || c->active_ui->focus_restore_depth == 0u) return 0u;
+    const uint32_t saved = c->active_ui->focus_restore_stack[--c->active_ui->focus_restore_depth];
+    if (saved != 0u) {
+        Context* prev = current_context();
+        set_current_context(c);
+        request_focus(saved);
+        set_current_context(prev);
+    }
+    return saved;
+}
+
+FuzzyMatchResult fuzzy_match(Str pattern, Str candidate, uint32_t* out_positions, uint32_t max_positions) noexcept {
+    if (pattern.length == 0u) return {true, 0, 0u};
+    if (!pattern.chars || !candidate.chars || candidate.length < pattern.length) return {};
+
+    const auto fold = [](char ch) noexcept -> unsigned char {
+        return (ch >= 'A' && ch <= 'Z') ? static_cast<unsigned char>(ch + ('a' - 'A')) : static_cast<unsigned char>(ch);
+    };
+    const auto is_sep = [](char ch) noexcept -> bool {
+        return ch == '/' || ch == '\\' || ch == '_' || ch == '-' || ch == '.' || ch == ' ' || ch == ':';
+    };
+    const auto is_upper = [](char ch) noexcept -> bool { return ch >= 'A' && ch <= 'Z'; };
+    const auto is_lower = [](char ch) noexcept -> bool { return ch >= 'a' && ch <= 'z'; };
+
+    // Fast greedy pass with word-boundary lookahead so camelCase/path initials beat mid-word hits.
+    uint32_t pi = 0u;
+    uint32_t ci = 0u;
+    int32_t score = 0;
+    uint32_t matched = 0u;
+    uint32_t prev_match = UINT32_MAX;
+    uint32_t consecutive = 0u;
+
+    while (pi < pattern.length && ci < candidate.length) {
+        const unsigned char pc = fold(pattern.chars[pi]);
+        uint32_t chosen = UINT32_MAX;
+        int32_t chosen_bonus = -10000;
+
+        for (uint32_t scan = ci; scan < candidate.length; ++scan) {
+            if (fold(candidate.chars[scan]) != pc) continue;
+            // Verify the remaining pattern still fits after `scan`.
+            if (candidate.length - scan < pattern.length - pi) break;
+            int32_t b = 0;
+            const bool is_consec = (prev_match != UINT32_MAX && scan == prev_match + 1u);
+            const bool at_start = (scan == 0u);
+            const bool after_sep = (scan > 0u && is_sep(candidate.chars[scan - 1u]));
+            const bool camel = (scan > 0u && is_upper(candidate.chars[scan]) && is_lower(candidate.chars[scan - 1u]));
+            if (at_start) b += 24;
+            if (after_sep) b += 20;
+            if (camel) b += 18;
+            if (is_consec) b += 16 + static_cast<int32_t>(consecutive < 8u ? consecutive * 3u : 24u);
+            if (candidate.chars[scan] == pattern.chars[pi]) b += 2;
+            const uint32_t gap = (prev_match == UINT32_MAX) ? scan : (scan - prev_match - 1u);
+            b -= static_cast<int32_t>(gap < 32u ? gap : 32u);
+            if (chosen == UINT32_MAX || b > chosen_bonus) {
+                chosen = scan;
+                chosen_bonus = b;
+                // Stop scanning early once we hit an optimal consecutive or boundary match.
+                if (is_consec || at_start || after_sep || camel) break;
+            }
+        }
+        if (chosen == UINT32_MAX) return {};
+        if (prev_match != UINT32_MAX && chosen == prev_match + 1u) ++consecutive;
+        else consecutive = 0u;
+        score += 10 + chosen_bonus;
+        if (out_positions && matched < max_positions) {
+            out_positions[matched] = chosen;
+        }
+        ++matched;
+        prev_match = chosen;
+        ci = chosen + 1u;
+        ++pi;
+    }
+    if (pi < pattern.length) return {};
+    // Slightly prefer tighter candidates.
+    const uint32_t excess = candidate.length - pattern.length;
+    score -= static_cast<int32_t>(excess < 64u ? excess : 64u);
+    return {true, score, matched};
 }
 
 } // namespace etch

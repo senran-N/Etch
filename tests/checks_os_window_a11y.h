@@ -899,23 +899,34 @@ inline bool verify_os_window_a11y_checks() noexcept {
 
     begin_window_frame(wctx,win,0);
     window_drag_region({0,0,480,32});
+    begin_box({.id=id("chrome.root_wrap"),.axis=Axis::Col,.width=Sizing::fixed(480),.height=Sizing::fixed(320)});
     begin_box({.width=Sizing::fixed(480),.height=Sizing::fixed(32)});
     box({.id=id("chrome.click"),.width=Sizing::fixed(40),.height=Sizing::fixed(32)});
     box({.id=id("chrome.pass"),.width=Sizing::fixed(40),.height=Sizing::fixed(32),.window_drag_passthrough=true});
     box({.id=id("chrome.max"),.width=Sizing::fixed(40),.height=Sizing::fixed(32)});
-    window_maximize_button_region(id("chrome.max"));end_box();end_window_frame(wctx);
+    window_maximize_button_region(id("chrome.max"));end_box();end_box();end_window_frame(wctx);
     check(evaluate_window_hit(wctx,{20,16},win)==WindowHit::Client,__LINE__);
     check(evaluate_window_hit(wctx,{60,16},win)==WindowHit::Caption,__LINE__);
+    check(evaluate_window_hit(wctx,{240,16},win)==WindowHit::Caption,__LINE__);
     check(evaluate_window_hit(wctx,{100,16},win)==WindowHit::Maximize,__LINE__);
 #if defined(_WIN32) && defined(ETCH_ENABLE_OS_A11Y) && ETCH_ENABLE_OS_A11Y
     {
         HWND native=static_cast<HWND>(SDL_GetPointerProperty(SDL_GetWindowProperties(win),SDL_PROP_WINDOW_WIN32_HWND_POINTER,nullptr));
         const float factor=SDL_GetWindowDisplayScale(win)/SDL_GetWindowPixelDensity(win);
+        auto hit_at=[&](float lx,float ly) noexcept -> LRESULT {
+            POINT pt={LONG(lx*factor),LONG(ly*factor)};
+            ClientToScreen(native,&pt);
+            return SendMessageW(native,WM_NCHITTEST,0,MAKELPARAM(pt.x,pt.y));
+        };
         POINT client_pt={LONG(100*factor),LONG(16*factor)};
         POINT screen_pt=client_pt;ClientToScreen(native,&screen_pt);
         const LPARAM screen_lp=MAKELPARAM(screen_pt.x,screen_pt.y);
         const LPARAM client_lp=MAKELPARAM(client_pt.x,client_pt.y);
         check(SendMessageW(native,WM_NCHITTEST,0,screen_lp)==HTMAXBUTTON,__LINE__);
+        check(hit_at(240.0f,16.0f)==HTCAPTION,__LINE__);
+        check(hit_at(60.0f,16.0f)==HTCAPTION,__LINE__);
+        check(hit_at(20.0f,16.0f)==HTCLIENT,__LINE__);
+        check(hit_at(2.0f,80.0f)==HTLEFT,__LINE__);
 
         auto pump_win_events=[&]() noexcept {
             SDL_Event ev={};

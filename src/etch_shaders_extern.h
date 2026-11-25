@@ -3,10 +3,10 @@
 #define ETCH_SHADERS_EXTERN_H
 
 #if defined(_WIN32)
-extern const unsigned char g_etch_quad_vs_dxil[11064];
-extern const unsigned char g_etch_quad_vs_spv[21684];
-extern const unsigned char g_etch_quad_ps_dxil[20564];
-extern const unsigned char g_etch_quad_ps_spv[51232];
+extern const unsigned char g_etch_quad_vs_dxil[11052];
+extern const unsigned char g_etch_quad_vs_spv[21564];
+extern const unsigned char g_etch_quad_ps_dxil[21280];
+extern const unsigned char g_etch_quad_ps_spv[53812];
 extern const unsigned char g_etch_subpixel_vs_dxil[8492];
 extern const unsigned char g_etch_subpixel_vs_spv[9884];
 extern const unsigned char g_etch_subpixel_ps_dxil[10732];
@@ -28,8 +28,8 @@ extern const unsigned char g_etch_kawase_vs_spv[728];
 extern const unsigned char g_etch_kawase_ps_dxil[6252];
 extern const unsigned char g_etch_kawase_ps_spv[5456];
 #elif defined(__APPLE__)
-extern const unsigned char g_etch_quad_vs_msl[25385];
-extern const unsigned char g_etch_quad_ps_msl[71791];
+extern const unsigned char g_etch_quad_vs_msl[25267];
+extern const unsigned char g_etch_quad_ps_msl[75955];
 extern const unsigned char g_etch_subpixel_vs_msl[9658];
 extern const unsigned char g_etch_subpixel_ps_msl[26368];
 extern const unsigned char g_etch_slug_vs_msl[15464];
@@ -41,8 +41,8 @@ extern const unsigned char g_etch_fx_ps_msl[55391];
 extern const unsigned char g_etch_kawase_vs_msl[510];
 extern const unsigned char g_etch_kawase_ps_msl[4838];
 #else
-extern const unsigned char g_etch_quad_vs_spv[21684];
-extern const unsigned char g_etch_quad_ps_spv[51232];
+extern const unsigned char g_etch_quad_vs_spv[21564];
+extern const unsigned char g_etch_quad_ps_spv[53812];
 extern const unsigned char g_etch_subpixel_vs_spv[9884];
 extern const unsigned char g_etch_subpixel_ps_spv[20756];
 extern const unsigned char g_etch_slug_vs_spv[13268];

@@ -552,8 +552,8 @@ void emit_draw_list_command(
                 const ShadowDrawCmd& sd = node->shadow_cmd;
                 if (sd.color.a > 0u && sd.blur > 0.0f) {
                     const Rect r_px = {
-                        .x = origin.x + (sd.rect.x + sd.offset.x) * scale,
-                        .y = origin.y + (sd.rect.y + sd.offset.y) * scale,
+                        .x = origin.x + sd.rect.x * scale,
+                        .y = origin.y + sd.rect.y * scale,
                         .w = sd.rect.w * scale,
                         .h = sd.rect.h * scale,
                     };
@@ -561,7 +561,7 @@ void emit_draw_list_command(
                     push_prim(
                         ctx,
                         continuous_prim(
-                            Prim::make_shadow(r_px, clip.rect, sd.color, scale_corners(sd.radius, scale), blur_px, clip.radius),
+                            Prim::make_shadow(r_px, clip.rect, sd.color, scale_corners(sd.radius, scale), blur_px, clip.radius, sd.offset * scale),
                             sd.continuous_corners),
                         nullptr,
                         2.0f * blur_px + 2.0f);
@@ -1421,7 +1421,8 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
         return;
     }
     if (!ctx->active_ui->layout) {
-        const float dpi = (desc.dpi_scale > 0.0f) ? desc.dpi_scale : 1.0f;
+        const float raw_dpi = (desc.dpi_scale > 0.0f) ? desc.dpi_scale : 1.0f;
+        const float dpi = raw_dpi * (ctx->ui_zoom > 0.0f ? ctx->ui_zoom : 1.0f);
         const float init_w = desc.viewport_w ? (static_cast<float>(desc.viewport_w) / dpi) : 1280.0f;
         const float init_h = desc.viewport_h ? (static_cast<float>(desc.viewport_h) / dpi) : 720.0f;
         if (!ensure_window_ui_clay(ctx, ctx->active_ui, init_w, init_h)) {
@@ -1567,6 +1568,19 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
         request_redraw(ctx);
     }
 
+    constexpr size_t kMaxAutoFrameArenaBytes = 32u * 1024u * 1024u;
+    if (ctx->frame_arena.capacity > 0u &&
+        ctx->frame_arena.capacity < kMaxAutoFrameArenaBytes &&
+        ctx->frame_arena.peak_offset >= (ctx->frame_arena.capacity * 7u) / 8u)
+    {
+        size_t next_cap = ctx->frame_arena.capacity * 2u;
+        if (next_cap > kMaxAutoFrameArenaBytes) next_cap = kMaxAutoFrameArenaBytes;
+        Arena grown = arena_create(next_cap);
+        if (grown.base) {
+            arena_destroy(&ctx->frame_arena);
+            ctx->frame_arena = grown;
+        }
+    }
     ctx->frame_arena.reset();
     ctx->active_ui->frame_drop_count = 0;
     ctx->active_ui->frame_text_drop_count = 0;
@@ -1656,7 +1670,8 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
         ctx->active_ui->marquee_finished_canvas_id = 0u;
     }
 
-    const float dpi = (desc.dpi_scale > 0.0f) ? desc.dpi_scale : 1.0f;
+    const float raw_dpi = (desc.dpi_scale > 0.0f) ? desc.dpi_scale : 1.0f;
+    const float dpi = raw_dpi * (ctx->ui_zoom > 0.0f ? ctx->ui_zoom : 1.0f);
     ctx->active_ui->viewport_w = (desc.viewport_w > 0u) ? desc.viewport_w : 1u;
     ctx->active_ui->viewport_h = (desc.viewport_h > 0u) ? desc.viewport_h : 1u;
     ctx->active_ui->dpi_scale = dpi;
@@ -1713,6 +1728,8 @@ static void begin_bound_frame(Context* ctx, const FrameDesc& desc) noexcept {
     const bool middle_down = ctx->active_ui->event_middle_down;
     const bool middle_pressed_this_frame = middle_down && !ctx->active_ui->prev_pan_button_down;
     ctx->active_ui->prev_pan_button_down = middle_down;
+    ctx->active_ui->middle_pressed_this_frame = middle_pressed_this_frame;
+    ctx->active_ui->command_scope_depth = 0u;
 
     const bool had_right_press = ctx->active_ui->event_right_pressed_edge;
     const bool had_right_release = ctx->active_ui->event_right_released_edge;
@@ -2411,9 +2428,8 @@ void begin_box(const BoxDesc& desc_in) noexcept {
         (eff_desc.border_width > 0.0f || has_border_sides(eff_desc))) || has_beam;
     const bool has_scrollbar = is_scroll && eff_desc.show_scrollbar;
     const bool has_multi_grad = (eff_desc.gradient.kind != GradientKind::None) && (eff_desc.gradient.stop_count >= 2u);
-    const bool has_single_shadow = eff_desc.shadow_inset
-        ? inset_shadow_active(eff_desc.shadow_color, eff_desc.shadow_blur, eff_desc.shadow_spread, eff_desc.shadow_offset)
-        : (eff_desc.shadow_color.a > 0u && std::isfinite(eff_desc.shadow_blur) && eff_desc.shadow_blur > 0.0f);
+    const bool has_single_shadow = inset_shadow_active(
+        eff_desc.shadow_color, eff_desc.shadow_blur, eff_desc.shadow_spread, eff_desc.shadow_offset);
     const bool has_multi_shadow = (eff_desc.shadow_count > 0u) || (eff_desc.elevation != Elevation::None);
     const bool has_visual =
         eff_desc.background.a > 0u ||
@@ -3982,6 +3998,26 @@ static TextInputResult text_input_impl(const TextInputDesc& desc_in, const void*
         cold->edit_wrap_affinity = false;
     }
 
+    const auto find_atomic_range = [&](uint32_t pos, bool include_start, bool include_end, uint32_t* out_s, uint32_t* out_e) noexcept -> bool {
+        if (!highlights || highlight_count == 0u || len == 0u) return false;
+        for (size_t hi = 0u; hi < highlight_count; ++hi) {
+            const TextInputHighlight hr = read_highlight(highlights, hi);
+            if (!hr.atomic || hr.byte_length == 0u || hr.byte_offset >= len) continue;
+            const uint32_t s = utf8_clamp_boundary(buf, len, hr.byte_offset);
+            uint32_t e = hr.byte_offset + std::min(hr.byte_length, len - hr.byte_offset);
+            const uint32_t eb = utf8_clamp_boundary(buf, len, e);
+            if (eb < e) e = utf8_next_boundary(buf, len, eb);
+            if (e <= s) continue;
+            const bool inside = (pos > s && pos < e) || (include_start && pos == s) || (include_end && pos == e);
+            if (inside) {
+                if (out_s) *out_s = s;
+                if (out_e) *out_e = e;
+                return true;
+            }
+        }
+        return false;
+    };
+
     // Pointer click / double-word / triple-line / drag selection
     if (!desc.disabled && ws && cold && ws->last_box_logical.w > 0.0f && desc.id != 0u) {
         const TextInnerGeom prev_geom = compute_text_inner_geom(ctx, ws->last_box_logical, desc);
@@ -4003,6 +4039,11 @@ static TextInputResult text_input_impl(const TextInputDesc& desc_in, const void*
                     hit_byte = previous;
                     hit_aff = false;
                 }
+            }
+            uint32_t as = 0u, ae = 0u;
+            if (find_atomic_range(hit_byte, false, false, &as, &ae)) {
+                hit_byte = ((hit_byte - as) <= (ae - hit_byte)) ? as : ae;
+                hit_aff = false;
             }
             if (ctx->active_ui->last_mouse_clicks >= 3u) {
                 if (desc.multiline) {
@@ -4033,6 +4074,11 @@ static TextInputResult text_input_impl(const TextInputDesc& desc_in, const void*
                     cursor = previous;
                     drag_aff = false;
                 }
+            }
+            uint32_t as = 0u, ae = 0u;
+            if (find_atomic_range(cursor, false, false, &as, &ae)) {
+                cursor = (cursor >= anchor) ? ae : as;
+                drag_aff = false;
             }
             cold->edit_wrap_affinity = (ptr_wrap_w > 0.0f) && drag_aff;
             cold->edit_preferred_x = -1.0f;
@@ -4067,6 +4113,7 @@ static TextInputResult text_input_impl(const TextInputDesc& desc_in, const void*
     }
     bool submitted = false;
     bool ghost_accepted = false;
+    bool pasted_image = false;
     if (is_focused) {
         if (undo_slot && undo_slot->count > 0u) {
             TextUndoRecord& cur_rec = undo_slot->entries[(undo_slot->head + undo_slot->cur) % undo_slot->entries_cap];
@@ -4190,6 +4237,13 @@ static TextInputResult text_input_impl(const TextInputDesc& desc_in, const void*
                                 cold->edit_preferred_x = -1.0f;
                                 cold->edit_wrap_affinity = false;
                             }
+                        } else if (has_clipboard_mime(str_lit("image/png")) ||
+                                   has_clipboard_mime(str_lit("image/bmp")) ||
+                                   has_clipboard_mime(str_lit("image/jpeg")) ||
+                                   has_clipboard_mime(str_lit("image/webp")) ||
+                                   get_clipboard_image(&ctx->frame_arena).size_bytes > 0u) {
+                            pasted_image = true;
+                            request_redraw(ctx);
                         }
                     }
                     continue;
@@ -4205,6 +4259,10 @@ static TextInputResult text_input_impl(const TextInputDesc& desc_in, const void*
                         cursor = word_mod
                             ? utf8_word_left(buf, len, cursor)
                             : utf8_prev_grapheme(buf, len, cursor);
+                        uint32_t as = 0u, ae = 0u;
+                        if (find_atomic_range(cursor, false, false, &as, &ae)) {
+                            cursor = as;
+                        }
                         if (!shift) {
                             anchor = cursor;
                         }
@@ -4222,6 +4280,10 @@ static TextInputResult text_input_impl(const TextInputDesc& desc_in, const void*
                         cursor = word_mod
                             ? utf8_word_right(buf, len, cursor)
                             : utf8_next_grapheme(buf, len, cursor);
+                        uint32_t as = 0u, ae = 0u;
+                        if (find_atomic_range(cursor, false, false, &as, &ae)) {
+                            cursor = ae;
+                        }
                         if (!shift) {
                             anchor = cursor;
                         }
@@ -4295,11 +4357,19 @@ static TextInputResult text_input_impl(const TextInputDesc& desc_in, const void*
                             anchor = cursor;
                             record_edit(0u);
                         } else if (cursor > 0u) {
-                            const uint32_t del_from = word_mod
+                            uint32_t del_from = word_mod
                                 ? utf8_word_left(buf, len, cursor)
                                 : utf8_prev_grapheme(buf, len, cursor);
-                            if (del_from < cursor) {
-                                cursor = erase_text_range(buf, &len, del_from, cursor);
+                            uint32_t del_to = cursor;
+                            uint32_t as = 0u, ae = 0u;
+                            if (find_atomic_range(cursor, false, true, &as, &ae)) {
+                                del_from = as;
+                                del_to = ae;
+                            } else if (find_atomic_range(del_from, false, false, &as, &ae)) {
+                                del_from = as;
+                            }
+                            if (del_from < del_to) {
+                                cursor = erase_text_range(buf, &len, del_from, del_to);
                                 anchor = cursor;
                                 record_edit(word_mod ? 0u : 2u);
                             }
@@ -4317,11 +4387,19 @@ static TextInputResult text_input_impl(const TextInputDesc& desc_in, const void*
                             anchor = cursor;
                             record_edit(0u);
                         } else if (cursor < len) {
-                            const uint32_t del_to = word_mod
+                            uint32_t del_from = cursor;
+                            uint32_t del_to = word_mod
                                 ? utf8_word_right(buf, len, cursor)
                                 : utf8_next_grapheme(buf, len, cursor);
-                            if (del_to > cursor) {
-                                cursor = erase_text_range(buf, &len, cursor, del_to);
+                            uint32_t as = 0u, ae = 0u;
+                            if (find_atomic_range(cursor, true, false, &as, &ae)) {
+                                del_from = as;
+                                del_to = ae;
+                            } else if (find_atomic_range(del_to, false, false, &as, &ae)) {
+                                del_to = ae;
+                            }
+                            if (del_to > del_from) {
+                                cursor = erase_text_range(buf, &len, del_from, del_to);
                                 anchor = cursor;
                                 record_edit(word_mod ? 0u : 3u);
                             }
@@ -4405,10 +4483,40 @@ static TextInputResult text_input_impl(const TextInputDesc& desc_in, const void*
     }
     if (!is_focused && ctx->active_ui->ime_focused_id==desc.id) ctx->active_ui->ime_focused_id=0;
     const bool composing = is_focused && !desc.read_only && !desc.password && ctx->active_ui->ime_comp_len > 0u;
-    if (is_focused && ws && ws->last_box_logical.w > 0.0f && !desc.read_only && !desc.password) {
+    Rect caret_rect = {};
+    if (is_focused && ws && ws->last_box_logical.w > 0.0f) {
         const TextInnerGeom pre_geom = compute_text_inner_geom(ctx, ws->last_box_logical, desc);
-        update_text_scroll_and_ime(
-            ctx, ws, desc, pre_geom, committed_slice, cursor, true, composing, nullptr, nullptr);
+        if (!desc.read_only && !desc.password) {
+            update_text_scroll_and_ime(
+                ctx, ws, desc, pre_geom, committed_slice, cursor, true, composing, nullptr, nullptr);
+            caret_rect = ctx->active_ui->ime_cursor_logical;
+        } else {
+            float cx = 0.0f, cy = 0.0f;
+            const float wrap_w = text_input_wrap_width(desc, pre_geom);
+            measure_text_content_and_ime(
+                ctx, desc, committed_slice, cursor, false,
+                nullptr, nullptr, nullptr, nullptr, nullptr, &cx, &cy, wrap_w,
+                (cold && wrap_w > 0.0f) ? cold->edit_wrap_affinity : false);
+            const float sx = cold ? cold->edit_scroll_x : 0.0f;
+            const float sy = cold ? cold->edit_scroll_y : 0.0f;
+            caret_rect = { pre_geom.origin_x + cx - sx, pre_geom.origin_y + cy - sy, 2.0f, pre_geom.line_h };
+        }
+    }
+    if (desc.multiline && desc.auto_grow) {
+        const float min_h = (std::isfinite(desc.min_height_px) && desc.min_height_px > 0.0f) ? desc.min_height_px : 36.0f;
+        const float max_h = (std::isfinite(desc.max_height_px) && desc.max_height_px >= min_h) ? desc.max_height_px : min_h;
+        float content_h = text_input_line_height_logical(ctx, desc);
+        float measure_wrap_w = active_wrap_w;
+        if (measure_wrap_w <= 0.0f && desc.word_wrap && desc.width.kind == SizingKind::Fixed && desc.width.value > 0.0f) {
+            const float inner_w = desc.width.value - desc.padding.left - desc.padding.right;
+            if (inner_w > 8.0f) measure_wrap_w = inner_w;
+        }
+        measure_text_content_and_ime(
+            ctx, desc, committed_slice, cursor, composing,
+            nullptr, &content_h, nullptr, nullptr, nullptr, nullptr, nullptr,
+            measure_wrap_w, (cold && measure_wrap_w > 0.0f) ? cold->edit_wrap_affinity : false);
+        const float wanted_h = clamp_range(content_h + desc.padding.top + desc.padding.bottom, min_h, max_h);
+        desc.height = Sizing::fixed(wanted_h);
     }
 
     TextInputExtra* ti_extra = ctx->frame_arena.alloc<TextInputExtra>();
@@ -4522,6 +4630,8 @@ static TextInputResult text_input_impl(const TextInputDesc& desc_in, const void*
         .selection_anchor_byte = anchor,
         .ime_cursor_rect = (is_focused && !desc.read_only && !desc.password) ? ctx->active_ui->ime_cursor_logical : Rect{},
         .ghost_accepted = ghost_accepted,
+        .caret_rect = caret_rect,
+        .pasted_image = pasted_image,
     };
 }
 
@@ -4907,6 +5017,32 @@ bool consume_key_pressed(uint32_t keycode, bool include_repeat) noexcept {
     return false;
 }
 
+uint32_t frame_key_count() noexcept {
+    const Context* ctx = current_context();
+    return (ctx && ctx->active_ui) ? ctx->active_ui->frame_key_count : 0u;
+}
+
+bool frame_key_at(uint32_t index, FrameKeyEvent* out_event) noexcept {
+    const Context* ctx = current_context();
+    if (!ctx || !ctx->active_ui || !out_event || index >= ctx->active_ui->frame_key_count) {
+        return false;
+    }
+    const KeyEventEntry& ev = ctx->active_ui->frame_keys[index];
+    *out_event = { ev.key, ev.mods, ev.repeat, ev.consumed };
+    return true;
+}
+
+bool consume_frame_key_at(uint32_t index) noexcept {
+    Context* ctx = current_context();
+    if (!ctx || !ctx->active_ui || index >= ctx->active_ui->frame_key_count) {
+        return false;
+    }
+    KeyEventEntry& ev = ctx->active_ui->frame_keys[index];
+    if (ev.consumed) return false;
+    ev.consumed = true;
+    return true;
+}
+
 bool shortcut(uint16_t required_mods, uint32_t keycode, bool allow_when_typing) noexcept {
     Context* ctx = current_context();
     if (!ctx || keycode == 0u) {
@@ -5250,6 +5386,52 @@ void set_scroll_offset(uint32_t element_id, Vec2 offset, bool stop_momentum) noe
             ws->scroll_vel = {};
         }
         request_redraw(ctx);
+    }
+}
+
+void scroll_into_view(uint32_t scroll_container_id, uint32_t item_id, float margin_px) noexcept {
+    Context* ctx = current_context();
+    if (!ctx || scroll_container_id == 0u || item_id == 0u || !std::isfinite(margin_px)) {
+        return;
+    }
+    const float m = (margin_px > 0.0f) ? margin_px : 0.0f;
+    const Rect cr = element_bounds(scroll_container_id);
+    const Rect ir = element_bounds(item_id);
+    if (cr.w <= 0.0f || cr.h <= 0.0f || ir.w <= 0.0f || ir.h <= 0.0f) {
+        return;
+    }
+    const WidgetState* ws = state_map_find(&ctx->active_ui->states, scroll_container_id);
+    if (!ws) {
+        return;
+    }
+    Vec2 next = ws->scroll_pos;
+    bool moved = false;
+    if (ws->scroll_max.y > 0.5f) {
+        const float top_lim = cr.y + m;
+        const float bot_lim = cr.y + cr.h - m;
+        if (ir.y < top_lim) {
+            next.y -= (top_lim - ir.y);
+            moved = true;
+        } else if (ir.y + ir.h > bot_lim) {
+            next.y += (ir.y + ir.h) - bot_lim;
+            moved = true;
+        }
+        next.y = clamp_range(next.y, 0.0f, ws->scroll_max.y);
+    }
+    if (ws->scroll_max.x > 0.5f) {
+        const float left_lim = cr.x + m;
+        const float right_lim = cr.x + cr.w - m;
+        if (ir.x < left_lim) {
+            next.x -= (left_lim - ir.x);
+            moved = true;
+        } else if (ir.x + ir.w > right_lim) {
+            next.x += (ir.x + ir.w) - right_lim;
+            moved = true;
+        }
+        next.x = clamp_range(next.x, 0.0f, ws->scroll_max.x);
+    }
+    if (moved) {
+        set_scroll_offset(scroll_container_id, next, true);
     }
 }
 

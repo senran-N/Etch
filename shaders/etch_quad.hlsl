@@ -76,7 +76,7 @@ VSOut vs_main(uint vertex_id : SV_VertexID, uint instance_id : SV_InstanceID)
     float pad = opaque_pass ? 0.0f : 1.0f;
     if (kind == ETCH_PRIM_SHADOW)
     {
-        pad = ((flags & ETCH_FLAG_LINEAR_GRAD) != 0u) ? 1.0f : (max(bw_soft.y, 1.0f) * 2.0f + 2.0f);
+        pad = ((flags & ETCH_FLAG_LINEAR_GRAD) != 0u) ? 1.0f : (max(bw_soft.y, 0.5f) * 2.0f + 2.0f);
     }
 
     static const float2 kCorners[6] = {
@@ -112,7 +112,7 @@ VSOut vs_main(uint vertex_id : SV_VertexID, uint instance_id : SV_InstanceID)
     float4 col1 = float4(0.0f, 0.0f, 0.0f, 0.0f);
     float2 grad_dir = float2(0.0f, 1.0f);
     uint grad_meta_x = 0u;
-    if (kind == ETCH_PRIM_SHADOW && (flags & ETCH_FLAG_LINEAR_GRAD) != 0u)
+    if (kind == ETCH_PRIM_SHADOW)
     {
         grad_dir = unpack_f16x2_custom(p.payload.x);
         bw_soft.x = unpack_f16x2_custom(p.payload.y).x;
@@ -283,23 +283,43 @@ float4 ps_main(VSOut input) : SV_Target0
     float4 out_pm = float4(0.0f, 0.0f, 0.0f, 0.0f);
     if (kind == ETCH_PRIM_SHADOW)
     {
-        float blur   = max(input.grad_params.w, 1.0f);
-        float sigma  = max(blur * 0.5f, 0.5f);
-        float inv_s2 = 1.0f / max(sigma * 1.41421356f, 0.5f);
+        float raw_blur = input.grad_params.w;
+        bool sharp     = raw_blur <= 0.001f;
+        float blur     = max(raw_blur, 1.0f);
+        float sigma    = max(blur * 0.5f, 0.5f);
+        float inv_s2   = 1.0f / max(sigma * 1.41421356f, 0.5f);
         bool continuous = (flags & ETCH_FLAG_ROUND_CAP) != 0u;
         if ((flags & ETCH_FLAG_LINEAR_GRAD) != 0u)
         {
             float shadow_cov = etch_eval_inset_shadow_cov(
-                p_local, half_size, input.radii, input.grad_params.xy, input.grad_params.z, inv_s2, continuous);
+                p_local, half_size, input.radii, input.grad_params.xy, input.grad_params.z, sharp ? -1.0f : inv_s2, continuous);
             out_pm = float4(input.color0.rgb, 1.0f) * (input.color0.a * shadow_cov);
         }
         else
         {
-            float d          = etch_sd_rounded_box(p_local, half_size, input.radii, continuous);
-            float edge_cov   = 0.5f * (1.0f - erf_approx(d * inv_s2));
-            float size_atten = erf_approx(half_size.x * inv_s2) * erf_approx(half_size.y * inv_s2);
-            float shadow_cov = saturate(edge_cov * size_atten);
-            out_pm           = float4(input.color0.rgb, 1.0f) * (input.color0.a * shadow_cov);
+            float d = etch_sd_rounded_box(p_local, half_size, input.radii, continuous);
+            float outer_cov;
+            if (sharp)
+            {
+                outer_cov = saturate(0.5f - d);
+            }
+            else
+            {
+                float edge_cov   = 0.5f * (1.0f - erf_approx(d * inv_s2));
+                float size_atten = erf_approx(half_size.x * inv_s2) * erf_approx(half_size.y * inv_s2);
+                outer_cov        = saturate(edge_cov * size_atten);
+            }
+            float spread = input.grad_params.z;
+            float2 box_half = max(half_size - spread, float2(0.0f, 0.0f));
+            float4 box_rad  = max(input.radii - spread, float4(0.0f, 0.0f, 0.0f, 0.0f));
+            float shadow_cov = outer_cov;
+            if (box_half.x > 0.0f && box_half.y > 0.0f)
+            {
+                float d_box   = etch_sd_rounded_box(p_local + input.grad_params.xy, box_half, box_rad, continuous);
+                float box_cov = saturate(0.5f - d_box);
+                shadow_cov = sharp ? max(outer_cov - box_cov, 0.0f) : (outer_cov * (1.0f - box_cov));
+            }
+            out_pm = float4(input.color0.rgb, 1.0f) * (input.color0.a * shadow_cov);
         }
     }
     else

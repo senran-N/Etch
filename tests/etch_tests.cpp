@@ -55,9 +55,12 @@ static bool arena_suite() noexcept {
     EtchArena ca = etch_arena_create(64);
     const bool ca_ok = ca.base && etch_arena_alloc_bytes(&ca, 16, 8) != nullptr;
     etch_arena_destroy(&ca);
-    Context* c=create_context({.max_prims_per_frame=64,.headless=true});if(!c)return false;
-    begin_frame(c,{.viewport_w=800,.viewport_h=500});for(uint32_t i=0;i<256;++i)box({.width=Sizing::fixed(1),.height=Sizing::fixed(1),.background=Color::white()});end_frame(c);
-    const bool elastic=frame_stats(c).prim_capacity>64;destroy_context(c);set_current_context(nullptr);return ok && reset && ca_ok && elastic;
+    Context* c=create_context({.frame_arena_bytes=64u*1024u,.max_prims_per_frame=64,.headless=true});if(!c)return false;
+    begin_frame(c,{.viewport_w=800,.viewport_h=500});for(uint32_t i=0;i<400;++i)box({.width=Sizing::fixed(1),.height=Sizing::fixed(1),.background=Color::white()});end_frame(c);
+    const bool grew_redraw=needs_redraw(c);
+    begin_frame(c,{.viewport_w=800,.viewport_h=500});for(uint32_t i=0;i<400;++i)box({.width=Sizing::fixed(1),.height=Sizing::fixed(1),.background=Color::white()});end_frame(c);
+    const bool elastic=frame_stats(c).prim_capacity>64 && frame_arena(c)->capacity>64u*1024u && frame_stats(c).arena_used_bytes>64u*1024u;
+    destroy_context(c);set_current_context(nullptr);return ok && reset && ca_ok && grew_redraw && elastic;
 }
 static bool unicode_suite() noexcept {
     Context* c=create_context({.headless=true});if(!c)return false;set_current_context(c);
@@ -612,7 +615,9 @@ static void ensure_test_video() noexcept {
 }
 static int finish_tests(int rc) noexcept {
     if (g_test_owns_video) {
+#if !defined(_WIN32)
         SDL_QuitSubSystem(SDL_INIT_VIDEO);
+#endif
         g_test_owns_video = false;
     }
     return rc;

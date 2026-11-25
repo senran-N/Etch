@@ -539,11 +539,11 @@ if (ETCH_BUILD_TESTS)
     endforeach()
 
     add_executable(etch_c_abi_tests tests/etch_c_abi_tests.c)
+    set_source_files_properties(tests/etch_c_abi_tests.c PROPERTIES OBJECT_DEPENDS "${_etch_common_dependencies}")
     set_target_properties(etch_c_abi_tests PROPERTIES
         C_STANDARD 99
         C_STANDARD_REQUIRED ON
         C_EXTENSIONS OFF
-        OBJECT_DEPENDS "${_etch_common_dependencies}"
     )
     if (CMAKE_C_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC" OR (NOT CMAKE_C_COMPILER_FRONTEND_VARIANT AND MSVC))
         target_compile_options(etch_c_abi_tests PRIVATE /W4 /WX /permissive- /utf-8)
@@ -566,8 +566,9 @@ if (ETCH_BUILD_TESTS)
     endif ()
     add_test(NAME c99_abi_smoke COMMAND etch_c_abi_tests)
 
-    set_tests_properties(arena_and_elasticity unicode_bidi_grapheme layout_clay_flex_grid fenwick_virtual_list_1m c99_abi_smoke
+    set_tests_properties(arena_and_elasticity unicode_bidi_grapheme layout_clay_flex_grid fenwick_virtual_list_1m
         PROPERTIES TIMEOUT 5)
+    set_tests_properties(c99_abi_smoke PROPERTIES TIMEOUT 20)
     add_test(NAME repo_guardrails COMMAND "${CMAKE_COMMAND}" "-DREPO_ROOT=${CMAKE_CURRENT_SOURCE_DIR}"
         -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/check_repo_guardrails.cmake")
     set_tests_properties(repo_guardrails PROPERTIES TIMEOUT 10)

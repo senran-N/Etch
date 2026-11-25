@@ -1217,7 +1217,11 @@ int run_headless(const char* out_png_path, const char* renderer) noexcept {
             etch::destroy_context(v13ctx);
             if (win_b) SDL_DestroyWindow(win_b);
             if (win_a) SDL_DestroyWindow(win_a);
+#if !defined(_WIN32)
             if (v13_owns_video) SDL_QuitSubSystem(SDL_INIT_VIDEO);
+#else
+            (void)v13_owns_video;
+#endif
             etch::set_current_context(ctx);
         }
     }

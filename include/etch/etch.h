@@ -382,13 +382,13 @@ struct Arena {
         const uintptr_t mask = static_cast<uintptr_t>(align - 1);
         const uintptr_t aligned_addr = (cur_addr + mask) & ~mask;
         const size_t pad = static_cast<size_t>(aligned_addr - cur_addr);
-        ETCH_ASSERT(pad <= capacity - offset && "etch::Arena out of memory during alignment");
         if (pad > capacity - offset) {
+            peak_offset = capacity;
             return nullptr;
         }
         const size_t aligned_offset = offset + pad;
-        ETCH_ASSERT(size <= capacity - aligned_offset && "etch::Arena out of memory");
         if (size > capacity - aligned_offset) {
+            peak_offset = capacity;
             return nullptr;
         }
         offset = aligned_offset + size;
@@ -689,7 +689,12 @@ struct alignas(16) Prim {
         return Prim{
             .bounds = {rect.x + offset.x - spread, rect.y + offset.y - spread, rect.w + 2 * spread, rect.h + 2 * spread},
             .clip = {clip_rect.x, clip_rect.y, clip_rect.x + clip_rect.w, clip_rect.y + clip_rect.h},
-            .payload = {0u, 0u, pack_f16x2(radius.tl, radius.tr), pack_f16x2(radius.br, radius.bl)},
+            .payload = {
+                pack_f16x2(offset.x, offset.y),
+                pack_f16x2(spread, 0.0f),
+                pack_f16x2(radius.tl, radius.tr),
+                pack_f16x2(radius.br, radius.bl),
+            },
             .style = {
                 pack_header(PrimKind::Shadow, flags, 0, clip_radius),
                 shadow_color.pack_rgba8(),
@@ -1400,6 +1405,10 @@ float stagger_delay(uint32_t index, float step_sec = 0.04f, float max_delay_sec 
 // Zero pauses animation time; reduced-motion preference settles springs immediately.
 void set_time_scale(Context* ctx, float scale) noexcept;
 
+// Global UI zoom multiplier [0.5 .. 3.0] applied atop display DPI (e.g. Ctrl+ / Ctrl-).
+void set_ui_zoom(Context* ctx, float zoom) noexcept;
+float ui_zoom(const Context* ctx = nullptr) noexcept;
+
 using TextureHandle = SDL_GPUTexture*;
 
 enum class BlendMode : uint8_t {
@@ -2055,8 +2064,16 @@ bool text_buffer_set_diagnostics(TextBuffer*, uint64_t expected_revision,
                                  std::span<const TextDiagnostic> diagnostics) noexcept;
 void text_buffer_clear_diagnostics(TextBuffer*) noexcept;
 struct TextSearchMatch { uint32_t byte_start = 0u, byte_end = 0u; };
+struct TextSearchOptions {
+    bool case_sensitive = false;
+    bool whole_word = false;
+    bool regex = false;
+};
 bool text_buffer_find(const TextBuffer* buf, Str needle, uint32_t start_byte, bool case_sensitive, bool whole_word, TextSearchMatch* out_match) noexcept;
 uint32_t text_buffer_find_all(const TextBuffer* buf, Str needle, bool case_sensitive, bool whole_word, TextSearchMatch* out_matches, uint32_t max_matches) noexcept;
+bool text_buffer_find_ex(const TextBuffer* buf, Str pattern, uint32_t start_byte, const TextSearchOptions& opts, TextSearchMatch* out_match) noexcept;
+uint32_t text_buffer_find_all_ex(const TextBuffer* buf, Str pattern, const TextSearchOptions& opts, TextSearchMatch* out_matches, uint32_t max_matches) noexcept;
+uint32_t text_buffer_replace_all(TextBuffer* buf, Str pattern, Str replacement, const TextSearchOptions& opts) noexcept;
 bool text_buffer_undo(TextBuffer*, uint32_t* out_cursor = nullptr, uint32_t* out_anchor = nullptr) noexcept;
 bool text_buffer_redo(TextBuffer*, uint32_t* out_cursor = nullptr, uint32_t* out_anchor = nullptr) noexcept;
 void text_buffer_clear_undo(TextBuffer*) noexcept;
@@ -2065,11 +2082,16 @@ struct SyntaxToken {
 };
 using SyntaxTokenizeFn = uint32_t (*)(uint32_t, Str, SyntaxToken*, uint32_t, void*) noexcept;
 uint32_t tokenize_cpp_hlsl(uint32_t, Str, SyntaxToken*, uint32_t, void*) noexcept;
+uint32_t tokenize_language(Str language, uint32_t line_index, Str line, SyntaxToken* out_tokens, uint32_t max_tokens) noexcept;
+uint32_t tokenize_language_stateful(Str language, Str line, uint8_t in_state, uint8_t* out_state, SyntaxToken* out_tokens, uint32_t max_tokens) noexcept;
 struct CodeLineDecoration {
     Color row_bg = {};
     Color gutter_bar_color = {};
     Str gutter_tag = {};
     Color gutter_tag_color = Color::theme_auto();
+    bool has_display_line_number = false;
+    uint32_t display_line_number = 0u;
+    bool hide_line_number = false;
 };
 using CodeLineDecorateFn = bool (*)(uint32_t line_index, CodeLineDecoration* out_dec, void* user_data) noexcept;
 struct CodeEditorDesc {
@@ -2091,6 +2113,15 @@ struct CodeEditorDesc {
     CodeLineDecorateFn line_decorator = nullptr;
     void* line_decorator_user_data = nullptr;
     float gutter_tag_width_px = 0;
+    bool auto_height = false;          // Expand height to full document + view zones and bubble wheel scroll
+    bool show_overview_ruler = false;  // Render overview markers & diagnostics along scrollbar track
+    bool show_sticky_header = false;   // Pin sticky_header_text at top while scrolled
+    Str sticky_header_text = {};
+    Str language = {};                 // Built-in multi-language syntax tokenizer when tokenizer is default/null
+    bool highlight_matching_brackets = true;
+    bool show_indent_guides = true;
+    bool show_diagnostic_tooltips = true;
+    bool show_minimap = false;         // Render right-hand miniature code overview with draggable viewport thumb
 };
 struct CodeEditorResult {
     bool changed = false, focused = false, composing = false;
@@ -2098,10 +2129,43 @@ struct CodeEditorResult {
     uint32_t first_visible_line = 0, end_visible_line = 0, total_lines = 0;
     Rect ime_cursor_rect = {};
     int32_t hovered_line = -1, clicked_gutter_line = -1;
+    int32_t gutter_drag_start_line = -1, gutter_drag_end_line = -1;
+    bool gutter_dragging = false;
+};
+struct CodeViewZone {
+    uint32_t zone_id = 0u;
+    uint32_t after_line = 0u;
+    float height_px = 0.0f;
+    bool above_line = false;
+    Color fill_color = {};
+};
+struct CodeInlayHint {
+    uint32_t line_index = 0u;
+    uint32_t col_byte = UINT32_MAX; // UINT32_MAX = append after line end
+    Str text = {};
+    Color color = Color::theme_auto();
+    Color background = {};
+    Color border_color = {};
+    float radius_px = 4.0f;
+};
+struct CodeInlineHighlight {
+    uint32_t line_index = 0u;
+    uint32_t start_col_byte = 0u;
+    uint32_t end_col_byte = 0u;
+    Color background = {};
+    Color border_color = {};
+    float radius_px = 3.0f;
+};
+struct CodeOverviewMarker {
+    uint32_t line_index = 0u;
+    Color color = {};
+    uint8_t lane = 0u; // 0 = full track, 1 = left half, 2 = right half
 };
 CodeEditorResult code_editor(const CodeEditorDesc&) noexcept;
 void code_editor_set_cursor(uint32_t, uint32_t anchor_byte, uint32_t cursor_byte, bool scroll_into_view = true) noexcept;
 void code_editor_scroll_to_line(uint32_t, uint32_t, AlignY align = AlignY::Center) noexcept;
+Vec2 code_editor_scroll_offset(uint32_t editor_id) noexcept;
+void code_editor_set_scroll_offset(uint32_t editor_id, Vec2 offset, bool stop_momentum = true) noexcept;
 void code_editor_set_inline_completion(uint32_t editor_id, Str ghost_text) noexcept;
 bool code_editor_completion_accepted(uint32_t editor_id) noexcept;
 bool code_editor_completion_dismissed(uint32_t editor_id) noexcept;
@@ -2111,6 +2175,17 @@ bool code_editor_is_line_folded(uint32_t editor_id, uint32_t line) noexcept;
 bool code_editor_add_cursor(uint32_t editor_id, uint32_t byte_offset) noexcept;
 void code_editor_clear_extra_cursors(uint32_t editor_id) noexcept;
 uint32_t code_editor_cursor_count(uint32_t editor_id) noexcept;
+bool code_editor_set_view_zones(uint32_t editor_id, std::span<const CodeViewZone> zones) noexcept;
+void code_editor_clear_view_zones(uint32_t editor_id) noexcept;
+bool code_editor_get_view_zone_bounds(uint32_t editor_id, uint32_t zone_id, Rect* out_bounds, Rect* out_viewport_clip = nullptr) noexcept;
+bool code_editor_begin_view_zone(uint32_t editor_id, uint32_t zone_id) noexcept;
+void code_editor_end_view_zone() noexcept;
+bool code_editor_set_inlay_hints(uint32_t editor_id, std::span<const CodeInlayHint> hints) noexcept;
+void code_editor_clear_inlay_hints(uint32_t editor_id) noexcept;
+bool code_editor_set_inline_highlights(uint32_t editor_id, std::span<const CodeInlineHighlight> highlights) noexcept;
+void code_editor_clear_inline_highlights(uint32_t editor_id) noexcept;
+bool code_editor_set_overview_markers(uint32_t editor_id, std::span<const CodeOverviewMarker> markers) noexcept;
+void code_editor_clear_overview_markers(uint32_t editor_id) noexcept;
 
 struct TextInputHighlight {
     uint32_t byte_offset = 0;
@@ -2119,6 +2194,7 @@ struct TextInputHighlight {
     Color background = {};
     Color border_color = {};
     float radius_px = 4.0f;
+    bool atomic = false; // Treat range as an indivisible mention/chip for navigation and Backspace/Delete
 };
 
 struct TextInputDesc {
@@ -2162,6 +2238,9 @@ struct TextInputDesc {
     Color leading_icon_color = Color::theme_auto();
     bool continuous_corners = true;
     bool disabled = false;
+    bool auto_grow = false;
+    float min_height_px = 36.0f;
+    float max_height_px = 200.0f;
 };
 
 struct TextInputResult {
@@ -2174,6 +2253,8 @@ struct TextInputResult {
     uint32_t selection_anchor_byte = 0;
     Rect ime_cursor_rect = {};
     bool ghost_accepted = false;
+    Rect caret_rect = {};
+    bool pasted_image = false;
 };
 
 // Standard desktop controls. Mutable values remain caller-owned.
@@ -2198,6 +2279,10 @@ struct ToggleSwitchDesc {
     Color off_color = Color::theme_auto();
     Color thumb_color = Color::theme_auto();
     Color border_color = Color::theme_auto();
+    Corners track_radius = Corners::theme_auto();
+    Corners thumb_radius = Corners::theme_auto();
+    float thumb_padding_px = 2.0f;
+    float border_width = 1.0f;
 };
 struct ProgressBarDesc {
     uint32_t id = 0; float fraction = 0; Str overlay_text = {};
@@ -2354,6 +2439,7 @@ enum class DockZone : uint8_t { None = 0, Center = 1, Left = 2, Right = 3, Top =
 struct DockPaneDesc {
     uint32_t id = 0; Str title = {}; uint16_t icon_id = kInvalidIcon;
     bool closable = false; bool default_open = true;
+    bool pinned = false; bool dirty = false; Color badge_color = {};
 };
 struct DockSpaceDesc {
     uint32_t id = 0;
@@ -2396,6 +2482,12 @@ uint32_t dock_save_layout_json(uint32_t dock_id, char* out_buf, uint32_t cap) no
 bool dock_load_layout_json(uint32_t dock_id, Str json) noexcept;
 uint32_t dock_redock_window_panes(SDL_Window* closing_window, uint32_t src_dock_id, uint32_t dst_dock_id,
     uint32_t target_pane_id, DockZone zone, SDL_Window* dst_window = nullptr) noexcept;
+void dock_set_pane_pinned(uint32_t dock_id, uint32_t pane_id, bool pinned) noexcept;
+bool dock_is_pane_pinned(uint32_t dock_id, uint32_t pane_id) noexcept;
+void dock_set_pane_dirty(uint32_t dock_id, uint32_t pane_id, bool dirty) noexcept;
+void dock_set_pane_badge(uint32_t dock_id, uint32_t pane_id, Color badge_color) noexcept;
+bool dock_pane_right_clicked(uint32_t dock_id, uint32_t pane_id) noexcept;
+uint32_t dock_focused_leaf(uint32_t dock_id) noexcept;
 
 inline constexpr uint32_t kMaxTableColumns = 16u;
 enum class TableColumnSizing : uint8_t { Fixed = 0, Stretch = 1 };
@@ -2840,12 +2932,32 @@ void destroy_shader_surface(Context*, ShaderSurfaceId) noexcept;
 SDL_GPUTexture* eval_shader_surface(Context*, ShaderSurfaceId, const ShaderSurfaceEvalDesc&) noexcept;
 
 enum class TerminalColorMode : uint8_t { Default, Ansi16, Ansi256, TrueColor };
+enum class TerminalUnderlineStyle : uint8_t { None = 0, Single = 1, Double = 2, Curly = 3, Dotted = 4 };
+enum class TerminalCursorShape : uint8_t { Underline = 0, Block = 1, Bar = 2, Hollow = 3 };
 struct TerminalColor { TerminalColorMode mode = TerminalColorMode::Default; uint32_t value = 0; }; // TrueColor: 0xRRGGBB
 struct TerminalCell {
     uint32_t codepoint = ' ';
     TerminalColor foreground = {}, background = {};
     uint8_t width = 1; // 2 for a wide leading cell, 0 for its continuation.
     bool bold = false, underline = false, inverse = false;
+    bool italic = false, dim = false, strikethrough = false;
+    TerminalUnderlineStyle underline_style = TerminalUnderlineStyle::None;
+    TerminalColor underline_color = {};
+    uint32_t hyperlink_id = 0u;
+    const char* grapheme_utf8 = nullptr; // Optional multi-codepoint cluster (ZWJ emoji / VS16 / combining marks)
+    uint16_t grapheme_len = 0u;
+};
+struct TerminalInlineImage {
+    uint32_t col = 0u, row = 0u, cols = 1u, rows = 1u;
+    SDL_GPUTexture* texture = nullptr;
+    Vec2 uv_min = {0.0f, 0.0f};
+    Vec2 uv_max = {1.0f, 1.0f};
+};
+struct TerminalSearchMatch {
+    uint32_t row = 0u;
+    uint32_t start_col = 0u;
+    uint32_t end_col = 0u; // exclusive column index
+    bool active = false;
 };
 struct TerminalGridDesc {
     uint32_t id = 0;
@@ -2857,8 +2969,58 @@ struct TerminalGridDesc {
     int32_t cursor_column = -1, cursor_row = -1;
     Color cursor_color = Color::theme_auto();
     SpringSpec cursor_motion = SpringSpec::snappy();
+    TerminalCursorShape cursor_shape = TerminalCursorShape::Underline;
+    bool cursor_visible = true;
+    bool focusable = false;
+    bool auto_fit_container = false;
+    uint16_t font_italic_id = kFontItalic;
+    int32_t selection_start_col = -1, selection_start_row = -1;
+    int32_t selection_end_col = -1, selection_end_row = -1;
+    bool selection_block = false;
+    Color selection_color = Color::theme_auto();
+    uint32_t hovered_hyperlink_id = 0u;
+    std::span<const TerminalInlineImage> inline_images = {};
+    std::span<const TerminalSearchMatch> search_matches = {};
+    Color search_match_color = Color::theme_auto();
+    Color search_active_color = Color::theme_auto();
+    bool interactive_selection = false; // Built-in mouse drag, double-click word, triple-click line selection
+    std::span<const Color> ansi_palette = {}; // Optional 16-entry custom ANSI color palette
+    bool capture_keyboard_input = false; // Forward focused key/IME/paste input in TerminalGridResult
+    bool bracketed_paste = false;        // Wrap pasted_text in ESC[200~ ... ESC[201~
+    bool mouse_reporting = false;        // Report pointer button & cell motion events for PTY SGR 1006
+};
+struct TerminalGridResult {
+    bool focused = false;
+    bool hovered = false;
+    bool clicked = false;
+    bool right_clicked = false;
+    int32_t hovered_col = -1, hovered_row = -1;
+    int32_t clicked_col = -1, clicked_row = -1;
+    uint32_t hovered_hyperlink_id = 0u;
+    uint32_t clicked_hyperlink_id = 0u;
+    uint32_t visible_columns = 0u, visible_rows = 0u;
+    Rect ime_cursor_rect = {};
+    bool has_selection = false;
+    int32_t sel_start_col = -1, sel_start_row = -1;
+    int32_t sel_end_col = -1, sel_end_row = -1;
+    bool selection_changed = false;
+    float wheel_delta_y = 0.0f;
+    Str typed_text = {};
+    uint32_t key_pressed = 0u;
+    uint16_t key_mods = 0u;
+    bool key_repeat = false;
+    Str pasted_text = {};
+    bool mouse_moved = false;
+    bool mouse_down = false;
+    bool mouse_released = false;
+    uint8_t mouse_button = 0u; // 0=none, 1=left, 2=middle, 3=right
+    Str hovered_url = {};      // Auto-detected http(s):// URL under hovered cell
+    Str clicked_url = {};      // Auto-detected http(s):// URL clicked this frame
 };
 void terminal_grid(const TerminalGridDesc&) noexcept;
+TerminalGridResult terminal_grid_ex(const TerminalGridDesc&) noexcept;
+uint32_t terminal_encode_key(uint32_t keycode, uint16_t mods, bool app_cursor, char* out_buf, uint32_t cap) noexcept;
+uint32_t terminal_encode_mouse_sgr(uint8_t button, int32_t col, int32_t row, uint16_t mods, bool pressed, bool motion, char* out_buf, uint32_t cap) noexcept;
 
 enum class SheetEdge : uint8_t { Bottom, Left, Right };
 struct SheetDesc {
@@ -3016,6 +3178,49 @@ bool open_file_dialog(Context* ctx, SDL_Window* parent_window = nullptr, std::sp
 bool open_save_file_dialog(Context* ctx, SDL_Window* parent_window = nullptr, std::span<const FileDialogFilter> filters = {}, const char* default_location = nullptr, uint32_t request_tag = 0) noexcept;
 FileDialogResult poll_file_dialog(Context* ctx = nullptr, Arena* arena = nullptr) noexcept;
 
+// Desktop OS integration: external URLs, window attention/progress, notifications & system tray
+enum class WindowFlashKind : uint8_t { Cancel = 0, Brief = 1, UntilFocused = 2 };
+enum class WindowProgressState : uint8_t { None = 0, Indeterminate = 1, Normal = 2, Paused = 3, Error = 4 };
+struct DesktopNotificationDesc {
+    Str title = {};
+    Str body = {};
+    uint32_t tag = 0u;
+    bool silent = false;
+};
+struct TrayItemDesc {
+    uint32_t id = 0u;
+    Str label = {};
+    bool checked = false;
+    bool checkbox = false;
+    bool disabled = false;
+    bool separator = false;
+    std::span<const TrayItemDesc> submenu = {};
+};
+struct MenuBarItemDesc {
+    uint32_t id = 0u;
+    Str label = {};
+    Str shortcut = {};
+    bool separator = false;
+    bool disabled = false;
+    bool checked = false;
+    std::span<const MenuBarItemDesc> children = {};
+};
+struct Tray;
+bool open_url(Str url) noexcept;
+bool flash_window(SDL_Window* window, WindowFlashKind kind = WindowFlashKind::Brief) noexcept;
+bool set_window_progress(SDL_Window* window, WindowProgressState state, float value_0_to_1 = 0.0f) noexcept;
+bool system_beep() noexcept;
+bool notify_desktop(Context* ctx, const DesktopNotificationDesc& desc) noexcept;
+uint32_t desktop_notification_count(const Context* ctx = nullptr) noexcept;
+Tray* create_tray(Context* ctx, Str tooltip) noexcept;
+void destroy_tray(Tray* tray) noexcept;
+bool tray_set_tooltip(Tray* tray, Str tooltip) noexcept;
+bool tray_set_icon_rgba(Tray* tray, const uint8_t* rgba_pixels, uint32_t width, uint32_t height) noexcept;
+bool tray_set_menu(Tray* tray, std::span<const TrayItemDesc> items) noexcept;
+uint32_t tray_poll_clicked_item(Tray* tray) noexcept;
+bool set_native_menu_bar(Context* ctx, SDL_Window* window, std::span<const MenuBarItemDesc> menus) noexcept;
+uint32_t poll_native_menu_item(Context* ctx = nullptr) noexcept;
+
 // Interaction, pointer capture, focus navigation, cursor & layout queries
 bool hovered(uint32_t element_id) noexcept;
 uint32_t topmost_hovered_id() noexcept;
@@ -3049,9 +3254,18 @@ bool screen_to_element_local(uint32_t element_id, Vec2 screen_pos, Vec2* out_loc
 
 
 // Pro desktop input, shortcuts, popover dismissal & file drops
+struct FrameKeyEvent {
+    uint32_t keycode = 0u;
+    uint16_t mods = 0u;
+    bool repeat = false;
+    bool consumed = false;
+};
 uint16_t key_mods() noexcept;
 bool key_pressed(uint32_t keycode, bool include_repeat = false) noexcept;
 bool consume_key_pressed(uint32_t keycode, bool include_repeat = false) noexcept;
+uint32_t frame_key_count() noexcept;
+bool frame_key_at(uint32_t index, FrameKeyEvent* out_event) noexcept;
+bool consume_frame_key_at(uint32_t index) noexcept;
 bool shortcut(uint16_t required_mods, uint32_t keycode, bool allow_when_typing = false) noexcept;
 bool consume_shortcut(uint16_t required_mods, uint32_t keycode, bool allow_when_typing = false) noexcept;
 
@@ -3122,6 +3336,16 @@ uint32_t recent_command_count(const Context* ctx) noexcept;
 uint32_t recent_command_at(const Context* ctx, uint32_t index) noexcept;
 uint32_t command_count(const Context* ctx) noexcept;
 bool get_command(const Context* ctx, uint32_t index, CommandDesc* out_desc) noexcept;
+void push_command_scope(uint32_t scope_id) noexcept;
+void pop_command_scope() noexcept;
+bool push_focus_restore_point(Context* ctx = nullptr) noexcept;
+uint32_t pop_focus_restore_point(Context* ctx = nullptr) noexcept;
+struct FuzzyMatchResult {
+    bool matched = false;
+    int32_t score = 0;
+    uint32_t match_count = 0u;
+};
+FuzzyMatchResult fuzzy_match(Str pattern, Str candidate, uint32_t* out_positions = nullptr, uint32_t max_positions = 0u) noexcept;
 
 // Pixel-free semantic UI automation, deterministic clock scaling, and input recording
 struct AutomationQuery {
@@ -3163,6 +3387,7 @@ Vec2 scroll_delta() noexcept;
 Vec2 scroll_max(uint32_t element_id) noexcept;
 Vec2 scroll_offset(uint32_t element_id) noexcept;
 void set_scroll_offset(uint32_t element_id, Vec2 offset, bool stop_momentum = true) noexcept;
+void scroll_into_view(uint32_t scroll_container_id, uint32_t item_id, float margin_px = 6.0f) noexcept;
 bool scroll_stuck_to_bottom(uint32_t element_id) noexcept;
 void set_scroll_stuck_to_bottom(uint32_t element_id, bool stuck) noexcept;
 

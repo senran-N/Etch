@@ -309,6 +309,8 @@ bool toggle_switch(const ToggleSwitchDesc& d) noexcept {
     const Color thumb_c = d.disabled ? Color::lerp_oklab(thumb_base, thm.surface_disabled, 0.35f) : thumb_base;
     const Color off_border = resolve_theme_color(d.border_color, thm.border_subtle);
     const Corners pill = Corners::all(thm.radius_pill_px);
+    const Corners track_rad = resolve_theme_corners(d.track_radius, pill);
+    const Corners thumb_rad = resolve_theme_corners(d.thumb_radius, pill);
     const bool change = desktop_activate(d.id, d.disabled);
     if (change) *d.value = !*d.value;
     const float t = clamp_range(spring(id_index(d.id, 0x2301u), *d.value ? 1.0f : 0.0f, SpringSpec::snappy()), 0.0f, 1.0f);
@@ -322,10 +324,12 @@ bool toggle_switch(const ToggleSwitchDesc& d) noexcept {
     }
     Color track_border = off_border;
     track_border.a = static_cast<uint8_t>(std::round(static_cast<float>(off_border.a) * (1.0f - t)));
-    const float track_bw = (track_border.a > 0u) ? 1.0f : 0.0f;
+    const float bw_in = (std::isfinite(d.border_width) && d.border_width >= 0.0f) ? d.border_width : 1.0f;
+    const float track_bw = (track_border.a > 0u) ? bw_in : 0.0f;
 
-    const float pad = 2.0f;
-    const float thumb_d = d.track_height_px - 2.0f * pad;
+    const float pad_in = (std::isfinite(d.thumb_padding_px) && d.thumb_padding_px >= 0.0f) ? d.thumb_padding_px : 2.0f;
+    const float pad = std::fmin(pad_in, d.track_height_px * 0.4f);
+    const float thumb_d = std::fmax(2.0f, d.track_height_px - 2.0f * pad);
     const float max_stretch = std::fmin(2.5f, (d.track_width_px - d.track_height_px) * 0.25f);
     const float stretch = press_t * max_stretch;
     const float thumb_w = thumb_d + stretch;
@@ -336,9 +340,9 @@ bool toggle_switch(const ToggleSwitchDesc& d) noexcept {
 
     begin_box({.id=d.id,.height=Sizing::fixed(has_label ? (d.track_height_px + 8.0f) : d.track_height_px),.gap=has_label ? 8.0f : 0.0f,.align_y=AlignY::Center,.focusable=!d.disabled});
     a11y_semantic(d.id,A11yRole::Switch,d.label,(d.disabled?A11yState_Disabled:0u)|(*d.value?A11yState_Checked:0u),3u);
-    begin_box({.width=Sizing::fixed(d.track_width_px),.height=Sizing::fixed(d.track_height_px),.background=track_bg,.border_color=track_border,.border_width=track_bw,.radius=pill});
-    draw_shadow_internal(thumb_rect, pill, sh_col, 6.0f, Vec2{0.0f, 1.5f});
-    draw_rect({.rect=thumb_rect,.fill=thumb_c,.radius=pill});
+    begin_box({.width=Sizing::fixed(d.track_width_px),.height=Sizing::fixed(d.track_height_px),.background=track_bg,.border_color=track_border,.border_width=track_bw,.radius=track_rad});
+    draw_shadow_internal(thumb_rect, thumb_rad, sh_col, 6.0f, Vec2{0.0f, 1.5f});
+    draw_rect({.rect=thumb_rect,.fill=thumb_c,.radius=thumb_rad});
     end_box();
     if (has_label) desktop_label(d.label,d.font_size_px,d.font_id,d.disabled ? thm.text_disabled : thm.text_primary);
     end_box();

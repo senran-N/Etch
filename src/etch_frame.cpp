@@ -684,11 +684,9 @@ void end_frame(Context* ctx_arg) noexcept {
                 const bool any_clip = d.clip_children || is_scroll || d.shrink_width || d.shrink_height;
 
                 if ((d.scroll_x || d.scroll_y || extra->is_virtual_list) && d.show_scrollbar && d.id != 0u) {
-                    // Retain the container's geometry and ancestor masks, excluding its content fade.
-                    const ClipEntry& parent_clip=clip_stack.depth>1u ? clip_stack.entries[clip_stack.depth-2u] : cur_clip;
-                    const bool has_fade = d.scroll_fade_px > 0 || d.edge_fade.left > 0 || d.edge_fade.right > 0 || d.edge_fade.top > 0 || d.edge_fade.bottom > 0;
-                    const ClipEntry scrollbar_clip = has_fade
-                        ? make_box_clip(ctx,parent_clip,box_px,scale_corners(d.radius,dpi),d.continuous_corners) : cur_clip;
+                    // ScissorEnd already popped this container's own clip; cur_clip is the parent clip.
+                    // Clip the scrollbar to this container's geometry & ancestor masks, excluding content fade.
+                    const ClipEntry scrollbar_clip = make_box_clip(ctx, cur_clip, box_px, scale_corners(d.radius, dpi), d.continuous_corners);
                     ctx->render_clip_index=scrollbar_clip.indexed ? scrollbar_clip.shape : 0;
                     ctx->render_clip_shape=scrollbar_clip.shape;
                     if (const WidgetState* ws = state_map_find(&ctx->active_ui->states, d.id)) {
@@ -701,41 +699,38 @@ void end_frame(Context* ctx_arg) noexcept {
                                 extra->scrollbar_thumb_hover, extra->scrollbar_thumb_drag, dpi);
                         }
                     }
+                    ctx->render_clip_index = cur_clip.indexed ? cur_clip.shape : 0;
+                    ctx->render_clip_shape = cur_clip.shape;
                 }
 
                 if(d.border_beam.color.a>0 || d.border_beam.base_color.a>0 || d.top_rim_alpha>0) {
-                    const ClipEntry& parent=any_clip && clip_stack.depth>1u ? clip_stack.entries[clip_stack.depth-2u] : cur_clip;
-                    ctx->render_clip_index=parent.indexed ? parent.shape : 0;
-                    ctx->render_clip_shape=parent.shape;
-                    emit_border_beam(ctx,box_px,parent,scale_corners(d.radius,dpi),d.border_beam,d.top_rim_alpha,d.continuous_corners,dpi);
+                    // ScissorEnd already ran before Border, so cur_clip is the parent container clip.
+                    ctx->render_clip_index=cur_clip.indexed ? cur_clip.shape : 0;
+                    ctx->render_clip_shape=cur_clip.shape;
+                    emit_border_beam(ctx,box_px,cur_clip,scale_corners(d.radius,dpi),d.border_beam,d.top_rim_alpha,d.continuous_corners,dpi);
                 }
                 if (has_segmented_border(d) && d.border_color.a > 0u &&
                     (d.border_width > 0.0f || has_border_sides(d))) {
-                    const ClipEntry& parent = any_clip && clip_stack.depth > 1u && clip_stack.overflow == 0u
-                        ? clip_stack.entries[clip_stack.depth - 2u] : cur_clip;
-                    if (any_clip && ctx->render_clip_depth > 1u) --ctx->render_clip_depth;
-                    emit_segmented_border(ctx, d, box_px, parent, dpi);
+                    ctx->render_clip_index = cur_clip.indexed ? cur_clip.shape : 0;
+                    ctx->render_clip_shape = cur_clip.shape;
+                    emit_segmented_border(ctx, d, box_px, cur_clip, dpi);
                 } else if (any_clip && d.border_width > 0.0f && d.border_color.a > 0u) {
-                    // Clip against parent container (below our own SCISSOR_START) so border AA edge isn't halved.
-                    const ClipEntry& parent_clip = (clip_stack.depth > 1u && clip_stack.overflow == 0u)
-                        ? clip_stack.entries[clip_stack.depth - 2u]
-                        : (clip_stack.overflow > 0u ? cur_clip : clip_stack.entries[0]);
-                    ctx->render_clip_index=parent_clip.indexed ? parent_clip.shape : 0;
-                    ctx->render_clip_shape=parent_clip.shape;
-                    if (ctx->render_clip_depth > 1u) --ctx->render_clip_depth;
+                    // ScissorEnd already popped our own clip; clip border against parent (cur_clip) so AA edge isn't halved.
+                    ctx->render_clip_index=cur_clip.indexed ? cur_clip.shape : 0;
+                    ctx->render_clip_shape=cur_clip.shape;
                     Rect border_bounds=box_px;Corners border_corners=scale_corners(d.radius,dpi);
                     align_border_bounds(&border_bounds,&border_corners,d.border_width*dpi,d.border_align);
                     push_prim(
                         ctx,
                         continuous_prim(Prim::make_rect(
                             border_bounds,
-                            parent_clip.rect,
+                            cur_clip.rect,
                             Color::transparent(),
                             border_corners,
                             d.border_color,
                             d.border_width * dpi,
                             1.0f,
-                            parent_clip.radius), d.continuous_corners),
+                            cur_clip.radius), d.continuous_corners),
                         nullptr,
                         2.0f,
                         nullptr,
@@ -996,12 +991,26 @@ void end_frame(Context* ctx_arg) noexcept {
                 if (r.w <= 0.0f || r.h <= 0.0f) {
                     continue;
                 }
+                // A passive, non-floating ancestor layout container (e.g. root shell or panel with an id
+                // for bounds lookup) that encloses a drag region should not swallow caption dragging.
+                const LayoutNode* node = layout_engine_find_cur_node(ctx->active_ui->layout, ws.key);
+                const bool passive_container = node && node->child_count > 0u && !ws.is_focusable &&
+                    node->cfg.attach_to == AttachTo::None && node->cfg.z_index == 0 &&
+                    node->cfg.hitbox_behavior != HitboxBehavior::BlockMouse;
                 bool hits_drag = false;
                 for (uint32_t d = 0u; d < ctx->active_ui->chrome_drag_count; ++d) {
-                    if (ctx->active_ui->chrome_drag_rects[d].intersects(r)) {
-                        hits_drag = true;
-                        break;
+                    const Rect& dr = ctx->active_ui->chrome_drag_rects[d];
+                    if (!dr.intersects(r)) {
+                        continue;
                     }
+                    if (passive_container &&
+                        r.x <= dr.x + 0.5f && r.y <= dr.y + 0.5f &&
+                        (r.x + r.w) >= (dr.x + dr.w) - 0.5f &&
+                        (r.y + r.h) >= (dr.y + dr.h) - 0.5f) {
+                        continue;
+                    }
+                    hits_drag = true;
+                    break;
                 }
                 if (hits_drag) {
                     ctx->active_ui->chrome_client_rects[chrome_client_n++] = r;
@@ -1122,6 +1131,12 @@ void end_frame(Context* ctx_arg) noexcept {
             dpi);
     }
 
+    if (ctx->frame_arena.capacity > 0u &&
+        ctx->frame_arena.capacity < (32u * 1024u * 1024u) &&
+        ctx->frame_arena.peak_offset >= (ctx->frame_arena.capacity * 7u) / 8u)
+    {
+        request_redraw(ctx);
+    }
     const bool idle_now = !needs_redraw(ctx);
     if (ctx->active_ui->debug_hud_open) {
         const float vp_w = static_cast<float>(ctx->active_ui->viewport_w) / dpi;
@@ -1447,6 +1462,22 @@ void apply_system_preferences(Context* ctx, bool auto_theme, bool auto_text_scal
 float active_text_scale(const Context* ctx) noexcept {
     const Context* c = ctx ? ctx : current_context();
     return c ? c->effective_text_scale : 1.0f;
+}
+
+void set_ui_zoom(Context* ctx, float zoom) noexcept {
+    Context* c = ctx ? ctx : current_context();
+    if (!c || !std::isfinite(zoom)) return;
+    const float next = clamp_range(zoom, 0.5f, 3.0f);
+    if (std::fabs(c->ui_zoom - next) > 1e-4f) {
+        c->ui_zoom = next;
+        invalidate_cached_subtree(0u, c);
+        request_redraw(c);
+    }
+}
+
+float ui_zoom(const Context* ctx) noexcept {
+    const Context* c = ctx ? ctx : current_context();
+    return (c && c->ui_zoom > 0.0f) ? c->ui_zoom : 1.0f;
 }
 
 LayoutDirection active_layout_direction(const Context* ctx) noexcept {

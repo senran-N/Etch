@@ -934,6 +934,625 @@ static bool verify_editor_checks(etch::Context* restore) noexcept {
             automation_set_recording(test, false);
             automation_clear_recording(test);
         }
+
+        // E18: ADE primitives — terminal_grid_ex, code_editor ViewZones/InlayHints/ScrollSync,
+        // TextInput auto_grow + caret_rect, hierarchical command scopes, focus restore, fuzzy_match, dock pinned/badge.
+        {
+            // 1. terminal_grid_ex: rich styles, selection, hyperlink hit-testing, auto_fit_container, IME rect
+            TerminalCell tcells[16] = {};
+            for (uint32_t i = 0u; i < 16u; ++i) {
+                tcells[i].codepoint = 'A' + (i % 8u);
+                tcells[i].width = 1u;
+            }
+            tcells[1].italic = true;
+            tcells[2].dim = true;
+            tcells[3].strikethrough = true;
+            tcells[4].underline_style = TerminalUnderlineStyle::Curly;
+            tcells[4].underline_color = {TerminalColorMode::TrueColor, 0xFF4444u};
+            tcells[5].underline_style = TerminalUnderlineStyle::Double;
+            tcells[6].underline_style = TerminalUnderlineStyle::Dotted;
+            tcells[2].hyperlink_id = 77u;
+            tcells[3].hyperlink_id = 77u;
+
+            const uint32_t tid = id("e18_term_ex");
+            TerminalGridResult tres = {};
+            // Frame 1: establish layout bounds
+            begin_frame(test, {.viewport_w = 400, .viewport_h = 200});
+            begin_box({.width = Sizing::fixed(180.0f), .height = Sizing::fixed(80.0f)});
+            tres = terminal_grid_ex({
+                .id = tid, .cells = tcells, .columns = 8u, .rows = 2u,
+                .cell_width_px = 10.0f, .line_height_px = 20.0f, .font_size_px = 13.0f,
+                .cursor_column = 1, .cursor_row = 0,
+                .cursor_shape = TerminalCursorShape::Block, .cursor_visible = true,
+                .focusable = true, .auto_fit_container = true,
+                .selection_start_col = 0, .selection_start_row = 0,
+                .selection_end_col = 3, .selection_end_row = 0,
+            });
+            end_box();
+            end_frame(test);
+
+            // Frame 2: hover & click cell (2, 0) where hyperlink_id == 77
+            const Rect tb_rect = element_bounds(tid);
+            const Vec2 link_pt = {tb_rect.x + 25.0f, tb_rect.y + 10.0f};
+            begin_frame(test, {.viewport_w = 400, .viewport_h = 200, .pointer_pos = link_pt, .pointer_down = true});
+            begin_box({.width = Sizing::fixed(180.0f), .height = Sizing::fixed(80.0f)});
+            terminal_grid_ex({
+                .id = tid, .cells = tcells, .columns = 8u, .rows = 2u,
+                .cell_width_px = 10.0f, .line_height_px = 20.0f, .font_size_px = 13.0f,
+                .cursor_column = 1, .cursor_row = 0,
+                .cursor_shape = TerminalCursorShape::Bar, .cursor_visible = true,
+                .focusable = true, .auto_fit_container = true,
+            });
+            end_box();
+            end_frame(test);
+            begin_frame(test, {.viewport_w = 400, .viewport_h = 200, .pointer_pos = link_pt, .pointer_down = false});
+            begin_box({.width = Sizing::fixed(180.0f), .height = Sizing::fixed(80.0f)});
+            tres = terminal_grid_ex({
+                .id = tid, .cells = tcells, .columns = 8u, .rows = 2u,
+                .cell_width_px = 10.0f, .line_height_px = 20.0f, .font_size_px = 13.0f,
+                .cursor_column = 1, .cursor_row = 0,
+                .cursor_shape = TerminalCursorShape::Block, .cursor_visible = true,
+                .focusable = true, .auto_fit_container = true,
+            });
+            end_box();
+            end_frame(test);
+            check(tres.visible_columns == 18u && tres.visible_rows == 4u &&
+                  tres.hovered && tres.hovered_col == 2 && tres.hovered_row == 0 &&
+                  tres.hovered_hyperlink_id == 77u &&
+                  tres.clicked && tres.clicked_col == 2 && tres.clicked_row == 0 &&
+                  tres.clicked_hyperlink_id == 77u &&
+                  tres.focused && tres.ime_cursor_rect.w > 0.0f, __LINE__);
+
+            // 2. code_editor ViewZones + InlayHints + ScrollSync
+            TextBuffer vz_buf = {};
+            check(init_text_buffer(&vz_buf, str_lit("line0\nline1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\nline11")), __LINE__);
+            const uint32_t vz_ed = id("e18_vz_editor");
+            const uint32_t vz_ed2 = id("e18_vz_editor2");
+            const CodeViewZone zones[1] = {{.zone_id = 9001u, .after_line = 1u, .height_px = 64.0f, .above_line = false, .fill_color = Color::rgba8(40, 80, 140, 32)}};
+            const CodeInlayHint hints[1] = {{.line_index = 0u, .col_byte = UINT32_MAX, .text = str_lit(": i32"), .background = Color::rgba8(60, 70, 90, 80)}};
+            check(code_editor_set_view_zones(vz_ed, zones), __LINE__);
+            check(code_editor_set_inlay_hints(vz_ed, hints), __LINE__);
+            for (int f = 0; f < 2; ++f) {
+                begin_frame(test, {.viewport_w = 600, .viewport_h = 260});
+                code_editor({.id = vz_ed, .buffer = &vz_buf, .width = Sizing::fixed(420), .height = Sizing::fixed(180)});
+                if (code_editor_begin_view_zone(vz_ed, 9001u)) {
+                    button({.id = id("e18_vz_btn"), .label = str_lit("Reply")});
+                    code_editor_end_view_zone();
+                }
+                code_editor({.id = vz_ed2, .buffer = &vz_buf, .width = Sizing::fixed(160), .height = Sizing::fixed(180)});
+                end_frame(test);
+            }
+            Rect zrect = {}, zclip = {};
+            check(code_editor_get_view_zone_bounds(vz_ed, 9001u, &zrect, &zclip) &&
+                  zrect.h == 64.0f && zrect.w > 100.0f && zclip.h > 100.0f, __LINE__);
+            // Scroll sync across two editors
+            code_editor_set_scroll_offset(vz_ed, {0.0f, 40.0f});
+            const Vec2 so1 = code_editor_scroll_offset(vz_ed);
+            code_editor_set_scroll_offset(vz_ed2, so1);
+            const Vec2 so2 = code_editor_scroll_offset(vz_ed2);
+            check(so1.y >= 39.5f && std::fabs(so2.y - so1.y) < 0.5f, __LINE__);
+            code_editor_clear_view_zones(vz_ed);
+            code_editor_clear_inlay_hints(vz_ed);
+            free_text_buffer(&vz_buf);
+
+            // 3. TextInput auto_grow + caret_rect
+            char ag_buf[256] = "short";
+            const uint32_t ag_id = id("e18_autogrow");
+            begin_frame(test, {.viewport_w = 480, .viewport_h = 300});
+            text_input({.id = ag_id, .buffer = ag_buf, .capacity = sizeof(ag_buf), .width = Sizing::fixed(240),
+                        .multiline = true, .word_wrap = true, .auto_grow = true, .min_height_px = 36.0f, .max_height_px = 120.0f});
+            end_frame(test);
+            const float h_short = element_bounds(ag_id).h;
+            std::strcpy(ag_buf, "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8");
+            request_focus(ag_id);
+            begin_frame(test, {.viewport_w = 480, .viewport_h = 300});
+            const TextInputResult ag_r = text_input({
+                .id = ag_id, .buffer = ag_buf, .capacity = sizeof(ag_buf), .width = Sizing::fixed(240),
+                .multiline = true, .word_wrap = true, .auto_grow = true, .min_height_px = 36.0f, .max_height_px = 120.0f});
+            end_frame(test);
+            const float h_tall = element_bounds(ag_id).h;
+            check(h_short >= 35.5f && h_short < 60.0f && h_tall > h_short && h_tall <= 120.5f &&
+                  ag_r.focused && ag_r.caret_rect.h > 0.0f, __LINE__);
+
+            // 4. Hierarchical command scopes + focus restore stack + fuzzy_match
+            const uint32_t outer_scope = id("e18_outer_scope");
+            const uint32_t inner_scope = id("e18_inner_scope");
+            check(register_command(test, {.id = 801u, .name = str_lit("global.k"), .shortcut_mods = Mod_Ctrl, .shortcut_keycode = SDLK_K, .scope_id = 0u}), __LINE__);
+            check(register_command(test, {.id = 802u, .name = str_lit("outer.k"), .shortcut_mods = Mod_Ctrl, .shortcut_keycode = SDLK_K, .scope_id = outer_scope}), __LINE__);
+            check(register_command(test, {.id = 803u, .name = str_lit("inner.k"), .shortcut_mods = Mod_Ctrl, .shortcut_keycode = SDLK_K, .scope_id = inner_scope}), __LINE__);
+            request_focus(0u);
+            begin_frame(test, {.viewport_w = 320, .viewport_h = 160, .key_mods = Mod_Ctrl, .key_pressed_code = SDLK_K});
+            push_command_scope(outer_scope);
+            push_command_scope(inner_scope);
+            check(poll_triggered_command(test) == 803u, __LINE__);
+            pop_command_scope();
+            pop_command_scope();
+            end_frame(test);
+            begin_frame(test, {.viewport_w = 320, .viewport_h = 160, .key_mods = Mod_Ctrl, .key_pressed_code = SDLK_K});
+            push_command_scope(outer_scope);
+            check(poll_triggered_command(test) == 802u, __LINE__);
+            pop_command_scope();
+            end_frame(test);
+            check(unregister_command(test, 801u) && unregister_command(test, 802u) && unregister_command(test, 803u), __LINE__);
+
+            request_focus(ag_id);
+            check(push_focus_restore_point(test), __LINE__);
+            request_focus(tid);
+            check(focused_id() == tid, __LINE__);
+            check(pop_focus_restore_point(test) == ag_id && focused_id() == ag_id, __LINE__);
+
+            uint32_t fpos[8] = {};
+            const FuzzyMatchResult fm_good = fuzzy_match(str_lit("gws"), str_lit("git_worktree_sync"), fpos, 8u);
+            const FuzzyMatchResult fm_weak = fuzzy_match(str_lit("gws"), str_lit("agxwxsz"), nullptr, 0u);
+            const FuzzyMatchResult fm_miss = fuzzy_match(str_lit("xyz"), str_lit("git_worktree_sync"), nullptr, 0u);
+            check(fm_good.matched && fm_good.match_count == 3u && fpos[0] == 0u && fpos[1] == 4u && fpos[2] == 13u &&
+                  fm_weak.matched && fm_good.score > fm_weak.score && !fm_miss.matched, __LINE__);
+
+            // 5. DockPane pinned / dirty / badge / focused_leaf
+            const uint32_t dk = id("e18_dock");
+            const uint32_t leaf0 = dock_reset_root(dk);
+            check(dock_add_pane(dk, leaf0, {.id = id("e18_p1"), .title = str_lit("Pinned"), .closable = true, .pinned = true, .dirty = true, .badge_color = Color::rgb_hex(0x22C55E)}), __LINE__);
+            check(dock_is_pane_pinned(dk, id("e18_p1")), __LINE__);
+            dock_set_pane_pinned(dk, id("e18_p1"), false);
+            check(!dock_is_pane_pinned(dk, id("e18_p1")), __LINE__);
+            dock_set_pane_dirty(dk, id("e18_p1"), false);
+            dock_set_pane_badge(dk, id("e18_p1"), Color::rgb_hex(0xF59E0B));
+            begin_frame(test, {.viewport_w = 480, .viewport_h = 240});
+            begin_dock_space({.id = dk, .width = Sizing::fixed(480), .height = Sizing::fixed(240)});
+            while (next_dock_pane() != 0u) {
+                text(str_lit("pane"));
+            }
+            end_dock_space();
+            end_frame(test);
+            check(dock_focused_leaf(dk) == leaf0 && !dock_pane_right_clicked(dk, id("e18_p1")), __LINE__);
+
+            // 6. Round 2: CodeEditor inline highlights, overview ruler, sticky header, auto_height, gutter drag range
+            {
+                TextBuffer dbuf = {};
+                check(init_text_buffer(&dbuf, str_lit("fn alpha() {\n    let old_val = 1;\n    let new_val = 2;\n    return new_val;\n}\n")), __LINE__);
+                const uint32_t ded = id("e19_diff_ed");
+                const CodeInlineHighlight ihs[1] = {{
+                    .line_index = 1u, .start_col_byte = 8u, .end_col_byte = 15u,
+                    .background = Color::rgba8(239, 68, 68, 90), .border_color = Color::rgba8(239, 68, 68, 160), .radius_px = 3.0f
+                }};
+                const CodeOverviewMarker mks[2] = {
+                    {.line_index = 1u, .color = Color::rgb_hex(0xEF4444), .lane = 1u},
+                    {.line_index = 2u, .color = Color::rgb_hex(0x22C55E), .lane = 2u},
+                };
+                check(code_editor_set_inline_highlights(ded, ihs), __LINE__);
+                check(code_editor_set_overview_markers(ded, mks), __LINE__);
+                CodeEditorResult dr = {};
+                // Prime bounds & test auto_height
+                begin_frame(test, {.viewport_w = 500, .viewport_h = 300});
+                dr = code_editor({.id = ded, .buffer = &dbuf, .width = Sizing::fixed(440), .height = Sizing::fixed(80),
+                    .auto_height = true, .show_overview_ruler = true});
+                end_frame(test);
+                const float auto_h = element_bounds(ded).h;
+                check(auto_h > 100.0f && dr.end_visible_line == dr.total_lines, __LINE__);
+
+                // Switch to fixed height + sticky header + gutter range drag (line 1 -> line 3)
+                const auto gdrag = [&](Vec2 p, bool down) noexcept {
+                    begin_frame(test, {.viewport_w = 500, .viewport_h = 300, .pointer_pos = p, .pointer_down = down});
+                    dr = code_editor({.id = ded, .buffer = &dbuf, .width = Sizing::fixed(440), .height = Sizing::fixed(180),
+                        .line_height_px = 20.0f, .show_overview_ruler = true, .show_sticky_header = true,
+                        .sticky_header_text = str_lit("fn alpha()")});
+                    end_frame(test);
+                };
+                gdrag({-1.0f, -1.0f}, false);
+                gdrag({18.0f, 36.0f}, true);   // press gutter line 1 (pad.top=8 + 1*20 = 28..48)
+                check(dr.clicked_gutter_line == 1 && dr.gutter_dragging && dr.gutter_drag_start_line == 1 && dr.gutter_drag_end_line == 1, __LINE__);
+                gdrag({18.0f, 76.0f}, true);   // drag to line 3 (pad.top=8 + 3*20 = 68..88)
+                check(dr.gutter_dragging && dr.gutter_drag_start_line == 1 && dr.gutter_drag_end_line == 3, __LINE__);
+                gdrag({18.0f, 76.0f}, false);  // release commits range
+                check(!dr.gutter_dragging && dr.gutter_drag_start_line == 1 && dr.gutter_drag_end_line == 3, __LINE__);
+                code_editor_clear_inline_highlights(ded);
+                code_editor_clear_overview_markers(ded);
+                free_text_buffer(&dbuf);
+            }
+
+            // 7. Round 2: TerminalGrid search matches, vector box-drawing, interactive drag/word/line selection, wheel_delta_y
+            {
+                TerminalCell bcells[24] = {};
+                const char* row0 = "hello world ";
+                for (uint32_t i = 0u; i < 12u; ++i) bcells[i].codepoint = static_cast<uint32_t>(row0[i]);
+                bcells[12].codepoint = 0x250Cu; // ┌
+                bcells[13].codepoint = 0x2500u; // ─
+                bcells[14].codepoint = 0x2510u; // ┐
+                bcells[15].codepoint = 0x2588u; // █
+                bcells[16].codepoint = 0x2592u; // ▒
+                for (uint32_t i = 17u; i < 24u; ++i) bcells[i].codepoint = ' ';
+                const TerminalSearchMatch sm[1] = {{.row = 0u, .start_col = 6u, .end_col = 11u, .active = true}};
+                const uint32_t btid = id("e19_box_term");
+                TerminalGridResult btr = {};
+                const auto tstep = [&](Vec2 p, bool down, uint8_t clicks = 1u, float wy = 0.0f) noexcept {
+                    begin_frame(test, {.viewport_w = 320, .viewport_h = 120, .pointer_pos = p, .pointer_down = down,
+                        .scroll_delta = {0.0f, wy}, .pointer_clicks = clicks});
+                    btr = terminal_grid_ex({
+                        .id = btid, .cells = bcells, .columns = 12, .rows = 2,
+                        .cell_width_px = 10.0f, .line_height_px = 20.0f, .font_size_px = 14.0f,
+                        .focusable = true, .search_matches = sm, .interactive_selection = true,
+                    });
+                    end_frame(test);
+                };
+                tstep({-1.0f, -1.0f}, false);
+                tstep({15.0f, 10.0f}, true);     // press col 1 row 0
+                tstep({45.0f, 10.0f}, true);     // drag to col 4 row 0
+                check(btr.has_selection && btr.selection_changed && btr.sel_start_col == 1 && btr.sel_end_col == 4, __LINE__);
+                tstep({45.0f, 10.0f}, false, 1u, -2.0f);
+                check(btr.has_selection && std::fabs(btr.wheel_delta_y + 2.0f) < 0.01f, __LINE__);
+                tstep({75.0f, 10.0f}, true, 2u); // double click inside "world" (cols 6..10)
+                check(btr.has_selection && btr.sel_start_col == 6 && btr.sel_end_col == 10, __LINE__);
+                tstep({75.0f, 10.0f}, false);
+                tstep({25.0f, 10.0f}, true, 3u); // triple click selects full row (cols 0..11)
+                check(btr.has_selection && btr.sel_start_col == 0 && btr.sel_end_col == 11, __LINE__);
+                tstep({25.0f, 10.0f}, false);
+            }
+
+            // 8. Round 2: TextInput atomic mention chip + pasted_image + global ui_zoom
+            {
+                char chip_buf[64] = "hi @main.cpp ok";
+                const uint32_t chip_id = id("e19_chip_input");
+                const TextInputHighlight chip_hl[1] = {{
+                    .byte_offset = 3u, .byte_length = 9u,
+                    .text_color = Color::rgb_hex(0x38BDF8), .background = Color::rgba8(56, 189, 248, 36),
+                    .radius_px = 4.0f, .atomic = true
+                }};
+                TextInputResult cr = {};
+                const auto cstep = [&](uint32_t key = 0u, uint16_t mods = 0u) noexcept {
+                    begin_frame(test, {.viewport_w = 400, .viewport_h = 120, .key_mods = mods, .key_pressed_code = key});
+                    cr = text_input({.id = chip_id, .buffer = chip_buf, .capacity = sizeof(chip_buf),
+                        .width = Sizing::fixed(320), .highlights = chip_hl});
+                    end_frame(test);
+                };
+                cstep();
+                request_focus(chip_id);
+                set_text_selection(chip_id, 12u, 12u); // right after "@main.cpp"
+                cstep();
+                cstep(SDLK_LEFT); // jump over entire atomic chip 12 -> 3
+                check(cr.cursor_byte == 3u, __LINE__);
+                cstep(SDLK_RIGHT); // jump over entire atomic chip 3 -> 12
+                check(cr.cursor_byte == 12u, __LINE__);
+                cstep(SDLK_BACKSPACE); // delete entire "@main.cpp" in 1 keypress
+                check(cr.changed && std::strcmp(chip_buf, "hi  ok") == 0 && cr.cursor_byte == 3u, __LINE__);
+
+                // Image paste signal when clipboard has image/png and no text
+                (void)set_clipboard_text("");
+                static const uint8_t kPngMagic[8] = {0x89u, 'P', 'N', 'G', 0x0Du, 0x0Au, 0x1Au, 0x0Au};
+                const MimeDragEntry img_mime[1] = {{.mime_type = str_lit("image/png"), .bytes = kPngMagic, .size = sizeof(kPngMagic)}};
+                if (set_clipboard_mime(img_mime) && has_clipboard_mime(str_lit("image/png"))) {
+                    cstep(SDLK_V, Mod_Ctrl);
+                    check(cr.pasted_image, __LINE__);
+                }
+
+                // Global ui_zoom
+                check(std::fabs(ui_zoom(test) - 1.0f) < 1e-4f, __LINE__);
+                set_ui_zoom(test, 1.5f);
+                check(std::fabs(ui_zoom(test) - 1.5f) < 1e-4f, __LINE__);
+                begin_frame(test, {.viewport_w = 600, .viewport_h = 300, .dpi_scale = 1.0f});
+                check(std::fabs(dpi_scale(test) - 1.5f) < 1e-4f, __LINE__);
+                end_frame(test);
+                set_ui_zoom(test, 99.0f);
+                check(std::fabs(ui_zoom(test) - 3.0f) < 1e-4f, __LINE__);
+                set_ui_zoom(test, 1.0f);
+            }
+
+            // 9. Round 3: Multi-language tokenizer, interactive multi-cursor, brackets, indent guides, diag tooltip,
+            //    terminal graphemes/palette/input/VT encoding, frame key enumeration, desktop OS APIs.
+            {
+                SyntaxToken toks[64] = {};
+                check(tokenize_language(str_lit("typescript"), 0u, str_lit("export async function run(x: number): Promise<void> { return; }"), toks, 64u) >= 5u, __LINE__);
+                check(tokenize_language(str_lit("python"), 0u, str_lit("def greet(name): return 'hello' # hi"), toks, 64u) >= 4u, __LINE__);
+                check(tokenize_language(str_lit("rust"), 0u, str_lit("pub fn main() -> Result<i32, ()> { Ok(42) }"), toks, 64u) >= 4u, __LINE__);
+                check(tokenize_language(str_lit("go"), 0u, str_lit("func serve() { defer close(ch) }"), toks, 64u) >= 2u, __LINE__);
+                check(tokenize_language(str_lit("json"), 0u, str_lit("{\"enabled\": true, \"count\": 12}"), toks, 64u) >= 4u, __LINE__);
+                check(tokenize_language(str_lit("sql"), 0u, str_lit("SELECT id FROM users WHERE active = 1 -- note"), toks, 64u) >= 5u, __LINE__);
+                check(tokenize_language(str_lit("diff"), 0u, str_lit("+added line"), toks, 64u) == 1u, __LINE__);
+                check(tokenize_language(str_lit("diff"), 1u, str_lit("-removed line"), toks, 64u) == 1u, __LINE__);
+
+                // Interactive multi-cursor: Ctrl+D select word -> Ctrl+D next match -> type -> Backspace -> Escape
+                TextBuffer mcb = {};
+                check(init_text_buffer(&mcb, str_lit("foo(1) + foo(2)\n    bar(foo)")), __LINE__);
+                const uint32_t mcid = id("e20_mc_ed");
+                const TextDiagnostic diag[1] = {{.byte_start = 0u, .byte_end = 3u, .severity = TextDiagnosticSeverity::Error, .message = str_lit("undefined foo")}};
+                check(text_buffer_set_diagnostics(&mcb, text_buffer_revision(&mcb), diag), __LINE__);
+                CodeEditorResult mcr = {};
+                const auto mc_step = [&](uint32_t key = 0u, uint16_t mods = 0u, const char* typed = nullptr, Vec2 ptr = {-1.0f, -1.0f}) noexcept {
+                    if (typed) {
+                        SDL_Event tev = {};
+                        tev.type = SDL_EVENT_TEXT_INPUT;
+                        tev.text.text = typed;
+                        process_event(test, tev);
+                    }
+                    begin_frame(test, {.viewport_w = 500, .viewport_h = 200, .pointer_pos = ptr, .key_mods = mods, .key_pressed_code = key});
+                    mcr = code_editor({.id = mcid, .buffer = &mcb, .width = Sizing::fixed(460), .height = Sizing::fixed(160),
+                        .language = str_lit("ts"), .highlight_matching_brackets = true,
+                        .show_indent_guides = true, .show_diagnostic_tooltips = true});
+                    end_frame(test);
+                };
+                mc_step();
+                request_focus(mcid);
+                code_editor_set_cursor(mcid, 1u, 1u, false); // inside first "foo"
+                mc_step();
+                mc_step(SDLK_D, Mod_Ctrl); // selects "foo" (0..3)
+                check(mcr.selection_anchor_byte == 0u && mcr.cursor_byte == 3u && code_editor_cursor_count(mcid) == 1u, __LINE__);
+                mc_step(SDLK_D, Mod_Ctrl); // adds second "foo" (9..12)
+                check(code_editor_cursor_count(mcid) == 2u, __LINE__);
+                mc_step(0u, 0u, "baz");    // replaces both "foo" with "baz"
+                check(mcr.changed && code_editor_cursor_count(mcid) == 2u, __LINE__);
+                char mc_out[64] = {};
+                const uint32_t mclen = text_buffer_copy_range(&mcb, 0u, text_buffer_byte_length(&mcb), mc_out, sizeof(mc_out) - 1u);
+                mc_out[mclen] = '\0';
+                check(std::strncmp(mc_out, "baz(1) + baz(2)", 15u) == 0, __LINE__);
+                mc_step(SDLK_BACKSPACE);   // deletes 'z' at both cursors -> "ba(1) + ba(2)"
+                const uint32_t mclen2 = text_buffer_copy_range(&mcb, 0u, text_buffer_byte_length(&mcb), mc_out, sizeof(mc_out) - 1u);
+                mc_out[mclen2] = '\0';
+                check(std::strncmp(mc_out, "ba(1) + ba(2)", 13u) == 0, __LINE__);
+                mc_step(SDLK_ESCAPE);      // collapses extra cursors back to 1
+                check(code_editor_cursor_count(mcid) == 1u, __LINE__);
+                // Bracket highlight check: cursor right after '(' (byte 3 in "ba(1) + ba(2)")
+                code_editor_set_cursor(mcid, 3u, 3u, false);
+                mc_step(0u, 0u, nullptr, {72.0f, 16.0f});
+                check(frame_prims(test).size() > 0u, __LINE__);
+                free_text_buffer(&mcb);
+
+                // Terminal grapheme cluster, custom 16-color palette, focused key/paste/mouse capture & VT encoders
+                char vt[32] = {};
+                uint32_t vlen = terminal_encode_key(SDLK_UP, 0u, false, vt, sizeof(vt));
+                check(vlen == 3u && std::memcmp(vt, "\x1b[A", 3u) == 0, __LINE__);
+                vlen = terminal_encode_key(SDLK_UP, 0u, true, vt, sizeof(vt));
+                check(vlen == 3u && std::memcmp(vt, "\x1bOA", 3u) == 0, __LINE__);
+                vlen = terminal_encode_key(SDLK_C, Mod_Ctrl, false, vt, sizeof(vt));
+                check(vlen == 1u && vt[0] == 3, __LINE__);
+                vlen = terminal_encode_mouse_sgr(1u, 4, 2, 0u, true, false, vt, sizeof(vt));
+                check(vlen > 0u && std::strcmp(vt, "\x1b[<0;5;3M") == 0, __LINE__);
+
+                Color custom_pal[16] = {};
+                for (uint32_t pi = 0u; pi < 16u; ++pi) custom_pal[pi] = Color::rgba8(uint8_t(10u + pi * 12u), 180u, 220u, 255u);
+                static const char kCluster[] = "e\xCC\x81"; // combining acute accent grapheme cluster
+                TerminalCell gcells[8] = {};
+                gcells[0].codepoint = 'e';
+                gcells[0].grapheme_utf8 = kCluster;
+                gcells[0].grapheme_len = 3u;
+                gcells[0].foreground = {TerminalColorMode::Ansi16, 2u};
+                gcells[1].codepoint = 'X';
+                const uint32_t gtid = id("e20_grapheme_term");
+                TerminalGridResult gtr = {};
+                begin_frame(test, {.viewport_w = 320, .viewport_h = 120});
+                gtr = terminal_grid_ex({.id = gtid, .cells = gcells, .columns = 4u, .rows = 2u,
+                    .cell_width_px = 10.0f, .line_height_px = 20.0f, .focusable = true,
+                    .ansi_palette = custom_pal, .capture_keyboard_input = true, .bracketed_paste = true, .mouse_reporting = true});
+                end_frame(test);
+                request_focus(gtid);
+                begin_frame(test, {.viewport_w = 320, .viewport_h = 120, .pointer_pos = {15.0f, 10.0f}, .pointer_down = true,
+                    .key_mods = Mod_Ctrl, .key_pressed_code = SDLK_C});
+                gtr = terminal_grid_ex({.id = gtid, .cells = gcells, .columns = 4u, .rows = 2u,
+                    .cell_width_px = 10.0f, .line_height_px = 20.0f, .focusable = true,
+                    .ansi_palette = custom_pal, .capture_keyboard_input = true, .bracketed_paste = true, .mouse_reporting = true});
+                end_frame(test);
+                check(gtr.focused && gtr.key_pressed == SDLK_C && (gtr.key_mods & Mod_Ctrl) != 0u &&
+                      gtr.mouse_down && gtr.mouse_button == 1u, __LINE__);
+
+                // Frame key enumeration API
+                begin_frame(test, {.viewport_w = 200, .viewport_h = 100, .key_mods = Mod_Shift, .key_pressed_code = SDLK_P});
+                FrameKeyEvent fk = {};
+                check(frame_key_count() == 1u && frame_key_at(0u, &fk) &&
+                      fk.keycode == SDLK_P && (fk.mods & Mod_Shift) != 0u && !fk.consumed, __LINE__);
+                check(consume_frame_key_at(0u) && !consume_frame_key_at(0u), __LINE__);
+                check(frame_key_at(0u, &fk) && fk.consumed, __LINE__);
+                end_frame(test);
+
+                // Desktop OS integration (headless-safe)
+                check(!open_url(str_lit("javascript:alert(1)")), __LINE__);
+                check(!open_url(str_lit("")), __LINE__);
+                const uint32_t n0 = desktop_notification_count(test);
+                check(notify_desktop(test, {.title = str_lit("Done"), .body = str_lit("Build finished"), .tag = 7u, .silent = true}), __LINE__);
+                check(desktop_notification_count(test) == n0 + 1u, __LINE__);
+                Tray* tray = create_tray(test, str_lit("Etch Test"));
+                check(tray != nullptr, __LINE__);
+                const TrayItemDesc titems[2] = {
+                    {.id = 1u, .label = str_lit("Open")},
+                    {.id = 2u, .label = str_lit("Quit")},
+                };
+                check(tray_set_tooltip(tray, str_lit("Etch Ready")) && tray_set_menu(tray, titems) &&
+                      tray_poll_clicked_item(tray) == 0u, __LINE__);
+                destroy_tray(tray);
+                check(!flash_window(nullptr, WindowFlashKind::Brief), __LINE__);
+                check(!set_window_progress(nullptr, WindowProgressState::Normal, 0.5f), __LINE__);
+            }
+
+            // 10. Round 4: Stateful multiline lexer, regex search/replace, atomic multi-cursor undo/redo,
+            //     Alt+Up/Down, Ctrl+/, Alt+Shift+Drag box selection, minimap, auto sticky scroll,
+            //     custom display line numbers, Braille/Powerline + auto-URL terminal, tray icon/submenu & native menu bar.
+            {
+                // 10a. Stateful multiline syntax tokenizer
+                SyntaxToken stoks[32] = {};
+                uint8_t lex_st = 0u;
+                // C/TS multiline /* ... */
+                check(tokenize_language_stateful(str_lit("ts"), str_lit("const a = 1; /* start"), 0u, &lex_st, stoks, 32u) >= 2u && lex_st == 1u, __LINE__);
+                check(tokenize_language_stateful(str_lit("ts"), str_lit("still comment"), lex_st, &lex_st, stoks, 32u) == 1u && lex_st == 1u, __LINE__);
+                check(tokenize_language_stateful(str_lit("ts"), str_lit("end */ const b = 2;"), lex_st, &lex_st, stoks, 32u) >= 2u && lex_st == 0u, __LINE__);
+                // JS multiline template string
+                check(tokenize_language_stateful(str_lit("js"), str_lit("const s = `hello"), 0u, &lex_st, stoks, 32u) >= 2u && lex_st == 2u, __LINE__);
+                check(tokenize_language_stateful(str_lit("js"), str_lit("world`; const n = 7;"), lex_st, &lex_st, stoks, 32u) >= 2u && lex_st == 0u, __LINE__);
+                // Python triple quotes
+                check(tokenize_language_stateful(str_lit("py"), str_lit("doc = \"\"\"line1"), 0u, &lex_st, stoks, 32u) >= 1u && lex_st == 3u, __LINE__);
+                check(tokenize_language_stateful(str_lit("py"), str_lit("line2\"\"\" + 1"), lex_st, &lex_st, stoks, 32u) >= 2u && lex_st == 0u, __LINE__);
+                // Rust nested /* /* */ */
+                check(tokenize_language_stateful(str_lit("rs"), str_lit("/* outer /* inner"), 0u, &lex_st, stoks, 32u) == 1u && lex_st == 6u, __LINE__);
+                check(tokenize_language_stateful(str_lit("rs"), str_lit("close inner */ still outer"), lex_st, &lex_st, stoks, 32u) == 1u && lex_st == 5u, __LINE__);
+                check(tokenize_language_stateful(str_lit("rs"), str_lit("close outer */ fn ok() {}"), lex_st, &lex_st, stoks, 32u) >= 2u && lex_st == 0u, __LINE__);
+
+                // 10b. Regex search & replace_all on TextBuffer
+                TextBuffer rbuf = {};
+                check(init_text_buffer(&rbuf, str_lit("item_12 = foo;\nitem_345 = bar;\nother = baz;\n")), __LINE__);
+                TextSearchMatch rm[8] = {};
+                const TextSearchOptions re_opts = {.case_sensitive = true, .whole_word = false, .regex = true};
+                check(text_buffer_find_all_ex(&rbuf, str_lit("item_\\d+"), re_opts, rm, 8u) == 2u &&
+                      rm[0].byte_start == 0u && rm[0].byte_end == 7u &&
+                      rm[1].byte_start == 15u && rm[1].byte_end == 23u, __LINE__);
+                check(text_buffer_find_all_ex(&rbuf, str_lit("(foo|bar)"), re_opts, rm, 8u) == 2u, __LINE__);
+                const uint32_t rep_n = text_buffer_replace_all(&rbuf, str_lit("item_\\d+"), str_lit("val"), re_opts);
+                check(rep_n == 2u, __LINE__);
+                char rstr[128] = {};
+                uint32_t rlen = text_buffer_copy_range(&rbuf, 0u, text_buffer_byte_length(&rbuf), rstr, sizeof(rstr) - 1u);
+                rstr[rlen] = '\0';
+                check(std::strcmp(rstr, "val = foo;\nval = bar;\nother = baz;\n") == 0, __LINE__);
+                check(text_buffer_undo(&rbuf), __LINE__);
+                rlen = text_buffer_copy_range(&rbuf, 0u, text_buffer_byte_length(&rbuf), rstr, sizeof(rstr) - 1u);
+                rstr[rlen] = '\0';
+                check(std::strcmp(rstr, "item_12 = foo;\nitem_345 = bar;\nother = baz;\n") == 0, __LINE__);
+                free_text_buffer(&rbuf);
+
+                // 10c. Atomic multi-cursor undo/redo + Alt+Up/Down + Ctrl+/ + Alt+Shift+Drag box selection
+                TextBuffer r4b = {};
+                check(init_text_buffer(&r4b, str_lit("alpha\nbeta\ngamma\ndelta")), __LINE__);
+                const uint32_t r4ed = id("e21_r4_ed");
+                CodeEditorResult r4r = {};
+                const auto r4_step = [&](uint32_t key = 0u, uint16_t mods = 0u, const char* typed = nullptr,
+                                         Vec2 ptr = {-1.0f, -1.0f}, bool down = false, Str lang = str_lit("ts")) noexcept {
+                    if (typed) {
+                        SDL_Event tev = {};
+                        tev.type = SDL_EVENT_TEXT_INPUT;
+                        tev.text.text = typed;
+                        process_event(test, tev);
+                    }
+                    begin_frame(test, {.viewport_w = 520, .viewport_h = 220, .pointer_pos = ptr, .pointer_down = down,
+                                       .key_mods = mods, .key_pressed_code = key});
+                    r4r = code_editor({.id = r4ed, .buffer = &r4b, .width = Sizing::fixed(480), .height = Sizing::fixed(180),
+                                       .line_height_px = 20.0f, .show_sticky_header = true, .language = lang, .show_minimap = true});
+                    end_frame(test);
+                };
+                auto read_r4 = [&]() -> Str {
+                    static char buf_out[256];
+                    const uint32_t n = text_buffer_copy_range(&r4b, 0u, text_buffer_byte_length(&r4b), buf_out, sizeof(buf_out) - 1u);
+                    buf_out[n] = '\0';
+                    return { buf_out, n };
+                };
+                r4_step();
+                request_focus(r4ed);
+                // Move line 1 ("beta") up -> "beta\nalpha\ngamma\ndelta"
+                code_editor_set_cursor(r4ed, 7u, 7u, false);
+                r4_step();
+                r4_step(SDLK_UP, Mod_Alt);
+                check(std::strcmp(read_r4().chars, "beta\nalpha\ngamma\ndelta") == 0, __LINE__);
+                // Move it back down -> "alpha\nbeta\ngamma\ndelta"
+                r4_step(SDLK_DOWN, Mod_Alt);
+                check(std::strcmp(read_r4().chars, "alpha\nbeta\ngamma\ndelta") == 0, __LINE__);
+                // Ctrl+/ toggle comment on line 1 (TS -> "// beta") then uncomment
+                r4_step(SDLK_SLASH, Mod_Ctrl);
+                check(std::strcmp(read_r4().chars, "alpha\n// beta\ngamma\ndelta") == 0, __LINE__);
+                r4_step(SDLK_SLASH, Mod_Ctrl);
+                check(std::strcmp(read_r4().chars, "alpha\nbeta\ngamma\ndelta") == 0, __LINE__);
+                // Ctrl+/ in Python uses "# "
+                r4_step(SDLK_SLASH, Mod_Ctrl, nullptr, {-1.0f, -1.0f}, false, str_lit("python"));
+                check(std::strcmp(read_r4().chars, "alpha\n# beta\ngamma\ndelta") == 0, __LINE__);
+                r4_step(SDLK_SLASH, Mod_Ctrl, nullptr, {-1.0f, -1.0f}, false, str_lit("python"));
+                check(std::strcmp(read_r4().chars, "alpha\nbeta\ngamma\ndelta") == 0, __LINE__);
+                // Multi-cursor edit + atomic Undo restores both text AND extra cursors!
+                code_editor_set_cursor(r4ed, 0u, 0u, false);
+                check(code_editor_add_cursor(r4ed, 6u), __LINE__);
+                r4_step(0u, 0u, "X_");
+                check(std::strcmp(read_r4().chars, "X_alpha\nX_beta\ngamma\ndelta") == 0 && code_editor_cursor_count(r4ed) == 2u, __LINE__);
+                r4_step(SDLK_Z, Mod_Ctrl);
+                check(std::strcmp(read_r4().chars, "alpha\nbeta\ngamma\ndelta") == 0 && code_editor_cursor_count(r4ed) == 2u, __LINE__);
+                r4_step(SDLK_Z, static_cast<uint16_t>(Mod_Ctrl | Mod_Shift));
+                check(std::strcmp(read_r4().chars, "X_alpha\nX_beta\ngamma\ndelta") == 0 && code_editor_cursor_count(r4ed) == 2u, __LINE__);
+                r4_step(SDLK_Z, Mod_Ctrl);
+                code_editor_clear_extra_cursors(r4ed);
+                // Alt+Shift+Drag box selection across lines 0..2
+                r4_step(0u, static_cast<uint16_t>(Mod_Alt | Mod_Shift), nullptr, {70.0f, 16.0f}, true);
+                r4_step(0u, static_cast<uint16_t>(Mod_Alt | Mod_Shift), nullptr, {90.0f, 56.0f}, true);
+                check(code_editor_cursor_count(r4ed) >= 3u, __LINE__);
+                r4_step(0u, 0u, nullptr, {90.0f, 56.0f}, false);
+                free_text_buffer(&r4b);
+
+                // 10d. Minimap click-scroll + Auto Sticky Scroll + Custom Display Line Numbers
+                TextBuffer mmb = {};
+                check(init_text_buffer(&mmb, str_lit(
+                    "function outerScope() {\n"
+                    "    const a = 1;\n    const b = 2;\n    const c = 3;\n    const d = 4;\n"
+                    "    const e = 5;\n    const f = 6;\n    const g = 7;\n    const h = 8;\n"
+                    "    const i = 9;\n    const j = 10;\n    const k = 11;\n    const l = 12;\n"
+                    "    return a + l;\n}\n")), __LINE__);
+                const uint32_t mmed = id("e21_mm_ed");
+                auto custom_line_dec = [](uint32_t li, CodeLineDecoration* out_dec, void*) noexcept -> bool {
+                    if (li == 1u) { out_dec->hide_line_number = true; return true; }
+                    out_dec->has_display_line_number = true;
+                    out_dec->display_line_number = 100u + li;
+                    return true;
+                };
+                begin_frame(test, {.viewport_w = 500, .viewport_h = 200});
+                (void)code_editor({.id = mmed, .buffer = &mmb, .width = Sizing::fixed(460), .height = Sizing::fixed(120),
+                                   .line_height_px = 20.0f, .line_decorator = custom_line_dec,
+                                   .show_sticky_header = true, .language = str_lit("ts"), .show_minimap = true});
+                end_frame(test);
+                // Click lower half of minimap (right side, x ~ 460 - 14 - 36 = 410, y ~ 95) -> scrolls down
+                begin_frame(test, {.viewport_w = 500, .viewport_h = 200, .pointer_pos = {410.0f, 95.0f}, .pointer_down = true});
+                (void)code_editor({.id = mmed, .buffer = &mmb, .width = Sizing::fixed(460), .height = Sizing::fixed(120),
+                                   .line_height_px = 20.0f, .line_decorator = custom_line_dec,
+                                   .show_sticky_header = true, .language = str_lit("ts"), .show_minimap = true});
+                end_frame(test);
+                check(code_editor_scroll_offset(mmed).y > 10.0f, __LINE__);
+                free_text_buffer(&mmb);
+
+                // 10e. Terminal Braille + Powerline + Auto-URL hover/click detection
+                TerminalCell ucells[32] = {};
+                const char* urow = "go https://etch.dev/ui ok ";
+                for (uint32_t k = 0u; k < 26u; ++k) ucells[k].codepoint = static_cast<uint32_t>(urow[k]);
+                ucells[26].codepoint = 0x28FFu; // Braille full 8-dot
+                ucells[27].codepoint = 0xE0B0u; // Powerline right triangle
+                ucells[28].codepoint = 0xE0B1u; // Powerline right chevron
+                ucells[29].codepoint = 0xE0B2u; // Powerline left triangle
+                ucells[30].codepoint = 0xE0B4u; // Powerline right pill
+                ucells[31].codepoint = 0xE0B6u; // Powerline left pill
+                const uint32_t utid = id("e21_url_term");
+                TerminalGridResult utr = {};
+                begin_frame(test, {.viewport_w = 400, .viewport_h = 100});
+                utr = terminal_grid_ex({.id = utid, .cells = ucells, .columns = 32u, .rows = 1u,
+                                        .cell_width_px = 10.0f, .line_height_px = 20.0f});
+                end_frame(test);
+                const Vec2 url_pt = {65.0f, 10.0f}; // col 6 -> inside "https://etch.dev/ui"
+                begin_frame(test, {.viewport_w = 400, .viewport_h = 100, .pointer_pos = url_pt, .pointer_down = true});
+                utr = terminal_grid_ex({.id = utid, .cells = ucells, .columns = 32u, .rows = 1u,
+                                        .cell_width_px = 10.0f, .line_height_px = 20.0f});
+                end_frame(test);
+                begin_frame(test, {.viewport_w = 400, .viewport_h = 100, .pointer_pos = url_pt, .pointer_down = false});
+                utr = terminal_grid_ex({.id = utid, .cells = ucells, .columns = 32u, .rows = 1u,
+                                        .cell_width_px = 10.0f, .line_height_px = 20.0f});
+                end_frame(test);
+                check(utr.hovered_url.length == 19u && std::memcmp(utr.hovered_url.chars, "https://etch.dev/ui", 19u) == 0 &&
+                      utr.clicked_url.length == 19u && std::memcmp(utr.clicked_url.chars, "https://etch.dev/ui", 19u) == 0, __LINE__);
+
+                // 10f. Tray custom RGBA icon + submenu + Native Menu Bar
+                Tray* tray4 = create_tray(test, str_lit("Etch R4"));
+                uint8_t icon_px[4u * 4u * 4u] = {};
+                for (uint32_t pi = 0u; pi < sizeof(icon_px); ++pi) icon_px[pi] = 220u;
+                const TrayItemDesc sub_items[2] = {
+                    {.id = 21u, .label = str_lit("Sub A")},
+                    {.id = 22u, .label = str_lit("Sub B"), .checked = true, .checkbox = true},
+                };
+                const TrayItemDesc top_items[2] = {
+                    {.id = 10u, .label = str_lit("Recent"), .submenu = sub_items},
+                    {.id = 11u, .label = str_lit("Quit")},
+                };
+                check(tray4 != nullptr &&
+                      tray_set_icon_rgba(tray4, icon_px, 4u, 4u) &&
+                      !tray_set_icon_rgba(tray4, nullptr, 4u, 4u) &&
+                      tray_set_menu(tray4, top_items), __LINE__);
+                destroy_tray(tray4);
+
+                const MenuBarItemDesc file_children[2] = {
+                    {.id = 101u, .label = str_lit("Open"), .shortcut = str_lit("Ctrl+O")},
+                    {.id = 102u, .label = str_lit("Save"), .shortcut = str_lit("Ctrl+S")},
+                };
+                const MenuBarItemDesc menu_roots[1] = {
+                    {.id = 100u, .label = str_lit("File"), .children = file_children},
+                };
+                check(set_native_menu_bar(test, nullptr, menu_roots) &&
+                      poll_native_menu_item(test) == 0u &&
+                      set_native_menu_bar(test, nullptr, {}), __LINE__);
+            }
+        }
     }
 
     destroy_context(test);set_current_context(restore);free_text_buffer(&b);return ok;

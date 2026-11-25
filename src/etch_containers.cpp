@@ -1625,7 +1625,37 @@ bool dock_add_pane(uint32_t id, uint32_t leaf, const DockPaneDesc& pane) noexcep
     char* title = t.title_heap ? t.title_heap : t.title_inline;
     if (len) { std::memcpy(title, pane.title.chars, len); } title[len] = 0;
     t.id = pane.id; t.leaf = leaf; t.icon_id = pane.icon_id; t.closable = pane.closable; t.open = pane.default_open;
+    t.pinned = pane.pinned; t.dirty = pane.dirty; t.badge_color = pane.badge_color; t.right_clicked_frame = 0u;
     s->nodes[leaf - 1u].active = dock_visible(s, leaf); return true;
+}
+
+void dock_set_pane_pinned(uint32_t id, uint32_t pane, bool pinned) noexcept {
+    Context* ctx = current_context(); if (!ctx || !id || !pane) return;
+    auto* s = dock_slot(ctx, id); auto* t = s ? dock_tab(s, pane) : nullptr;
+    if (t && t->pinned != pinned) { t->pinned = pinned; request_redraw(ctx); }
+}
+bool dock_is_pane_pinned(uint32_t id, uint32_t pane) noexcept {
+    Context* ctx = current_context(); if (!ctx || !id || !pane) return false;
+    auto* s = dock_slot(ctx, id); auto* t = s ? dock_tab(s, pane) : nullptr; return t && t->pinned;
+}
+void dock_set_pane_dirty(uint32_t id, uint32_t pane, bool dirty) noexcept {
+    Context* ctx = current_context(); if (!ctx || !id || !pane) return;
+    auto* s = dock_slot(ctx, id); auto* t = s ? dock_tab(s, pane) : nullptr;
+    if (t && t->dirty != dirty) { t->dirty = dirty; request_redraw(ctx); }
+}
+void dock_set_pane_badge(uint32_t id, uint32_t pane, Color badge_color) noexcept {
+    Context* ctx = current_context(); if (!ctx || !id || !pane) return;
+    auto* s = dock_slot(ctx, id); auto* t = s ? dock_tab(s, pane) : nullptr;
+    if (t && t->badge_color.pack_rgba8() != badge_color.pack_rgba8()) { t->badge_color = badge_color; request_redraw(ctx); }
+}
+bool dock_pane_right_clicked(uint32_t id, uint32_t pane) noexcept {
+    Context* ctx = current_context(); if (!ctx || !ctx->active_ui || !id || !pane) return false;
+    auto* s = dock_slot(ctx, id); auto* t = s ? dock_tab(s, pane) : nullptr;
+    return t && t->right_clicked_frame != 0u && t->right_clicked_frame == ctx->active_ui->frame_index;
+}
+uint32_t dock_focused_leaf(uint32_t id) noexcept {
+    Context* ctx = current_context(); if (!ctx || !id) return 0u;
+    auto* s = dock_slot(ctx, id); return s ? s->focused_leaf : 0u;
 }
 
 uint32_t dock_find_pane_leaf(uint32_t id, uint32_t pane) noexcept {
@@ -2829,25 +2859,47 @@ uint32_t next_dock_pane() noexcept {
         }
         const uint32_t leaf = e.node_idx; --c.depth; n.active = dock_visible(s, leaf); if (!n.active) continue;
         const uint32_t leaf_id = id_index(d.id, 0xD200u + leaf);
+        if (s->focused_leaf == 0u) s->focused_leaf = leaf;
+        if (pointer_over_id(ctx->active_ui, leaf_id) && ctx->active_ui->left_pressed_this_frame) {
+            s->focused_leaf = leaf;
+        }
+        const bool leaf_focused = (s->focused_leaf == leaf);
         begin_box({ .id = leaf_id, .axis = Axis::Col, .width = Sizing::percent(1), .height = Sizing::percent(1),
             .background = d.pane_background, .border_color = d.pane_border_color, .border_width = d.pane_border_width,
             .radius = d.pane_radius, .clip_children = true });
         begin_box({ .width = Sizing::grow(), .height = Sizing::fixed(d.tab_bar_height_px), .background = d.tab_bar_bg });
         for (auto& t : std::span(s->tabs, s->tab_cap)) if (t.leaf == leaf && t.open) {
             const uint32_t tab_id = id_index(t.id, 0xD300u), close_id = id_index(t.id, 0xD301u);
-            if (clicked(tab_id) && !clicked(close_id)) n.active = t.id;
+            if (clicked(tab_id) && !clicked(close_id)) { n.active = t.id; s->focused_leaf = leaf; }
+            if (right_clicked(tab_id)) { t.right_clicked_frame = ctx->active_ui->frame_index; s->focused_leaf = leaf; }
+            if (t.closable && !t.pinned && hovered(tab_id) && ctx->active_ui->middle_pressed_this_frame) {
+                t.open = false; c.move_pane = t.id; c.target = 0;
+            }
             if (dragging(tab_id, 4.0f)) begin_drag_payload(tab_id, kInternalDockDragKind, dock_tab_title(t), nullptr, 0, 0, t.id);
             begin_box({ .id = tab_id, .height = Sizing::grow(), .padding = Padding::xy(10, 0), .gap = 6,
                 .align_y = AlignY::Center, .background = n.active == t.id ? d.tab_active_bg : (hovered(tab_id) ? d.tab_hover_bg : Color{}), .focusable = true });
             if (n.active == t.id) {
                 auto* color=ctx->frame_arena.alloc<Color>();
-                if(color) {*color=d.tab_accent;draw_after_layout([](Rect r,void* data) noexcept {
-                    draw_line({.from={2,r.h-1.5f},.to={r.w-2,r.h-1.5f},.color=*static_cast<Color*>(data),.thickness=2});
-                },color);}
+                if(color) {
+                    *color = leaf_focused ? d.tab_accent : Color::rgba8(d.tab_accent.r, d.tab_accent.g, d.tab_accent.b, 96u);
+                    draw_after_layout([](Rect r,void* data) noexcept {
+                        draw_line({.from={2,r.h-1.5f},.to={r.w-2,r.h-1.5f},.color=*static_cast<Color*>(data),.thickness=2});
+                    },color);
+                }
+            }
+            if (t.badge_color.a > 0u) {
+                box({ .width = Sizing::fixed(7.0f), .height = Sizing::fixed(7.0f), .background = t.badge_color, .radius = Corners::all(3.5f) });
             }
             if (t.icon_id != kInvalidIcon) icon({ .icon_id = t.icon_id, .size_px = 14 });
             text(dock_tab_title(t), { .font_size_px = 12.5f, .wrap = false });
-            if (t.closable) {
+            if (t.dirty) {
+                box({ .width = Sizing::fixed(6.0f), .height = Sizing::fixed(6.0f),
+                      .background = d.tab_accent, .radius = Corners::all(3.0f) });
+            }
+            if (t.pinned) {
+                box({ .width = Sizing::fixed(5.0f), .height = Sizing::fixed(5.0f),
+                      .background = active_theme(ctx).text_muted, .radius = Corners::all(1.0f) });
+            } else if (t.closable) {
                 begin_box({ .id = close_id, .width = Sizing::fixed(14), .height = Sizing::fixed(20), .align_y = AlignY::Center });
                 if(hovered(close_id))set_cursor(Cursor::Hand);
                 const Color color=hovered(close_id)?active_theme(ctx).text_primary:active_theme(ctx).text_muted;

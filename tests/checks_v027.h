@@ -202,6 +202,71 @@ inline bool verify_v027_driver(const char* driver) noexcept {
         } else {
             check(false, __LINE__);
         }
+
+        // Sharp zero-blur ring shadows (outer 0 0 0 2px ring + inset 0 0 0 2px ring + transparent cutout):
+        begin_frame(c, {.viewport_w = 340, .viewport_h = 120});
+        begin_box({
+            .axis = Axis::Row,
+            .width = Sizing::fixed(340.0f),
+            .height = Sizing::fixed(120.0f),
+            .padding = Padding::xy(24.0f, 24.0f),
+            .gap = 48.0f,
+            .background = Color::rgb_hex(0x101010),
+        });
+        // Box 1 [24..84, 24..84]: sharp outer spread=2px bright ring (blur=0)
+        box({
+            .width = Sizing::fixed(60.0f),
+            .height = Sizing::fixed(60.0f),
+            .background = Color::rgb_hex(0x202020),
+            .radius = Corners::all(6.0f),
+            .shadows = {
+                ShadowLayer{.offset = {0.0f, 0.0f}, .blur_px = 0.0f, .spread_px = 2.0f, .color = Color::rgba8(240, 240, 240, 255), .inset = false},
+            },
+            .shadow_count = 1u,
+        });
+        // Box 2 [132..192, 24..84]: sharp inset spread=2px bright ring (blur=0, zero center bleed)
+        box({
+            .width = Sizing::fixed(60.0f),
+            .height = Sizing::fixed(60.0f),
+            .background = Color::rgb_hex(0x202020),
+            .radius = Corners::all(6.0f),
+            .shadows = {
+                ShadowLayer{.offset = {0.0f, 0.0f}, .blur_px = 0.0f, .spread_px = 2.0f, .color = Color::rgba8(240, 240, 240, 255), .inset = true},
+            },
+            .shadow_count = 1u,
+        });
+        // Box 3 [240..300, 24..84]: transparent fill with sharp outer spread=2px white ring (interior stays pure canvas!)
+        box({
+            .width = Sizing::fixed(60.0f),
+            .height = Sizing::fixed(60.0f),
+            .background = Color::transparent(),
+            .radius = Corners::all(6.0f),
+            .shadows = {
+                ShadowLayer{.offset = {0.0f, 0.0f}, .blur_px = 0.0f, .spread_px = 2.0f, .color = Color::rgba8(240, 240, 240, 255), .inset = false},
+            },
+            .shadow_count = 1u,
+        });
+        end_box();
+        end_frame(c);
+
+        check(render_headless_png(c, 340u, 120u, png_path, Color::rgb_hex(0x101010)), __LINE__);
+        if (SDL_Surface* img = SDL_LoadPNG(png_path)) {
+            Uint8 r = 0, g = 0, b = 0, a = 0;
+            // Box 1: outer ring at (54, 22) is bright, outside at (54, 18) is canvas #101010, interior (54, 54) is #202020
+            check(SDL_ReadSurfacePixel(img, 54, 22, &r, &g, &b, &a) && r > 200, __LINE__);
+            check(SDL_ReadSurfacePixel(img, 54, 18, &r, &g, &b, &a) && r < 24, __LINE__);
+            check(SDL_ReadSurfacePixel(img, 54, 54, &r, &g, &b, &a) && r >= 26 && r <= 38, __LINE__);
+            // Box 2: inset ring at (162, 24) is bright, interior (162, 54) is #202020, exterior (162, 21) is canvas #101010
+            check(SDL_ReadSurfacePixel(img, 162, 24, &r, &g, &b, &a) && r > 200, __LINE__);
+            check(SDL_ReadSurfacePixel(img, 162, 54, &r, &g, &b, &a) && r >= 26 && r <= 38, __LINE__);
+            check(SDL_ReadSurfacePixel(img, 162, 21, &r, &g, &b, &a) && r < 24, __LINE__);
+            // Box 3: CSS-accurate outer cutout -> outer ring (270, 22) bright, transparent interior (270, 54) stays canvas #101010
+            check(SDL_ReadSurfacePixel(img, 270, 22, &r, &g, &b, &a) && r > 200, __LINE__);
+            check(SDL_ReadSurfacePixel(img, 270, 54, &r, &g, &b, &a) && r < 24, __LINE__);
+            SDL_DestroySurface(img);
+        } else {
+            check(false, __LINE__);
+        }
     }
 
     // ------------------------------------------------------------------
@@ -810,6 +875,86 @@ inline bool verify_v027_driver(const char* driver) noexcept {
             std::fprintf(stderr, "v027 [%s] combined card draw_call_count=%u (expected 1..6)\n", drv_label, dc);
         }
         check(dc > 0u && dc <= 6u, __LINE__);
+    }
+
+    // ------------------------------------------------------------------
+    // (h) Clipped Child Borders & Top Rim Must Respect Parent Scissor
+    // ------------------------------------------------------------------
+    {
+        begin_frame(c, {.viewport_w = 240, .viewport_h = 160});
+        begin_box({
+            .axis = Axis::Col,
+            .width = Sizing::fixed(240.0f),
+            .height = Sizing::fixed(160.0f),
+            .background = Color::rgb_hex(0x080808),
+            .clip_children = true,
+        });
+        begin_box({
+            .id = id("v027_clip_parent"),
+            .axis = Axis::Col,
+            .width = Sizing::fixed(240.0f),
+            .height = Sizing::fixed(80.0f),
+            .clip_children = true,
+            .scroll_y = true,
+            .show_scrollbar = false,
+            .shrink_height = true,
+        });
+        box({.width = Sizing::fixed(200.0f), .height = Sizing::fixed(60.0f)});
+        BoxDesc seg_child = {};
+        seg_child.width = Sizing::fixed(200.0f);
+        seg_child.height = Sizing::fixed(60.0f);
+        seg_child.background = Color::rgb_hex(0x101010);
+        seg_child.border_color = Color::rgb_hex(0xFF0000);
+        seg_child.border_sides = {2.0f, 2.0f, 2.0f, 2.0f};
+        seg_child.radius = Corners::all(6.0f);
+        seg_child.clip_children = true;
+        seg_child.top_rim_alpha = 0.8f;
+        box(seg_child);
+
+        BoxDesc solid_child = {};
+        solid_child.width = Sizing::fixed(200.0f);
+        solid_child.height = Sizing::fixed(40.0f);
+        solid_child.background = Color::rgb_hex(0x101010);
+        solid_child.border_color = Color::rgb_hex(0x00FF00);
+        solid_child.border_width = 2.0f;
+        solid_child.radius = Corners::all(6.0f);
+        solid_child.clip_children = true;
+        box(solid_child);
+        end_box();
+        end_box();
+        end_frame(c);
+
+        check(render_headless_png(c, 240u, 160u, png_path, Color::rgb_hex(0x080808)), __LINE__);
+        if (SDL_Surface* raw = SDL_LoadPNG(png_path)) {
+            if (SDL_Surface* rgba = SDL_ConvertSurface(raw, SDL_PIXELFORMAT_RGBA32)) {
+                const uint8_t* px = static_cast<const uint8_t*>(rgba->pixels);
+                auto at = [&](int x, int y) -> const uint8_t* {
+                    return px + size_t(y) * size_t(rgba->pitch) + size_t(x) * 4u;
+                };
+                // Top border of red segmented box at y=60..61 must be visible inside parent clip (y < 80)
+                const uint8_t* in_top = at(100, 61);
+                check(in_top[0] > 180u, __LINE__);
+                // Below parent clip (y >= 80): neither segmented border, top rim, nor solid border may leak
+                const int probe_ys[4] = {90, 119, 121, 140};
+                const int probe_xs[3] = {1, 100, 199};
+                for (int py : probe_ys) {
+                    for (int px_x : probe_xs) {
+                        const uint8_t* p = at(px_x, py);
+                        if (p[0] > 14u || p[1] > 14u || p[2] > 14u) {
+                            std::fprintf(stderr, "v027 [%s] clipped child border leaked at (%d,%d) rgb=(%u,%u,%u)\n",
+                                         drv_label, px_x, py, p[0], p[1], p[2]);
+                            check(false, __LINE__);
+                        }
+                    }
+                }
+                SDL_DestroySurface(rgba);
+            } else {
+                check(false, __LINE__);
+            }
+            SDL_DestroySurface(raw);
+        } else {
+            check(false, __LINE__);
+        }
     }
 
     std::remove(png_path);

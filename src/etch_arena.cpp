@@ -66,6 +66,12 @@ struct WidgetCold {
 
     // Terminal & Sheet
     Vec2     terminal_cursor = {}, terminal_velocity = {};
+    int32_t  term_sel_start_col = -1, term_sel_start_row = -1;
+    int32_t  term_sel_end_col = -1, term_sel_end_row = -1;
+    bool     term_sel_active = false, term_sel_dragging = false;
+    int32_t  term_last_col = -1, term_last_row = -1;
+    bool     term_mouse_down = false;
+    uint8_t  term_mouse_btn = 0u;
     float    sheet_pos = 0.0f, sheet_velocity = 0.0f, sheet_last_pointer = 0.0f;
     uint32_t sheet_snap = 0;
     bool     terminal_initialized = false;
@@ -894,9 +900,10 @@ struct DockNode {
 struct DockTabSlot {
     uint32_t id = 0; uint32_t leaf = 0; char title_inline[48] = {}; char* title_heap = nullptr; uint32_t title_cap = 0;
     uint16_t icon_id = kInvalidIcon; bool closable = false; bool open = false;
+    bool pinned = false; bool dirty = false; Color badge_color = {}; uint32_t right_clicked_frame = 0u;
 };
 struct DockSpaceSlot {
-    uint32_t id = 0; uint32_t root = 0; uint32_t split_seq = 0;
+    uint32_t id = 0; uint32_t root = 0; uint32_t split_seq = 0; uint32_t focused_leaf = 0;
     DockNode* nodes = nullptr; uint32_t node_cap = 0; DockTabSlot* tabs = nullptr; uint32_t tab_cap = 0;
 };
 struct DockTraverseEntry { uint32_t node_idx = 0; uint8_t phase = 0; bool split_pushed = false; };
@@ -1016,6 +1023,10 @@ struct WindowUiState {
     uint32_t focus_scope = 0;
     uint32_t focus_scopes[32] = {};
     uint32_t focus_scope_depth = 0;
+    uint32_t command_scopes[32] = {};
+    uint32_t command_scope_depth = 0;
+    uint32_t focus_restore_stack[16] = {};
+    uint32_t focus_restore_depth = 0;
     uint32_t modal_scope = 0;
     bool modal_needs_focus = false;
     bool os_dragging = false;
@@ -1066,6 +1077,7 @@ struct WindowUiState {
     bool        mouse_captured = false;
     Vec2        pointer_pos = {-1.0f, -1.0f};
     bool        left_pressed_this_frame = false;
+    bool        middle_pressed_this_frame = false;
     Vec2        left_press_origin = {-1.0f, -1.0f};
     float       left_max_drag_dist_sq = 0.0f;
     bool        right_pressed_this_frame = false;
@@ -1271,6 +1283,7 @@ struct Context {
     ShaderSurfaceSlot shader_surfaces[64] = {};
     const VisualLayerNode* active_render_layer = nullptr;
     float time_scale = 1;
+    float ui_zoom = 1.0f;
     bool reduced_motion = false;
     A11yIndexEntry* a11y_index = nullptr; uint32_t a11y_index_cap = 0, a11y_index_count = 0;
     A11yBuild* a11y_first = nullptr; A11yBuild* a11y_last = nullptr; A11yBuild* a11y_parent = nullptr;
@@ -1452,6 +1465,15 @@ struct Context {
     char*         clipboard_fallback = nullptr;
     uint32_t      clipboard_fallback_cap = 0;
     struct DialogSharedQueue* dialog_queue = nullptr;
+    uint32_t      desktop_notification_count = 0u;
+    bool          win32_notify_icon_added = false;
+    void*         win32_notify_hwnd = nullptr;
+    void*         native_menu_handle = nullptr;
+    void*         native_menu_hwnd = nullptr;
+    uint32_t      native_menu_item_count = 0u;
+    uint32_t      native_menu_ring[32] = {};
+    uint32_t      native_menu_head = 0u;
+    uint32_t      native_menu_count = 0u;
 
     uint64_t   layout_start_ticks = 0;
     SlugCurveGpu* dyn_slug_curves = nullptr;

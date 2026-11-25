@@ -1133,8 +1133,19 @@ static bool test_versioned_c_abi(EtchContext* ctx) {
 
         bool tval = true;
         EtchToggleSwitchDesc tog = etch_toggle_switch_desc_default();
+        if (!etch_corners_is_theme_auto(tog.track_radius) || !etch_corners_is_theme_auto(tog.thumb_radius) ||
+            tog.thumb_padding_px != 2.0f || tog.border_width != 1.0f) {
+            etch_end_frame(ctx);
+            return false;
+        }
         tog.id = etch_id("c_toggle");
         tog.value = &tval;
+        tog.track_width_px = 24.0f;
+        tog.track_height_px = 16.0f;
+        tog.track_radius = etch_corners_all(4.0f);
+        tog.thumb_radius = etch_corners_all(2.0f);
+        tog.thumb_padding_px = 2.0f;
+        tog.border_width = 0.5f;
         etch_toggle_switch(&tog);
 
         EtchComboBoxDesc cbd = etch_combo_box_desc_default();
@@ -2011,6 +2022,189 @@ int main(void) {
     const bool ok_editor = test_text_buffer_and_code_editor(ctx);
     const bool ok_containers = test_containers_and_canvas(ctx);
     const bool ok_audit = test_kernel_audit_c_abi(ctx);
+    bool ok_ade_c99 = false;
+    {
+        EtchTerminalCell tcells[8];
+        for (uint32_t i = 0u; i < 8u; ++i) {
+            tcells[i] = etch_terminal_cell_default();
+            tcells[i].codepoint = 'a' + i;
+        }
+        tcells[0].italic = true;
+        tcells[0].dim = true;
+        tcells[0].strikethrough = true;
+        tcells[0].underline_style = ETCH_TERMINAL_UNDERLINE_CURLY;
+        tcells[0].hyperlink_id = 42u;
+        EtchTerminalGridDesc tgd = etch_terminal_grid_desc_default();
+        tgd.id = etch_id("c_ade_term");
+        tgd.cells = tcells;
+        tgd.cell_count = 8u;
+        tgd.columns = 4u;
+        tgd.rows = 2u;
+        tgd.cursor_shape = ETCH_TERMINAL_CURSOR_BLOCK;
+        tgd.auto_fit_container = true;
+        tgd.focusable = true;
+
+        EtchTextBuffer* tb = etch_create_text_buffer(ETCH_STR_LIT("alpha\nbeta\ngamma\ndelta"), 64u);
+        const uint32_t ced = etch_id("c_ade_ed");
+        EtchCodeViewZone vz = etch_code_view_zone_default();
+        vz.zone_id = 501u;
+        vz.after_line = 0u;
+        vz.height_px = 40.0f;
+        EtchCodeInlayHint ih = etch_code_inlay_hint_default();
+        ih.line_index = 0u;
+        ih.text = ETCH_STR_LIT(": str");
+        EtchCodeInlineHighlight cih = etch_code_inline_highlight_default();
+        cih.line_index = 0u;
+        cih.start_col_byte = 0u;
+        cih.end_col_byte = 5u;
+        cih.background = etch_rgba8(239u, 68u, 68u, 80u);
+        EtchCodeOverviewMarker cmk = etch_code_overview_marker_default();
+        cmk.line_index = 1u;
+        cmk.color = etch_rgb_hex(0x22C55Eu, 255u);
+        cmk.lane = 1u;
+        const bool ok_vz_set = etch_code_editor_set_view_zones(ced, &vz, 1u) &&
+            etch_code_editor_set_inlay_hints(ced, &ih, 1u) &&
+            etch_code_editor_set_inline_highlights(ced, &cih, 1u) &&
+            etch_code_editor_set_overview_markers(ced, &cmk, 1u);
+
+        EtchTerminalSearchMatch tsm = {0u, 0u, 2u, true};
+        tgd.search_matches = &tsm;
+        tgd.search_match_count = 1u;
+        tgd.interactive_selection = true;
+
+        char ag_buf[64] = "one\ntwo\nthree";
+        EtchTextInputHighlight ath = etch_text_input_highlight_default();
+        ath.byte_offset = 0u;
+        ath.byte_length = 3u;
+        ath.background = etch_rgba8(56u, 189u, 248u, 40u);
+        ath.atomic = true;
+        EtchTextInputDesc tid = etch_text_input_desc_default();
+        tid.id = etch_id("c_ade_input");
+        tid.buffer = ag_buf;
+        tid.capacity = sizeof(ag_buf);
+        tid.multiline = true;
+        tid.auto_grow = true;
+        tid.min_height_px = 36.0f;
+        tid.max_height_px = 140.0f;
+        tid.highlights = &ath;
+        tid.highlight_count = 1u;
+
+        etch_set_ui_zoom(ctx, 1.25f);
+        const bool ok_zoom = (etch_ui_zoom(ctx) > 1.24f && etch_ui_zoom(ctx) < 1.26f);
+        etch_set_ui_zoom(ctx, 1.0f);
+
+        EtchFrameDesc fd = etch_frame_desc_default();
+        fd.viewport_w = 500;
+        fd.viewport_h = 300;
+        etch_begin_frame(ctx, &fd);
+        etch_push_command_scope(etch_id("c_scope_outer"));
+        const EtchTerminalGridResult tr = etch_terminal_grid_ex(&tgd);
+        EtchCodeEditorDesc ced_d = etch_code_editor_desc_default();
+        ced_d.id = ced;
+        ced_d.buffer = tb;
+        ced_d.width = etch_sizing_fixed(300.0f);
+        ced_d.height = etch_sizing_fixed(120.0f);
+        ced_d.show_overview_ruler = true;
+        ced_d.show_sticky_header = true;
+        ced_d.sticky_header_text = ETCH_STR_LIT("alpha");
+        (void)etch_code_editor(&ced_d);
+        const EtchTextInputResult tir = etch_text_input(&tid);
+        etch_pop_command_scope();
+        etch_end_frame(ctx);
+
+        EtchRect zrect = {0}, zclip = {0};
+        const bool ok_vz_bounds = etch_code_editor_get_view_zone_bounds(ced, 501u, &zrect, &zclip) && zrect.h == 40.0f;
+        etch_code_editor_set_scroll_offset(ced, (EtchVec2){0.0f, 12.0f}, true);
+        const EtchVec2 sc = etch_code_editor_scroll_offset(ced);
+        etch_code_editor_clear_view_zones(ced);
+        etch_code_editor_clear_inlay_hints(ced);
+        etch_code_editor_clear_inline_highlights(ced);
+        etch_code_editor_clear_overview_markers(ced);
+        etch_destroy_text_buffer(tb);
+
+        etch_request_focus(tid.id);
+        const bool ok_focus_rp = etch_push_focus_restore_point(ctx);
+        etch_request_focus(tgd.id);
+        const uint32_t restored = etch_pop_focus_restore_point(ctx);
+
+        uint32_t fpos[4] = {0};
+        const EtchFuzzyMatchResult fmr = etch_fuzzy_match(ETCH_STR_LIT("op"), ETCH_STR_LIT("open_panel"), fpos, 4u);
+        uint32_t fpos_wb[4] = {0};
+        const EtchFuzzyMatchResult fmr_wb = etch_fuzzy_match(ETCH_STR_LIT("os"), ETCH_STR_LIT("open_settings"), fpos_wb, 4u);
+
+        const uint32_t dkid = etch_id("c_ade_dock");
+        const uint32_t dl = etch_dock_reset_root(dkid);
+        EtchDockPaneDesc dp = etch_dock_pane_desc_default();
+        dp.id = etch_id("c_ade_pane");
+        dp.title = ETCH_STR_LIT("Pin");
+        dp.pinned = true;
+        dp.dirty = true;
+        dp.badge_color = etch_rgb_hex(0x10B981u, 255u);
+        const bool ok_dock_add = etch_dock_add_pane(dkid, dl, &dp) && etch_dock_is_pane_pinned(dkid, dp.id);
+        etch_dock_set_pane_pinned(dkid, dp.id, false);
+        etch_dock_set_pane_dirty(dkid, dp.id, false);
+        etch_dock_set_pane_badge(dkid, dp.id, etch_rgb_hex(0x3B82F6u, 255u));
+
+        ok_ade_c99 = ok_vz_set && ok_vz_bounds && ok_zoom && tr.visible_columns > 0u &&
+            tir.byte_length == 13u && !tir.pasted_image && sc.y >= 0.0f &&
+            ok_focus_rp && restored == tid.id &&
+            fmr.matched && fmr.match_count == 2u && fpos[0] == 0u && fpos[1] == 1u &&
+            fmr_wb.matched && fmr_wb.match_count == 2u && fpos_wb[0] == 0u && fpos_wb[1] == 5u &&
+            ok_dock_add && !etch_dock_is_pane_pinned(dkid, dp.id) && !etch_dock_pane_right_clicked(dkid, dp.id);
+
+        /* Round 3 C99 ABI coverage: tokenize_language, terminal VT encoders/graphemes/palette, frame keys, desktop OS APIs */
+        EtchSyntaxToken r3_toks[16];
+        const uint32_t r3_tn = etch_tokenize_language(ETCH_STR_LIT("ts"), 0u, ETCH_STR_LIT("const x = 42; // hi"), r3_toks, 16u);
+        char r3_vt[24];
+        const uint32_t r3_klen = etch_terminal_encode_key((uint32_t)'c', ETCH_MOD_CTRL, false, r3_vt, (uint32_t)sizeof(r3_vt));
+        const uint32_t r3_mlen = etch_terminal_encode_mouse_sgr(1u, 0, 0, 0u, true, false, r3_vt, (uint32_t)sizeof(r3_vt));
+        EtchDesktopNotificationDesc r3_nd = etch_desktop_notification_desc_default();
+        r3_nd.title = ETCH_STR_LIT("C99");
+        r3_nd.body = ETCH_STR_LIT("OK");
+        r3_nd.silent = true;
+        const uint32_t r3_n0 = etch_desktop_notification_count(ctx);
+        const bool r3_notified = etch_notify_desktop(ctx, &r3_nd) && etch_desktop_notification_count(ctx) == r3_n0 + 1u;
+        EtchTray* r3_tray = etch_tray_create(ctx, ETCH_STR_LIT("C99 Tray"));
+        const bool r3_tray_ok = (r3_tray != NULL) && etch_tray_set_tooltip(r3_tray, ETCH_STR_LIT("Updated")) &&
+            etch_tray_poll_clicked_item(r3_tray) == 0u;
+        etch_tray_destroy(r3_tray);
+        EtchFrameDesc r3_fd = etch_frame_desc_default();
+        r3_fd.viewport_w = 160u; r3_fd.viewport_h = 80u; r3_fd.key_pressed_code = (uint32_t)'a';
+        etch_begin_frame(ctx, &r3_fd);
+        EtchFrameKeyEvent r3_fke;
+        memset(&r3_fke, 0, sizeof(r3_fke));
+        const bool r3_fk_ok = etch_frame_key_count() == 1u && etch_frame_key_at(0u, &r3_fke) &&
+            r3_fke.keycode == (uint32_t)'a' && !r3_fke.consumed && etch_consume_frame_key_at(0u);
+        etch_end_frame(ctx);
+        ok_ade_c99 = ok_ade_c99 && r3_tn >= 3u && r3_klen == 1u && r3_mlen > 0u &&
+            !etch_open_url(ETCH_STR_LIT("javascript:void(0)")) && r3_notified && r3_tray_ok && r3_fk_ok;
+
+        /* Round 4 C99 ABI coverage: stateful tokenizer, regex search/replace, minimap desc, tray icon/submenu, native menu bar */
+        uint8_t r4_st = 0u;
+        EtchSyntaxToken r4_toks[16];
+        const uint32_t r4_t0 = etch_tokenize_language_stateful(ETCH_STR_LIT("ts"), ETCH_STR_LIT("/* start"), 0u, &r4_st, r4_toks, 16u);
+        const bool r4_st1 = (r4_t0 == 1u && r4_st == 1u);
+        const uint32_t r4_t1 = etch_tokenize_language_stateful(ETCH_STR_LIT("ts"), ETCH_STR_LIT("end */ const z = 1;"), r4_st, &r4_st, r4_toks, 16u);
+        const bool r4_st2 = (r4_t1 >= 2u && r4_st == 0u);
+        EtchTextBuffer* r4_tb = etch_create_text_buffer(ETCH_STR_LIT("k1=10 k2=20"), 256u);
+        EtchTextSearchOptions r4_opt = etch_text_search_options_default();
+        r4_opt.regex = true;
+        EtchTextSearchMatch r4_m[4];
+        const uint32_t r4_fc = etch_text_buffer_find_all_ex(r4_tb, ETCH_STR_LIT("k\\d+"), &r4_opt, r4_m, 4u);
+        const uint32_t r4_rc = etch_text_buffer_replace_all(r4_tb, ETCH_STR_LIT("k\\d+"), ETCH_STR_LIT("v"), &r4_opt);
+        etch_destroy_text_buffer(r4_tb);
+        uint8_t r4_px[16] = {255};
+        EtchTray* r4_tray = etch_tray_create(ctx, ETCH_STR_LIT("R4"));
+        EtchTrayItemDesc r4_sub[1] = {{ 2u, ETCH_STR_LIT("Child"), false, false, false, false, NULL, 0u }};
+        EtchTrayItemDesc r4_top[1] = {{ 1u, ETCH_STR_LIT("Parent"), false, false, false, false, r4_sub, 1u }};
+        const bool r4_tray_ok = r4_tray != NULL && etch_tray_set_icon_rgba(r4_tray, r4_px, 2u, 2u) && etch_tray_set_menu(r4_tray, r4_top, 1u);
+        etch_tray_destroy(r4_tray);
+        EtchMenuBarItemDesc r4_mch[1] = {{ 50u, ETCH_STR_LIT("About"), ETCH_STR_LIT("F1"), false, false, false, NULL, 0u }};
+        EtchMenuBarItemDesc r4_mroot[1] = {{ 49u, ETCH_STR_LIT("Help"), ETCH_STR_LIT(""), false, false, false, r4_mch, 1u }};
+        const bool r4_menu_ok = etch_set_native_menu_bar(ctx, NULL, r4_mroot, 1u) && etch_poll_native_menu_item(ctx) == 0u &&
+            etch_set_native_menu_bar(ctx, NULL, NULL, 0u);
+        ok_ade_c99 = ok_ade_c99 && r4_st1 && r4_st2 && r4_fc == 2u && r4_rc == 2u && r4_tray_ok && r4_menu_ok;
+    }
     bool ok_svg_webp = false;
     {
         static const char kCSvg[] = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"24\" height=\"24\"><rect width=\"24\" height=\"24\" fill=\"#E59A38\"/></svg>";
@@ -2029,9 +2223,9 @@ int main(void) {
     etch_destroy_context(ctx);
     etch_set_current_context(NULL);
 
-    if (!ok_layout || !ok_editor || !ok_containers || !ok_audit || !ok_svg_webp) {
-        fprintf(stderr, "c99_abi_smoke: failed (layout=%d editor=%d containers=%d audit=%d svg_webp=%d)\n",
-            (int)ok_layout, (int)ok_editor, (int)ok_containers, (int)ok_audit, (int)ok_svg_webp);
+    if (!ok_layout || !ok_editor || !ok_containers || !ok_audit || !ok_ade_c99 || !ok_svg_webp) {
+        fprintf(stderr, "c99_abi_smoke: failed (layout=%d editor=%d containers=%d audit=%d ade_c99=%d svg_webp=%d)\n",
+            (int)ok_layout, (int)ok_editor, (int)ok_containers, (int)ok_audit, (int)ok_ade_c99, (int)ok_svg_webp);
         return 1;
     }
     printf("c99_abi_smoke: PASS\n");

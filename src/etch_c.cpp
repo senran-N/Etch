@@ -495,6 +495,9 @@ bool c_code_line_decorate_trampoline(
     out_dec->gutter_bar_color = to_cpp(c_dec.gutter_bar_color);
     out_dec->gutter_tag = to_cpp(c_dec.gutter_tag);
     out_dec->gutter_tag_color = to_cpp(c_dec.gutter_tag_color);
+    out_dec->has_display_line_number = c_dec.has_display_line_number;
+    out_dec->display_line_number = c_dec.display_line_number;
+    out_dec->hide_line_number = c_dec.hide_line_number;
     return true;
 }
 
@@ -507,7 +510,11 @@ etch::TerminalCell read_c_terminal_cell(const void* data, size_t index) noexcept
     const auto& c = static_cast<const EtchTerminalCell*>(data)[index];
     return {c.codepoint, {static_cast<etch::TerminalColorMode>(c.foreground.mode), c.foreground.value},
             {static_cast<etch::TerminalColorMode>(c.background.mode), c.background.value},
-            c.width, c.bold, c.underline, c.inverse};
+            c.width, c.bold, c.underline, c.inverse,
+            c.italic, c.dim, c.strikethrough,
+            static_cast<etch::TerminalUnderlineStyle>(c.underline_style),
+            {static_cast<etch::TerminalColorMode>(c.underline_color.mode), c.underline_color.value},
+            c.hyperlink_id, c.grapheme_utf8, c.grapheme_len};
 }
 
 inline EtchVirtualListSlice from_cpp(const etch::VirtualListSlice& s) noexcept {
@@ -749,13 +756,15 @@ ETCH_API EtchCodeEditorDesc etch_code_editor_desc_default(void) {
             from_cpp(d.gutter_text_color), from_cpp(d.gutter_active_text_color),
             from_cpp(d.caret_color), from_cpp(d.composition_color), from_cpp(d.border_color),
             from_cpp(d.focus_border_color), d.border_width, d.focus_border_width,
-            from_cpp(d.radius), d.scroll_fade_px, nullptr, nullptr, d.gutter_tag_width_px};
+            from_cpp(d.radius), d.scroll_fade_px, nullptr, nullptr, d.gutter_tag_width_px,
+            d.auto_height, d.show_overview_ruler, d.show_sticky_header, from_cpp(d.sticky_header_text),
+            from_cpp(d.language), d.highlight_matching_brackets, d.show_indent_guides, d.show_diagnostic_tooltips, d.show_minimap};
 }
 
 ETCH_API EtchTextInputHighlight etch_text_input_highlight_default(void) {
     const etch::TextInputHighlight h{};
     return {h.byte_offset, h.byte_length, from_cpp(h.text_color), from_cpp(h.background),
-            from_cpp(h.border_color), h.radius_px};
+            from_cpp(h.border_color), h.radius_px, h.atomic};
 }
 
 ETCH_API EtchTextInputDesc etch_text_input_desc_default(void) {
@@ -770,7 +779,8 @@ ETCH_API EtchTextInputDesc etch_text_input_desc_default(void) {
             d.read_only, d.password, d.context_menu, d.clear_button, d.escape_blurs, d.suppress_popup_keys, nullptr, 0u,
             from_cpp(d.ghost_text), from_cpp(d.ghost_color), d.accept_ghost_on_tab, d.submit_on_enter,
             from_cpp(d.hover_border_color), d.focus_glow_blur, d.leading_icon_id,
-            from_cpp(d.leading_icon_color), d.continuous_corners, d.disabled};
+            from_cpp(d.leading_icon_color), d.continuous_corners, d.disabled,
+            d.auto_grow, d.min_height_px, d.max_height_px};
 }
 
 ETCH_API EtchButtonDesc etch_button_desc_default(void) {
@@ -790,7 +800,8 @@ ETCH_API EtchToggleSwitchDesc etch_toggle_switch_desc_default(void) {
     const etch::ToggleSwitchDesc d{};
     return {d.id, from_cpp(d.label), d.value, d.disabled, d.track_width_px,
             d.track_height_px, d.font_size_px, d.font_id, from_cpp(d.on_color),
-            from_cpp(d.off_color), from_cpp(d.thumb_color), from_cpp(d.border_color)};
+            from_cpp(d.off_color), from_cpp(d.thumb_color), from_cpp(d.border_color),
+            from_cpp(d.track_radius), from_cpp(d.thumb_radius), d.thumb_padding_px, d.border_width};
 }
 
 ETCH_API EtchProgressBarDesc etch_progress_bar_desc_default(void) {
@@ -894,7 +905,8 @@ ETCH_API EtchVirtualListDesc etch_virtual_list_desc_default(void) {
 
 ETCH_API EtchDockPaneDesc etch_dock_pane_desc_default(void) {
     const etch::DockPaneDesc d{};
-    return {d.id, from_cpp(d.title), d.icon_id, d.closable, d.default_open};
+    return {d.id, from_cpp(d.title), d.icon_id, d.closable, d.default_open,
+            d.pinned, d.dirty, from_cpp(d.badge_color)};
 }
 
 ETCH_API EtchDockSpaceDesc etch_dock_space_desc_default(void) {
@@ -1804,9 +1816,11 @@ ETCH_API EtchTextInputResult etch_text_input(const EtchTextInputDesc* desc) {
         to_cpp(d->ghost_text), to_cpp(d->ghost_color), d->accept_ghost_on_tab, d->submit_on_enter,
         to_cpp(d->hover_border_color), d->focus_glow_blur, d->leading_icon_id,
         to_cpp(d->leading_icon_color), d->continuous_corners, d->disabled,
+        d->auto_grow, d->min_height_px, d->max_height_px,
     });
     return {r.changed, r.submitted, r.focused, r.composing, r.byte_length,
-            r.cursor_byte, r.selection_anchor_byte, from_cpp(r.ime_cursor_rect), r.ghost_accepted};
+            r.cursor_byte, r.selection_anchor_byte, from_cpp(r.ime_cursor_rect), r.ghost_accepted,
+            from_cpp(r.caret_rect), r.pasted_image};
 }
 ETCH_API void etch_set_text_selection(uint32_t element_id, uint32_t anchor_byte, uint32_t cursor_byte) {
     etch::set_text_selection(element_id, anchor_byte, cursor_byte);
@@ -1875,6 +1889,129 @@ ETCH_API EtchFileDialogResult etch_poll_file_dialog(EtchContext* ctx, EtchArena*
     return {r.ready, r.cancelled, r.error, r.request_tag, r.selected_filter, c_paths, cnt};
 }
 
+ETCH_API EtchDesktopNotificationDesc etch_desktop_notification_desc_default(void) {
+    return {static_cast<uint32_t>(sizeof(EtchDesktopNotificationDesc)), {nullptr, 0u, false}, {nullptr, 0u, false}, 0u, false};
+}
+ETCH_API bool etch_open_url(EtchStr url) { return etch::open_url(to_cpp(url)); }
+ETCH_API bool etch_flash_window(struct SDL_Window* window, EtchWindowFlashKind kind) {
+    return etch::flash_window(window, static_cast<etch::WindowFlashKind>(kind));
+}
+ETCH_API bool etch_set_window_progress(struct SDL_Window* window, EtchWindowProgressState state, float value_0_to_1) {
+    return etch::set_window_progress(window, static_cast<etch::WindowProgressState>(state), value_0_to_1);
+}
+ETCH_API bool etch_system_beep(void) { return etch::system_beep(); }
+ETCH_API bool etch_notify_desktop(EtchContext* ctx, const EtchDesktopNotificationDesc* desc) {
+    if (!desc) return false;
+    EtchDesktopNotificationDesc scratch{};
+    const EtchDesktopNotificationDesc* d = resolve_c_desc(desc, &scratch, etch_desktop_notification_desc_default);
+    if (!d) return false;
+    return etch::notify_desktop(to_ctx(ctx), {to_cpp(d->title), to_cpp(d->body), d->tag, d->silent});
+}
+ETCH_API uint32_t etch_desktop_notification_count(const EtchContext* ctx) {
+    return etch::desktop_notification_count(to_ctx(ctx));
+}
+ETCH_API EtchTray* etch_tray_create(EtchContext* ctx, EtchStr tooltip) {
+    return reinterpret_cast<EtchTray*>(etch::create_tray(to_ctx(ctx), to_cpp(tooltip)));
+}
+ETCH_API void etch_tray_destroy(EtchTray* tray) {
+    etch::destroy_tray(reinterpret_cast<etch::Tray*>(tray));
+}
+ETCH_API bool etch_tray_set_tooltip(EtchTray* tray, EtchStr tooltip) {
+    return etch::tray_set_tooltip(reinterpret_cast<etch::Tray*>(tray), to_cpp(tooltip));
+}
+ETCH_API bool etch_tray_set_icon_rgba(EtchTray* tray, const uint8_t* rgba_pixels, uint32_t width, uint32_t height) {
+    return etch::tray_set_icon_rgba(reinterpret_cast<etch::Tray*>(tray), rgba_pixels, width, height);
+}
+namespace {
+uint32_t count_c_tray_items(const EtchTrayItemDesc* items, uint32_t count, uint32_t depth) noexcept {
+    if (!items || count == 0u || depth > 4u) return 0u;
+    uint32_t total = count;
+    for (uint32_t i = 0u; i < count; ++i) {
+        if (items[i].submenu_items && items[i].submenu_count > 0u) {
+            total += count_c_tray_items(items[i].submenu_items, items[i].submenu_count, depth + 1u);
+        }
+    }
+    return total;
+}
+std::span<const etch::TrayItemDesc> convert_c_tray_items(
+    const EtchTrayItemDesc* src, uint32_t count,
+    etch::TrayItemDesc* pool, uint32_t* used, uint32_t cap, uint32_t depth) noexcept
+{
+    if (!src || count == 0u || depth > 4u || *used + count > cap) return {};
+    const uint32_t base = *used;
+    *used += count;
+    for (uint32_t i = 0u; i < count; ++i) {
+        const EtchTrayItemDesc& s = src[i];
+        std::span<const etch::TrayItemDesc> sub = {};
+        if (s.submenu_items && s.submenu_count > 0u) {
+            sub = convert_c_tray_items(s.submenu_items, s.submenu_count, pool, used, cap, depth + 1u);
+        }
+        pool[base + i] = {s.id, to_cpp(s.label), s.checked, s.checkbox, s.disabled, s.separator, sub};
+    }
+    return std::span<const etch::TrayItemDesc>(pool + base, count);
+}
+uint32_t count_c_menu_items(const EtchMenuBarItemDesc* items, uint32_t count, uint32_t depth) noexcept {
+    if (!items || count == 0u || depth > 4u) return 0u;
+    uint32_t total = count;
+    for (uint32_t i = 0u; i < count; ++i) {
+        if (items[i].children && items[i].child_count > 0u) {
+            total += count_c_menu_items(items[i].children, items[i].child_count, depth + 1u);
+        }
+    }
+    return total;
+}
+std::span<const etch::MenuBarItemDesc> convert_c_menu_items(
+    const EtchMenuBarItemDesc* src, uint32_t count,
+    etch::MenuBarItemDesc* pool, uint32_t* used, uint32_t cap, uint32_t depth) noexcept
+{
+    if (!src || count == 0u || depth > 4u || *used + count > cap) return {};
+    const uint32_t base = *used;
+    *used += count;
+    for (uint32_t i = 0u; i < count; ++i) {
+        const EtchMenuBarItemDesc& s = src[i];
+        std::span<const etch::MenuBarItemDesc> ch = {};
+        if (s.children && s.child_count > 0u) {
+            ch = convert_c_menu_items(s.children, s.child_count, pool, used, cap, depth + 1u);
+        }
+        pool[base + i] = {s.id, to_cpp(s.label), to_cpp(s.shortcut), s.separator, s.disabled, s.checked, ch};
+    }
+    return std::span<const etch::MenuBarItemDesc>(pool + base, count);
+}
+} // namespace
+ETCH_API bool etch_tray_set_menu(EtchTray* tray, const EtchTrayItemDesc* items, uint32_t item_count) {
+    if (item_count == 0u) {
+        return etch::tray_set_menu(reinterpret_cast<etch::Tray*>(tray), {});
+    }
+    if (!items || item_count > 64u) return false;
+    const uint32_t total = count_c_tray_items(items, item_count, 0u);
+    if (total == 0u || total > 256u) return false;
+    etch::TrayItemDesc pool[256] = {};
+    uint32_t used = 0u;
+    const auto span = convert_c_tray_items(items, item_count, pool, &used, total, 0u);
+    return etch::tray_set_menu(reinterpret_cast<etch::Tray*>(tray), span);
+}
+ETCH_API uint32_t etch_tray_poll_clicked_item(EtchTray* tray) {
+    return etch::tray_poll_clicked_item(reinterpret_cast<etch::Tray*>(tray));
+}
+ETCH_API bool etch_set_native_menu_bar(EtchContext* ctx, struct SDL_Window* window, const EtchMenuBarItemDesc* menus, uint32_t menu_count) {
+    if (menu_count == 0u) {
+        return etch::set_native_menu_bar(to_ctx(ctx), window, {});
+    }
+    if (!menus || menu_count > 32u) return false;
+    const uint32_t total = count_c_menu_items(menus, menu_count, 0u);
+    if (total == 0u || total > 512u) return false;
+    auto* pool = static_cast<etch::MenuBarItemDesc*>(std::calloc(total, sizeof(etch::MenuBarItemDesc)));
+    if (!pool) return false;
+    uint32_t used = 0u;
+    const auto span = convert_c_menu_items(menus, menu_count, pool, &used, total, 0u);
+    const bool ok = etch::set_native_menu_bar(to_ctx(ctx), window, span);
+    std::free(pool);
+    return ok;
+}
+ETCH_API uint32_t etch_poll_native_menu_item(EtchContext* ctx) {
+    return etch::poll_native_menu_item(to_ctx(ctx));
+}
+
 ETCH_API EtchTextBuffer* etch_create_text_buffer(EtchStr initial_utf8, uint32_t initial_cap) {
     auto* tb = static_cast<etch::TextBuffer*>(std::calloc(1u, sizeof(etch::TextBuffer)));
     if (!tb) return nullptr;
@@ -1924,6 +2061,9 @@ ETCH_API bool etch_text_buffer_set_diagnostics(EtchTextBuffer* buf, uint64_t rev
 ETCH_API void etch_text_buffer_clear_diagnostics(EtchTextBuffer* buf) {
     etch::text_buffer_clear_diagnostics(to_tb(buf));
 }
+ETCH_API EtchTextSearchOptions etch_text_search_options_default(void) {
+    return {static_cast<uint32_t>(sizeof(EtchTextSearchOptions)), false, false, false};
+}
 ETCH_API bool etch_text_buffer_find(const EtchTextBuffer* buf, EtchStr needle, uint32_t start_byte,
     bool case_sensitive, bool whole_word, EtchTextSearchMatch* out_match) {
     etch::TextSearchMatch m = {};
@@ -1936,6 +2076,32 @@ ETCH_API uint32_t etch_text_buffer_find_all(const EtchTextBuffer* buf, EtchStr n
     static_assert(sizeof(EtchTextSearchMatch) == sizeof(etch::TextSearchMatch));
     return etch::text_buffer_find_all(to_tb(buf), to_cpp(needle), case_sensitive, whole_word,
         reinterpret_cast<etch::TextSearchMatch*>(out_matches), max_matches);
+}
+ETCH_API bool etch_text_buffer_find_ex(const EtchTextBuffer* buf, EtchStr pattern, uint32_t start_byte,
+    const EtchTextSearchOptions* opts, EtchTextSearchMatch* out_match) {
+    EtchTextSearchOptions scratch{};
+    const EtchTextSearchOptions* o = opts ? resolve_c_desc(opts, &scratch, etch_text_search_options_default) : nullptr;
+    const etch::TextSearchOptions cpp_opts = o ? etch::TextSearchOptions{o->case_sensitive, o->whole_word, o->regex} : etch::TextSearchOptions{};
+    etch::TextSearchMatch m = {};
+    if (!etch::text_buffer_find_ex(to_tb(buf), to_cpp(pattern), start_byte, cpp_opts, &m)) return false;
+    if (out_match) { out_match->byte_start = m.byte_start; out_match->byte_end = m.byte_end; }
+    return true;
+}
+ETCH_API uint32_t etch_text_buffer_find_all_ex(const EtchTextBuffer* buf, EtchStr pattern,
+    const EtchTextSearchOptions* opts, EtchTextSearchMatch* out_matches, uint32_t max_matches) {
+    static_assert(sizeof(EtchTextSearchMatch) == sizeof(etch::TextSearchMatch));
+    EtchTextSearchOptions scratch{};
+    const EtchTextSearchOptions* o = opts ? resolve_c_desc(opts, &scratch, etch_text_search_options_default) : nullptr;
+    const etch::TextSearchOptions cpp_opts = o ? etch::TextSearchOptions{o->case_sensitive, o->whole_word, o->regex} : etch::TextSearchOptions{};
+    return etch::text_buffer_find_all_ex(to_tb(buf), to_cpp(pattern), cpp_opts,
+        reinterpret_cast<etch::TextSearchMatch*>(out_matches), max_matches);
+}
+ETCH_API uint32_t etch_text_buffer_replace_all(EtchTextBuffer* buf, EtchStr pattern, EtchStr replacement,
+    const EtchTextSearchOptions* opts) {
+    EtchTextSearchOptions scratch{};
+    const EtchTextSearchOptions* o = opts ? resolve_c_desc(opts, &scratch, etch_text_search_options_default) : nullptr;
+    const etch::TextSearchOptions cpp_opts = o ? etch::TextSearchOptions{o->case_sensitive, o->whole_word, o->regex} : etch::TextSearchOptions{};
+    return etch::text_buffer_replace_all(to_tb(buf), to_cpp(pattern), to_cpp(replacement), cpp_opts);
 }
 ETCH_API uint32_t etch_text_buffer_line_count(const EtchTextBuffer* buf) { return etch::text_buffer_line_count(to_tb(buf)); }
 ETCH_API uint32_t etch_text_buffer_line_start(const EtchTextBuffer* buf, uint32_t line) { return etch::text_buffer_line_start(to_tb(buf), line); }
@@ -1981,7 +2147,40 @@ ETCH_API uint32_t etch_tokenize_cpp_hlsl(uint32_t line_index, EtchStr line, Etch
             static_cast<EtchSyntaxToken*>(ptr)[i] = {a, z, from_cpp(color), etch::kFontMono};
         });
 }
+ETCH_API uint32_t etch_tokenize_language(EtchStr language, uint32_t line_index, EtchStr line, EtchSyntaxToken* out_tokens, uint32_t max_tokens) {
+    (void)line_index;
+    if (!out_tokens || max_tokens == 0u) return 0u;
+    return etch::c_bridge_tokenize_language(to_cpp(language), to_cpp(line), out_tokens, max_tokens,
+        [](void* ptr, uint32_t i, uint32_t a, uint32_t z, etch::Color color) noexcept {
+            static_cast<EtchSyntaxToken*>(ptr)[i] = {a, z, from_cpp(color), etch::kFontMono};
+        });
+}
+ETCH_API uint32_t etch_tokenize_language_stateful(EtchStr language, EtchStr line, uint8_t in_state, uint8_t* out_state, EtchSyntaxToken* out_tokens, uint32_t max_tokens) {
+    if (!out_tokens && max_tokens > 0u) return 0u;
+    return etch::c_bridge_tokenize_language_stateful(to_cpp(language), to_cpp(line), in_state, out_state, out_tokens, max_tokens,
+        [](void* ptr, uint32_t i, uint32_t a, uint32_t z, etch::Color color) noexcept {
+            static_cast<EtchSyntaxToken*>(ptr)[i] = {a, z, from_cpp(color), etch::kFontMono};
+        });
+}
 
+ETCH_API EtchCodeViewZone etch_code_view_zone_default(void) {
+    const etch::CodeViewZone z{};
+    return {z.zone_id, z.after_line, z.height_px, z.above_line, from_cpp(z.fill_color)};
+}
+ETCH_API EtchCodeInlayHint etch_code_inlay_hint_default(void) {
+    const etch::CodeInlayHint h{};
+    return {h.line_index, h.col_byte, from_cpp(h.text), from_cpp(h.color),
+            from_cpp(h.background), from_cpp(h.border_color), h.radius_px};
+}
+ETCH_API EtchCodeInlineHighlight etch_code_inline_highlight_default(void) {
+    const etch::CodeInlineHighlight h{};
+    return {h.line_index, h.start_col_byte, h.end_col_byte,
+            from_cpp(h.background), from_cpp(h.border_color), h.radius_px};
+}
+ETCH_API EtchCodeOverviewMarker etch_code_overview_marker_default(void) {
+    const etch::CodeOverviewMarker m{};
+    return {m.line_index, from_cpp(m.color), m.lane};
+}
 ETCH_API EtchCodeEditorResult etch_code_editor(const EtchCodeEditorDesc* desc) {
     if (!desc) return {};
     EtchCodeEditorDesc scratch{};
@@ -2026,10 +2225,13 @@ ETCH_API EtchCodeEditorResult etch_code_editor(const EtchCodeEditorDesc* desc) {
         to_cpp(d->gutter_active_text_color), to_cpp(d->caret_color),
         to_cpp(d->composition_color), to_cpp(d->border_color),
         to_cpp(d->focus_border_color), d->border_width, d->focus_border_width,
-        to_cpp(d->radius), d->scroll_fade_px, dec_fn, dec_ud, d->gutter_tag_width_px});
+        to_cpp(d->radius), d->scroll_fade_px, dec_fn, dec_ud, d->gutter_tag_width_px,
+        d->auto_height, d->show_overview_ruler, d->show_sticky_header, to_cpp(d->sticky_header_text),
+        to_cpp(d->language), d->highlight_matching_brackets, d->show_indent_guides, d->show_diagnostic_tooltips, d->show_minimap});
     return {r.changed, r.focused, r.composing, r.cursor_byte, r.selection_anchor_byte,
             r.cursor_line, r.cursor_col_byte, r.first_visible_line, r.end_visible_line,
-            r.total_lines, from_cpp(r.ime_cursor_rect), r.hovered_line, r.clicked_gutter_line};
+            r.total_lines, from_cpp(r.ime_cursor_rect), r.hovered_line, r.clicked_gutter_line,
+            r.gutter_drag_start_line, r.gutter_drag_end_line, r.gutter_dragging};
 }
 ETCH_API void etch_code_editor_set_cursor(uint32_t element_id, uint32_t anchor_byte, uint32_t cursor_byte, bool scroll_into_view) {
     etch::code_editor_set_cursor(element_id, anchor_byte, cursor_byte, scroll_into_view);
@@ -2064,6 +2266,65 @@ ETCH_API void etch_code_editor_clear_extra_cursors(uint32_t editor_id) {
 ETCH_API uint32_t etch_code_editor_cursor_count(uint32_t editor_id) {
     return etch::code_editor_cursor_count(editor_id);
 }
+ETCH_API EtchVec2 etch_code_editor_scroll_offset(uint32_t editor_id) {
+    return from_cpp(etch::code_editor_scroll_offset(editor_id));
+}
+ETCH_API void etch_code_editor_set_scroll_offset(uint32_t editor_id, EtchVec2 offset, bool stop_momentum) {
+    etch::code_editor_set_scroll_offset(editor_id, to_cpp(offset), stop_momentum);
+}
+ETCH_API bool etch_code_editor_set_view_zones(uint32_t editor_id, const EtchCodeViewZone* zones, uint32_t count) {
+    if (!zones && count > 0u) return false;
+    if (count == 0u) { etch::code_editor_clear_view_zones(editor_id); return true; }
+    static_assert(sizeof(EtchCodeViewZone) == sizeof(etch::CodeViewZone));
+    return etch::code_editor_set_view_zones(editor_id,
+        std::span<const etch::CodeViewZone>(reinterpret_cast<const etch::CodeViewZone*>(zones), count));
+}
+ETCH_API void etch_code_editor_clear_view_zones(uint32_t editor_id) {
+    etch::code_editor_clear_view_zones(editor_id);
+}
+ETCH_API bool etch_code_editor_get_view_zone_bounds(uint32_t editor_id, uint32_t zone_id, EtchRect* out_bounds, EtchRect* out_viewport_clip) {
+    etch::Rect b = {}, vp = {};
+    if (!etch::code_editor_get_view_zone_bounds(editor_id, zone_id, &b, &vp)) return false;
+    if (out_bounds) *out_bounds = from_cpp(b);
+    if (out_viewport_clip) *out_viewport_clip = from_cpp(vp);
+    return true;
+}
+ETCH_API bool etch_code_editor_begin_view_zone(uint32_t editor_id, uint32_t zone_id) {
+    return etch::code_editor_begin_view_zone(editor_id, zone_id);
+}
+ETCH_API void etch_code_editor_end_view_zone(void) {
+    etch::code_editor_end_view_zone();
+}
+ETCH_API bool etch_code_editor_set_inlay_hints(uint32_t editor_id, const EtchCodeInlayHint* hints, uint32_t count) {
+    if (!hints && count > 0u) return false;
+    if (count == 0u) { etch::code_editor_clear_inlay_hints(editor_id); return true; }
+    static_assert(sizeof(EtchCodeInlayHint) == sizeof(etch::CodeInlayHint));
+    return etch::code_editor_set_inlay_hints(editor_id,
+        std::span<const etch::CodeInlayHint>(reinterpret_cast<const etch::CodeInlayHint*>(hints), count));
+}
+ETCH_API void etch_code_editor_clear_inlay_hints(uint32_t editor_id) {
+    etch::code_editor_clear_inlay_hints(editor_id);
+}
+ETCH_API bool etch_code_editor_set_inline_highlights(uint32_t editor_id, const EtchCodeInlineHighlight* highlights, uint32_t count) {
+    if (!highlights && count > 0u) return false;
+    if (count == 0u) { etch::code_editor_clear_inline_highlights(editor_id); return true; }
+    static_assert(sizeof(EtchCodeInlineHighlight) == sizeof(etch::CodeInlineHighlight));
+    return etch::code_editor_set_inline_highlights(editor_id,
+        std::span<const etch::CodeInlineHighlight>(reinterpret_cast<const etch::CodeInlineHighlight*>(highlights), count));
+}
+ETCH_API void etch_code_editor_clear_inline_highlights(uint32_t editor_id) {
+    etch::code_editor_clear_inline_highlights(editor_id);
+}
+ETCH_API bool etch_code_editor_set_overview_markers(uint32_t editor_id, const EtchCodeOverviewMarker* markers, uint32_t count) {
+    if (!markers && count > 0u) return false;
+    if (count == 0u) { etch::code_editor_clear_overview_markers(editor_id); return true; }
+    static_assert(sizeof(EtchCodeOverviewMarker) == sizeof(etch::CodeOverviewMarker));
+    return etch::code_editor_set_overview_markers(editor_id,
+        std::span<const etch::CodeOverviewMarker>(reinterpret_cast<const etch::CodeOverviewMarker*>(markers), count));
+}
+ETCH_API void etch_code_editor_clear_overview_markers(uint32_t editor_id) {
+    etch::code_editor_clear_overview_markers(editor_id);
+}
 
 /* ============================================================================
  * Desktop Widgets
@@ -2087,7 +2348,9 @@ ETCH_API bool etch_toggle_switch(const EtchToggleSwitchDesc* desc) {
     return etch::toggle_switch({desc->id, to_cpp(desc->label), desc->value, desc->disabled,
                                 desc->track_width_px, desc->track_height_px, desc->font_size_px,
                                 desc->font_id, to_cpp(desc->on_color), to_cpp(desc->off_color),
-                                to_cpp(desc->thumb_color), to_cpp(desc->border_color)});
+                                to_cpp(desc->thumb_color), to_cpp(desc->border_color),
+                                to_cpp(desc->track_radius), to_cpp(desc->thumb_radius),
+                                desc->thumb_padding_px, desc->border_width});
 }
 ETCH_API void etch_progress_bar(const EtchProgressBarDesc* desc) {
     if (!desc) return;
@@ -2219,6 +2482,15 @@ ETCH_API uint32_t etch_scoped_id_str(EtchStr label) { return etch::scoped_id(to_
 ETCH_API uint16_t etch_key_mods(void) { return etch::key_mods(); }
 ETCH_API bool etch_key_pressed(uint32_t keycode, bool include_repeat) { return etch::key_pressed(keycode, include_repeat); }
 ETCH_API bool etch_consume_key_pressed(uint32_t keycode, bool include_repeat) { return etch::consume_key_pressed(keycode, include_repeat); }
+ETCH_API uint32_t etch_frame_key_count(void) { return etch::frame_key_count(); }
+ETCH_API bool etch_frame_key_at(uint32_t index, EtchFrameKeyEvent* out_event) {
+    if (!out_event) return false;
+    etch::FrameKeyEvent ev{};
+    if (!etch::frame_key_at(index, &ev)) return false;
+    *out_event = {ev.keycode, ev.mods, ev.repeat, ev.consumed};
+    return true;
+}
+ETCH_API bool etch_consume_frame_key_at(uint32_t index) { return etch::consume_frame_key_at(index); }
 ETCH_API bool etch_shortcut(uint16_t required_mods, uint32_t keycode, bool allow_when_typing) {
     return etch::shortcut(required_mods, keycode, allow_when_typing);
 }
@@ -2300,6 +2572,7 @@ ETCH_API EtchVec2 etch_scroll_delta(void) { return from_cpp(etch::scroll_delta()
 ETCH_API EtchVec2 etch_scroll_max(uint32_t element_id) { return from_cpp(etch::scroll_max(element_id)); }
 ETCH_API EtchVec2 etch_scroll_offset(uint32_t element_id) { return from_cpp(etch::scroll_offset(element_id)); }
 ETCH_API void etch_set_scroll_offset(uint32_t element_id, EtchVec2 offset, bool stop_momentum) { etch::set_scroll_offset(element_id, to_cpp(offset), stop_momentum); }
+ETCH_API void etch_scroll_into_view(uint32_t scroll_container_id, uint32_t item_id, float margin_px) { etch::scroll_into_view(scroll_container_id, item_id, margin_px); }
 ETCH_API bool etch_scroll_stuck_to_bottom(uint32_t element_id) { return etch::scroll_stuck_to_bottom(element_id); }
 ETCH_API void etch_set_scroll_stuck_to_bottom(uint32_t element_id, bool stuck) { etch::set_scroll_stuck_to_bottom(element_id, stuck); }
 
@@ -2356,7 +2629,8 @@ ETCH_API bool etch_dock_split_node(uint32_t dock_id, uint32_t node_idx, EtchAxis
 }
 ETCH_API bool etch_dock_add_pane(uint32_t dock_id, uint32_t leaf_node_idx, const EtchDockPaneDesc* pane) {
     if (!pane) return false;
-    return etch::dock_add_pane(dock_id, leaf_node_idx, {pane->id, to_cpp(pane->title), pane->icon_id, pane->closable, pane->default_open});
+    return etch::dock_add_pane(dock_id, leaf_node_idx, {pane->id, to_cpp(pane->title), pane->icon_id, pane->closable, pane->default_open,
+        pane->pinned, pane->dirty, to_cpp(pane->badge_color)});
 }
 ETCH_API bool etch_dock_dock_pane(uint32_t dock_id, uint32_t pane_id, uint32_t target_pane_id, EtchDockZone zone, float split_ratio) {
     return etch::dock_dock_pane(dock_id, pane_id, target_pane_id, static_cast<etch::DockZone>(zone), split_ratio);
@@ -2403,6 +2677,24 @@ ETCH_API uint32_t etch_dock_redock_window_panes(struct SDL_Window* closing_windo
     uint32_t dst_dock_id, uint32_t target_pane_id, EtchDockZone zone, struct SDL_Window* dst_window) {
     return etch::dock_redock_window_panes(closing_window, src_dock_id, dst_dock_id, target_pane_id,
         static_cast<etch::DockZone>(zone), dst_window);
+}
+ETCH_API void etch_dock_set_pane_pinned(uint32_t dock_id, uint32_t pane_id, bool pinned) {
+    etch::dock_set_pane_pinned(dock_id, pane_id, pinned);
+}
+ETCH_API bool etch_dock_is_pane_pinned(uint32_t dock_id, uint32_t pane_id) {
+    return etch::dock_is_pane_pinned(dock_id, pane_id);
+}
+ETCH_API void etch_dock_set_pane_dirty(uint32_t dock_id, uint32_t pane_id, bool dirty) {
+    etch::dock_set_pane_dirty(dock_id, pane_id, dirty);
+}
+ETCH_API void etch_dock_set_pane_badge(uint32_t dock_id, uint32_t pane_id, EtchColor badge_color) {
+    etch::dock_set_pane_badge(dock_id, pane_id, to_cpp(badge_color));
+}
+ETCH_API bool etch_dock_pane_right_clicked(uint32_t dock_id, uint32_t pane_id) {
+    return etch::dock_pane_right_clicked(dock_id, pane_id);
+}
+ETCH_API uint32_t etch_dock_focused_leaf(uint32_t dock_id) {
+    return etch::dock_focused_leaf(dock_id);
 }
 
 ETCH_API bool etch_begin_mime_drag_payload(uint32_t source_id, EtchStr label, const EtchMimeDragEntry* entries, uint32_t count) {
@@ -2477,6 +2769,14 @@ ETCH_API bool etch_get_command(const EtchContext* ctx, uint32_t index, EtchComma
         from_cpp(c.category), c.shortcut_mods, c.shortcut_keycode, c.enabled, c.allow_when_typing,
         c.scope_id, c.chord_mods, c.chord_keycode};
     return true;
+}
+ETCH_API void etch_push_command_scope(uint32_t scope_id) { etch::push_command_scope(scope_id); }
+ETCH_API void etch_pop_command_scope(void) { etch::pop_command_scope(); }
+ETCH_API bool etch_push_focus_restore_point(EtchContext* ctx) { return etch::push_focus_restore_point(to_ctx(ctx)); }
+ETCH_API uint32_t etch_pop_focus_restore_point(EtchContext* ctx) { return etch::pop_focus_restore_point(to_ctx(ctx)); }
+ETCH_API EtchFuzzyMatchResult etch_fuzzy_match(EtchStr pattern, EtchStr candidate, uint32_t* out_positions, uint32_t max_positions) {
+    const etch::FuzzyMatchResult r = etch::fuzzy_match(to_cpp(pattern), to_cpp(candidate), out_positions, max_positions);
+    return {r.matched, r.score, r.match_count};
 }
 
 ETCH_API uint32_t etch_automation_find_nodes(const EtchContext* ctx, const EtchAutomationQuery* query,
@@ -2628,6 +2928,8 @@ ETCH_API EtchPresenceResult etch_presence(uint32_t id, bool mounted, EtchSpringS
     const auto r=etch::presence(id,mounted,to_cpp(spec)); return {r.visible,r.opacity,r.exiting};
 }
 ETCH_API void etch_set_time_scale(EtchContext* ctx, float scale) { etch::set_time_scale(to_ctx(ctx),scale); }
+ETCH_API void etch_set_ui_zoom(EtchContext* ctx, float zoom) { etch::set_ui_zoom(to_ctx(ctx), zoom); }
+ETCH_API float etch_ui_zoom(const EtchContext* ctx) { return etch::ui_zoom(to_ctx(ctx)); }
 
 ETCH_API EtchLayerDesc etch_layer_desc_default(void) {
     const etch::LayerDesc d{};
@@ -2684,18 +2986,62 @@ ETCH_API SDL_GPUTexture* etch_eval_shader_surface(EtchContext* ctx, EtchShaderSu
 ETCH_API EtchTerminalGridDesc etch_terminal_grid_desc_default(void) {
     const etch::TerminalGridDesc d;
     return {d.id,nullptr,0,d.columns,d.rows,d.first_row,d.cell_width_px,d.line_height_px,d.font_size_px,d.font_id,
-        from_cpp(d.foreground),from_cpp(d.background),d.cursor_column,d.cursor_row,from_cpp(d.cursor_color),from_cpp(d.cursor_motion)};
+        from_cpp(d.foreground),from_cpp(d.background),d.cursor_column,d.cursor_row,from_cpp(d.cursor_color),from_cpp(d.cursor_motion),
+        static_cast<EtchTerminalCursorShape>(d.cursor_shape),d.cursor_visible,d.focusable,d.auto_fit_container,d.font_italic_id,
+        d.selection_start_col,d.selection_start_row,d.selection_end_col,d.selection_end_row,d.selection_block,
+        from_cpp(d.selection_color),d.hovered_hyperlink_id,nullptr,0u,
+        nullptr,0u,from_cpp(d.search_match_color),from_cpp(d.search_active_color),d.interactive_selection,
+        nullptr,0u,d.capture_keyboard_input,d.bracketed_paste,d.mouse_reporting};
 }
 ETCH_API EtchTerminalCell etch_terminal_cell_default(void) {
-    return {' ',{ETCH_TERMINAL_DEFAULT,0},{ETCH_TERMINAL_DEFAULT,0},1,false,false,false};
+    return {' ',{ETCH_TERMINAL_DEFAULT,0},{ETCH_TERMINAL_DEFAULT,0},1,false,false,false,
+            false,false,false,ETCH_TERMINAL_UNDERLINE_NONE,{ETCH_TERMINAL_DEFAULT,0},0u,nullptr,0u};
 }
-ETCH_API void etch_terminal_grid(const EtchTerminalGridDesc* d) {
-    if(!d || !d->cells) return;
+ETCH_API EtchTerminalGridResult etch_terminal_grid_ex(const EtchTerminalGridDesc* d) {
+    if(!d || !d->cells) return {};
+    static_assert(sizeof(EtchTerminalInlineImage) == sizeof(etch::TerminalInlineImage));
+    static_assert(sizeof(EtchTerminalSearchMatch) == sizeof(etch::TerminalSearchMatch));
     const etch::TerminalGridDesc desc={.id=d->id,.columns=d->columns,.rows=d->rows,.first_row=d->first_row,
         .cell_width_px=d->cell_width_px,.line_height_px=d->line_height_px,.font_size_px=d->font_size_px,.font_id=d->font_id,
         .foreground=to_cpp(d->foreground),.background=to_cpp(d->background),.cursor_column=d->cursor_column,
-        .cursor_row=d->cursor_row,.cursor_color=to_cpp(d->cursor_color),.cursor_motion=to_cpp(d->cursor_motion)};
-    etch::c_bridge_terminal_grid(desc, d->cells, d->cell_count, read_c_terminal_cell);
+        .cursor_row=d->cursor_row,.cursor_color=to_cpp(d->cursor_color),.cursor_motion=to_cpp(d->cursor_motion),
+        .cursor_shape=static_cast<etch::TerminalCursorShape>(d->cursor_shape),.cursor_visible=d->cursor_visible,
+        .focusable=d->focusable,.auto_fit_container=d->auto_fit_container,.font_italic_id=d->font_italic_id,
+        .selection_start_col=d->selection_start_col,.selection_start_row=d->selection_start_row,
+        .selection_end_col=d->selection_end_col,.selection_end_row=d->selection_end_row,
+        .selection_block=d->selection_block,.selection_color=to_cpp(d->selection_color),
+        .hovered_hyperlink_id=d->hovered_hyperlink_id,
+        .inline_images=(d->inline_images && d->inline_image_count > 0u)
+            ? std::span<const etch::TerminalInlineImage>(reinterpret_cast<const etch::TerminalInlineImage*>(d->inline_images), d->inline_image_count)
+            : std::span<const etch::TerminalInlineImage>{},
+        .search_matches=(d->search_matches && d->search_match_count > 0u)
+            ? std::span<const etch::TerminalSearchMatch>(reinterpret_cast<const etch::TerminalSearchMatch*>(d->search_matches), d->search_match_count)
+            : std::span<const etch::TerminalSearchMatch>{},
+        .search_match_color=to_cpp(d->search_match_color),
+        .search_active_color=to_cpp(d->search_active_color),
+        .interactive_selection=d->interactive_selection,
+        .ansi_palette=view_compatible_span<etch::Color>(d->ansi_palette, d->ansi_palette_count),
+        .capture_keyboard_input=d->capture_keyboard_input,
+        .bracketed_paste=d->bracketed_paste,
+        .mouse_reporting=d->mouse_reporting};
+    const etch::TerminalGridResult r = etch::c_bridge_terminal_grid(desc, d->cells, d->cell_count, read_c_terminal_cell);
+    return {r.focused,r.hovered,r.clicked,r.right_clicked,r.hovered_col,r.hovered_row,
+            r.clicked_col,r.clicked_row,r.hovered_hyperlink_id,r.clicked_hyperlink_id,
+            r.visible_columns,r.visible_rows,from_cpp(r.ime_cursor_rect),
+            r.has_selection,r.sel_start_col,r.sel_start_row,r.sel_end_col,r.sel_end_row,
+            r.selection_changed,r.wheel_delta_y,
+            from_cpp(r.typed_text),r.key_pressed,r.key_mods,r.key_repeat,from_cpp(r.pasted_text),
+            r.mouse_moved,r.mouse_down,r.mouse_released,r.mouse_button,
+            from_cpp(r.hovered_url),from_cpp(r.clicked_url)};
+}
+ETCH_API void etch_terminal_grid(const EtchTerminalGridDesc* d) {
+    (void)etch_terminal_grid_ex(d);
+}
+ETCH_API uint32_t etch_terminal_encode_key(uint32_t keycode, uint16_t mods, bool app_cursor, char* out_buf, uint32_t cap) {
+    return etch::terminal_encode_key(keycode, mods, app_cursor, out_buf, cap);
+}
+ETCH_API uint32_t etch_terminal_encode_mouse_sgr(uint8_t button, int32_t col, int32_t row, uint16_t mods, bool pressed, bool motion, char* out_buf, uint32_t cap) {
+    return etch::terminal_encode_mouse_sgr(button, col, row, mods, pressed, motion, out_buf, cap);
 }
 ETCH_API EtchSheetDesc etch_sheet_desc_default(void) {
     const etch::SheetDesc d;

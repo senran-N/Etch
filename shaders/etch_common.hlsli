@@ -202,6 +202,10 @@ float etch_eval_inset_shadow_cov(float2 p_local, float2 half_size, float4 radii,
         outer_r.z > 0.0f ? max(outer_r.z - spread, 0.0f) : 0.0f,
         outer_r.w > 0.0f ? max(outer_r.w - spread, 0.0f) : 0.0f);
     float d_inner = etch_sd_rounded_box(p_local - offset, raw_inner_hs, inner_r, continuous);
+    if (inv_s2 < 0.0f)
+    {
+        return max(outer_cov - saturate(0.5f - d_inner), 0.0f);
+    }
     return outer_cov * saturate(0.5f * (1.0f + erf_approx(d_inner * inv_s2)));
 }
 
